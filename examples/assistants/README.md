@@ -14,4 +14,5 @@ The core workflow must remain valid without these examples.
 
 ## Generic Adapters
 
+- `generic/IMPLEMENT-PR.md`: assistant-agnostic implementation prompt for GitHub PRs.
 - `generic/REVIEW-PR.md`: assistant-agnostic review prompt for GitHub PRs.
