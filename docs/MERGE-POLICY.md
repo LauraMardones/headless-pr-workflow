@@ -28,7 +28,8 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 - Any earlier blocking inline comments are resolved, outdated by later commits, or explicitly waived in GitHub.
 - The PR is not draft.
 - A fresh GitHub refresh immediately before merge confirms the current head SHA still matches the reviewed head SHA.
-- Required CI/checks and adapter gates are passing, absent by policy, or explicitly waived in GitHub.
+- Required CI/checks have completed successfully for the current head SHA.
+- Optional adapter gates are passing, absent by policy, or explicitly waived in GitHub.
 
 This override is a bootstrap/solo-maintainer exception, not the default approval path. It must be visible in GitHub history and must not be used when an independent GitHub approver is available.
 
