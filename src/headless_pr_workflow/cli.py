@@ -9,6 +9,7 @@ from dataclasses import asdict
 
 from .catalog import COMMANDS, find_command
 from .github import GHCommandError, fetch_pr_context
+from .review_sha import summarize_review_sha
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,22 +70,7 @@ def _print_pr_context(target: str | None, *, repo: str | None, as_json: bool, in
     try:
         context = fetch_pr_context(target, repo=repo)
     except GHCommandError as error:
-        if as_json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": error.error,
-                        "command": error.command,
-                        "returncode": error.returncode,
-                        "stderr": error.stderr,
-                    },
-                    indent=2,
-                )
-            )
-        else:
-            print(error, file=sys.stderr)
-        return 1
+        return _print_gh_error(error, as_json=as_json)
 
     if as_json:
         print(json.dumps(context.to_dict(include_raw=include_raw), indent=2))
@@ -115,6 +101,48 @@ def _print_pr_context(target: str | None, *, repo: str | None, as_json: bool, in
     return 0
 
 
+def _print_review_sha(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_review_sha(context)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"head sha: {summary.head_ref_oid}")
+    print(f"latest review sha: {summary.latest_review_sha or 'none'}")
+    print(f"latest review state: {summary.latest_review_state or 'none'}")
+    print(f"latest review author: {summary.latest_review_author or 'none'}")
+    print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
+    print(f"approval status: {summary.approval_status}")
+    return 0
+
+
+def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": error.error,
+                    "command": error.command,
+                    "returncode": error.returncode,
+                    "stderr": error.stderr,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(error, file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -133,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
             as_json=args.json,
             include_raw=args.include_raw,
         )
+
+    if args.command == "review-sha":
+        return _print_review_sha(args.target, repo=args.repo, as_json=args.json)
 
     return _print_scaffold(args.command, args.target, args.json)
 
