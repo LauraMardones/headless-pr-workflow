@@ -15,6 +15,24 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 - Required manual gates are satisfied.
 - The merge owner is the session that last implemented the approved current head SHA, or an authorized human/operator acting under explicit takeover rules.
 
+## Solo-Maintainer Bootstrap Override
+
+Some repositories have only one GitHub account with write access, especially during bootstrap. In that case GitHub may prevent a formal approval even when review was performed in a separate assistant session.
+
+A solo-maintainer override may substitute for formal GitHub approval only when all conditions are true:
+
+- The repository has no available independent GitHub approver.
+- Review was performed in a separate session from the session that implemented the reviewed head SHA.
+- The review is recorded on GitHub against the current head SHA.
+- The review summary explicitly states that no blockers remain for that exact head SHA.
+- Any earlier blocking inline comments are resolved, outdated by later commits, or explicitly waived in GitHub.
+- The PR is not draft.
+- A fresh GitHub refresh immediately before merge confirms the current head SHA still matches the reviewed head SHA.
+- Required CI/checks have completed successfully for the current head SHA.
+- Optional adapter gates are passing, absent by policy, or explicitly waived in GitHub.
+
+This override is a bootstrap/solo-maintainer exception, not the default approval path. It must be visible in GitHub history and must not be used when an independent GitHub approver is available.
+
 ## SHA-Bound Approval
 
 Approval is not a general property of a PR. Approval is a property of a reviewed PR head SHA.
