@@ -11,3 +11,7 @@ Future examples should provide:
 - Tool-specific command recipe.
 
 The core workflow must remain valid without these examples.
+
+## Generic Adapters
+
+- `generic/REVIEW-PR.md`: assistant-agnostic review prompt for GitHub PRs.
