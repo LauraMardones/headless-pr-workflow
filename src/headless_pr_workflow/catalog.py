@@ -17,7 +17,7 @@ class CommandSpec:
 
 
 COMMANDS: tuple[CommandSpec, ...] = (
-    CommandSpec("pr-context", "Fetch complete current PR context from GitHub.", "P1-high", "C-session", "report", "core"),
+    CommandSpec("pr-context", "Fetch complete current PR context from GitHub.", "P1-high", "C-session", "report", "core", "implemented"),
     CommandSpec("pr-takeover", "Produce safe takeover context for a PR.", "P1-high", "C-session", "action", "core"),
     CommandSpec("worktree-status", "Report local worktrees, branches, and dirty state.", "P1-high", "C-session", "report", "core"),
     CommandSpec("review-sha", "Report current head SHA and approval SHA relationship.", "P0-blocking", "F-review", "hard-gate", "core"),
