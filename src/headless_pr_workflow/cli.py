@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict
 
 from .catalog import COMMANDS, find_command
+from .github import GHCommandError, fetch_pr_context
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     for command in COMMANDS:
         command_parser = subparsers.add_parser(command.name, help=command.description)
         command_parser.add_argument("target", nargs="?", help="PR, issue, branch, or repo target depending on command.")
+        command_parser.add_argument("--repo", help="GitHub repository in OWNER/REPO format.")
         command_parser.add_argument("--json", action="store_true", help="Emit scaffold metadata as JSON.")
+        if command.name == "pr-context":
+            command_parser.add_argument("--include-raw", action="store_true", help="Include raw GitHub CLI payload in JSON output.")
 
     return parser
 
@@ -61,6 +65,56 @@ def _print_scaffold(command_name: str, target: str | None, as_json: bool) -> int
     return 0
 
 
+def _print_pr_context(target: str | None, *, repo: str | None, as_json: bool, include_raw: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": error.error,
+                        "command": error.command,
+                        "returncode": error.returncode,
+                        "stderr": error.stderr,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(error, file=sys.stderr)
+        return 1
+
+    if as_json:
+        print(json.dumps(context.to_dict(include_raw=include_raw), indent=2))
+        return 0
+
+    counts = context.check_counts
+    print(f"PR #{context.number}: {context.title}")
+    print(f"state: {context.state}")
+    print(f"url: {context.url}")
+    print(f"base: {context.base_ref_name} ({context.base_ref_oid or 'unknown'})")
+    print(f"head: {context.head_ref_name} ({context.head_ref_oid})")
+    print(f"repository: {context.head_repository or 'unknown'}")
+    print(f"draft: {str(context.is_draft).lower()}")
+    print(f"review decision: {context.review_decision or 'unknown'}")
+    print(f"latest approval sha: {context.latest_approval_sha or 'none'}")
+    print(
+        "checks: "
+        f"{counts['success']} success, "
+        f"{counts['failure']} failure, "
+        f"{counts['pending']} pending, "
+        f"{counts['skipped']} skipped, "
+        f"{counts['unknown']} unknown"
+    )
+    if context.labels:
+        print(f"labels: {', '.join(context.labels)}")
+    if context.review_requests:
+        print(f"review requests: {', '.join(context.review_requests)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -71,6 +125,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "catalog":
         return _print_catalog(args.json)
+
+    if args.command == "pr-context":
+        return _print_pr_context(
+            args.target,
+            repo=args.repo,
+            as_json=args.json,
+            include_raw=args.include_raw,
+        )
 
     return _print_scaffold(args.command, args.target, args.json)
 
