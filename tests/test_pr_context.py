@@ -88,6 +88,42 @@ def test_parse_pr_context_handles_nested_status_rollup_nodes():
     assert context.check_counts["failure"] == 1
 
 
+def test_completed_without_success_conclusion_is_unknown():
+    context = parse_pr_context(
+        {
+            "baseRefName": "main",
+            "headRefName": "feature",
+            "headRefOid": "head789",
+            "number": 7,
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "build", "status": "COMPLETED"}],
+            "title": "Ambiguous completed check",
+            "url": "https://github.com/owner/repo/pull/7",
+        }
+    )
+
+    assert context.check_counts["success"] == 0
+    assert context.check_counts["unknown"] == 1
+
+
+def test_head_repository_falls_back_to_owner_qualified_name():
+    context = parse_pr_context(
+        {
+            "baseRefName": "main",
+            "headRefName": "feature",
+            "headRefOid": "head789",
+            "headRepository": {"name": "repo", "nameWithOwner": ""},
+            "headRepositoryOwner": {"login": "owner"},
+            "number": 7,
+            "state": "OPEN",
+            "title": "Owner fallback",
+            "url": "https://github.com/owner/repo/pull/7",
+        }
+    )
+
+    assert context.head_repository == "owner/repo"
+
+
 def test_parse_pr_context_prefers_reviews_for_commit_oid():
     context = parse_pr_context(
         {
@@ -127,3 +163,53 @@ def test_fetch_pr_context_passes_per_process_safe_directory(monkeypatch):
     assert command[:4] == ["gh", "pr", "view", "1"]
     assert kwargs["env"]["GIT_CONFIG_COUNT"] >= "1"
     assert "safe.directory" in kwargs["env"].values()
+
+
+def test_fetch_pr_context_reports_missing_gh(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(pr_context.subprocess, "run", fake_run)
+
+    try:
+        pr_context.fetch_pr_context("1")
+    except pr_context.GHCommandError as error:
+        assert error.error == "gh-not-found"
+        assert error.returncode is None
+        assert "not found" in error.stderr
+    else:
+        raise AssertionError("expected GHCommandError")
+
+
+def test_fetch_pr_context_reports_invalid_json(monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = "not json"
+        stderr = ""
+
+    monkeypatch.setattr(pr_context.subprocess, "run", lambda command, **kwargs: Result())
+
+    try:
+        pr_context.fetch_pr_context("1")
+    except pr_context.GHCommandError as error:
+        assert error.error == "gh-invalid-json"
+        assert error.returncode == 0
+    else:
+        raise AssertionError("expected GHCommandError")
+
+
+def test_fetch_pr_context_reports_parse_failures(monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = '{"title": "missing number"}'
+        stderr = ""
+
+    monkeypatch.setattr(pr_context.subprocess, "run", lambda command, **kwargs: Result())
+
+    try:
+        pr_context.fetch_pr_context("1")
+    except pr_context.GHCommandError as error:
+        assert error.error == "gh-parse-failed"
+        assert error.returncode == 0
+    else:
+        raise AssertionError("expected GHCommandError")

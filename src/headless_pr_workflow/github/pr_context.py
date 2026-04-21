@@ -44,11 +44,15 @@ PR_CONTEXT_FIELDS: tuple[str, ...] = (
 class GHCommandError(RuntimeError):
     """Raised when a GitHub CLI command fails."""
 
-    def __init__(self, command: list[str], returncode: int, stderr: str) -> None:
+    def __init__(self, command: list[str], returncode: int | None, stderr: str, *, error: str = "gh-command-failed") -> None:
         self.command = command
         self.returncode = returncode
+        self.error = error
         self.stderr = stderr.strip()
-        super().__init__(f"GitHub CLI failed with exit code {returncode}: {self.stderr}")
+        if returncode is None:
+            super().__init__(self.stderr)
+        else:
+            super().__init__(f"GitHub CLI failed with exit code {returncode}: {self.stderr}")
 
 
 @dataclass(frozen=True)
@@ -183,11 +187,23 @@ def fetch_pr_context(target: str | None = None, *, repo: str | None = None) -> P
         command.extend(["--repo", repo])
     command.extend(["--json", ",".join(PR_CONTEXT_FIELDS)])
 
-    result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+    except FileNotFoundError as error:
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)
 
-    return parse_pr_context(json.loads(result.stdout))
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GHCommandError(command, result.returncode, f"GitHub CLI returned invalid JSON: {error.msg}", error="gh-invalid-json") from error
+
+    try:
+        return parse_pr_context(raw)
+    except (KeyError, TypeError, ValueError) as error:
+        raise GHCommandError(command, result.returncode, f"GitHub PR payload could not be parsed: {error}", error="gh-parse-failed") from error
 
 
 def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
@@ -196,6 +212,8 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
     review_source = raw.get("reviews") or raw.get("latestReviews") or ()
     latest_reviews = tuple(ReviewSummary.from_raw(review) for review in review_source)
     status_checks = tuple(CheckSummary.from_raw(check) for check in _status_nodes(raw.get("statusCheckRollup")))
+
+    head_repository_owner = _login(raw.get("headRepositoryOwner"))
 
     return PullRequestContext(
         number=int(raw["number"]),
@@ -206,8 +224,8 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
         base_ref_oid=raw.get("baseRefOid"),
         head_ref_name=raw.get("headRefName") or "",
         head_ref_oid=raw.get("headRefOid") or "",
-        head_repository=_repository_name(raw.get("headRepository")),
-        head_repository_owner=_login(raw.get("headRepositoryOwner")),
+        head_repository=_repository_name(raw.get("headRepository"), owner=head_repository_owner),
+        head_repository_owner=head_repository_owner,
         is_cross_repository=bool(raw.get("isCrossRepository")),
         is_draft=bool(raw.get("isDraft")),
         merge_state_status=raw.get("mergeStateStatus"),
@@ -270,7 +288,7 @@ def _check_bucket(*, status: str | None, conclusion: str | None, state: str | No
         return "pending"
     if normalized & {"SKIPPED", "NEUTRAL"}:
         return "skipped"
-    if normalized & {"SUCCESS", "COMPLETED"}:
+    if normalized & {"SUCCESS"}:
         return "success"
     return "unknown"
 
@@ -290,10 +308,16 @@ def _login(raw: Any) -> str | None:
     return None
 
 
-def _repository_name(raw: Any) -> str | None:
+def _repository_name(raw: Any, *, owner: str | None = None) -> str | None:
     if not isinstance(raw, dict):
         return None
-    return raw.get("nameWithOwner") or raw.get("name")
+    name_with_owner = raw.get("nameWithOwner")
+    if name_with_owner:
+        return name_with_owner
+    name = raw.get("name")
+    if owner and name:
+        return f"{owner}/{name}"
+    return name
 
 
 def _label_name(raw: Any) -> str | None:

@@ -74,7 +74,7 @@ def _print_pr_context(target: str | None, *, repo: str | None, as_json: bool, in
                 json.dumps(
                     {
                         "ok": False,
-                        "error": "gh-command-failed",
+                        "error": error.error,
                         "command": error.command,
                         "returncode": error.returncode,
                         "stderr": error.stderr,

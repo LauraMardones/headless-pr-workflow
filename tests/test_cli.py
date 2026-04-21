@@ -1,4 +1,5 @@
 from headless_pr_workflow import cli
+from headless_pr_workflow.github import GHCommandError
 from headless_pr_workflow.github.pr_context import PullRequestContext
 
 
@@ -39,6 +40,20 @@ def test_pr_context_json_output(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert '"number": 123' in output
     assert '"head_ref_oid": "head123"' in output
+
+
+def test_pr_context_json_error_output(monkeypatch, capsys):
+    def fail(target, repo=None):
+        raise GHCommandError(["gh", "pr", "view"], None, "GitHub CLI executable not found: gh", error="gh-not-found")
+
+    monkeypatch.setattr(cli, "fetch_pr_context", fail)
+
+    exit_code = cli.main(["pr-context", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"error": "gh-not-found"' in output
+    assert '"returncode": null' in output
 
 
 def test_catalog_marks_pr_context_implemented(capsys):
