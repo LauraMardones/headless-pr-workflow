@@ -304,6 +304,7 @@ def test_approval_check_json_output(monkeypatch, capsys):
 
 def test_pre_merge_json_output_ready(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _ready_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
@@ -316,6 +317,7 @@ def test_pre_merge_json_output_ready(monkeypatch, capsys):
 
 def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _blocked_pre_merge_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
@@ -328,3 +330,14 @@ def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
     assert '"Status check lint is pending (state=PENDING)."' in output
     assert '"PR mergeable state is CONFLICTING."' in output
     assert '"PR merge state status is DIRTY."' in output
+
+
+def test_pre_merge_json_output_blocks_empty_status_checks(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _approved_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+
+    exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"GitHub reported no status checks for the current head SHA."' in output

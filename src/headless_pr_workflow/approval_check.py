@@ -52,6 +52,8 @@ def summarize_approval_check(context: PullRequestContext) -> ApprovalCheckSummar
 
 
 def _blocking_reasons(context: PullRequestContext) -> tuple[str, ...]:
+    if context.review_decision == "CHANGES_REQUESTED":
+        return ("GitHub review decision is CHANGES_REQUESTED for the current PR head.",)
     if not context.head_ref_oid:
         return ("Current PR head SHA is unknown, so approval cannot be verified.",)
 

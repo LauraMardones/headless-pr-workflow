@@ -36,6 +36,7 @@ class PreMergeSummary:
     url: str
     state: str
     is_draft: bool
+    expected_base_ref_name: str | None
     base_ref_name: str
     base_ref_oid: str | None
     head_ref_name: str
@@ -55,6 +56,7 @@ class PreMergeSummary:
             "url": self.url,
             "state": self.state,
             "is_draft": self.is_draft,
+            "expected_base_ref_name": self.expected_base_ref_name,
             "base_ref_name": self.base_ref_name,
             "base_ref_oid": self.base_ref_oid,
             "head_ref_name": self.head_ref_name,
@@ -70,7 +72,7 @@ class PreMergeSummary:
         }
 
 
-def summarize_pre_merge(context: PullRequestContext) -> PreMergeSummary:
+def summarize_pre_merge(context: PullRequestContext, *, expected_base_ref_name: str | None) -> PreMergeSummary:
     approval = summarize_approval_check(context)
     checks: list[PreMergeCheck] = []
     blocking_reasons: list[str] = []
@@ -113,14 +115,16 @@ def summarize_pre_merge(context: PullRequestContext) -> PreMergeSummary:
     if not approval_ok:
         blocking_reasons.extend(approval.blocking_reasons)
 
-    _append_simple_check(
-        checks,
-        blocking_reasons,
-        code="target-branch-known",
-        ok=bool(context.base_ref_name),
-        pass_message=f"Target base branch is {context.base_ref_name}.",
-        fail_message="Target base branch is unknown.",
+    target_branch_blockers = _target_branch_blockers(context, expected_base_ref_name=expected_base_ref_name)
+    checks.append(
+        PreMergeCheck(
+            code="target-branch-expected",
+            ok=not target_branch_blockers,
+            message=_target_branch_message(context, expected_base_ref_name=expected_base_ref_name, blockers=target_branch_blockers),
+            details=tuple(target_branch_blockers),
+        )
     )
+    blocking_reasons.extend(target_branch_blockers)
 
     check_blockers = _status_check_blockers(context.status_checks)
     checks.append(
@@ -150,6 +154,7 @@ def summarize_pre_merge(context: PullRequestContext) -> PreMergeSummary:
         url=context.url,
         state=context.state,
         is_draft=context.is_draft,
+        expected_base_ref_name=expected_base_ref_name,
         base_ref_name=context.base_ref_name,
         base_ref_oid=context.base_ref_oid,
         head_ref_name=context.head_ref_name,
@@ -182,12 +187,12 @@ def _append_simple_check(
 def _status_check_message(status_checks: tuple[CheckSummary, ...], blockers: list[str]) -> str:
     if blockers:
         return "Required status checks are not yet merge-ready."
-    if not status_checks:
-        return "No status checks were reported by GitHub."
     return "All reported status checks are passing or skipped."
 
 
 def _status_check_blockers(status_checks: tuple[CheckSummary, ...]) -> list[str]:
+    if not status_checks:
+        return ["GitHub reported no status checks for the current head SHA."]
     blockers: list[str] = []
     for check in status_checks:
         if check.bucket == "success" or check.bucket == "skipped":
@@ -209,6 +214,33 @@ def _mergeability_message(context: PullRequestContext, blockers: list[str]) -> s
     mergeable = context.mergeable or "unknown"
     merge_state_status = context.merge_state_status or "unknown"
     return f"Mergeability is acceptable (mergeable={mergeable}, merge_state_status={merge_state_status})."
+
+
+def _target_branch_message(
+    context: PullRequestContext,
+    *,
+    expected_base_ref_name: str | None,
+    blockers: list[str],
+) -> str:
+    if blockers:
+        return "Target base branch is not acceptable."
+    return f"Target base branch matches expected {expected_base_ref_name}."
+
+
+def _target_branch_blockers(
+    context: PullRequestContext,
+    *,
+    expected_base_ref_name: str | None,
+) -> list[str]:
+    if not expected_base_ref_name:
+        return ["Expected target base branch is unknown."]
+    if not context.base_ref_name:
+        return ["Target base branch is unknown."]
+    if context.base_ref_name != expected_base_ref_name:
+        return [
+            f"PR targets base branch {context.base_ref_name}, expected {expected_base_ref_name}.",
+        ]
+    return []
 
 
 def _mergeability_blockers(context: PullRequestContext) -> list[str]:

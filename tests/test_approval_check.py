@@ -63,3 +63,39 @@ def test_approval_check_rejects_unknown_head_sha():
     assert summary.approval_status == "unknown-head"
     assert summary.blocking_reasons == ("Current PR head SHA is unknown, so approval cannot be verified.",)
     assert summary.hard_gate_passed is False
+
+
+def test_approval_check_rejects_active_change_request_decision():
+    context = _context(
+        reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head"),),
+    )
+    context = PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state=context.state,
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=context.is_draft,
+        merge_state_status=context.merge_state_status,
+        mergeable=context.mergeable,
+        review_decision="CHANGES_REQUESTED",
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=context.latest_reviews,
+        review_requests=context.review_requests,
+        status_checks=context.status_checks,
+        raw=context.raw,
+    )
+
+    summary = summarize_approval_check(context)
+
+    assert summary.blocking_reasons == ("GitHub review decision is CHANGES_REQUESTED for the current PR head.",)
+    assert summary.hard_gate_passed is False

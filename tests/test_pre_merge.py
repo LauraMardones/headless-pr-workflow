@@ -58,7 +58,8 @@ def test_pre_merge_passes_when_all_core_gates_pass():
         _context(
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
             status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
-        )
+        ),
+        expected_base_ref_name="main",
     )
 
     assert summary.blocking_reasons == ()
@@ -71,7 +72,8 @@ def test_pre_merge_blocks_draft_pr():
         _context(
             is_draft=True,
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-        )
+        ),
+        expected_base_ref_name="main",
     )
 
     assert "PR is draft." in summary.blocking_reasons
@@ -83,7 +85,8 @@ def test_pre_merge_blocks_stale_approval():
         _context(
             head_sha="new-head",
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="old-head"),),
-        )
+        ),
+        expected_base_ref_name="main",
     )
 
     assert "Latest formal approval applies to old-head, not current head new-head." in summary.blocking_reasons
@@ -98,7 +101,8 @@ def test_pre_merge_blocks_failing_and_pending_checks():
                 _check(name="unit", bucket="failure", status="COMPLETED", conclusion="FAILURE"),
                 _check(name="lint", bucket="pending", state="PENDING"),
             ),
-        )
+        ),
+        expected_base_ref_name="main",
     )
 
     assert "Status check unit is failing (status=COMPLETED, conclusion=FAILURE)." in summary.blocking_reasons
@@ -112,7 +116,8 @@ def test_pre_merge_blocks_non_mergeable_pr():
             mergeable="CONFLICTING",
             merge_state_status="DIRTY",
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-        )
+        ),
+        expected_base_ref_name="main",
     )
 
     assert "PR mergeable state is CONFLICTING." in summary.blocking_reasons
@@ -121,8 +126,34 @@ def test_pre_merge_blocks_non_mergeable_pr():
 
 
 def test_pre_merge_blocks_missing_head_sha():
-    summary = summarize_pre_merge(_context(head_sha="", reviews=()))
+    summary = summarize_pre_merge(_context(head_sha="", reviews=()), expected_base_ref_name="main")
 
     assert "Current PR head SHA is unknown." in summary.blocking_reasons
     assert "Current PR head SHA is unknown, so approval cannot be verified." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_blocks_unexpected_target_branch():
+    summary = summarize_pre_merge(
+        _context(
+            base_ref_name="release",
+            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
+            status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+        ),
+        expected_base_ref_name="main",
+    )
+
+    assert "PR targets base branch release, expected main." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_blocks_when_github_reports_no_status_checks():
+    summary = summarize_pre_merge(
+        _context(
+            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
+        ),
+        expected_base_ref_name="main",
+    )
+
+    assert "GitHub reported no status checks for the current head SHA." in summary.blocking_reasons
     assert summary.hard_gate_passed is False

@@ -206,6 +206,35 @@ def fetch_pr_context(target: str | None = None, *, repo: str | None = None) -> P
         raise GHCommandError(command, result.returncode, f"GitHub PR payload could not be parsed: {error}", error="gh-parse-failed") from error
 
 
+def fetch_repo_default_branch(repo: str | None = None) -> str:
+    """Fetch the repository default branch from GitHub."""
+
+    command = ["gh", "repo", "view"]
+    if repo:
+        command.append(repo)
+    command.extend(["--json", "defaultBranchRef"])
+
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+    except FileNotFoundError as error:
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+
+    if result.returncode != 0:
+        raise GHCommandError(command, result.returncode, result.stderr)
+
+    try:
+        raw = json.loads(result.stdout)
+        default_branch_ref = raw["defaultBranchRef"]
+        branch_name = default_branch_ref["name"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise GHCommandError(command, result.returncode, f"GitHub repo payload could not be parsed: {error}", error="gh-parse-failed") from error
+
+    if not branch_name:
+        raise GHCommandError(command, result.returncode, "GitHub repo payload did not include a default branch name.", error="gh-parse-failed")
+
+    return branch_name
+
+
 def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
     """Normalize the subset of `gh pr view --json` needed by core commands."""
 

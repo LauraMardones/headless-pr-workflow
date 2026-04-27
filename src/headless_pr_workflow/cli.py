@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
-from .github import GHCommandError, fetch_pr_context
+from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 
@@ -159,10 +159,11 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
 def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> int:
     try:
         context = fetch_pr_context(target, repo=repo)
+        expected_base_ref_name = fetch_repo_default_branch(repo=repo)
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
 
-    summary = summarize_pre_merge(context)
+    summary = summarize_pre_merge(context, expected_base_ref_name=expected_base_ref_name)
 
     if as_json:
         print(json.dumps(summary.to_dict(), indent=2))
@@ -172,6 +173,7 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     print(f"url: {summary.url}")
     print(f"state: {summary.state}")
     print(f"draft: {str(summary.is_draft).lower()}")
+    print(f"expected base: {summary.expected_base_ref_name or 'unknown'}")
     print(f"base: {summary.base_ref_name or 'unknown'} ({summary.base_ref_oid or 'unknown'})")
     print(f"head: {summary.head_ref_name or 'unknown'} ({summary.head_ref_oid or 'unknown'})")
     print(f"mergeable: {summary.mergeable or 'unknown'}")
