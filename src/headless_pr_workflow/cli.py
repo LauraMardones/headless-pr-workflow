@@ -141,13 +141,16 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
 
     print(f"PR #{summary.number}: {summary.title}")
     print(f"url: {summary.url}")
-    print(f"head sha: {summary.head_ref_oid or 'unknown'}")
+    print(f"head sha: {summary.head_ref_oid}")
     print(f"latest review sha: {summary.latest_review_sha or 'none'}")
     print(f"latest review state: {summary.latest_review_state or 'none'}")
     print(f"latest review author: {summary.latest_review_author or 'none'}")
     print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
-    print(f"approval status: {summary.approval_status}")
+    print(f"formal approval status: {summary.approval_status}")
+    print(f"solo-maintainer override: {summary.solo_override.status}")
+    print(f"override review sha: {summary.solo_override.review_commit_oid or 'none'}")
     print(f"approval source: {summary.approval_source or 'none'}")
+    print(f"satisfied by: {summary.satisfied_by or 'none'}")
     if summary.blocking_reasons:
         print("blocking reasons:")
         for reason in summary.blocking_reasons:
@@ -184,6 +187,7 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     print(f"mergeable: {summary.mergeable or 'unknown'}")
     print(f"merge state status: {summary.merge_state_status or 'unknown'}")
     print(f"approval status: {summary.approval.approval_status}")
+    print(f"approval source: {summary.approval.approval_source or 'none'}")
     if summary.blocking_reasons:
         print("blocking reasons:")
         for reason in summary.blocking_reasons:

@@ -93,7 +93,7 @@ def test_pre_merge_blocks_stale_approval():
         required_check_names=(),
     )
 
-    assert "Latest formal approval applies to old-head, not current head new-head." in summary.blocking_reasons
+    assert "formal approval is stale for the current PR head SHA" in summary.blocking_reasons
     assert summary.hard_gate_passed is False
 
 

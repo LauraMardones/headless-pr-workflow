@@ -25,6 +25,8 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 - Review was performed in a separate session from the session that implemented the reviewed head SHA.
 - The review is recorded on GitHub against the current head SHA.
 - The review summary explicitly states that no blockers remain for that exact head SHA.
+- For automation, the GitHub review summary should include `solo-maintainer override accepted` and `no blockers remain for <head-sha>`.
+- The review summary should explicitly say when formal GitHub approval is unavailable and that the solo-maintainer override is the approval to rely on for the current head SHA.
 - Any earlier blocking inline comments are resolved, outdated by later commits, or explicitly waived in GitHub.
 - The PR is not draft.
 - A fresh GitHub refresh immediately before merge confirms the current head SHA still matches the reviewed head SHA.
@@ -32,6 +34,22 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 - Optional adapter gates are passing, absent by policy, or explicitly waived in GitHub.
 
 This override is a bootstrap/solo-maintainer exception, not the default approval path. It must be visible in GitHub history and must not be used when an independent GitHub approver is available.
+
+A PR may be reviewed while draft, but neither formal approval nor a solo-maintainer override may be relied on for merge until the PR is marked Ready for review. When a review session determines that no blockers remain, the reviewer should mark the PR Ready for review before issuing the final approval or solo-maintainer override summary.
+
+Recommended review summary template:
+
+```text
+Reviewed head SHA `<head-sha>`.
+
+No blockers remain for <head-sha>.
+
+solo-maintainer override accepted.
+
+Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.
+
+This solo-maintainer override is the approval to rely on for the current head SHA.
+```
 
 ## SHA-Bound Approval
 

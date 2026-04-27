@@ -61,6 +61,7 @@ class ReviewSummary:
     state: str | None
     submitted_at: str | None
     commit_oid: str | None
+    body: str | None = None
 
     @classmethod
     def from_raw(cls, review: dict[str, Any]) -> "ReviewSummary":
@@ -70,6 +71,7 @@ class ReviewSummary:
             state=review.get("state"),
             submitted_at=review.get("submittedAt"),
             commit_oid=_nested_get(review, "commit", "oid"),
+            body=review.get("body"),
         )
 
     def to_dict(self) -> dict[str, Any]:
