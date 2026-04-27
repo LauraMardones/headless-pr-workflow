@@ -25,6 +25,7 @@ def _context(
     merge_state_status: str | None = "CLEAN",
     reviews: tuple[ReviewSummary, ...] = (),
     status_checks: tuple[CheckSummary, ...] = (),
+    raw: dict | None = None,
 ) -> PullRequestContext:
     return PullRequestContext(
         number=7,
@@ -49,7 +50,7 @@ def _context(
         latest_reviews=reviews,
         review_requests=(),
         status_checks=status_checks,
-        raw={},
+        raw=raw or {},
     )
 
 
@@ -60,6 +61,7 @@ def test_pre_merge_passes_when_all_core_gates_pass():
             status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=("unit",),
     )
 
     assert summary.blocking_reasons == ()
@@ -74,6 +76,7 @@ def test_pre_merge_blocks_draft_pr():
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=(),
     )
 
     assert "PR is draft." in summary.blocking_reasons
@@ -87,6 +90,7 @@ def test_pre_merge_blocks_stale_approval():
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="old-head"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=(),
     )
 
     assert "Latest formal approval applies to old-head, not current head new-head." in summary.blocking_reasons
@@ -103,6 +107,7 @@ def test_pre_merge_blocks_failing_and_pending_checks():
             ),
         ),
         expected_base_ref_name="main",
+        required_check_names=("unit", "lint"),
     )
 
     assert "Status check unit is failing (status=COMPLETED, conclusion=FAILURE)." in summary.blocking_reasons
@@ -118,6 +123,7 @@ def test_pre_merge_blocks_non_mergeable_pr():
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=(),
     )
 
     assert "PR mergeable state is CONFLICTING." in summary.blocking_reasons
@@ -126,7 +132,7 @@ def test_pre_merge_blocks_non_mergeable_pr():
 
 
 def test_pre_merge_blocks_missing_head_sha():
-    summary = summarize_pre_merge(_context(head_sha="", reviews=()), expected_base_ref_name="main")
+    summary = summarize_pre_merge(_context(head_sha="", reviews=()), expected_base_ref_name="main", required_check_names=())
 
     assert "Current PR head SHA is unknown." in summary.blocking_reasons
     assert "Current PR head SHA is unknown, so approval cannot be verified." in summary.blocking_reasons
@@ -141,19 +147,48 @@ def test_pre_merge_blocks_unexpected_target_branch():
             status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=("unit",),
     )
 
     assert "PR targets base branch release, expected main." in summary.blocking_reasons
     assert summary.hard_gate_passed is False
 
 
-def test_pre_merge_blocks_when_github_reports_no_status_checks():
+def test_pre_merge_blocks_when_required_checks_are_not_reported():
     summary = summarize_pre_merge(
         _context(
             reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
         ),
         expected_base_ref_name="main",
+        required_check_names=("unit",),
     )
 
     assert "GitHub reported no status checks for the current head SHA." in summary.blocking_reasons
     assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_allows_absent_checks_when_none_are_required():
+    summary = summarize_pre_merge(
+        _context(
+            reviews=(ReviewSummary(author="reviewer", state="COMMENTED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
+            raw={
+                "reviews": [
+                    {
+                        "body": (
+                            "Reviewed head SHA `head123`.\n\n"
+                            "No blockers remain for head123.\n\n"
+                            "solo-maintainer override accepted.\n\n"
+                            "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+                            "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+                        ),
+                        "commit": {"oid": "head123"},
+                    }
+                ]
+            },
+        ),
+        expected_base_ref_name="main",
+        required_check_names=(),
+    )
+
+    assert "GitHub reported no required status checks for the target branch." not in summary.blocking_reasons
+    assert summary.checks[5].ok is True

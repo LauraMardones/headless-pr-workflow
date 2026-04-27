@@ -44,6 +44,7 @@ class PreMergeSummary:
     mergeable: str | None
     merge_state_status: str | None
     approval: ApprovalCheckSummary
+    required_check_names: tuple[str, ...]
     status_checks: tuple[CheckSummary, ...]
     checks: tuple[PreMergeCheck, ...]
     blocking_reasons: tuple[str, ...]
@@ -64,6 +65,7 @@ class PreMergeSummary:
             "mergeable": self.mergeable,
             "merge_state_status": self.merge_state_status,
             "approval": self.approval.to_dict(),
+            "required_check_names": list(self.required_check_names),
             "status_checks": [check.to_dict() for check in self.status_checks],
             "check_counts": _check_counts(self.status_checks),
             "checks": [check.to_dict() for check in self.checks],
@@ -72,7 +74,12 @@ class PreMergeSummary:
         }
 
 
-def summarize_pre_merge(context: PullRequestContext, *, expected_base_ref_name: str | None) -> PreMergeSummary:
+def summarize_pre_merge(
+    context: PullRequestContext,
+    *,
+    expected_base_ref_name: str | None,
+    required_check_names: tuple[str, ...] = (),
+) -> PreMergeSummary:
     approval = summarize_approval_check(context)
     checks: list[PreMergeCheck] = []
     blocking_reasons: list[str] = []
@@ -126,12 +133,12 @@ def summarize_pre_merge(context: PullRequestContext, *, expected_base_ref_name: 
     )
     blocking_reasons.extend(target_branch_blockers)
 
-    check_blockers = _status_check_blockers(context.status_checks)
+    check_blockers = _status_check_blockers(context.status_checks, required_check_names=required_check_names)
     checks.append(
         PreMergeCheck(
             code="required-checks-passing",
             ok=not check_blockers,
-            message=_status_check_message(context.status_checks, check_blockers),
+            message=_status_check_message(context.status_checks, check_blockers, required_check_names=required_check_names),
             details=tuple(check_blockers),
         )
     )
@@ -162,6 +169,7 @@ def summarize_pre_merge(context: PullRequestContext, *, expected_base_ref_name: 
         mergeable=context.mergeable,
         merge_state_status=context.merge_state_status,
         approval=approval,
+        required_check_names=required_check_names,
         status_checks=context.status_checks,
         checks=tuple(checks),
         blocking_reasons=tuple(blocking_reasons),
@@ -184,16 +192,31 @@ def _append_simple_check(
         blocking_reasons.append(message)
 
 
-def _status_check_message(status_checks: tuple[CheckSummary, ...], blockers: list[str]) -> str:
+def _status_check_message(
+    status_checks: tuple[CheckSummary, ...],
+    blockers: list[str],
+    *,
+    required_check_names: tuple[str, ...],
+) -> str:
     if blockers:
         return "Required status checks are not yet merge-ready."
+    if not status_checks and not required_check_names:
+        return "GitHub reports no required status checks for the target branch."
     return "All reported status checks are passing or skipped."
 
 
-def _status_check_blockers(status_checks: tuple[CheckSummary, ...]) -> list[str]:
-    if not status_checks:
+def _status_check_blockers(
+    status_checks: tuple[CheckSummary, ...],
+    *,
+    required_check_names: tuple[str, ...],
+) -> list[str]:
+    if not status_checks and required_check_names:
         return ["GitHub reported no status checks for the current head SHA."]
     blockers: list[str] = []
+    seen_names = {_check_name(check) for check in status_checks}
+    for required_check_name in required_check_names:
+        if required_check_name not in seen_names:
+            blockers.append(f"Required status check {required_check_name} was not reported for the current head SHA.")
     for check in status_checks:
         if check.bucket == "success" or check.bucket == "skipped":
             continue

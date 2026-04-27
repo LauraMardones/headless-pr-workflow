@@ -305,6 +305,7 @@ def test_approval_check_json_output(monkeypatch, capsys):
 def test_pre_merge_json_output_ready(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _ready_context())
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
@@ -318,6 +319,7 @@ def test_pre_merge_json_output_ready(monkeypatch, capsys):
 def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _blocked_pre_merge_context())
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit", "lint"))
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
@@ -332,9 +334,10 @@ def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
     assert '"PR merge state status is DIRTY."' in output
 
 
-def test_pre_merge_json_output_blocks_empty_status_checks(monkeypatch, capsys):
+def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _approved_context())
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 

@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
-from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch
+from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch, fetch_required_status_checks
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 
@@ -160,10 +160,15 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     try:
         context = fetch_pr_context(target, repo=repo)
         expected_base_ref_name = fetch_repo_default_branch(repo=repo)
+        required_check_names = fetch_required_status_checks(repo or context.head_repository or "", expected_base_ref_name)
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
 
-    summary = summarize_pre_merge(context, expected_base_ref_name=expected_base_ref_name)
+    summary = summarize_pre_merge(
+        context,
+        expected_base_ref_name=expected_base_ref_name,
+        required_check_names=required_check_names,
+    )
 
     if as_json:
         print(json.dumps(summary.to_dict(), indent=2))
