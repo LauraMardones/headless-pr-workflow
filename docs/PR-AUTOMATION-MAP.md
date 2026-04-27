@@ -34,7 +34,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `pr-takeover` | Produce safe takeover context for a PR. | implementer, orchestrator | P1-high | C-session | action | core | scaffolded |
 | `worktree-status` | Report local worktrees, branches, and dirty state. | all | P1-high | C-session | report | core | scaffolded |
 | `review-sha` | Report current head SHA and approval SHA relationship. | reviewer, implementer | P0-blocking | F-review | hard-gate | core | implemented |
-| `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | scaffolded |
+| `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | implemented |
 | `re-review-needed` | Detect whether new commits require review re-evaluation. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
 | `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P2-medium | F-review | report | core | scaffolded |
 | `unresolved-review-threads` | Detect unresolved GitHub review threads. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
@@ -42,7 +42,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | scaffolded |
 | `target-branch-check` | Verify PR targets the expected base branch. | implementer, merge-owner | P0-blocking | H-merge | hard-gate | core | scaffolded |
 | `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | scaffolded |
-| `pre-merge` | Compose merge-readiness checks. | merge-owner | P0-blocking | H-merge | hard-gate | core | scaffolded |
+| `pre-merge` | Compose merge-readiness checks. | merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
 | `merge-pr` | Merge after fresh pre-merge gates pass. | merge-owner | P0-blocking | H-merge | action | core | scaffolded |
 | `post-merge-sync` | Sync local state after merge. | merge-owner, implementer | P1-high | I-post-merge | action | core | scaffolded |
 | `branch-cleanup` | Remove stale merged local branches when safe. | implementer | P2-medium | I-post-merge | action | core | scaffolded |
