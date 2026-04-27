@@ -31,11 +31,14 @@ Review for:
 
 Return findings ordered by severity. If no blockers remain, say so explicitly in a GitHub review summary and include the reviewed head SHA.
 
+If no blockers remain and the PR is still draft, mark it Ready for review before leaving the final approval or solo-maintainer override summary. If you cannot change draft state, clearly say so in the GitHub review summary.
+
 If GitHub allows formal approval and no blockers remain, approve the PR.
 
 If GitHub blocks formal approval because the authenticated account owns the PR, leave a GitHub review summary that states:
 - the reviewed head SHA
 - that no blockers remain
+- that the PR was marked Ready for review, or that changing draft state was unavailable
 - that formal approval was attempted or unavailable because of ownership/account limitations
 
 Do not merge the PR from this review session.
