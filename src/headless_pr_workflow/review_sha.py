@@ -19,6 +19,7 @@ class ReviewShaSummary:
     latest_review_author: str | None
     latest_approval_sha: str | None
     approval_status: str
+    hard_gate_passed: bool
     reviews: tuple[ReviewSummary, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +42,7 @@ def summarize_review_sha(context: PullRequestContext) -> ReviewShaSummary:
         latest_review_author=latest_review.author if latest_review else None,
         latest_approval_sha=latest_approval_sha,
         approval_status=_approval_status(context.head_ref_oid, latest_approval_sha),
+        hard_gate_passed=latest_approval_sha == context.head_ref_oid,
         reviews=context.latest_reviews,
     )
 

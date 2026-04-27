@@ -111,7 +111,7 @@ def _print_review_sha(target: str | None, *, repo: str | None, as_json: bool) ->
 
     if as_json:
         print(json.dumps(summary.to_dict(), indent=2))
-        return 0
+        return 0 if summary.hard_gate_passed else 1
 
     print(f"PR #{summary.number}: {summary.title}")
     print(f"url: {summary.url}")
@@ -121,7 +121,8 @@ def _print_review_sha(target: str | None, *, repo: str | None, as_json: bool) ->
     print(f"latest review author: {summary.latest_review_author or 'none'}")
     print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
     print(f"approval status: {summary.approval_status}")
-    return 0
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    return 0 if summary.hard_gate_passed else 1
 
 
 def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:

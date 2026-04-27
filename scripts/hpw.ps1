@@ -12,3 +12,4 @@ if ($env:PYTHONPATH) {
 }
 
 python -m headless_pr_workflow.cli @Args
+exit $LASTEXITCODE

@@ -60,6 +60,64 @@ def _approved_context() -> PullRequestContext:
     )
 
 
+def _commented_context() -> PullRequestContext:
+    context = _context()
+    return PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state=context.state,
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=context.is_draft,
+        merge_state_status=context.merge_state_status,
+        mergeable=context.mergeable,
+        review_decision=context.review_decision,
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=(ReviewSummary(author="reviewer", state="COMMENTED", submitted_at="2026-04-21T10:00:00Z", commit_oid=context.head_ref_oid),),
+        review_requests=context.review_requests,
+        status_checks=context.status_checks,
+        raw=context.raw,
+    )
+
+
+def _stale_approved_context() -> PullRequestContext:
+    context = _context()
+    return PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state=context.state,
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=context.is_draft,
+        merge_state_status=context.merge_state_status,
+        mergeable=context.mergeable,
+        review_decision=context.review_decision,
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="old-head"),),
+        review_requests=context.review_requests,
+        status_checks=context.status_checks,
+        raw=context.raw,
+    )
+
+
 def test_pr_context_json_output(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _context())
 
@@ -104,6 +162,29 @@ def test_review_sha_json_output(monkeypatch, capsys):
     assert '"head_ref_oid": "head123"' in output
     assert '"latest_approval_sha": "head123"' in output
     assert '"approval_status": "current"' in output
+    assert '"hard_gate_passed": true' in output
+
+
+def test_review_sha_json_output_fails_for_missing_approval(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _commented_context())
+
+    exit_code = cli.main(["review-sha", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"approval_status": "missing"' in output
+    assert '"hard_gate_passed": false' in output
+
+
+def test_review_sha_json_output_fails_for_stale_approval(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _stale_approved_context())
+
+    exit_code = cli.main(["review-sha", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"approval_status": "stale"' in output
+    assert '"hard_gate_passed": false' in output
 
 
 def test_review_sha_json_error_output(monkeypatch, capsys):

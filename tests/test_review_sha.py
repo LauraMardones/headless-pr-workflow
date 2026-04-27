@@ -42,6 +42,7 @@ def test_review_sha_reports_current_approval():
     assert summary.latest_review_sha == "head"
     assert summary.latest_approval_sha == "head"
     assert summary.approval_status == "current"
+    assert summary.hard_gate_passed is True
 
 
 def test_review_sha_reports_stale_approval():
@@ -55,6 +56,7 @@ def test_review_sha_reports_stale_approval():
     assert summary.latest_review_sha == "old-head"
     assert summary.latest_approval_sha == "old-head"
     assert summary.approval_status == "stale"
+    assert summary.hard_gate_passed is False
 
 
 def test_review_sha_reports_missing_approval_with_comment_only_review():
@@ -69,6 +71,7 @@ def test_review_sha_reports_missing_approval_with_comment_only_review():
     assert summary.latest_review_state == "COMMENTED"
     assert summary.latest_approval_sha is None
     assert summary.approval_status == "missing"
+    assert summary.hard_gate_passed is False
 
 
 def test_review_sha_reports_no_reviews():
@@ -77,3 +80,4 @@ def test_review_sha_reports_no_reviews():
     assert summary.latest_review_sha is None
     assert summary.latest_approval_sha is None
     assert summary.approval_status == "missing"
+    assert summary.hard_gate_passed is False
