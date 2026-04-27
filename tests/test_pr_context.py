@@ -25,12 +25,14 @@ def test_parse_pr_context_normalizes_core_fields():
                     "state": "COMMENTED",
                     "submittedAt": "2026-04-21T10:30:00Z",
                     "commit": {"oid": "old111"},
+                    "body": "needs follow-up",
                 },
                 {
                     "author": {"login": "reviewer-b"},
                     "state": "APPROVED",
                     "submittedAt": "2026-04-21T11:00:00Z",
                     "commit": {"oid": "head456"},
+                    "body": "",
                 },
             ],
             "maintainerCanModify": True,
@@ -57,6 +59,7 @@ def test_parse_pr_context_normalizes_core_fields():
     assert context.head_ref_oid == "head456"
     assert context.head_repository == "owner/repo"
     assert context.labels == ("workflow",)
+    assert context.latest_reviews[0].body == "needs follow-up"
     assert context.latest_approval_sha == "head456"
     assert context.review_requests == ("reviewer-c",)
     assert context.check_counts == {"success": 1, "failure": 1, "pending": 1, "skipped": 0, "unknown": 0}

@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import asdict
 
+from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
 from .github import GHCommandError, fetch_pr_context
 from .review_sha import summarize_review_sha
@@ -125,6 +126,32 @@ def _print_review_sha(target: str | None, *, repo: str | None, as_json: bool) ->
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_approval_check(context)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"head sha: {summary.head_ref_oid}")
+    print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
+    print(f"formal approval status: {summary.approval_status}")
+    print(f"solo-maintainer override: {summary.solo_override.status}")
+    print(f"override review sha: {summary.solo_override.review_commit_oid or 'none'}")
+    print(f"satisfied by: {summary.satisfied_by or 'none'}")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    if summary.blocking_reason:
+        print(f"blocking reason: {summary.blocking_reason}")
+    return 0 if summary.hard_gate_passed else 1
+
+
 def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
     if as_json:
         print(
@@ -165,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "review-sha":
         return _print_review_sha(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "approval-check":
+        return _print_approval_check(args.target, repo=args.repo, as_json=args.json)
 
     return _print_scaffold(args.command, args.target, args.json)
 
