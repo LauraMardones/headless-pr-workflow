@@ -25,6 +25,7 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 - Review was performed in a separate session from the session that implemented the reviewed head SHA.
 - The review is recorded on GitHub against the current head SHA.
 - The review summary explicitly states that no blockers remain for that exact head SHA.
+- For automation, the GitHub review summary should include `solo-maintainer override accepted` and `no blockers remain for <head-sha>`.
 - Any earlier blocking inline comments are resolved, outdated by later commits, or explicitly waived in GitHub.
 - The PR is not draft.
 - A fresh GitHub refresh immediately before merge confirms the current head SHA still matches the reviewed head SHA.
