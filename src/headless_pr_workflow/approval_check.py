@@ -102,7 +102,6 @@ def summarize_approval_check(context: PullRequestContext) -> ApprovalCheckSummar
 
 
 def evaluate_solo_maintainer_override(context: PullRequestContext) -> SoloMaintainerOverrideSummary:
-    current_head_override_review: ReviewSummary | None = None
     stale_review: ReviewSummary | None = None
 
     for review in reversed(context.latest_reviews):
@@ -113,30 +112,20 @@ def evaluate_solo_maintainer_override(context: PullRequestContext) -> SoloMainta
         if not body:
             continue
 
+        if review.commit_oid == context.head_ref_oid and _looks_like_override(body):
+            return SoloMaintainerOverrideSummary(
+                status="accepted" if _is_accepted_override(review, head_sha=context.head_ref_oid) else "invalid",
+                review_author=review.author,
+                review_state=review.state,
+                review_commit_oid=review.commit_oid,
+                review_submitted_at=review.submitted_at,
+            )
+
         if review.commit_oid == context.head_ref_oid:
-            if _is_accepted_override(review, head_sha=context.head_ref_oid):
-                return SoloMaintainerOverrideSummary(
-                    status="accepted",
-                    review_author=review.author,
-                    review_state=review.state,
-                    review_commit_oid=review.commit_oid,
-                    review_submitted_at=review.submitted_at,
-                )
-            if current_head_override_review is None and _looks_like_override(body):
-                current_head_override_review = review
             continue
 
         if stale_review is None and _looks_like_override(body):
             stale_review = review
-
-    if current_head_override_review is not None:
-        return SoloMaintainerOverrideSummary(
-            status="invalid",
-            review_author=current_head_override_review.author,
-            review_state=current_head_override_review.state,
-            review_commit_oid=current_head_override_review.commit_oid,
-            review_submitted_at=current_head_override_review.submitted_at,
-        )
 
     if stale_review is not None:
         return SoloMaintainerOverrideSummary(

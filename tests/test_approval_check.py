@@ -137,6 +137,34 @@ def test_approval_check_keeps_valid_override_when_newer_comment_is_not_an_overri
     assert summary.hard_gate_passed is True
 
 
+def test_approval_check_rejects_older_override_after_newer_same_head_revocation():
+    summary = summarize_approval_check(
+        _context(
+            reviews=(
+                ReviewSummary(
+                    author="reviewer",
+                    state="COMMENTED",
+                    submitted_at="2026-04-21T10:00:00Z",
+                    commit_oid="head",
+                    body="Solo-maintainer override accepted. No blockers remain for head.",
+                ),
+                ReviewSummary(
+                    author="reviewer",
+                    state="COMMENTED",
+                    submitted_at="2026-04-21T10:05:00Z",
+                    commit_oid="head",
+                    body="Solo-maintainer override is no longer accepted; blocker found.",
+                ),
+            ),
+        )
+    )
+
+    assert summary.approval_status == "missing"
+    assert summary.solo_override.status == "invalid"
+    assert summary.hard_gate_passed is False
+    assert summary.blocking_reason == "current-head review comment does not contain an accepted solo-maintainer override"
+
+
 def test_approval_check_ignores_old_override_review_on_previous_head():
     summary = summarize_approval_check(
         _context(
