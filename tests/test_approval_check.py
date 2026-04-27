@@ -39,9 +39,11 @@ def test_approval_check_passes_for_current_formal_approval():
 
     assert summary.approval_status == "current"
     assert summary.solo_override.status == "missing"
+    assert summary.approval_source == "formal"
     assert summary.satisfied_by == "formal-approval"
     assert summary.hard_gate_passed is True
     assert summary.blocking_reason is None
+    assert summary.blocking_reasons == ()
 
 
 def test_approval_check_fails_for_stale_formal_approval():
@@ -56,6 +58,7 @@ def test_approval_check_fails_for_stale_formal_approval():
     assert summary.solo_override.status == "missing"
     assert summary.hard_gate_passed is False
     assert summary.blocking_reason == "formal approval is stale for the current PR head SHA"
+    assert summary.blocking_reasons == ("formal approval is stale for the current PR head SHA",)
 
 
 def test_approval_check_fails_for_missing_approval():
@@ -65,6 +68,51 @@ def test_approval_check_fails_for_missing_approval():
     assert summary.solo_override.status == "missing"
     assert summary.hard_gate_passed is False
     assert summary.blocking_reason == "no formal approval or accepted solo-maintainer override exists for the current PR head SHA"
+
+
+def test_approval_check_rejects_unknown_head_sha():
+    summary = summarize_approval_check(_context(head_sha="", reviews=()))
+
+    assert summary.approval_status == "unknown-head"
+    assert summary.hard_gate_passed is False
+    assert summary.blocking_reason == "Current PR head SHA is unknown, so approval cannot be verified."
+
+
+def test_approval_check_rejects_active_change_request_decision():
+    context = _context(
+        reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head"),),
+    )
+    context = PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state=context.state,
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=context.is_draft,
+        merge_state_status=context.merge_state_status,
+        mergeable=context.mergeable,
+        review_decision="CHANGES_REQUESTED",
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=context.latest_reviews,
+        review_requests=context.review_requests,
+        status_checks=context.status_checks,
+        raw=context.raw,
+    )
+
+    summary = summarize_approval_check(context)
+
+    assert summary.blocking_reason == "GitHub review decision is CHANGES_REQUESTED for the current PR head."
+    assert summary.blocking_reasons == ("GitHub review decision is CHANGES_REQUESTED for the current PR head.",)
+    assert summary.hard_gate_passed is False
 
 
 def test_approval_check_fails_for_comment_only_review_without_override():
@@ -97,7 +145,13 @@ def test_approval_check_passes_for_valid_solo_maintainer_override():
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:00:00Z",
                     commit_oid="head",
-                    body="Solo-maintainer override accepted. No blockers remain for head.",
+                    body=(
+                        "Reviewed head SHA `head`.\n\n"
+                        "No blockers remain for head.\n\n"
+                        "solo-maintainer override accepted.\n\n"
+                        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+                        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+                    ),
                 ),
             ),
         )
@@ -105,6 +159,7 @@ def test_approval_check_passes_for_valid_solo_maintainer_override():
 
     assert summary.approval_status == "missing"
     assert summary.solo_override.status == "accepted"
+    assert summary.approval_source == "solo-maintainer-override"
     assert summary.satisfied_by == "solo-maintainer-override"
     assert summary.hard_gate_passed is True
     assert summary.blocking_reason is None
@@ -119,7 +174,13 @@ def test_approval_check_keeps_valid_override_when_newer_comment_is_not_an_overri
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:00:00Z",
                     commit_oid="head",
-                    body="Solo-maintainer override accepted. No blockers remain for head.",
+                    body=(
+                        "Reviewed head SHA `head`.\n\n"
+                        "No blockers remain for head.\n\n"
+                        "solo-maintainer override accepted.\n\n"
+                        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+                        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+                    ),
                 ),
                 ReviewSummary(
                     author="reviewer",
@@ -146,7 +207,13 @@ def test_approval_check_rejects_older_override_after_newer_same_head_revocation(
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:00:00Z",
                     commit_oid="head",
-                    body="Solo-maintainer override accepted. No blockers remain for head.",
+                    body=(
+                        "Reviewed head SHA `head`.\n\n"
+                        "No blockers remain for head.\n\n"
+                        "solo-maintainer override accepted.\n\n"
+                        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+                        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+                    ),
                 ),
                 ReviewSummary(
                     author="reviewer",
@@ -175,7 +242,13 @@ def test_approval_check_ignores_old_override_review_on_previous_head():
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:00:00Z",
                     commit_oid="old-head",
-                    body="Solo-maintainer override accepted. No blockers remain for old-head.",
+                    body=(
+                        "Reviewed head SHA `old-head`.\n\n"
+                        "No blockers remain for old-head.\n\n"
+                        "solo-maintainer override accepted.\n\n"
+                        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+                        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+                    ),
                 ),
             ),
         )

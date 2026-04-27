@@ -42,9 +42,11 @@ class ApprovalCheckSummary:
     latest_approval_sha: str | None
     approval_status: str
     solo_override: SoloMaintainerOverrideSummary
+    approval_source: str | None
     satisfied_by: str | None
     hard_gate_passed: bool
     blocking_reason: str | None
+    blocking_reasons: tuple[str, ...]
     reviews: tuple[ReviewSummary, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -59,9 +61,11 @@ class ApprovalCheckSummary:
             "latest_approval_sha": self.latest_approval_sha,
             "approval_status": self.approval_status,
             "solo_override": self.solo_override.to_dict(),
+            "approval_source": self.approval_source,
             "satisfied_by": self.satisfied_by,
             "hard_gate_passed": self.hard_gate_passed,
             "blocking_reason": self.blocking_reason,
+            "blocking_reasons": list(self.blocking_reasons),
             "reviews": [review.to_dict() for review in self.reviews],
         }
 
@@ -70,18 +74,28 @@ def summarize_approval_check(context: PullRequestContext) -> ApprovalCheckSummar
     review_sha = summarize_review_sha(context)
     solo_override = evaluate_solo_maintainer_override(context)
 
+    approval_source: str | None = None
     satisfied_by: str | None = None
-    hard_gate_passed = False
     blocking_reason: str | None = None
 
-    if review_sha.hard_gate_passed:
+    if context.review_decision == "CHANGES_REQUESTED":
+        blocking_reason = "GitHub review decision is CHANGES_REQUESTED for the current PR head."
+    elif not context.head_ref_oid:
+        blocking_reason = "Current PR head SHA is unknown, so approval cannot be verified."
+    elif review_sha.hard_gate_passed:
+        approval_source = "formal"
         satisfied_by = "formal-approval"
-        hard_gate_passed = True
     elif solo_override.status == "accepted":
+        approval_source = "solo-maintainer-override"
         satisfied_by = "solo-maintainer-override"
-        hard_gate_passed = True
     else:
-        blocking_reason = _blocking_reason(review_sha.approval_status, solo_override.status, review_sha.latest_review_state)
+        blocking_reason = _blocking_reason(
+            review_sha.approval_status,
+            solo_override.status,
+            review_sha.latest_review_state,
+        )
+
+    blocking_reasons = () if blocking_reason is None else (blocking_reason,)
 
     return ApprovalCheckSummary(
         number=review_sha.number,
@@ -94,9 +108,11 @@ def summarize_approval_check(context: PullRequestContext) -> ApprovalCheckSummar
         latest_approval_sha=review_sha.latest_approval_sha,
         approval_status=review_sha.approval_status,
         solo_override=solo_override,
+        approval_source=approval_source,
         satisfied_by=satisfied_by,
-        hard_gate_passed=hard_gate_passed,
+        hard_gate_passed=blocking_reason is None,
         blocking_reason=blocking_reason,
+        blocking_reasons=blocking_reasons,
         reviews=review_sha.reviews,
     )
 
@@ -154,12 +170,15 @@ def _is_accepted_override(review: ReviewSummary, *, head_sha: str) -> bool:
         return False
 
     body = (review.body or "").lower()
-    return SOLO_OVERRIDE_MARKER in body and f"no blockers remain for {head_sha.lower()}" in body
+    return (
+        SOLO_OVERRIDE_MARKER in body
+        and f"no blockers remain for {head_sha.lower()}" in body
+        and "approval to rely on for the current head sha" in body
+        and "no independent github approver is available" in body
+    )
 
 
 def _blocking_reason(approval_status: str, override_status: str, latest_review_state: str | None) -> str:
-    if approval_status == "current":
-        return "formal approval applies to the current PR head SHA"
     if override_status == "invalid":
         return "current-head review comment does not contain an accepted solo-maintainer override"
     if override_status == "stale":

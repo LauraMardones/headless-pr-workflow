@@ -29,7 +29,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("ci-summary", "Summarize CI/check state for the current head SHA.", "P1-high", "E-review-readiness", "report", "core"),
     CommandSpec("target-branch-check", "Verify PR targets the expected base branch.", "P0-blocking", "H-merge", "hard-gate", "core"),
     CommandSpec("merge-owner", "Determine whether this session may merge.", "P1-high", "H-merge", "hard-gate", "core"),
-    CommandSpec("pre-merge", "Compose merge-readiness checks.", "P0-blocking", "H-merge", "hard-gate", "core"),
+    CommandSpec("pre-merge", "Compose merge-readiness checks.", "P0-blocking", "H-merge", "hard-gate", "core", "implemented"),
     CommandSpec("merge-pr", "Merge after fresh pre-merge gates pass.", "P0-blocking", "H-merge", "action", "core"),
     CommandSpec("post-merge-sync", "Sync local state after merge.", "P1-high", "I-post-merge", "action", "core"),
     CommandSpec("branch-cleanup", "Remove stale merged local branches when safe.", "P2-medium", "I-post-merge", "action", "core"),

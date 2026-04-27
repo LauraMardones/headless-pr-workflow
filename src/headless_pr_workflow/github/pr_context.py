@@ -208,6 +208,77 @@ def fetch_pr_context(target: str | None = None, *, repo: str | None = None) -> P
         raise GHCommandError(command, result.returncode, f"GitHub PR payload could not be parsed: {error}", error="gh-parse-failed") from error
 
 
+def fetch_repo_default_branch(repo: str | None = None) -> str:
+    """Fetch the repository default branch from GitHub."""
+
+    command = ["gh", "repo", "view"]
+    if repo:
+        command.append(repo)
+    command.extend(["--json", "defaultBranchRef"])
+
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+    except FileNotFoundError as error:
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+
+    if result.returncode != 0:
+        raise GHCommandError(command, result.returncode, result.stderr)
+
+    try:
+        raw = json.loads(result.stdout)
+        default_branch_ref = raw["defaultBranchRef"]
+        branch_name = default_branch_ref["name"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise GHCommandError(command, result.returncode, f"GitHub repo payload could not be parsed: {error}", error="gh-parse-failed") from error
+
+    if not branch_name:
+        raise GHCommandError(command, result.returncode, "GitHub repo payload did not include a default branch name.", error="gh-parse-failed")
+
+    return branch_name
+
+
+def fetch_required_status_checks(repo: str, branch: str) -> tuple[str, ...]:
+    """Fetch required status check names for a branch when GitHub exposes them.
+
+    Repositories without branch protection support cannot require checks through
+    this GitHub feature, so those cases return an empty set of required checks.
+    """
+
+    command = ["gh", "api", f"repos/{repo}/branches/{branch}/protection"]
+
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+    except FileNotFoundError as error:
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+
+    if result.returncode != 0:
+        payload = _json_or_none(result.stdout)
+        if _protection_unavailable(payload):
+            return ()
+        raise GHCommandError(command, result.returncode, result.stderr)
+
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GHCommandError(command, result.returncode, f"GitHub branch protection payload could not be parsed: {error.msg}", error="gh-parse-failed") from error
+
+    required_status_checks = raw.get("required_status_checks")
+    if not isinstance(required_status_checks, dict):
+        return ()
+
+    checks = required_status_checks.get("checks")
+    if isinstance(checks, list):
+        names = [check.get("context") for check in checks if isinstance(check, dict) and isinstance(check.get("context"), str)]
+        return tuple(names)
+
+    contexts = required_status_checks.get("contexts")
+    if isinstance(contexts, list):
+        names = [context for context in contexts if isinstance(context, str)]
+        return tuple(names)
+
+    return ()
+
+
 def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
     """Normalize the subset of `gh pr view --json` needed by core commands."""
 
@@ -261,6 +332,26 @@ def _status_nodes(status_check_rollup: Any) -> tuple[dict[str, Any], ...]:
         return tuple(node for node in contexts["nodes"] if isinstance(node, dict))
 
     return ()
+
+
+def _json_or_none(payload: str) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _protection_unavailable(payload: dict[str, Any] | None) -> bool:
+    if not payload:
+        return False
+    status = str(payload.get("status") or "")
+    message = str(payload.get("message") or "").lower()
+    if status == "404":
+        return True
+    if status == "403" and "upgrade to github pro" in message:
+        return True
+    return False
 
 
 def _gh_env() -> dict[str, str]:

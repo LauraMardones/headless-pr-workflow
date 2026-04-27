@@ -1,6 +1,6 @@
 from headless_pr_workflow import cli
 from headless_pr_workflow.github import GHCommandError
-from headless_pr_workflow.github.pr_context import PullRequestContext, ReviewSummary
+from headless_pr_workflow.github.pr_context import CheckSummary, PullRequestContext, ReviewSummary
 
 
 def _context() -> PullRequestContext:
@@ -62,6 +62,13 @@ def _approved_context() -> PullRequestContext:
 
 def _override_context() -> PullRequestContext:
     context = _context()
+    override_body = (
+        f"Reviewed head SHA `{context.head_ref_oid}`.\n\n"
+        f"No blockers remain for {context.head_ref_oid}.\n\n"
+        "solo-maintainer override accepted.\n\n"
+        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
+    )
     return PullRequestContext(
         number=context.number,
         title=context.title,
@@ -88,12 +95,12 @@ def _override_context() -> PullRequestContext:
                 state="COMMENTED",
                 submitted_at="2026-04-21T10:00:00Z",
                 commit_oid=context.head_ref_oid,
-                body=f"Solo-maintainer override accepted. No blockers remain for {context.head_ref_oid}.",
+                body=override_body,
             ),
         ),
         review_requests=context.review_requests,
         status_checks=context.status_checks,
-        raw=context.raw,
+        raw={"reviews": [{"body": override_body, "commit": {"oid": context.head_ref_oid}}]},
     )
 
 
@@ -155,6 +162,93 @@ def _stale_approved_context() -> PullRequestContext:
     )
 
 
+def _ready_context() -> PullRequestContext:
+    context = _approved_context()
+    return PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state=context.state,
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=context.is_draft,
+        merge_state_status=context.merge_state_status,
+        mergeable=context.mergeable,
+        review_decision=context.review_decision,
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=context.latest_reviews,
+        review_requests=context.review_requests,
+        status_checks=(
+            CheckSummary(
+                name="unit",
+                workflow=None,
+                status="COMPLETED",
+                conclusion="SUCCESS",
+                state=None,
+                bucket="success",
+                url="https://checks/unit",
+            ),
+        ),
+        raw=context.raw,
+    )
+
+
+def _blocked_pre_merge_context() -> PullRequestContext:
+    context = _stale_approved_context()
+    return PullRequestContext(
+        number=context.number,
+        title=context.title,
+        state="OPEN",
+        url=context.url,
+        base_ref_name=context.base_ref_name,
+        base_ref_oid=context.base_ref_oid,
+        head_ref_name=context.head_ref_name,
+        head_ref_oid=context.head_ref_oid,
+        head_repository=context.head_repository,
+        head_repository_owner=context.head_repository_owner,
+        is_cross_repository=context.is_cross_repository,
+        is_draft=True,
+        merge_state_status="DIRTY",
+        mergeable="CONFLICTING",
+        review_decision=context.review_decision,
+        changed_files=context.changed_files,
+        additions=context.additions,
+        deletions=context.deletions,
+        labels=context.labels,
+        latest_reviews=context.latest_reviews,
+        review_requests=context.review_requests,
+        status_checks=(
+            CheckSummary(
+                name="unit",
+                workflow=None,
+                status="COMPLETED",
+                conclusion="FAILURE",
+                state=None,
+                bucket="failure",
+                url="https://checks/unit",
+            ),
+            CheckSummary(
+                name="lint",
+                workflow=None,
+                status=None,
+                conclusion=None,
+                state="PENDING",
+                bucket="pending",
+                url="https://checks/lint",
+            ),
+        ),
+        raw=context.raw,
+    )
+
+
 def test_pr_context_json_output(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _context())
 
@@ -186,8 +280,9 @@ def test_catalog_marks_pr_context_implemented(capsys):
     assert exit_code == 0
     output = capsys.readouterr().out
     assert "pr-context\tP1-high\tC-session\treport\tcore\timplemented" in output
-    assert "review-sha\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
     assert "approval-check\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
+    assert "review-sha\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
+    assert "pre-merge\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
 
 
 def test_review_sha_json_output(monkeypatch, capsys):
@@ -247,6 +342,7 @@ def test_approval_check_json_output_passes_for_formal_approval(monkeypatch, caps
     assert exit_code == 0
     output = capsys.readouterr().out
     assert '"approval_status": "current"' in output
+    assert '"approval_source": "formal"' in output
     assert '"satisfied_by": "formal-approval"' in output
     assert '"hard_gate_passed": true' in output
 
@@ -260,6 +356,7 @@ def test_approval_check_json_output_passes_for_solo_override(monkeypatch, capsys
     output = capsys.readouterr().out
     assert '"approval_status": "missing"' in output
     assert '"status": "accepted"' in output
+    assert '"approval_source": "solo-maintainer-override"' in output
     assert '"satisfied_by": "solo-maintainer-override"' in output
     assert '"hard_gate_passed": true' in output
 
@@ -286,3 +383,47 @@ def test_approval_check_json_output_fails_for_stale_approval(monkeypatch, capsys
     assert '"approval_status": "stale"' in output
     assert '"hard_gate_passed": false' in output
     assert '"blocking_reason": "formal approval is stale for the current PR head SHA"' in output
+
+
+def test_pre_merge_json_output_ready(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _ready_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
+
+    exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"hard_gate_passed": true' in output
+    assert '"code": "required-checks-passing"' in output
+    assert '"blocking_reasons": []' in output
+
+
+def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _blocked_pre_merge_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit", "lint"))
+
+    exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"hard_gate_passed": false' in output
+    assert '"PR is draft."' in output
+    assert '"formal approval is stale for the current PR head SHA"' in output
+    assert '"Status check unit is failing (status=COMPLETED, conclusion=FAILURE)."' in output
+    assert '"Status check lint is pending (state=PENDING)."' in output
+    assert '"PR mergeable state is CONFLICTING."' in output
+    assert '"PR merge state status is DIRTY."' in output
+
+
+def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: _approved_context())
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
+
+    exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"GitHub reported no status checks for the current head SHA."' in output

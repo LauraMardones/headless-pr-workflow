@@ -31,6 +31,11 @@ class ReviewShaSummary:
 def summarize_review_sha(context: PullRequestContext) -> ReviewShaSummary:
     latest_review = _latest_review_with_sha(context)
     latest_approval_sha = context.latest_approval_sha
+    hard_gate_passed = (
+        bool(context.head_ref_oid)
+        and latest_approval_sha == context.head_ref_oid
+        and context.review_decision != "CHANGES_REQUESTED"
+    )
 
     return ReviewShaSummary(
         number=context.number,
@@ -42,7 +47,7 @@ def summarize_review_sha(context: PullRequestContext) -> ReviewShaSummary:
         latest_review_author=latest_review.author if latest_review else None,
         latest_approval_sha=latest_approval_sha,
         approval_status=_approval_status(context.head_ref_oid, latest_approval_sha),
-        hard_gate_passed=latest_approval_sha == context.head_ref_oid,
+        hard_gate_passed=hard_gate_passed,
         reviews=context.latest_reviews,
     )
 
@@ -55,6 +60,8 @@ def _latest_review_with_sha(context: PullRequestContext) -> ReviewSummary | None
 
 
 def _approval_status(head_sha: str, approval_sha: str | None) -> str:
+    if not head_sha:
+        return "unknown-head"
     if not approval_sha:
         return "missing"
     if approval_sha == head_sha:

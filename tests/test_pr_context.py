@@ -216,3 +216,29 @@ def test_fetch_pr_context_reports_parse_failures(monkeypatch):
         assert error.returncode == 0
     else:
         raise AssertionError("expected GHCommandError")
+
+
+def test_fetch_required_status_checks_returns_context_names(monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = '{"required_status_checks": {"contexts": ["unit", "lint"]}}'
+        stderr = ""
+
+    monkeypatch.setattr(pr_context.subprocess, "run", lambda command, **kwargs: Result())
+
+    required = pr_context.fetch_required_status_checks("owner/repo", "main")
+
+    assert required == ("unit", "lint")
+
+
+def test_fetch_required_status_checks_treats_unavailable_protection_as_no_checks(monkeypatch):
+    class Result:
+        returncode = 1
+        stdout = '{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}'
+        stderr = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+
+    monkeypatch.setattr(pr_context.subprocess, "run", lambda command, **kwargs: Result())
+
+    required = pr_context.fetch_required_status_checks("owner/repo", "main")
+
+    assert required == ()

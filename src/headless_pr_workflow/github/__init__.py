@@ -6,6 +6,8 @@ from .pr_context import (
     CheckSummary,
     PullRequestContext,
     ReviewSummary,
+    fetch_required_status_checks,
+    fetch_repo_default_branch,
     fetch_pr_context,
     parse_pr_context,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "PR_CONTEXT_FIELDS",
     "PullRequestContext",
     "ReviewSummary",
+    "fetch_required_status_checks",
+    "fetch_repo_default_branch",
     "fetch_pr_context",
     "parse_pr_context",
 ]

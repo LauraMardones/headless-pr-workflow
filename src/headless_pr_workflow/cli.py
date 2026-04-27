@@ -9,7 +9,8 @@ from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
-from .github import GHCommandError, fetch_pr_context
+from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch, fetch_required_status_checks
+from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 
 
@@ -141,14 +142,63 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
     print(f"PR #{summary.number}: {summary.title}")
     print(f"url: {summary.url}")
     print(f"head sha: {summary.head_ref_oid}")
+    print(f"latest review sha: {summary.latest_review_sha or 'none'}")
+    print(f"latest review state: {summary.latest_review_state or 'none'}")
+    print(f"latest review author: {summary.latest_review_author or 'none'}")
     print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
     print(f"formal approval status: {summary.approval_status}")
     print(f"solo-maintainer override: {summary.solo_override.status}")
     print(f"override review sha: {summary.solo_override.review_commit_oid or 'none'}")
+    print(f"approval source: {summary.approval_source or 'none'}")
     print(f"satisfied by: {summary.satisfied_by or 'none'}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
     print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
-    if summary.blocking_reason:
-        print(f"blocking reason: {summary.blocking_reason}")
+    return 0 if summary.hard_gate_passed else 1
+
+
+def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+        expected_base_ref_name = fetch_repo_default_branch(repo=repo)
+        required_check_names = fetch_required_status_checks(repo or context.head_repository or "", expected_base_ref_name)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_pre_merge(
+        context,
+        expected_base_ref_name=expected_base_ref_name,
+        required_check_names=required_check_names,
+    )
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"state: {summary.state}")
+    print(f"draft: {str(summary.is_draft).lower()}")
+    print(f"expected base: {summary.expected_base_ref_name or 'unknown'}")
+    print(f"base: {summary.base_ref_name or 'unknown'} ({summary.base_ref_oid or 'unknown'})")
+    print(f"head: {summary.head_ref_name or 'unknown'} ({summary.head_ref_oid or 'unknown'})")
+    print(f"mergeable: {summary.mergeable or 'unknown'}")
+    print(f"merge state status: {summary.merge_state_status or 'unknown'}")
+    print(f"approval status: {summary.approval.approval_status}")
+    print(f"approval source: {summary.approval.approval_source or 'none'}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
+    print("checks:")
+    for check in summary.checks:
+        status = "pass" if check.ok else "fail"
+        print(f"- [{status}] {check.code}: {check.message}")
+        for detail in check.details:
+            print(f"  {detail}")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
     return 0 if summary.hard_gate_passed else 1
 
 
@@ -195,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "approval-check":
         return _print_approval_check(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "pre-merge":
+        return _print_pre_merge(args.target, repo=args.repo, as_json=args.json)
 
     return _print_scaffold(args.command, args.target, args.json)
 
