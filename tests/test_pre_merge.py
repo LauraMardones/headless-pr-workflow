@@ -1,64 +1,27 @@
-from headless_pr_workflow.github.pr_context import CheckSummary, PullRequestContext, ReviewSummary
 from headless_pr_workflow.pre_merge import summarize_pre_merge
 
-
-def _check(*, name: str, bucket: str, status: str | None = None, conclusion: str | None = None, state: str | None = None) -> CheckSummary:
-    return CheckSummary(
-        name=name,
-        workflow=None,
-        status=status,
-        conclusion=conclusion,
-        state=state,
-        bucket=bucket,
-        url=None,
-    )
-
-
-def _context(
-    *,
-    state: str = "OPEN",
-    is_draft: bool = False,
-    head_sha: str = "head123",
-    base_ref_name: str = "main",
-    base_ref_oid: str | None = "base123",
-    mergeable: str | None = "MERGEABLE",
-    merge_state_status: str | None = "CLEAN",
-    reviews: tuple[ReviewSummary, ...] = (),
-    status_checks: tuple[CheckSummary, ...] = (),
-    raw: dict | None = None,
-) -> PullRequestContext:
-    return PullRequestContext(
-        number=7,
-        title="Pre-merge",
-        state=state,
-        url="https://github.com/owner/repo/pull/7",
-        base_ref_name=base_ref_name,
-        base_ref_oid=base_ref_oid,
-        head_ref_name="feature/pre-merge",
-        head_ref_oid=head_sha,
-        head_repository="owner/repo",
-        head_repository_owner="owner",
-        is_cross_repository=False,
-        is_draft=is_draft,
-        merge_state_status=merge_state_status,
-        mergeable=mergeable,
-        review_decision=None,
-        changed_files=3,
-        additions=20,
-        deletions=4,
-        labels=(),
-        latest_reviews=reviews,
-        review_requests=(),
-        status_checks=status_checks,
-        raw=raw or {},
-    )
+from tests.github_scenarios import (
+    build_check,
+    build_pr_context,
+    scenario_comment_only_review,
+    scenario_current_approval,
+    scenario_dirty_merge_state,
+    scenario_draft_pr,
+    scenario_empty_status_rollup,
+    scenario_failing_checks,
+    scenario_mergeable_unknown,
+    scenario_pending_checks,
+    scenario_solo_override,
+    scenario_stale_approval,
+    with_context,
+)
 
 
 def test_pre_merge_passes_when_all_core_gates_pass():
     summary = summarize_pre_merge(
-        _context(
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-            status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+        scenario_current_approval(
+            head_sha="head123",
+            status_checks=(build_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
         ),
         expected_base_ref_name="main",
         required_check_names=("unit",),
@@ -71,9 +34,9 @@ def test_pre_merge_passes_when_all_core_gates_pass():
 
 def test_pre_merge_blocks_draft_pr():
     summary = summarize_pre_merge(
-        _context(
-            is_draft=True,
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
+        with_context(
+            scenario_draft_pr(head_ref_oid="head123"),
+            latest_reviews=(scenario_current_approval(head_sha="head123").latest_reviews[0],),
         ),
         expected_base_ref_name="main",
         required_check_names=(),
@@ -85,10 +48,7 @@ def test_pre_merge_blocks_draft_pr():
 
 def test_pre_merge_blocks_stale_approval():
     summary = summarize_pre_merge(
-        _context(
-            head_sha="new-head",
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="old-head"),),
-        ),
+        scenario_stale_approval(head_sha="new-head", approval_sha="old-head"),
         expected_base_ref_name="main",
         required_check_names=(),
     )
@@ -99,11 +59,11 @@ def test_pre_merge_blocks_stale_approval():
 
 def test_pre_merge_blocks_failing_and_pending_checks():
     summary = summarize_pre_merge(
-        _context(
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
+        with_context(
+            scenario_failing_checks(head_sha="head123", check_name="unit"),
             status_checks=(
-                _check(name="unit", bucket="failure", status="COMPLETED", conclusion="FAILURE"),
-                _check(name="lint", bucket="pending", state="PENDING"),
+                build_check(name="unit", bucket="failure", status="COMPLETED", conclusion="FAILURE"),
+                build_check(name="lint", bucket="pending", state="PENDING"),
             ),
         ),
         expected_base_ref_name="main",
@@ -115,24 +75,30 @@ def test_pre_merge_blocks_failing_and_pending_checks():
     assert summary.hard_gate_passed is False
 
 
-def test_pre_merge_blocks_non_mergeable_pr():
+def test_pre_merge_blocks_mergeable_unknown():
     summary = summarize_pre_merge(
-        _context(
-            mergeable="CONFLICTING",
-            merge_state_status="DIRTY",
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-        ),
+        scenario_mergeable_unknown(head_sha="head123"),
         expected_base_ref_name="main",
         required_check_names=(),
     )
 
-    assert "PR mergeable state is CONFLICTING." in summary.blocking_reasons
+    assert "PR mergeable state is UNKNOWN." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_blocks_dirty_merge_state():
+    summary = summarize_pre_merge(
+        scenario_dirty_merge_state(head_sha="head123"),
+        expected_base_ref_name="main",
+        required_check_names=(),
+    )
+
     assert "PR merge state status is DIRTY." in summary.blocking_reasons
     assert summary.hard_gate_passed is False
 
 
 def test_pre_merge_blocks_missing_head_sha():
-    summary = summarize_pre_merge(_context(head_sha="", reviews=()), expected_base_ref_name="main", required_check_names=())
+    summary = summarize_pre_merge(build_pr_context(head_ref_oid=""), expected_base_ref_name="main", required_check_names=())
 
     assert "Current PR head SHA is unknown." in summary.blocking_reasons
     assert "Current PR head SHA is unknown, so approval cannot be verified." in summary.blocking_reasons
@@ -141,10 +107,10 @@ def test_pre_merge_blocks_missing_head_sha():
 
 def test_pre_merge_blocks_unexpected_target_branch():
     summary = summarize_pre_merge(
-        _context(
+        scenario_current_approval(
+            head_sha="head123",
             base_ref_name="release",
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-            status_checks=(_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+            status_checks=(build_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
         ),
         expected_base_ref_name="main",
         required_check_names=("unit",),
@@ -156,9 +122,7 @@ def test_pre_merge_blocks_unexpected_target_branch():
 
 def test_pre_merge_blocks_when_required_checks_are_not_reported():
     summary = summarize_pre_merge(
-        _context(
-            reviews=(ReviewSummary(author="reviewer", state="APPROVED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-        ),
+        scenario_empty_status_rollup(head_sha="head123"),
         expected_base_ref_name="main",
         required_check_names=("unit",),
     )
@@ -169,23 +133,7 @@ def test_pre_merge_blocks_when_required_checks_are_not_reported():
 
 def test_pre_merge_allows_absent_checks_when_none_are_required():
     summary = summarize_pre_merge(
-        _context(
-            reviews=(ReviewSummary(author="reviewer", state="COMMENTED", submitted_at="2026-04-21T10:00:00Z", commit_oid="head123"),),
-            raw={
-                "reviews": [
-                    {
-                        "body": (
-                            "Reviewed head SHA `head123`.\n\n"
-                            "No blockers remain for head123.\n\n"
-                            "solo-maintainer override accepted.\n\n"
-                            "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
-                            "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
-                        ),
-                        "commit": {"oid": "head123"},
-                    }
-                ]
-            },
-        ),
+        scenario_solo_override(head_sha="head123"),
         expected_base_ref_name="main",
         required_check_names=(),
     )
