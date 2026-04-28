@@ -27,6 +27,11 @@ Responsibilities:
 - Approve only the specific head SHA reviewed.
 - Re-review if implementation commits change the head SHA after approval.
 
+Solo-maintainer example:
+
+- If no independent GitHub approver exists, record a GitHub review summary for the current head SHA stating that no blockers remain, formal approval is unavailable, and the solo-maintainer override is the approval to rely on for that SHA.
+- Do not treat the override as permission to skip CI, unresolved blocker cleanup, or the Ready for review transition.
+
 ## Merge Owner
 
 The merge owner performs the final merge action for an approved PR head SHA.
@@ -38,6 +43,11 @@ Responsibilities:
 - Run a fresh pre-merge check immediately before merging.
 - Merge only through GitHub or a GitHub-backed command.
 - Perform or trigger post-merge sync and cleanup.
+
+Solo-maintainer example:
+
+- Treat the reviewer summary as a substitute only for formal approval.
+- Still require a fresh GitHub refresh, a matching current head SHA, and passing merge gates before merging.
 
 ## Orchestrator
 
@@ -70,3 +80,23 @@ Responsibilities:
 - Approve product, risk, design, legal, or release decisions when required.
 - Resolve ambiguous policy conflicts.
 - Decide whether an adapter-specific gate is required for a repo.
+
+## Worked Solo-Maintainer Flow
+
+Implementation session responsibilities:
+
+- Produce the candidate changes and push the reviewable head SHA.
+- Request review from a separate session instead of self-approving.
+- If blockers are found, address them by pushing a new head SHA and requesting another review.
+
+Review session responsibilities:
+
+- Refresh GitHub state before reviewing so the exact current head SHA is known.
+- Record blockers on GitHub, or record a no-blockers review summary for that SHA.
+- When formal approval is unavailable, use the solo-maintainer override language required by `MERGE-POLICY.md`.
+
+Merge-owner responsibilities:
+
+- Refresh GitHub again immediately before merge.
+- Confirm the reviewed SHA still matches the current PR head SHA.
+- Run fresh merge gates such as `pre-merge`; the solo-maintainer override does not bypass checks or stale-state protection.
