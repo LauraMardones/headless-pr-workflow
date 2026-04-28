@@ -1,63 +1,106 @@
 # Roadmap
 
-## Phase 1: Normative Documentation
+GitHub should be the operational source of truth for roadmap state, epic status, stories, sequencing, and delivery progress.
 
-Create the core documents that define workflow invariants:
+This document does not own the backlog. It defines only the durable roadmap structure that GitHub planning artifacts should follow.
 
-- Headless PR lifecycle.
-- Role separation.
-- SHA-bound approval.
-- Merge policy.
-- Takeover rules.
-- Worktree model.
-- Adapter boundaries.
+## Source of Truth
 
-## Phase 2: Normalized Automation Map
+Track the following in GitHub, not in repository markdown:
 
-Convert the inherited script catalog into generic command contracts:
+- epics
+- stories
+- status
+- delivery order
+- target milestone
+- blockers
+- roadmap progress
 
-- Use stable extensionless command names.
-- Classify each command by phase, priority, type, layer, and status.
-- Move repo-specific rules into adapter categories.
-- Keep assistant behavior optional.
+Repository markdown should define workflow policy, command contracts, and adapter boundaries, but should not become a second planning system.
 
-## Phase 3: MVP Core Scripts
+## Planning Model
 
-Implement the first deterministic Python CLI commands:
+Use GitHub planning artifacts with this structure:
 
-- `pr-context`
-- `review-sha`
-- `approval-check`
-- `re-review-needed`
-- `ci-summary`
-- `unresolved-review-threads`
-- `pre-merge`
+- one GitHub issue per epic
+- one GitHub issue per story
+- labels for type, priority, area, and status
+- milestones for delivery increments
+- issue links or task lists to connect stories to epics
+- optional GitHub Project views for board and timeline reporting
+
+## Milestone Structure
+
+### Milestone 0: Foundation Complete
+
+Goal: define the rules before scaling automation.
+
+Examples of work that belongs here:
+
+- normative workflow documentation
+- command catalog normalization
+- initial implemented core commands
+- deterministic tests for implemented commands
+
+### Milestone 1: Session and Review Safety
+
+Goal: make session start, takeover, review state, and blocker detection reliable from GitHub state.
+
+Examples of work that belongs here:
+
+- `worktree-status`
 - `pr-takeover`
+- `re-review-needed`
+- `unresolved-review-threads`
+- `ci-summary`
+- shared GitHub scenario fixtures
+
+### Milestone 2: Orchestration and Merge Decisioning
+
+Goal: turn workflow facts into explicit session guidance and guarded merge decisioning.
+
+Examples of work that belongs here:
+
+- `next-action`
 - `workflow-status`
-- `merge-pr`
+- `review-delta`
+- `target-branch-check`
+- `merge-owner`
+- `merge-pr` dry-run
 
-Use mocked GitHub JSON fixtures for tests before relying deeply on live `gh` behavior.
+### Milestone 3: Merge Execution and Post-Merge Hygiene
 
-## Phase 4: Assistant Adapters
+Goal: safely execute the merge path and leave local state clean.
 
-Add non-normative examples for:
+Examples of work that belongs here:
 
-- Claude.
-- Codex.
-- Gemini.
-- Copilot.
-- Future assistants.
+- `merge-pr` execution
+- `post-merge-sync`
+- `branch-cleanup`
+- `blocking-comments`
 
-Each adapter should provide prompts and session recipes, not workflow authority.
+### Milestone 4: Adoption Layer
 
-## Phase 5: Example Repo Integrations
+Goal: make the workflow easy to adopt across tools and repositories without changing core policy.
 
-Add example repo adapters for:
+Examples of work that belongs here:
 
-- Protected file rules.
-- Mandatory docs.
-- Test command configuration.
-- Required reviewers.
-- Release gates.
+- assistant adapter contract and examples
+- repo adapter examples
+- usage-flow documentation
+- top-level documentation alignment
 
-Examples must be clearly labeled as optional patterns.
+## Sequencing Rules
+
+- Implement factual commands before advisory/orchestration commands.
+- Implement dry-run modes before live mutation commands.
+- Prefer mocked GitHub fixtures over deep reliance on live `gh` behavior.
+- Keep repo-specific and assistant-specific logic out of core commands.
+
+## Out of Scope for MVP
+
+- cost and telemetry reporting
+- session registry features
+- aggressive cleanup automation
+- repo-specific gates encoded in core
+- assistant-specific workflow authority
