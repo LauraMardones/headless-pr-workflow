@@ -5,6 +5,7 @@ from tests.github_scenarios import (
     scenario_changes_requested,
     scenario_comment_only_review,
     scenario_current_approval,
+    scenario_solo_override,
     scenario_stale_approval,
 )
 
@@ -52,3 +53,11 @@ def test_review_sha_blocks_current_approval_when_changes_requested():
 
     assert summary.approval_status == "current"
     assert summary.hard_gate_passed is False
+
+
+def test_review_sha_accepts_current_head_solo_override():
+    summary = summarize_review_sha(scenario_solo_override(head_sha="head"))
+
+    assert summary.approval_status == "missing"
+    assert summary.latest_review_sha == "head"
+    assert summary.hard_gate_passed is True
