@@ -84,6 +84,17 @@ def test_review_sha_json_output_fails_for_stale_approval(monkeypatch, capsys):
     assert '"hard_gate_passed": false' in output
 
 
+def test_review_sha_json_output_passes_for_solo_override(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+
+    exit_code = cli.main(["review-sha", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"approval_status": "missing"' in output
+    assert '"hard_gate_passed": true' in output
+
+
 def test_review_sha_json_error_output(monkeypatch, capsys):
     def fail(target, repo=None):
         raise GHCommandError(["gh", "pr", "view"], 1, "not found")
