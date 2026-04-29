@@ -241,3 +241,79 @@ def test_approval_check_accepts_solo_override_from_reviews_surface():
     assert summary.solo_override.status == "accepted"
     assert summary.approval_source == "solo-maintainer-override"
     assert summary.hard_gate_passed is True
+<<<<<<< issue-27-review-discovery
+=======
+
+
+def test_approval_check_accepts_complementary_current_head_override_across_review_surfaces():
+    summary = summarize_approval_check(
+        parse_pr_context(
+            {
+                "baseRefName": "main",
+                "headRefName": "feature",
+                "headRefOid": "head",
+                "latestReviews": [
+                    {
+                        "author": {"login": "maintainer"},
+                        "state": "COMMENTED",
+                        "commit": {"oid": "head"},
+                        "body": "",
+                    }
+                ],
+                "number": 30,
+                "reviews": [
+                    {
+                        "author": {"login": "maintainer"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-04-21T10:00:00Z",
+                        "commit": {"oid": ""},
+                        "body": solo_override_body(head_sha="head"),
+                    }
+                ],
+                "state": "OPEN",
+                "title": "Complementary override surfaces",
+                "url": "https://github.com/owner/repo/pull/30",
+            }
+        )
+    )
+
+    assert summary.solo_override.status == "accepted"
+    assert summary.approval_source == "solo-maintainer-override"
+    assert summary.hard_gate_passed is True
+
+
+def test_approval_check_treats_untimestamped_revocation_as_newer_than_older_override():
+    summary = summarize_approval_check(
+        parse_pr_context(
+            {
+                "baseRefName": "main",
+                "headRefName": "feature",
+                "headRefOid": "head",
+                "number": 31,
+                "reviews": [
+                    {
+                        "author": {"login": "maintainer"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-04-21T10:00:00Z",
+                        "commit": {"oid": "head"},
+                        "body": solo_override_body(head_sha="head"),
+                    },
+                    {
+                        "author": {"login": "maintainer"},
+                        "state": "COMMENTED",
+                        "commit": {"oid": "head"},
+                        "body": "Solo-maintainer override is no longer accepted; blocker found.",
+                    },
+                ],
+                "state": "OPEN",
+                "title": "Untimestamped revocation",
+                "url": "https://github.com/owner/repo/pull/31",
+            }
+        )
+    )
+
+    assert summary.approval_status == "missing"
+    assert summary.solo_override.status == "invalid"
+    assert summary.hard_gate_passed is False
+    assert summary.blocking_reason == "current-head review comment does not contain an accepted solo-maintainer override"
+>>>>>>> local

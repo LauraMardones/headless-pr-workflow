@@ -217,6 +217,46 @@ def test_parse_pr_context_keeps_review_order_by_submission_time_across_surfaces(
     assert [review.commit_oid for review in context.latest_reviews] == ["head-one", "head-two"]
 
 
+<<<<<<< issue-27-review-discovery
+=======
+def test_parse_pr_context_merges_complementary_reviews_when_one_surface_lacks_submitted_at():
+    context = parse_pr_context(
+        {
+            "baseRefName": "main",
+            "headRefName": "feature",
+            "headRefOid": "head",
+            "latestReviews": [
+                {
+                    "author": {"login": "maintainer"},
+                    "state": "COMMENTED",
+                    "commit": {"oid": "head"},
+                    "body": "",
+                }
+            ],
+            "number": 10,
+            "reviews": [
+                {
+                    "author": {"login": "maintainer"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-04-21T10:00:00Z",
+                    "commit": {"oid": ""},
+                    "body": "override body",
+                }
+            ],
+            "state": "OPEN",
+            "title": "Complementary reviews",
+            "url": "https://github.com/owner/repo/pull/10",
+        }
+    )
+
+    assert len(context.latest_reviews) == 1
+    assert context.latest_reviews[0].submitted_at == "2026-04-21T10:00:00Z"
+    assert context.latest_reviews[0].commit_oid == "head"
+    assert context.latest_reviews[0].body == "override body"
+    assert context.latest_reviews[0].source_surfaces == ("latestReviews", "reviews")
+
+
+>>>>>>> local
 def test_fetch_pr_context_passes_per_process_safe_directory(monkeypatch):
     calls = []
 

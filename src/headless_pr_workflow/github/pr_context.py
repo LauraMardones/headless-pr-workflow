@@ -332,11 +332,23 @@ def _normalize_reviews(raw: dict[str, Any]) -> tuple[ReviewSummary, ...]:
                 continue
 
             candidate = ReviewSummary.from_raw(review, source_surface=source_surface)
+<<<<<<< issue-27-review-discovery
             for index, (existing, ordinal) in enumerate(merged_reviews):
                 if not _same_review(existing, candidate):
                     continue
                 merged_reviews[index] = (_merge_reviews(existing, candidate), ordinal)
                 break
+=======
+            matching_indexes = [
+                index
+                for index, (existing, _) in enumerate(merged_reviews)
+                if _same_review(existing, candidate)
+            ]
+            if len(matching_indexes) == 1:
+                index = matching_indexes[0]
+                existing, ordinal = merged_reviews[index]
+                merged_reviews[index] = (_merge_reviews(existing, candidate), ordinal)
+>>>>>>> local
             else:
                 merged_reviews.append((candidate, len(merged_reviews)))
 
@@ -347,9 +359,17 @@ def _normalize_reviews(raw: dict[str, Any]) -> tuple[ReviewSummary, ...]:
 def _same_review(left: ReviewSummary, right: ReviewSummary) -> bool:
     if left.author != right.author or left.state != right.state:
         return False
+<<<<<<< issue-27-review-discovery
     if left.submitted_at and right.submitted_at:
         return left.submitted_at == right.submitted_at
     return left.commit_oid == right.commit_oid and left.body == right.body
+=======
+    if _review_fields_conflict(left, right):
+        return False
+    if _shared_review_field_count(left, right) > 0:
+        return True
+    return _complements_missing_review_fields(left, right)
+>>>>>>> local
 
 
 def _merge_reviews(existing: ReviewSummary, incoming: ReviewSummary) -> ReviewSummary:
@@ -380,7 +400,11 @@ def _merge_reviews(existing: ReviewSummary, incoming: ReviewSummary) -> ReviewSu
 
 
 def _review_sort_key(review: ReviewSummary, ordinal: int) -> tuple[bool, str, int]:
+<<<<<<< issue-27-review-discovery
     return (review.submitted_at is not None, review.submitted_at or "", ordinal)
+=======
+    return (review.submitted_at is None, review.submitted_at or "", ordinal)
+>>>>>>> local
 
 
 def _review_surface_priority(source_surface: str | None) -> int:
@@ -391,6 +415,67 @@ def _review_surface_priority(source_surface: str | None) -> int:
     return 0
 
 
+<<<<<<< issue-27-review-discovery
+=======
+def _review_fields_conflict(left: ReviewSummary, right: ReviewSummary) -> bool:
+    for left_value, right_value in (
+        (left.submitted_at, right.submitted_at),
+        (left.commit_oid, right.commit_oid),
+        (_review_body_key(left.body), _review_body_key(right.body)),
+    ):
+        if left_value and right_value and left_value != right_value:
+            return True
+    return False
+
+
+def _shared_review_field_count(left: ReviewSummary, right: ReviewSummary) -> int:
+    shared_fields = 0
+    for left_value, right_value in (
+        (left.submitted_at, right.submitted_at),
+        (left.commit_oid, right.commit_oid),
+        (_review_body_key(left.body), _review_body_key(right.body)),
+    ):
+        if left_value and right_value and left_value == right_value:
+            shared_fields += 1
+    return shared_fields
+
+
+def _complements_missing_review_fields(left: ReviewSummary, right: ReviewSummary) -> bool:
+    if bool(left.submitted_at) == bool(right.submitted_at):
+        return False
+    return _review_field_count(left) > 0 and _review_field_count(right) > 0 and _review_union_field_count(left, right) >= 2
+
+
+def _review_field_count(review: ReviewSummary) -> int:
+    return sum(
+        1
+        for value in (
+            review.submitted_at,
+            review.commit_oid,
+            _review_body_key(review.body),
+        )
+        if value
+    )
+
+
+def _review_union_field_count(left: ReviewSummary, right: ReviewSummary) -> int:
+    return sum(
+        1
+        for left_value, right_value in (
+            (left.submitted_at, right.submitted_at),
+            (left.commit_oid, right.commit_oid),
+            (_review_body_key(left.body), _review_body_key(right.body)),
+        )
+        if left_value or right_value
+    )
+
+
+def _review_body_key(body: str | None) -> str | None:
+    normalized = (body or "").strip()
+    return normalized or None
+
+
+>>>>>>> local
 def _status_nodes(status_check_rollup: Any) -> tuple[dict[str, Any], ...]:
     if not status_check_rollup:
         return ()
