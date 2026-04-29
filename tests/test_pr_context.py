@@ -145,6 +145,78 @@ def test_parse_pr_context_prefers_reviews_for_commit_oid():
     assert context.latest_approval_sha == "approved-sha"
 
 
+def test_parse_pr_context_merges_review_surfaces_and_preserves_source_metadata():
+    context = parse_pr_context(
+        {
+            "baseRefName": "main",
+            "headRefName": "feature",
+            "headRefOid": "approved-sha",
+            "latestReviews": [
+                {
+                    "author": {"login": "reviewer"},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-04-21T11:00:00Z",
+                    "commit": {"oid": ""},
+                    "body": "",
+                }
+            ],
+            "number": 8,
+            "reviews": [
+                {
+                    "author": {"login": "reviewer"},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-04-21T11:00:00Z",
+                    "commit": {"oid": "approved-sha"},
+                    "body": "ship it",
+                }
+            ],
+            "state": "OPEN",
+            "title": "Merge review surfaces",
+            "url": "https://github.com/owner/repo/pull/8",
+        }
+    )
+
+    assert len(context.latest_reviews) == 1
+    assert context.latest_reviews[0].commit_oid == "approved-sha"
+    assert context.latest_reviews[0].body == "ship it"
+    assert context.latest_reviews[0].source_surface == "reviews"
+    assert context.latest_reviews[0].source_surfaces == ("latestReviews", "reviews")
+
+
+def test_parse_pr_context_keeps_review_order_by_submission_time_across_surfaces():
+    context = parse_pr_context(
+        {
+            "baseRefName": "main",
+            "headRefName": "feature",
+            "headRefOid": "head-two",
+            "latestReviews": [
+                {
+                    "author": {"login": "reviewer-a"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-04-21T11:00:00Z",
+                    "commit": {"oid": "head-two"},
+                    "body": "latest surface review",
+                }
+            ],
+            "number": 9,
+            "reviews": [
+                {
+                    "author": {"login": "reviewer-b"},
+                    "state": "APPROVED",
+                    "submittedAt": "2026-04-21T10:00:00Z",
+                    "commit": {"oid": "head-one"},
+                    "body": "older full review",
+                }
+            ],
+            "state": "OPEN",
+            "title": "Chronological review order",
+            "url": "https://github.com/owner/repo/pull/9",
+        }
+    )
+
+    assert [review.commit_oid for review in context.latest_reviews] == ["head-one", "head-two"]
+
+
 def test_fetch_pr_context_passes_per_process_safe_directory(monkeypatch):
     calls = []
 
