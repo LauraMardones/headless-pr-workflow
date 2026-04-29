@@ -241,8 +241,6 @@ def test_approval_check_accepts_solo_override_from_reviews_surface():
     assert summary.solo_override.status == "accepted"
     assert summary.approval_source == "solo-maintainer-override"
     assert summary.hard_gate_passed is True
-<<<<<<< issue-27-review-discovery
-=======
 
 
 def test_approval_check_accepts_complementary_current_head_override_across_review_surfaces():
@@ -316,4 +314,3 @@ def test_approval_check_treats_untimestamped_revocation_as_newer_than_older_over
     assert summary.solo_override.status == "invalid"
     assert summary.hard_gate_passed is False
     assert summary.blocking_reason == "current-head review comment does not contain an accepted solo-maintainer override"
->>>>>>> local

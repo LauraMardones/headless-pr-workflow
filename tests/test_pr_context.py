@@ -216,9 +216,6 @@ def test_parse_pr_context_keeps_review_order_by_submission_time_across_surfaces(
 
     assert [review.commit_oid for review in context.latest_reviews] == ["head-one", "head-two"]
 
-
-<<<<<<< issue-27-review-discovery
-=======
 def test_parse_pr_context_merges_complementary_reviews_when_one_surface_lacks_submitted_at():
     context = parse_pr_context(
         {
@@ -254,9 +251,6 @@ def test_parse_pr_context_merges_complementary_reviews_when_one_surface_lacks_su
     assert context.latest_reviews[0].commit_oid == "head"
     assert context.latest_reviews[0].body == "override body"
     assert context.latest_reviews[0].source_surfaces == ("latestReviews", "reviews")
-
-
->>>>>>> local
 def test_fetch_pr_context_passes_per_process_safe_directory(monkeypatch):
     calls = []
 
