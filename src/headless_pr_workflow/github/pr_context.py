@@ -62,16 +62,21 @@ class ReviewSummary:
     submitted_at: str | None
     commit_oid: str | None
     body: str | None = None
+    source_surface: str | None = None
+    source_surfaces: tuple[str, ...] = ()
 
     @classmethod
-    def from_raw(cls, review: dict[str, Any]) -> "ReviewSummary":
+    def from_raw(cls, review: dict[str, Any], *, source_surface: str | None = None) -> "ReviewSummary":
         author = review.get("author")
+        source_surfaces = () if source_surface is None else (source_surface,)
         return cls(
             author=_login(author),
             state=review.get("state"),
             submitted_at=review.get("submittedAt"),
             commit_oid=_nested_get(review, "commit", "oid"),
             body=review.get("body"),
+            source_surface=source_surface,
+            source_surfaces=source_surfaces,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -282,8 +287,7 @@ def fetch_required_status_checks(repo: str, branch: str) -> tuple[str, ...]:
 def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
     """Normalize the subset of `gh pr view --json` needed by core commands."""
 
-    review_source = raw.get("reviews") or raw.get("latestReviews") or ()
-    latest_reviews = tuple(ReviewSummary.from_raw(review) for review in review_source)
+    latest_reviews = _normalize_reviews(raw)
     status_checks = tuple(CheckSummary.from_raw(check) for check in _status_nodes(raw.get("statusCheckRollup")))
 
     head_repository_owner = _login(raw.get("headRepositoryOwner"))
@@ -313,6 +317,142 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
         status_checks=status_checks,
         raw=raw,
     )
+
+
+def _normalize_reviews(raw: dict[str, Any]) -> tuple[ReviewSummary, ...]:
+    merged_reviews: list[tuple[ReviewSummary, int]] = []
+
+    for source_surface in ("latestReviews", "reviews"):
+        review_source = raw.get(source_surface)
+        if not isinstance(review_source, list):
+            continue
+
+        for review in review_source:
+            if not isinstance(review, dict):
+                continue
+
+            candidate = ReviewSummary.from_raw(review, source_surface=source_surface)
+            matching_indexes = [
+                index
+                for index, (existing, _) in enumerate(merged_reviews)
+                if _same_review(existing, candidate)
+            ]
+            if len(matching_indexes) == 1:
+                index = matching_indexes[0]
+                existing, ordinal = merged_reviews[index]
+                merged_reviews[index] = (_merge_reviews(existing, candidate), ordinal)
+            else:
+                merged_reviews.append((candidate, len(merged_reviews)))
+
+    ordered_reviews = sorted(merged_reviews, key=lambda item: _review_sort_key(item[0], item[1]))
+    return tuple(review for review, _ in ordered_reviews)
+
+
+def _same_review(left: ReviewSummary, right: ReviewSummary) -> bool:
+    if left.author != right.author or left.state != right.state:
+        return False
+    if _review_fields_conflict(left, right):
+        return False
+    if _shared_review_field_count(left, right) > 0:
+        return True
+    return _complements_missing_review_fields(left, right)
+
+
+def _merge_reviews(existing: ReviewSummary, incoming: ReviewSummary) -> ReviewSummary:
+    existing_priority = _review_surface_priority(existing.source_surface)
+    incoming_priority = _review_surface_priority(incoming.source_surface)
+    if incoming_priority >= existing_priority:
+        preferred = incoming
+        fallback = existing
+    else:
+        preferred = existing
+        fallback = incoming
+
+    source_surfaces = tuple(
+        surface
+        for surface in ("latestReviews", "reviews")
+        if surface in {*existing.source_surfaces, *incoming.source_surfaces}
+    )
+
+    return ReviewSummary(
+        author=preferred.author or fallback.author,
+        state=preferred.state or fallback.state,
+        submitted_at=preferred.submitted_at or fallback.submitted_at,
+        commit_oid=preferred.commit_oid or fallback.commit_oid,
+        body=preferred.body if preferred.body not in (None, "") else fallback.body,
+        source_surface=preferred.source_surface or fallback.source_surface,
+        source_surfaces=source_surfaces,
+    )
+
+
+def _review_sort_key(review: ReviewSummary, ordinal: int) -> tuple[bool, str, int]:
+    return (review.submitted_at is None, review.submitted_at or "", ordinal)
+
+
+def _review_surface_priority(source_surface: str | None) -> int:
+    if source_surface == "reviews":
+        return 2
+    if source_surface == "latestReviews":
+        return 1
+    return 0
+
+
+def _review_fields_conflict(left: ReviewSummary, right: ReviewSummary) -> bool:
+    for left_value, right_value in (
+        (left.submitted_at, right.submitted_at),
+        (left.commit_oid, right.commit_oid),
+        (_review_body_key(left.body), _review_body_key(right.body)),
+    ):
+        if left_value and right_value and left_value != right_value:
+            return True
+    return False
+
+
+def _shared_review_field_count(left: ReviewSummary, right: ReviewSummary) -> int:
+    shared_fields = 0
+    for left_value, right_value in (
+        (left.submitted_at, right.submitted_at),
+        (left.commit_oid, right.commit_oid),
+        (_review_body_key(left.body), _review_body_key(right.body)),
+    ):
+        if left_value and right_value and left_value == right_value:
+            shared_fields += 1
+    return shared_fields
+
+
+def _complements_missing_review_fields(left: ReviewSummary, right: ReviewSummary) -> bool:
+    if bool(left.submitted_at) == bool(right.submitted_at):
+        return False
+    return _review_field_count(left) > 0 and _review_field_count(right) > 0 and _review_union_field_count(left, right) >= 2
+
+
+def _review_field_count(review: ReviewSummary) -> int:
+    return sum(
+        1
+        for value in (
+            review.submitted_at,
+            review.commit_oid,
+            _review_body_key(review.body),
+        )
+        if value
+    )
+
+
+def _review_union_field_count(left: ReviewSummary, right: ReviewSummary) -> int:
+    return sum(
+        1
+        for left_value, right_value in (
+            (left.submitted_at, right.submitted_at),
+            (left.commit_oid, right.commit_oid),
+            (_review_body_key(left.body), _review_body_key(right.body)),
+        )
+        if left_value or right_value
+    )
+
+
+def _review_body_key(body: str | None) -> str | None:
+    normalized = (body or "").strip()
+    return normalized or None
 
 
 def _status_nodes(status_check_rollup: Any) -> tuple[dict[str, Any], ...]:
