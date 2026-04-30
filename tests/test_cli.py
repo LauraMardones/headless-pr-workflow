@@ -1,5 +1,5 @@
 from headless_pr_workflow import cli
-from headless_pr_workflow.github import GHCommandError
+from headless_pr_workflow.github import GHCommandError, RequiredStatusChecks
 
 from tests.github_scenarios import (
     build_check,
@@ -46,6 +46,7 @@ def test_catalog_marks_pr_context_implemented(capsys):
     assert "pr-context\tP1-high\tC-session\treport\tcore\timplemented" in output
     assert "approval-check\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
     assert "review-sha\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
+    assert "ci-summary\tP1-high\tE-review-readiness\treport\tcore\timplemented" in output
     assert "unresolved-review-threads\tP1-high\tF-review\thard-gate\tcore\timplemented" in output
     assert "pre-merge\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
 
@@ -220,3 +221,46 @@ def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypa
     assert exit_code == 1
     output = capsys.readouterr().out
     assert '"GitHub reported no status checks for the current head SHA."' in output
+
+
+def test_ci_summary_json_output_reports_required_check_state(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "fetch_pr_context",
+        lambda target, repo=None: scenario_current_approval(
+            head_sha="head123",
+            status_checks=(build_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "fetch_required_status_check_context",
+        lambda repo, branch: RequiredStatusChecks(names=("unit", "lint"), status="configured"),
+    )
+
+    exit_code = cli.main(["ci-summary", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"required_check_status": "missing"' in output
+    assert '"missing": [' in output
+    assert '"lint"' in output
+    assert '"passing": [' in output
+    assert '"unit"' in output
+
+
+def test_ci_summary_human_output_is_explicit_for_absent_required_checks(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_empty_status_rollup(head_sha="head123"))
+    monkeypatch.setattr(
+        cli,
+        "fetch_required_status_check_context",
+        lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"),
+    )
+
+    exit_code = cli.main(["ci-summary", "123", "--repo", "owner/repo"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "status rollup: empty" in output
+    assert "required checks: not_configured" in output
+    assert "No required status checks are configured for the target branch." in output

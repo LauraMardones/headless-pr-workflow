@@ -9,7 +9,15 @@ from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
-from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch, fetch_required_status_checks, fetch_review_thread_summary
+from .ci_summary import summarize_ci
+from .github import (
+    GHCommandError,
+    fetch_pr_context,
+    fetch_repo_default_branch,
+    fetch_required_status_check_context,
+    fetch_required_status_checks,
+    fetch_review_thread_summary,
+)
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 
@@ -202,6 +210,35 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_ci_summary(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+        required_checks = fetch_required_status_check_context(repo or context.head_repository or "", context.base_ref_name)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_ci(context, required_checks=required_checks)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"base: {summary.base_ref_name or 'unknown'}")
+    print(f"head: {summary.head_ref_name or 'unknown'} ({summary.head_ref_oid or 'unknown'})")
+    print(f"status rollup: {summary.status_rollup}")
+    print(f"required checks: {summary.required_check_status}")
+    for state in ("passing", "failing", "pending", "skipped", "missing", "unknown"):
+        names = summary.check_buckets[state]
+        print(f"{state}: {len(names)}" + (f" ({', '.join(names)})" if names else ""))
+    if summary.messages:
+        print("messages:")
+        for message in summary.messages:
+            print(f"- {message}")
+    return 0
+
+
 def _print_unresolved_review_threads(target: str | None, *, repo: str | None, as_json: bool) -> int:
     try:
         summary = fetch_review_thread_summary(target, repo=repo)
@@ -278,6 +315,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "approval-check":
         return _print_approval_check(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "ci-summary":
+        return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)
 
     if args.command == "pre-merge":
         return _print_pre_merge(args.target, repo=args.repo, as_json=args.json)
