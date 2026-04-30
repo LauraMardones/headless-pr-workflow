@@ -24,7 +24,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("approval-check", "Verify approval applies to current PR head SHA.", "P0-blocking", "F-review", "hard-gate", "core", "implemented"),
     CommandSpec("re-review-needed", "Detect whether new commits require review re-evaluation.", "P1-high", "F-review", "hard-gate", "core"),
     CommandSpec("review-delta", "Show changes since the last reviewed SHA.", "P2-medium", "F-review", "report", "core"),
-    CommandSpec("unresolved-review-threads", "Detect unresolved GitHub review threads.", "P1-high", "F-review", "hard-gate", "core"),
+    CommandSpec("unresolved-review-threads", "Detect unresolved GitHub review threads.", "P1-high", "F-review", "hard-gate", "core", "implemented"),
     CommandSpec("blocking-comments", "Detect blocking review comments or labels.", "P1-high", "F-review", "hard-gate", "core"),
     CommandSpec("ci-summary", "Summarize CI/check state for the current head SHA.", "P1-high", "E-review-readiness", "report", "core"),
     CommandSpec("target-branch-check", "Verify PR targets the expected base branch.", "P0-blocking", "H-merge", "hard-gate", "core"),
