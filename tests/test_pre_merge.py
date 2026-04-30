@@ -1,4 +1,5 @@
 from headless_pr_workflow.pre_merge import summarize_pre_merge
+from headless_pr_workflow.github.review_threads import summarize_review_threads
 
 from tests.github_scenarios import (
     build_check,
@@ -17,6 +18,25 @@ from tests.github_scenarios import (
 )
 
 
+def review_thread(
+    *,
+    thread_id: str = "thread-1",
+    path: str = "src/app.py",
+    line: int = 10,
+    is_resolved: bool = False,
+    is_outdated: bool = False,
+) -> dict:
+    return {
+        "id": thread_id,
+        "path": path,
+        "line": line,
+        "startLine": None,
+        "isResolved": is_resolved,
+        "isOutdated": is_outdated,
+        "comments": {"totalCount": 0, "nodes": []},
+    }
+
+
 def test_pre_merge_passes_when_all_core_gates_pass():
     summary = summarize_pre_merge(
         scenario_current_approval(
@@ -30,6 +50,14 @@ def test_pre_merge_passes_when_all_core_gates_pass():
     assert summary.blocking_reasons == ()
     assert summary.hard_gate_passed is True
     assert all(check.ok for check in summary.checks)
+    output = summary.to_dict()
+    assert output["current_head_sha"] == "head123"
+    assert output["pr"]["number"] == 123
+    assert output["approval_review_source"]["approval_source"] == "formal"
+    assert output["target_branch_comparison"]["result"] == "pass"
+    assert output["required_check_summary"]["required_check_status"] == "satisfied"
+    assert output["mergeability_facts"]["mergeable"] == "MERGEABLE"
+    assert output["unresolved_thread_summary"]["thread_counts"]["unresolved_blocking"] == 0
 
 
 def test_pre_merge_blocks_draft_pr():
@@ -128,6 +156,23 @@ def test_pre_merge_blocks_when_required_checks_are_not_reported():
     )
 
     assert "GitHub reported no status checks for the current head SHA." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_blocks_unresolved_review_threads():
+    context = scenario_current_approval(head_sha="head123")
+    review_threads = summarize_review_threads(context, (review_thread(thread_id="active-thread"),))
+
+    summary = summarize_pre_merge(
+        context,
+        expected_base_ref_name="main",
+        required_check_names=(),
+        review_threads=review_threads,
+    )
+
+    assert "Unresolved review thread src/app.py:10 (active-thread): Thread is unresolved and still applies to the current PR head." in summary.blocking_reasons
+    assert next(check for check in summary.checks if check.code == "unresolved-review-threads").ok is False
+    assert summary.to_dict()["unresolved_thread_summary"]["thread_counts"]["unresolved_blocking"] == 1
     assert summary.hard_gate_passed is False
 
 

@@ -15,8 +15,9 @@ from .github import (
     fetch_pr_context,
     fetch_repo_default_branch,
     fetch_required_status_check_context,
-    fetch_required_status_checks,
     fetch_review_thread_summary,
+    fetch_review_threads_for_context,
+    summarize_review_threads,
 )
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
@@ -174,14 +175,16 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     try:
         context = fetch_pr_context(target, repo=repo)
         expected_base_ref_name = fetch_repo_default_branch(repo=repo)
-        required_check_names = fetch_required_status_checks(repo or context.head_repository or "", expected_base_ref_name)
+        required_checks = fetch_required_status_check_context(repo or context.head_repository or "", expected_base_ref_name)
+        review_threads = summarize_review_threads(context, fetch_review_threads_for_context(context, repo=repo))
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
 
     summary = summarize_pre_merge(
         context,
         expected_base_ref_name=expected_base_ref_name,
-        required_check_names=required_check_names,
+        required_checks=required_checks,
+        review_threads=review_threads,
     )
 
     if as_json:
@@ -199,6 +202,15 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     print(f"merge state status: {summary.merge_state_status or 'unknown'}")
     print(f"approval status: {summary.approval.approval_status}")
     print(f"approval source: {summary.approval.approval_source or 'none'}")
+    print(f"status rollup: {summary.ci.status_rollup}")
+    print(f"required checks: {summary.ci.required_check_status}")
+    thread_counts = summary.review_threads.thread_counts
+    print(
+        "review threads: "
+        f"{thread_counts['unresolved_blocking']} active unresolved, "
+        f"{thread_counts['resolved']} resolved, "
+        f"{thread_counts['outdated_or_superseded']} outdated/superseded"
+    )
     if summary.blocking_reasons:
         print("blocking reasons:")
         for reason in summary.blocking_reasons:

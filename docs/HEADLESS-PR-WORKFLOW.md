@@ -92,7 +92,7 @@ The GitHub review summary for the override should make three facts explicit:
 This keeps the flow compatible with deterministic commands:
 
 - `approval-check` may treat the review summary as satisfying the approval gate only when the summary is attached to the current head SHA and contains the required solo-maintainer override language.
-- `pre-merge` must still fail if the PR is draft, if checks are missing or failing, if mergeability is bad, or if the reviewed SHA is no longer current.
+- `pre-merge` must still fail if the PR is draft, if checks are missing or failing, if mergeability is bad, if unresolved review threads remain active, or if the reviewed SHA is no longer current.
 
 ## Deterministic Automation
 
