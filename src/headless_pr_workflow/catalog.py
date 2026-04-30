@@ -27,7 +27,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("unresolved-review-threads", "Detect unresolved GitHub review threads.", "P1-high", "F-review", "hard-gate", "core", "implemented"),
     CommandSpec("blocking-comments", "Detect blocking review comments or labels.", "P1-high", "F-review", "hard-gate", "core"),
     CommandSpec("ci-summary", "Summarize CI/check state for the current head SHA.", "P1-high", "E-review-readiness", "report", "core", "implemented"),
-    CommandSpec("target-branch-check", "Verify PR targets the expected base branch.", "P0-blocking", "H-merge", "hard-gate", "core"),
+    CommandSpec("target-branch-check", "Verify PR targets the expected base branch.", "P0-blocking", "H-merge", "hard-gate", "core", "implemented"),
     CommandSpec("merge-owner", "Determine whether this session may merge.", "P1-high", "H-merge", "hard-gate", "core"),
     CommandSpec("pre-merge", "Compose merge-readiness checks.", "P0-blocking", "H-merge", "hard-gate", "core", "implemented"),
     CommandSpec("merge-pr", "Merge after fresh pre-merge gates pass.", "P0-blocking", "H-merge", "action", "core"),

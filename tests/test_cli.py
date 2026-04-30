@@ -47,6 +47,7 @@ def test_catalog_marks_pr_context_implemented(capsys):
     assert "approval-check\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
     assert "review-sha\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
     assert "ci-summary\tP1-high\tE-review-readiness\treport\tcore\timplemented" in output
+    assert "target-branch-check\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
     assert "unresolved-review-threads\tP1-high\tF-review\thard-gate\tcore\timplemented" in output
     assert "pre-merge\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
 
@@ -221,6 +222,103 @@ def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypa
     assert exit_code == 1
     output = capsys.readouterr().out
     assert '"GitHub reported no status checks for the current head SHA."' in output
+
+
+def test_target_branch_check_json_output_passes_for_matching_default_branch(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name="main"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"number": 123' in output
+    assert '"url": "https://github.com/owner/repo/pull/123"' in output
+    assert '"base_ref_name": "main"' in output
+    assert '"expected_base_ref_name": "main"' in output
+    assert '"result": "pass"' in output
+    assert '"hard_gate_passed": true' in output
+    assert '"blocking_reasons": []' in output
+
+
+def test_target_branch_check_json_output_fails_for_mismatched_branch(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name="release"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"result": "fail"' in output
+    assert '"PR targets base branch release, expected main."' in output
+
+
+def test_target_branch_check_json_output_fails_for_unknown_pr_base_branch(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name=""))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"Target base branch is unknown."' in output
+    assert '"hard_gate_passed": false' in output
+
+
+def test_target_branch_check_json_output_fails_for_unknown_expected_branch(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name="main"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "")
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"expected_base_ref_name": ""' in output
+    assert '"Expected target base branch is unknown."' in output
+
+
+def test_target_branch_check_json_output_uses_explicit_expected_branch(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name="release"))
+
+    def fail(repo=None):
+        raise AssertionError("default branch should not be fetched when --expected-base is provided")
+
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", fail)
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo", "--expected-base", "release", "--json"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"expected_base_ref_name": "release"' in output
+    assert '"result": "pass"' in output
+
+
+def test_target_branch_check_human_output_states_fail_and_compared_branches(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: build_pr_context(base_ref_name="release"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+
+    exit_code = cli.main(["target-branch-check", "123", "--repo", "owner/repo"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "actual base: release" in output
+    assert "expected base: main" in output
+    assert "target branch check: fail" in output
+    assert "hard gate passed: false" in output
+
+
+def test_target_branch_check_json_error_output(monkeypatch, capsys):
+    def fail(target, repo=None):
+        raise GHCommandError(["gh", "pr", "view"], 1, "not found")
+
+    monkeypatch.setattr(cli, "fetch_pr_context", fail)
+
+    exit_code = cli.main(["target-branch-check", "999", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"error": "gh-command-failed"' in output
+    assert '"stderr": "not found"' in output
 
 
 def test_ci_summary_json_output_reports_required_check_state(monkeypatch, capsys):
