@@ -7,6 +7,7 @@ from typing import Any
 
 from .approval_check import ApprovalCheckSummary, summarize_approval_check
 from .github import CheckSummary, PullRequestContext
+from .target_branch import summarize_target_branch, target_branch_message
 
 
 ACCEPTABLE_MERGEABLE = {"MERGEABLE"}
@@ -122,16 +123,16 @@ def summarize_pre_merge(
     if not approval_ok:
         blocking_reasons.extend(approval.blocking_reasons)
 
-    target_branch_blockers = _target_branch_blockers(context, expected_base_ref_name=expected_base_ref_name)
+    target_branch = summarize_target_branch(context, expected_base_ref_name=expected_base_ref_name)
     checks.append(
         PreMergeCheck(
             code="target-branch-expected",
-            ok=not target_branch_blockers,
-            message=_target_branch_message(context, expected_base_ref_name=expected_base_ref_name, blockers=target_branch_blockers),
-            details=tuple(target_branch_blockers),
+            ok=target_branch.hard_gate_passed,
+            message=target_branch_message(target_branch),
+            details=target_branch.blocking_reasons,
         )
     )
-    blocking_reasons.extend(target_branch_blockers)
+    blocking_reasons.extend(target_branch.blocking_reasons)
 
     check_blockers = _status_check_blockers(context.status_checks, required_check_names=required_check_names)
     checks.append(
@@ -237,33 +238,6 @@ def _mergeability_message(context: PullRequestContext, blockers: list[str]) -> s
     mergeable = context.mergeable or "unknown"
     merge_state_status = context.merge_state_status or "unknown"
     return f"Mergeability is acceptable (mergeable={mergeable}, merge_state_status={merge_state_status})."
-
-
-def _target_branch_message(
-    context: PullRequestContext,
-    *,
-    expected_base_ref_name: str | None,
-    blockers: list[str],
-) -> str:
-    if blockers:
-        return "Target base branch is not acceptable."
-    return f"Target base branch matches expected {expected_base_ref_name}."
-
-
-def _target_branch_blockers(
-    context: PullRequestContext,
-    *,
-    expected_base_ref_name: str | None,
-) -> list[str]:
-    if not expected_base_ref_name:
-        return ["Expected target base branch is unknown."]
-    if not context.base_ref_name:
-        return ["Target base branch is unknown."]
-    if context.base_ref_name != expected_base_ref_name:
-        return [
-            f"PR targets base branch {context.base_ref_name}, expected {expected_base_ref_name}.",
-        ]
-    return []
 
 
 def _mergeability_blockers(context: PullRequestContext) -> list[str]:

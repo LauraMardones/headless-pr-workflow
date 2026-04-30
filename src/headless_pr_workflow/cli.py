@@ -20,6 +20,7 @@ from .github import (
 )
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
+from .target_branch import summarize_target_branch
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--json", action="store_true", help="Emit scaffold metadata as JSON.")
         if command.name == "pr-context":
             command_parser.add_argument("--include-raw", action="store_true", help="Include raw GitHub CLI payload in JSON output.")
+        if command.name == "target-branch-check":
+            command_parser.add_argument("--expected-base", help="Expected PR base branch. Defaults to the repository default branch.")
 
     return parser
 
@@ -210,6 +213,38 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_target_branch_check(
+    target: str | None,
+    *,
+    repo: str | None,
+    expected_base: str | None,
+    as_json: bool,
+) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+        expected_base_ref_name = expected_base if expected_base is not None else fetch_repo_default_branch(repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_target_branch(context, expected_base_ref_name=expected_base_ref_name)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"actual base: {summary.base_ref_name or 'unknown'}")
+    print(f"expected base: {summary.expected_base_ref_name or 'unknown'}")
+    print(f"target branch check: {summary.result}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    return 0 if summary.hard_gate_passed else 1
+
+
 def _print_ci_summary(target: str | None, *, repo: str | None, as_json: bool) -> int:
     try:
         context = fetch_pr_context(target, repo=repo)
@@ -318,6 +353,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ci-summary":
         return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "target-branch-check":
+        return _print_target_branch_check(
+            args.target,
+            repo=args.repo,
+            expected_base=args.expected_base,
+            as_json=args.json,
+        )
 
     if args.command == "pre-merge":
         return _print_pre_merge(args.target, repo=args.repo, as_json=args.json)
