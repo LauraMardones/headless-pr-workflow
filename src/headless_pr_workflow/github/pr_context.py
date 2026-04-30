@@ -526,8 +526,10 @@ def _protection_unavailable_status(payload: dict[str, Any] | None) -> str | None
         return None
     status = str(payload.get("status") or "")
     message = str(payload.get("message") or "").lower()
-    if status == "404":
+    if status == "404" and "branch not protected" in message:
         return "not_configured"
+    if status == "404":
+        return "unavailable"
     if status == "403" and "upgrade to github pro" in message:
         return "unavailable"
     return None

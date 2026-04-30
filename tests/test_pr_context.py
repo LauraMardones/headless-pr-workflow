@@ -367,6 +367,22 @@ def test_fetch_required_status_check_context_reports_absent_protection(monkeypat
     assert required.message == "Branch not protected"
 
 
+def test_fetch_required_status_check_context_reports_generic_404_as_unavailable(monkeypatch):
+    class Result:
+        returncode = 1
+        stdout = '{"message":"Not Found","status":"404"}'
+        stderr = "gh: Not Found (HTTP 404)"
+
+    monkeypatch.setattr(pr_context.subprocess, "run", lambda command, **kwargs: Result())
+
+    required = pr_context.fetch_required_status_check_context("owner/repo", "missing")
+
+    assert required.names == ()
+    assert required.status == "unavailable"
+    assert required.available is False
+    assert required.message == "Not Found"
+
+
 def test_fetch_required_status_checks_treats_unavailable_protection_as_no_checks(monkeypatch):
     class Result:
         returncode = 1
