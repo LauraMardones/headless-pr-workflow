@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
 from .catalog import COMMANDS, find_command
-from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch, fetch_required_status_checks
+from .github import GHCommandError, fetch_pr_context, fetch_repo_default_branch, fetch_required_status_checks, fetch_review_thread_summary
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 
@@ -202,6 +202,39 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_unresolved_review_threads(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        summary = fetch_review_thread_summary(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    counts = summary.thread_counts
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"head sha: {summary.head_ref_oid or 'unknown'}")
+    print(
+        "review threads: "
+        f"{counts['unresolved_blocking']} active unresolved, "
+        f"{counts['resolved']} resolved, "
+        f"{counts['outdated_or_superseded']} outdated/superseded"
+    )
+    if not summary.threads:
+        print("unresolved review threads: pass (no review threads found)")
+    elif summary.unresolved_blocking_threads:
+        print("unresolved review threads: blocked by active unresolved review threads")
+        print("blocking threads:")
+        for thread in summary.unresolved_blocking_threads:
+            print(f"- {_thread_label(thread)}: {thread.reason}")
+    else:
+        print("unresolved review threads: pass (only resolved/outdated thread history remains)")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    return 0 if summary.hard_gate_passed else 1
+
+
 def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
     if as_json:
         print(
@@ -249,7 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pre-merge":
         return _print_pre_merge(args.target, repo=args.repo, as_json=args.json)
 
+    if args.command == "unresolved-review-threads":
+        return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)
+
     return _print_scaffold(args.command, args.target, args.json)
+
+
+def _thread_label(thread: object) -> str:
+    path = getattr(thread, "path", None) or "unknown-path"
+    line = getattr(thread, "line", None) or getattr(thread, "start_line", None)
+    location = f"{path}:{line}" if line else path
+    thread_id = getattr(thread, "id", None)
+    return f"{location} ({thread_id})" if thread_id else location
 
 
 if __name__ == "__main__":
