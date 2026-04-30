@@ -39,7 +39,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P2-medium | F-review | report | core | scaffolded |
 | `unresolved-review-threads` | Detect unresolved GitHub review threads. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
 | `blocking-comments` | Detect blocking review comments or labels. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
-| `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | scaffolded |
+| `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | implemented |
 | `target-branch-check` | Verify PR targets the expected base branch. | implementer, merge-owner | P0-blocking | H-merge | hard-gate | core | scaffolded |
 | `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | scaffolded |
 | `pre-merge` | Compose merge-readiness checks. | merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |

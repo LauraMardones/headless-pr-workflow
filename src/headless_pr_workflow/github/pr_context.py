@@ -113,6 +113,32 @@ class CheckSummary:
 
 
 @dataclass(frozen=True)
+class RequiredStatusChecks:
+    names: tuple[str, ...]
+    status: str
+    source: str = "branch-protection"
+    message: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.status != "unavailable"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.names)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "names": list(self.names),
+            "status": self.status,
+            "source": self.source,
+            "available": self.available,
+            "configured": self.configured,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
 class PullRequestContext:
     number: int
     title: str
@@ -243,6 +269,10 @@ def fetch_repo_default_branch(repo: str | None = None) -> str:
 
 
 def fetch_required_status_checks(repo: str, branch: str) -> tuple[str, ...]:
+    return fetch_required_status_check_context(repo, branch).names
+
+
+def fetch_required_status_check_context(repo: str, branch: str) -> RequiredStatusChecks:
     """Fetch required status check names for a branch when GitHub exposes them.
 
     Repositories without branch protection support cannot require checks through
@@ -258,8 +288,11 @@ def fetch_required_status_checks(repo: str, branch: str) -> tuple[str, ...]:
 
     if result.returncode != 0:
         payload = _json_or_none(result.stdout)
-        if _protection_unavailable(payload):
-            return ()
+        unavailable_status = _protection_unavailable_status(payload)
+        if unavailable_status == "not_configured":
+            return RequiredStatusChecks(names=(), status="not_configured", message=_protection_message(payload))
+        if unavailable_status == "unavailable":
+            return RequiredStatusChecks(names=(), status="unavailable", message=_protection_message(payload) or result.stderr.strip() or None)
         raise GHCommandError(command, result.returncode, result.stderr)
 
     try:
@@ -269,19 +302,19 @@ def fetch_required_status_checks(repo: str, branch: str) -> tuple[str, ...]:
 
     required_status_checks = raw.get("required_status_checks")
     if not isinstance(required_status_checks, dict):
-        return ()
+        return RequiredStatusChecks(names=(), status="not_configured")
 
     checks = required_status_checks.get("checks")
     if isinstance(checks, list):
         names = [check.get("context") for check in checks if isinstance(check, dict) and isinstance(check.get("context"), str)]
-        return tuple(names)
+        return _required_status_checks_from_names(names)
 
     contexts = required_status_checks.get("contexts")
     if isinstance(contexts, list):
         names = [context for context in contexts if isinstance(context, str)]
-        return tuple(names)
+        return _required_status_checks_from_names(names)
 
-    return ()
+    return RequiredStatusChecks(names=(), status="not_configured")
 
 
 def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
@@ -482,16 +515,29 @@ def _json_or_none(payload: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _protection_unavailable(payload: dict[str, Any] | None) -> bool:
+def _required_status_checks_from_names(names: list[str]) -> RequiredStatusChecks:
+    deduped_names = tuple(dict.fromkeys(name for name in names if name))
+    status = "configured" if deduped_names else "not_configured"
+    return RequiredStatusChecks(names=deduped_names, status=status)
+
+
+def _protection_unavailable_status(payload: dict[str, Any] | None) -> str | None:
     if not payload:
-        return False
+        return None
     status = str(payload.get("status") or "")
     message = str(payload.get("message") or "").lower()
     if status == "404":
-        return True
+        return "not_configured"
     if status == "403" and "upgrade to github pro" in message:
-        return True
-    return False
+        return "unavailable"
+    return None
+
+
+def _protection_message(payload: dict[str, Any] | None) -> str | None:
+    if not payload:
+        return None
+    message = payload.get("message")
+    return message if isinstance(message, str) and message else None
 
 
 def _gh_env() -> dict[str, str]:
