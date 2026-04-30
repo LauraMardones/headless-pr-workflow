@@ -76,16 +76,16 @@ def test_outdated_thread_is_reported_and_non_blocking():
     assert summary.outdated_or_superseded_threads[0].blocking is False
 
 
-def test_superseded_thread_is_reported_and_non_blocking():
+def test_unresolved_non_outdated_thread_from_older_commit_still_blocks():
     context = build_pr_context(head_ref_oid="head123")
     summary = summarize_review_threads(context, (review_thread(commit_oid="old123"),))
 
-    assert summary.hard_gate_passed is True
-    assert summary.outdated_or_superseded_threads[0].classification == "superseded"
-    assert summary.outdated_or_superseded_threads[0].review_commit_oids == ("old123",)
+    assert summary.hard_gate_passed is False
+    assert summary.unresolved_blocking_threads[0].classification == "unresolved_blocking"
+    assert summary.unresolved_blocking_threads[0].review_commit_oids == ("old123",)
 
 
-def test_mixed_thread_state_keeps_only_current_unresolved_threads_blocking():
+def test_mixed_thread_state_keeps_all_active_unresolved_threads_blocking():
     context = build_pr_context(head_ref_oid="head123")
     summary = summarize_review_threads(
         context,
@@ -93,14 +93,14 @@ def test_mixed_thread_state_keeps_only_current_unresolved_threads_blocking():
             review_thread(thread_id="active", commit_oid="head123"),
             review_thread(thread_id="resolved", is_resolved=True, commit_oid="head123"),
             review_thread(thread_id="outdated", is_outdated=True, commit_oid="old123"),
-            review_thread(thread_id="superseded", commit_oid="old456"),
+            review_thread(thread_id="older-active", commit_oid="old456"),
         ),
     )
 
     assert summary.hard_gate_passed is False
-    assert [thread.id for thread in summary.unresolved_blocking_threads] == ["active"]
+    assert [thread.id for thread in summary.unresolved_blocking_threads] == ["active", "older-active"]
     assert [thread.id for thread in summary.resolved_threads] == ["resolved"]
-    assert [thread.id for thread in summary.outdated_or_superseded_threads] == ["outdated", "superseded"]
+    assert [thread.id for thread in summary.outdated_or_superseded_threads] == ["outdated"]
 
 
 def test_no_thread_state_passes():

@@ -284,8 +284,6 @@ def _summarize_thread(raw: dict[str, Any], *, head_ref_oid: str) -> ReviewThread
     classification, blocking, reason = _classify_thread(
         is_resolved=is_resolved,
         is_outdated=is_outdated,
-        review_commit_oids=review_commit_oids,
-        head_ref_oid=head_ref_oid,
     )
 
     return ReviewThreadSummary(
@@ -308,15 +306,11 @@ def _classify_thread(
     *,
     is_resolved: bool,
     is_outdated: bool,
-    review_commit_oids: tuple[str, ...],
-    head_ref_oid: str,
 ) -> tuple[str, bool, str]:
     if is_resolved:
         return "resolved", False, "Thread is resolved on GitHub."
     if is_outdated:
         return "outdated", False, "Thread is outdated on GitHub and does not block the current head."
-    if head_ref_oid and review_commit_oids and head_ref_oid not in review_commit_oids:
-        return "superseded", False, "Thread belongs to an earlier reviewed commit and does not block the current head."
     return "unresolved_blocking", True, "Thread is unresolved and still applies to the current PR head."
 
 
