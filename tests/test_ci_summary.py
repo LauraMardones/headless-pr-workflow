@@ -96,10 +96,28 @@ def test_ci_summary_reports_unknown_required_checks():
 
 def test_ci_summary_reports_unavailable_required_check_data():
     summary = summarize_ci(
-        scenario_empty_status_rollup(head_sha="head123"),
+        scenario_empty_status_rollup(head_sha="head123", base_ref_name="release"),
         required_checks=RequiredStatusChecks(names=(), status="unavailable", message="branch protection unavailable"),
     )
 
     assert summary.required_check_status == "unavailable"
     assert summary.required_checks_satisfied is None
     assert "Required status check data is unavailable from branch protection: branch protection unavailable." in summary.messages
+
+
+def test_ci_summary_reports_policy_absent_required_checks():
+    summary = summarize_ci(
+        scenario_empty_status_rollup(head_sha="head123"),
+        required_checks=RequiredStatusChecks(
+            names=(),
+            status="policy_absent",
+            source="docs/MERGE-POLICY.md#main-required-check-policy",
+            message="Required checks are absent by repository policy for main.",
+        ),
+    )
+
+    assert summary.status_rollup == "empty"
+    assert summary.required_check_status == "policy_absent"
+    assert summary.required_checks_satisfied is True
+    assert summary.required_checks.to_dict()["source"] == "docs/MERGE-POLICY.md#main-required-check-policy"
+    assert "Required status checks are absent by explicit repository policy. Source: docs/MERGE-POLICY.md#main-required-check-policy." in summary.messages

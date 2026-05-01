@@ -15,6 +15,17 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 - Required manual gates are satisfied.
 - The merge owner is the session that last implemented the approved current head SHA, or an authorized human/operator acting under explicit takeover rules.
 
+## Main Required-Check Policy
+
+For `main` in this repository, required status checks are absent by policy while all of these are true:
+
+- No GitHub Actions workflows are present in `.github/workflows`.
+- GitHub does not report configured required status checks for `main`, or branch-protection required-check data is unavailable for this private repository.
+- The current PR status-check rollup is empty, or every reported check is passing or skipped.
+- The machine-readable policy source in `docs/required-check-policy.json` declares `required_status_checks` and `ci_workflows` as `absent` for `main`.
+
+When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report the required-check gate as passing because required checks are absent by explicit repository policy. Unavailable branch-protection data is not enough by itself; failing, pending, unknown, missing, or configured required checks must still block merge readiness.
+
 ## Solo-Maintainer Bootstrap Override
 
 Some repositories have only one GitHub account with write access, especially during bootstrap. In that case GitHub may prevent a formal approval even when review was performed in a separate assistant session.

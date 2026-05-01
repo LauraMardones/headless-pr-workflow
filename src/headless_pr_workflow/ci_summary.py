@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .github import CheckSummary, PullRequestContext, RequiredStatusChecks
+from .required_check_policy import apply_required_check_policy
 
 
 CHECK_STATES: tuple[str, ...] = ("passing", "failing", "pending", "skipped", "missing", "unknown")
@@ -46,6 +47,11 @@ class CiSummary:
 
 
 def summarize_ci(context: PullRequestContext, *, required_checks: RequiredStatusChecks) -> CiSummary:
+    required_checks = apply_required_check_policy(
+        required_checks,
+        branch=context.base_ref_name,
+        status_checks=context.status_checks,
+    )
     buckets = {state: [] for state in CHECK_STATES}
     observed_checks = {_check_name(check): check for check in context.status_checks}
 
@@ -93,6 +99,8 @@ def _required_check_status(
 ) -> tuple[str, bool | None]:
     if required_checks.status == "unavailable":
         return "unavailable", None
+    if required_checks.status == "policy_absent":
+        return "policy_absent", True
     if not required_checks.names:
         return "not_configured", None
     if missing_required:
@@ -120,6 +128,9 @@ def _messages(
         messages.append("GitHub reported an empty status check rollup for the current head SHA.")
     if required_check_status == "not_configured":
         messages.append("No required status checks are configured for the target branch.")
+    elif required_check_status == "policy_absent":
+        detail = f" Source: {required_checks.source}." if required_checks.source else ""
+        messages.append(f"Required status checks are absent by explicit repository policy.{detail}")
     elif required_check_status == "unavailable":
         detail = f": {required_checks.message.rstrip('.')}" if required_checks.message else ""
         messages.append(f"Required status check data is unavailable from branch protection{detail}.")
