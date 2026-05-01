@@ -254,6 +254,8 @@ def _status_check_message(
 ) -> str:
     if blockers:
         return "Required status checks are not yet merge-ready."
+    if ci.required_check_status == "policy_absent":
+        return "Required status checks are absent by repository policy."
     if not ci.status_checks and not ci.required_checks.names:
         return "GitHub reports no required status checks for the target branch."
     return "All reported status checks are passing or skipped."
