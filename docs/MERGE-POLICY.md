@@ -89,6 +89,14 @@ If that session is unavailable, a takeover session may become merge owner only a
 - Recording takeover intent.
 - Re-running pre-merge checks.
 
+The initial `hpw merge-owner` implementation is intentionally conservative. It
+does not infer ownership from local chat history, branch names, or worktree
+state. The current session identity must be supplied with `--session-id` or
+`HPW_SESSION_ID`. Until durable owner recording exists, expected owner evidence
+must be supplied explicitly with `--expected-owner` or
+`HPW_EXPECTED_MERGE_OWNER`, optionally bound to the current PR head with
+`--expected-owner-sha` or `HPW_EXPECTED_MERGE_OWNER_SHA`.
+
 ## Merge Command Behavior
 
 The merge command must:

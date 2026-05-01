@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 
@@ -19,6 +20,7 @@ from .github import (
     fetch_review_threads_for_context,
     summarize_review_threads,
 )
+from .merge_owner import summarize_merge_owner
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
@@ -43,6 +45,19 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--include-raw", action="store_true", help="Include raw GitHub CLI payload in JSON output.")
         if command.name == "target-branch-check":
             command_parser.add_argument("--expected-base", help="Expected PR base branch. Defaults to the repository default branch.")
+        if command.name == "merge-owner":
+            command_parser.add_argument(
+                "--session-id",
+                help="Current session identity. Defaults to HPW_SESSION_ID when unset.",
+            )
+            command_parser.add_argument(
+                "--expected-owner",
+                help="Explicit expected merge owner identity. Defaults to HPW_EXPECTED_MERGE_OWNER when unset.",
+            )
+            command_parser.add_argument(
+                "--expected-owner-sha",
+                help="Head SHA that the expected owner evidence applies to. Defaults to HPW_EXPECTED_MERGE_OWNER_SHA.",
+            )
 
     return parser
 
@@ -225,6 +240,51 @@ def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> 
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_merge_owner(target: str | None, *, repo: str | None, args: argparse.Namespace) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=args.json)
+
+    session_id = args.session_id if args.session_id is not None else os.environ.get("HPW_SESSION_ID")
+    expected_owner = args.expected_owner if args.expected_owner is not None else os.environ.get("HPW_EXPECTED_MERGE_OWNER")
+    expected_owner_sha = (
+        args.expected_owner_sha if args.expected_owner_sha is not None else os.environ.get("HPW_EXPECTED_MERGE_OWNER_SHA")
+    )
+
+    summary = summarize_merge_owner(
+        context,
+        current_session_id=session_id,
+        current_session_source="--session-id" if args.session_id is not None else "HPW_SESSION_ID",
+        expected_owner_id=expected_owner,
+        expected_owner_source="--expected-owner" if args.expected_owner is not None else "HPW_EXPECTED_MERGE_OWNER",
+        expected_owner_head_sha=expected_owner_sha,
+        expected_owner_head_sha_source=(
+            "--expected-owner-sha" if args.expected_owner_sha is not None else "HPW_EXPECTED_MERGE_OWNER_SHA"
+        ),
+    )
+
+    if args.json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"state: {summary.state}")
+    print(f"head sha: {summary.current_head_sha or 'unknown'}")
+    print(f"current session: {summary.current_session.identity or 'missing'} ({summary.current_session.source})")
+    print(f"expected owner: {summary.expected_owner.identity or 'missing'} ({summary.expected_owner.source})")
+    print(f"expected owner head sha: {summary.expected_owner.head_sha or 'not supplied'}")
+    print(f"ownership status: {summary.ownership_status.replace('_', ' ')}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
+    print(f"next safe action: {summary.next_safe_action}")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    return 0 if summary.hard_gate_passed else 1
+
+
 def _print_target_branch_check(
     target: str | None,
     *,
@@ -376,6 +436,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pre-merge":
         return _print_pre_merge(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "merge-owner":
+        return _print_merge_owner(args.target, repo=args.repo, args=args)
 
     if args.command == "unresolved-review-threads":
         return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)
