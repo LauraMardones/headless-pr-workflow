@@ -1,4 +1,5 @@
 from headless_pr_workflow.pre_merge import summarize_pre_merge
+from headless_pr_workflow.github import RequiredStatusChecks
 from headless_pr_workflow.github.review_threads import summarize_review_threads
 
 from tests.github_scenarios import (
@@ -185,3 +186,47 @@ def test_pre_merge_allows_absent_checks_when_none_are_required():
 
     assert "GitHub reported no required status checks for the target branch." not in summary.blocking_reasons
     assert summary.checks[5].ok is True
+
+
+def test_pre_merge_allows_unavailable_checks_when_policy_absent():
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123"),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(
+            names=(),
+            status="policy_absent",
+            source="docs/MERGE-POLICY.md#main-required-check-policy",
+        ),
+    )
+
+    required_check = next(check for check in summary.checks if check.code == "required-checks-passing")
+    assert summary.blocking_reasons == ()
+    assert summary.hard_gate_passed is True
+    assert required_check.ok is True
+    assert required_check.message == "Required status checks are absent by repository policy."
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_absent"
+
+
+def test_pre_merge_blocks_generic_unavailable_required_check_data():
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", base_ref_name="release"),
+        expected_base_ref_name="release",
+        required_checks=RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
+    )
+
+    assert "Required status check data is unavailable from branch protection: Not Found." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
+
+
+def test_pre_merge_blocks_unknown_reported_checks_even_when_policy_absent():
+    summary = summarize_pre_merge(
+        scenario_solo_override(
+            head_sha="head123",
+            status_checks=(build_check(name="security", bucket="unknown"),),
+        ),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=(), status="policy_absent", source="docs/MERGE-POLICY.md"),
+    )
+
+    assert "Status check security has an unknown result (state=unknown)." in summary.blocking_reasons
+    assert summary.hard_gate_passed is False
