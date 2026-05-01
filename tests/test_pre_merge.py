@@ -203,7 +203,7 @@ def test_pre_merge_allows_unavailable_checks_when_policy_absent():
     assert summary.blocking_reasons == ()
     assert summary.hard_gate_passed is True
     assert required_check.ok is True
-    assert required_check.message == "Required status checks are absent by repository policy."
+    assert required_check.message == "Required status checks are absent by repository policy. Source: docs/MERGE-POLICY.md#main-required-check-policy."
     assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_absent"
 
 
