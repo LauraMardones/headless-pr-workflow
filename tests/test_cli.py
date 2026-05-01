@@ -8,7 +8,9 @@ from tests.github_scenarios import (
     build_pr_context,
     scenario_comment_only_review,
     scenario_current_approval,
+    scenario_draft_pr,
     scenario_empty_status_rollup,
+    scenario_mergeable_unknown,
     scenario_solo_override,
     scenario_stale_approval,
     with_context,
@@ -52,6 +54,7 @@ def test_catalog_marks_pr_context_implemented(capsys):
     assert "target-branch-check\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
     assert "unresolved-review-threads\tP1-high\tF-review\thard-gate\tcore\timplemented" in output
     assert "pre-merge\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
+    assert "merge-pr\tP0-blocking\tH-merge\taction\tcore\timplemented" in output
 
 
 def test_review_sha_json_output(monkeypatch, capsys):
@@ -238,6 +241,128 @@ def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypa
     assert exit_code == 1
     output = capsys.readouterr().out
     assert '"GitHub reported no status checks for the current head SHA."' in output
+
+
+def test_merge_pr_json_output_ready(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "fetch_pr_context",
+        lambda target, repo=None: scenario_current_approval(
+            head_sha="head123",
+            status_checks=(build_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+        ),
+    )
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=("unit",), status="configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--method", "squash", "--json"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "merge-pr"
+    assert output["mode"] == "dry_run"
+    assert output["dry_run"] is True
+    assert output["would_merge"] is True
+    assert output["selected_method"] == "squash"
+    assert output["number"] == 123
+    assert output["url"] == "https://github.com/owner/repo/pull/123"
+    assert output["head_sha"] == "head123"
+    assert output["base_branch"] == "main"
+    assert output["approval_review_source"]["approval_source"] == "formal"
+    assert output["readiness"]["hard_gate_passed"] is True
+    assert output["blocking_reasons"] == []
+
+
+def test_merge_pr_human_output_ready_names_dry_run_facts(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--method", "rebase"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "mode: dry-run (no GitHub merge mutation will be performed)" in output
+    assert "selected method: rebase" in output
+    assert "head sha: head123" in output
+    assert "base branch: main" in output
+    assert "approval source: solo-maintainer-override" in output
+    assert "would merge: true" in output
+
+
+def test_merge_pr_refuses_draft_pr(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "fetch_pr_context",
+        lambda target, repo=None: with_context(
+            scenario_draft_pr(head_ref_oid="head123"),
+            latest_reviews=(scenario_current_approval(head_sha="head123").latest_reviews[0],),
+        ),
+    )
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["would_merge"] is False
+    assert "PR is draft." in output["blocking_reasons"]
+
+
+def test_merge_pr_refuses_stale_approval_for_current_head(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_stale_approval(head_sha="new-head", approval_sha="old-head"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["head_sha"] == "new-head"
+    assert "formal approval is stale for the current PR head SHA" in output["blocking_reasons"]
+
+
+def test_merge_pr_refuses_pending_and_failing_checks(monkeypatch, capsys):
+    blocked_context = scenario_current_approval(
+        head_sha="head123",
+        status_checks=(
+            build_check(name="unit", bucket="failure", status="COMPLETED", conclusion="FAILURE"),
+            build_check(name="lint", bucket="pending", state="PENDING"),
+        ),
+    )
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: blocked_context)
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(
+        cli,
+        "fetch_required_status_check_context",
+        lambda repo, branch: RequiredStatusChecks(names=("unit", "lint"), status="configured"),
+    )
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert "Status check unit is failing (status=COMPLETED, conclusion=FAILURE)." in output["blocking_reasons"]
+    assert "Status check lint is pending (state=PENDING)." in output["blocking_reasons"]
+
+
+def test_merge_pr_refuses_unacceptable_mergeability(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_mergeable_unknown(head_sha="head123"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert "PR mergeable state is UNKNOWN." in output["blocking_reasons"]
 
 
 def test_target_branch_check_json_output_passes_for_matching_default_branch(monkeypatch, capsys):
