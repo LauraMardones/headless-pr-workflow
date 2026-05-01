@@ -1,3 +1,5 @@
+import json
+
 from headless_pr_workflow import cli
 from headless_pr_workflow.github import GHCommandError, RequiredStatusChecks
 
@@ -173,15 +175,23 @@ def test_pre_merge_json_output_ready(monkeypatch, capsys):
         ),
     )
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
-    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=("unit",), status="configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
     assert exit_code == 0
-    output = capsys.readouterr().out
-    assert '"hard_gate_passed": true' in output
-    assert '"code": "required-checks-passing"' in output
-    assert '"blocking_reasons": []' in output
+    output = json.loads(capsys.readouterr().out)
+    assert output["hard_gate_passed"] is True
+    assert output["current_head_sha"] == "head123"
+    assert output["pr"]["number"] == 123
+    assert output["approval_review_source"]["approval_source"] == "formal"
+    assert output["target_branch_comparison"]["result"] == "pass"
+    assert output["required_check_summary"]["required_check_status"] == "satisfied"
+    assert output["mergeability_facts"]["mergeable"] == "MERGEABLE"
+    assert output["unresolved_thread_summary"]["thread_counts"]["unresolved_blocking"] == 0
+    assert any(check["code"] == "required-checks-passing" for check in output["checks"])
+    assert output["blocking_reasons"] == []
 
 
 def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
@@ -197,7 +207,12 @@ def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
     )
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: blocked_context)
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
-    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit", "lint"))
+    monkeypatch.setattr(
+        cli,
+        "fetch_required_status_check_context",
+        lambda repo, branch: RequiredStatusChecks(names=("unit", "lint"), status="configured"),
+    )
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 
@@ -215,7 +230,8 @@ def test_pre_merge_json_output_lists_all_blockers(monkeypatch, capsys):
 def test_pre_merge_json_output_blocks_empty_status_checks_when_required(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_empty_status_rollup(head_sha="head123"))
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
-    monkeypatch.setattr(cli, "fetch_required_status_checks", lambda repo, branch: ("unit",))
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=("unit",), status="configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
 
     exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
 

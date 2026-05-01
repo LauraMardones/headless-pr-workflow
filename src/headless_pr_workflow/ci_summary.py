@@ -121,7 +121,7 @@ def _messages(
     if required_check_status == "not_configured":
         messages.append("No required status checks are configured for the target branch.")
     elif required_check_status == "unavailable":
-        detail = f": {required_checks.message}" if required_checks.message else ""
+        detail = f": {required_checks.message.rstrip('.')}" if required_checks.message else ""
         messages.append(f"Required status check data is unavailable from branch protection{detail}.")
     elif required_check_status == "missing":
         messages.append(f"Required status checks are missing from the current head SHA: {', '.join(missing_required)}.")

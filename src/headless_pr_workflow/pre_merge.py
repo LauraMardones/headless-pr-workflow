@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .approval_check import ApprovalCheckSummary, summarize_approval_check
-from .github import CheckSummary, PullRequestContext
-from .target_branch import summarize_target_branch, target_branch_message
+from .ci_summary import CiSummary, summarize_ci
+from .github import CheckSummary, PullRequestContext, RequiredStatusChecks, ReviewThreadGateSummary
+from .github.review_threads import summarize_review_threads
+from .target_branch import TargetBranchSummary, summarize_target_branch, target_branch_message
 
 
 ACCEPTABLE_MERGEABLE = {"MERGEABLE"}
@@ -45,6 +47,9 @@ class PreMergeSummary:
     mergeable: str | None
     merge_state_status: str | None
     approval: ApprovalCheckSummary
+    target_branch: TargetBranchSummary
+    ci: CiSummary
+    review_threads: ReviewThreadGateSummary
     required_check_names: tuple[str, ...]
     status_checks: tuple[CheckSummary, ...]
     checks: tuple[PreMergeCheck, ...]
@@ -65,7 +70,38 @@ class PreMergeSummary:
             "head_ref_oid": self.head_ref_oid,
             "mergeable": self.mergeable,
             "merge_state_status": self.merge_state_status,
+            "current_head_sha": self.head_ref_oid,
+            "pr": {
+                "number": self.number,
+                "title": self.title,
+                "url": self.url,
+                "state": self.state,
+                "is_draft": self.is_draft,
+                "base_ref_name": self.base_ref_name,
+                "base_ref_oid": self.base_ref_oid,
+                "head_ref_name": self.head_ref_name,
+                "head_ref_oid": self.head_ref_oid,
+            },
             "approval": self.approval.to_dict(),
+            "approval_review_source": {
+                "approval_source": self.approval.approval_source,
+                "satisfied_by": self.approval.satisfied_by,
+                "approval_status": self.approval.approval_status,
+                "latest_review_sha": self.approval.latest_review_sha,
+                "latest_review_state": self.approval.latest_review_state,
+                "latest_review_author": self.approval.latest_review_author,
+                "latest_approval_sha": self.approval.latest_approval_sha,
+                "solo_override": self.approval.solo_override.to_dict(),
+            },
+            "target_branch_comparison": self.target_branch.to_dict(),
+            "required_check_summary": self.ci.to_dict(),
+            "mergeability_facts": {
+                "mergeable": self.mergeable,
+                "merge_state_status": self.merge_state_status,
+                "acceptable_mergeable": sorted(ACCEPTABLE_MERGEABLE),
+                "acceptable_merge_state_status": sorted(ACCEPTABLE_MERGE_STATE_STATUS),
+            },
+            "unresolved_thread_summary": self.review_threads.to_dict(),
             "required_check_names": list(self.required_check_names),
             "status_checks": [check.to_dict() for check in self.status_checks],
             "check_counts": _check_counts(self.status_checks),
@@ -80,8 +116,14 @@ def summarize_pre_merge(
     *,
     expected_base_ref_name: str | None,
     required_check_names: tuple[str, ...] = (),
+    required_checks: RequiredStatusChecks | None = None,
+    review_threads: ReviewThreadGateSummary | None = None,
 ) -> PreMergeSummary:
     approval = summarize_approval_check(context)
+    required_check_context = required_checks or _required_checks_from_names(required_check_names)
+    ci = summarize_ci(context, required_checks=required_check_context)
+    target_branch = summarize_target_branch(context, expected_base_ref_name=expected_base_ref_name)
+    thread_summary = review_threads or summarize_review_threads(context, ())
     checks: list[PreMergeCheck] = []
     blocking_reasons: list[str] = []
 
@@ -123,7 +165,6 @@ def summarize_pre_merge(
     if not approval_ok:
         blocking_reasons.extend(approval.blocking_reasons)
 
-    target_branch = summarize_target_branch(context, expected_base_ref_name=expected_base_ref_name)
     checks.append(
         PreMergeCheck(
             code="target-branch-expected",
@@ -134,12 +175,12 @@ def summarize_pre_merge(
     )
     blocking_reasons.extend(target_branch.blocking_reasons)
 
-    check_blockers = _status_check_blockers(context.status_checks, required_check_names=required_check_names)
+    check_blockers = _status_check_blockers(ci)
     checks.append(
         PreMergeCheck(
             code="required-checks-passing",
             ok=not check_blockers,
-            message=_status_check_message(context.status_checks, check_blockers, required_check_names=required_check_names),
+            message=_status_check_message(ci, check_blockers),
             details=tuple(check_blockers),
         )
     )
@@ -156,6 +197,17 @@ def summarize_pre_merge(
     )
     blocking_reasons.extend(mergeability_blockers)
 
+    thread_blockers = _review_thread_blockers(thread_summary)
+    checks.append(
+        PreMergeCheck(
+            code="unresolved-review-threads",
+            ok=not thread_blockers,
+            message=_review_thread_message(thread_summary, thread_blockers),
+            details=tuple(thread_blockers),
+        )
+    )
+    blocking_reasons.extend(thread_blockers)
+
     return PreMergeSummary(
         number=context.number,
         title=context.title,
@@ -170,7 +222,10 @@ def summarize_pre_merge(
         mergeable=context.mergeable,
         merge_state_status=context.merge_state_status,
         approval=approval,
-        required_check_names=required_check_names,
+        target_branch=target_branch,
+        ci=ci,
+        review_threads=thread_summary,
+        required_check_names=required_check_context.names,
         status_checks=context.status_checks,
         checks=tuple(checks),
         blocking_reasons=tuple(blocking_reasons),
@@ -194,31 +249,25 @@ def _append_simple_check(
 
 
 def _status_check_message(
-    status_checks: tuple[CheckSummary, ...],
+    ci: CiSummary,
     blockers: list[str],
-    *,
-    required_check_names: tuple[str, ...],
 ) -> str:
     if blockers:
         return "Required status checks are not yet merge-ready."
-    if not status_checks and not required_check_names:
+    if not ci.status_checks and not ci.required_checks.names:
         return "GitHub reports no required status checks for the target branch."
     return "All reported status checks are passing or skipped."
 
 
-def _status_check_blockers(
-    status_checks: tuple[CheckSummary, ...],
-    *,
-    required_check_names: tuple[str, ...],
-) -> list[str]:
-    if not status_checks and required_check_names:
+def _status_check_blockers(ci: CiSummary) -> list[str]:
+    if ci.required_check_status == "unavailable":
+        return list(ci.messages)
+    if not ci.status_checks and ci.required_checks.names:
         return ["GitHub reported no status checks for the current head SHA."]
     blockers: list[str] = []
-    seen_names = {_check_name(check) for check in status_checks}
-    for required_check_name in required_check_names:
-        if required_check_name not in seen_names:
-            blockers.append(f"Required status check {required_check_name} was not reported for the current head SHA.")
-    for check in status_checks:
+    for required_check_name in ci.check_buckets["missing"]:
+        blockers.append(f"Required status check {required_check_name} was not reported for the current head SHA.")
+    for check in ci.status_checks:
         if check.bucket == "success" or check.bucket == "skipped":
             continue
         name = _check_name(check)
@@ -230,6 +279,21 @@ def _status_check_blockers(
         else:
             blockers.append(f"Status check {name} has an unknown result ({facts}).")
     return blockers
+
+
+def _review_thread_message(summary: ReviewThreadGateSummary, blockers: list[str]) -> str:
+    if blockers:
+        return "Active unresolved review threads block merge readiness."
+    if not summary.threads:
+        return "No review threads found."
+    return "No active unresolved review threads remain."
+
+
+def _review_thread_blockers(summary: ReviewThreadGateSummary) -> list[str]:
+    return [
+        f"Unresolved review thread {_thread_label(thread)}: {thread.reason}"
+        for thread in summary.unresolved_blocking_threads
+    ]
 
 
 def _mergeability_message(context: PullRequestContext, blockers: list[str]) -> str:
@@ -269,3 +333,16 @@ def _check_facts(check: CheckSummary) -> str:
     if check.state:
         parts.append(f"state={check.state}")
     return ", ".join(parts) or "state=unknown"
+
+
+def _required_checks_from_names(required_check_names: tuple[str, ...]) -> RequiredStatusChecks:
+    status = "configured" if required_check_names else "not_configured"
+    return RequiredStatusChecks(names=required_check_names, status=status)
+
+
+def _thread_label(thread: object) -> str:
+    path = getattr(thread, "path", None) or "unknown-path"
+    line = getattr(thread, "line", None) or getattr(thread, "start_line", None)
+    location = f"{path}:{line}" if line else path
+    thread_id = getattr(thread, "id", None)
+    return f"{location} ({thread_id})" if thread_id else location
