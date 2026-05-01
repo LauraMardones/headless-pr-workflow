@@ -41,7 +41,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `blocking-comments` | Detect blocking review comments or labels. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
 | `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | implemented |
 | `target-branch-check` | Verify PR targets the expected base branch. | implementer, merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
-| `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | scaffolded |
+| `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | implemented |
 | `pre-merge` | Compose merge-readiness checks. | merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
 | `merge-pr` | Dry-run merge after fresh pre-merge gates pass. | merge-owner | P0-blocking | H-merge | action | core | implemented |
 | `post-merge-sync` | Sync local state after merge. | merge-owner, implementer | P1-high | I-post-merge | action | core | scaffolded |

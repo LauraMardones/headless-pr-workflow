@@ -7,6 +7,7 @@ def test_mvp_commands_are_present():
     assert "pr-context" in names
     assert "review-sha" in names
     assert "approval-check" in names
+    assert "merge-owner" in names
     assert "pre-merge" in names
     assert "merge-pr" in names
 
