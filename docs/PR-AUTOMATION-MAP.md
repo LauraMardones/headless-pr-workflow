@@ -43,7 +43,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `target-branch-check` | Verify PR targets the expected base branch. | implementer, merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
 | `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | implemented |
 | `pre-merge` | Compose merge-readiness checks. | merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
-| `merge-pr` | Merge after fresh pre-merge gates pass. | merge-owner | P0-blocking | H-merge | action | core | scaffolded |
+| `merge-pr` | Dry-run merge after fresh pre-merge gates pass. | merge-owner | P0-blocking | H-merge | action | core | implemented |
 | `post-merge-sync` | Sync local state after merge. | merge-owner, implementer | P1-high | I-post-merge | action | core | scaffolded |
 | `branch-cleanup` | Remove stale merged local branches when safe. | implementer | P2-medium | I-post-merge | action | core | scaffolded |
 | `workflow-status` | Summarize PR state and next action. | orchestrator | P1-high | C-session | report | core | scaffolded |

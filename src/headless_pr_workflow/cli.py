@@ -21,6 +21,7 @@ from .github import (
     summarize_review_threads,
 )
 from .merge_owner import summarize_merge_owner
+from .merge_pr import MERGE_METHODS, summarize_merge_pr
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
@@ -57,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument(
                 "--expected-owner-sha",
                 help="Head SHA that the expected owner evidence applies to. Defaults to HPW_EXPECTED_MERGE_OWNER_SHA.",
+            )
+        if command.name == "merge-pr":
+            command_parser.add_argument(
+                "--method",
+                choices=MERGE_METHODS,
+                default="merge",
+                help="Merge method to rehearse. Dry-run only; never performs a GitHub merge.",
             )
 
     return parser
@@ -188,19 +196,9 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
 
 def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> int:
     try:
-        context = fetch_pr_context(target, repo=repo)
-        expected_base_ref_name = fetch_repo_default_branch(repo=repo)
-        required_checks = fetch_required_status_check_context(repo or context.head_repository or "", expected_base_ref_name)
-        review_threads = summarize_review_threads(context, fetch_review_threads_for_context(context, repo=repo))
+        summary = _fetch_pre_merge_summary(target, repo=repo)
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
-
-    summary = summarize_pre_merge(
-        context,
-        expected_base_ref_name=expected_base_ref_name,
-        required_checks=required_checks,
-        review_threads=review_threads,
-    )
 
     if as_json:
         print(json.dumps(summary.to_dict(), indent=2))
@@ -283,6 +281,47 @@ def _print_merge_owner(target: str | None, *, repo: str | None, args: argparse.N
     print(f"next safe action: {summary.next_safe_action}")
     print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
     return 0 if summary.hard_gate_passed else 1
+
+
+def _print_merge_pr(target: str | None, *, repo: str | None, method: str, as_json: bool) -> int:
+    try:
+        pre_merge = _fetch_pre_merge_summary(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_merge_pr(pre_merge, method=method)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.would_merge else 1
+
+    print(f"PR #{summary.pre_merge.number}: {summary.pre_merge.title}")
+    print(f"url: {summary.pre_merge.url}")
+    print("mode: dry-run (no GitHub merge mutation will be performed)")
+    print(f"selected method: {summary.method}")
+    print(f"base branch: {summary.pre_merge.base_ref_name or 'unknown'}")
+    print(f"head sha: {summary.pre_merge.head_ref_oid or 'unknown'}")
+    print(f"approval source: {summary.pre_merge.approval.approval_source or 'none'}")
+    print(f"satisfied by: {summary.pre_merge.approval.satisfied_by or 'none'}")
+    print(f"would merge: {str(summary.would_merge).lower()}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
+    return 0 if summary.would_merge else 1
+
+
+def _fetch_pre_merge_summary(target: str | None, *, repo: str | None):
+    context = fetch_pr_context(target, repo=repo)
+    expected_base_ref_name = fetch_repo_default_branch(repo=repo)
+    required_checks = fetch_required_status_check_context(repo or context.head_repository or "", expected_base_ref_name)
+    review_threads = summarize_review_threads(context, fetch_review_threads_for_context(context, repo=repo))
+    return summarize_pre_merge(
+        context,
+        expected_base_ref_name=expected_base_ref_name,
+        required_checks=required_checks,
+        review_threads=review_threads,
+    )
 
 
 def _print_target_branch_check(
@@ -439,6 +478,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "merge-owner":
         return _print_merge_owner(args.target, repo=args.repo, args=args)
+
+    if args.command == "merge-pr":
+        return _print_merge_pr(args.target, repo=args.repo, method=args.method, as_json=args.json)
 
     if args.command == "unresolved-review-threads":
         return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)
