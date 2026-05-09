@@ -21,7 +21,7 @@ from .github import (
     summarize_review_threads,
 )
 from .merge_owner import summarize_merge_owner
-from .merge_pr import MERGE_METHODS, summarize_merge_pr
+from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
 from .pre_merge import summarize_pre_merge
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
@@ -64,7 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
                 "--method",
                 choices=MERGE_METHODS,
                 default="merge",
-                help="Merge method to rehearse. Dry-run only; never performs a GitHub merge.",
+                help="Merge method to use for dry-run or live execution.",
+            )
+            command_parser.add_argument(
+                "--execute",
+                action="store_true",
+                help=(
+                    "Perform the GitHub merge after fresh readiness gates pass. "
+                    "No --admin, --auto, or branch deletion behavior is supported."
+                ),
             )
 
     return parser
@@ -283,32 +291,71 @@ def _print_merge_owner(target: str | None, *, repo: str | None, args: argparse.N
     return 0 if summary.hard_gate_passed else 1
 
 
-def _print_merge_pr(target: str | None, *, repo: str | None, method: str, as_json: bool) -> int:
+def _print_merge_pr(target: str | None, *, repo: str | None, method: str, execute: bool, as_json: bool) -> int:
     try:
         pre_merge = _fetch_pre_merge_summary(target, repo=repo)
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
 
-    summary = summarize_merge_pr(pre_merge, method=method)
+    mode = "execute" if execute else "dry_run"
+    summary = summarize_merge_pr(pre_merge, method=method, mode=mode)
+
+    if execute and pre_merge.hard_gate_passed:
+        try:
+            merge_result = run_github_merge(
+                number=pre_merge.number,
+                repo=repo,
+                method=method,
+                head_sha=pre_merge.head_ref_oid,
+            )
+        except GHCommandError as error:
+            return _print_gh_error(error, as_json=as_json)
+        post_merge = None
+        if merge_result.ok:
+            try:
+                post_context = fetch_pr_context(str(pre_merge.number), repo=repo)
+            except GHCommandError as error:
+                return _print_gh_error(error, as_json=as_json)
+            post_merge = PostMergeVerification.from_context(post_context)
+        summary = summarize_merge_pr(
+            pre_merge,
+            method=method,
+            mode=mode,
+            merge_result=merge_result,
+            post_merge=post_merge,
+        )
 
     if as_json:
         print(json.dumps(summary.to_dict(), indent=2))
-        return 0 if summary.would_merge else 1
+        return 0 if summary.execution_succeeded else 1
 
     print(f"PR #{summary.pre_merge.number}: {summary.pre_merge.title}")
     print(f"url: {summary.pre_merge.url}")
-    print("mode: dry-run (no GitHub merge mutation will be performed)")
+    if summary.dry_run:
+        print("mode: dry-run (no GitHub merge mutation will be performed)")
+    else:
+        print("mode: execute (GitHub merge mutation requires all fresh gates to pass)")
     print(f"selected method: {summary.method}")
     print(f"base branch: {summary.pre_merge.base_ref_name or 'unknown'}")
     print(f"head sha: {summary.pre_merge.head_ref_oid or 'unknown'}")
     print(f"approval source: {summary.pre_merge.approval.approval_source or 'none'}")
     print(f"satisfied by: {summary.pre_merge.approval.satisfied_by or 'none'}")
     print(f"would merge: {str(summary.would_merge).lower()}")
+    if summary.merge_result is not None:
+        print(f"merge command: {' '.join(summary.merge_result.command)}")
+        print(f"merge command return code: {summary.merge_result.returncode}")
+        if summary.merge_result.stdout:
+            print(f"merge stdout: {summary.merge_result.stdout}")
+        if summary.merge_result.stderr:
+            print(f"merge stderr: {summary.merge_result.stderr}")
+    if summary.post_merge is not None:
+        print(f"post-merge state: {summary.post_merge.state}")
+        print(f"post-merge verified merged: {str(summary.post_merge.merged).lower()}")
     if summary.blocking_reasons:
         print("blocking reasons:")
         for reason in summary.blocking_reasons:
             print(f"- {reason}")
-    return 0 if summary.would_merge else 1
+    return 0 if summary.execution_succeeded else 1
 
 
 def _fetch_pre_merge_summary(target: str | None, *, repo: str | None):
@@ -480,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         return _print_merge_owner(args.target, repo=args.repo, args=args)
 
     if args.command == "merge-pr":
-        return _print_merge_pr(args.target, repo=args.repo, method=args.method, as_json=args.json)
+        return _print_merge_pr(args.target, repo=args.repo, method=args.method, execute=args.execute, as_json=args.json)
 
     if args.command == "unresolved-review-threads":
         return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)
