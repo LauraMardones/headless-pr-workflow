@@ -1,7 +1,9 @@
 import json
 
+import headless_pr_workflow.merge_pr as merge_pr_module
 from headless_pr_workflow import cli
 from headless_pr_workflow.github import GHCommandError, RequiredStatusChecks
+from headless_pr_workflow.merge_pr import MergeCommandResult
 
 from tests.github_scenarios import (
     build_check,
@@ -364,6 +366,155 @@ def test_merge_pr_refuses_unacceptable_mergeability(monkeypatch, capsys):
     assert exit_code == 1
     output = json.loads(capsys.readouterr().out)
     assert "PR mergeable state is UNKNOWN." in output["blocking_reasons"]
+
+
+def test_run_github_merge_constructs_match_head_command(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = "merged"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(merge_pr_module.subprocess, "run", fake_run)
+
+    result = merge_pr_module.run_github_merge(number=123, repo="owner/repo", method="squash", head_sha="head123")
+
+    assert result.ok is True
+    assert result.command == (
+        "gh",
+        "pr",
+        "merge",
+        "123",
+        "--repo",
+        "owner/repo",
+        "--squash",
+        "--match-head-commit",
+        "head123",
+    )
+    assert captured["command"] == list(result.command)
+    assert captured["kwargs"]["check"] is False
+
+
+def test_merge_pr_execute_refuses_before_mutation_when_readiness_blocks(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_draft_pr(head_ref_oid="head123"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    def fail_merge(**kwargs):
+        raise AssertionError("merge subprocess should not run when readiness fails")
+
+    monkeypatch.setattr(cli, "run_github_merge", fail_merge)
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--execute", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["mode"] == "execute"
+    assert output["mutation_attempted"] is False
+    assert output["merge_command"] is None
+    assert "PR is draft." in output["blocking_reasons"]
+
+
+def test_merge_pr_execute_passes_fresh_head_sha_to_merge(monkeypatch, capsys):
+    contexts = iter(
+        (
+            scenario_current_approval(head_sha="fresh-head"),
+            with_context(scenario_current_approval(head_sha="fresh-head"), state="MERGED", raw={"merged": True}),
+        )
+    )
+    merge_calls = []
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: next(contexts))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    def fake_merge(**kwargs):
+        merge_calls.append(kwargs)
+        return MergeCommandResult(
+            command=("gh", "pr", "merge", "123", "--repo", "owner/repo", "--rebase", "--match-head-commit", kwargs["head_sha"]),
+            returncode=0,
+            stdout="merged",
+            stderr="",
+        )
+
+    monkeypatch.setattr(cli, "run_github_merge", fake_merge)
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--method", "rebase", "--execute", "--json"])
+
+    assert exit_code == 0
+    assert merge_calls == [{"number": 123, "repo": "owner/repo", "method": "rebase", "head_sha": "fresh-head"}]
+    output = json.loads(capsys.readouterr().out)
+    assert output["dry_run"] is False
+    assert output["mutation_attempted"] is True
+    assert output["merged"] is True
+    assert output["merge_command"]["command"][-2:] == ["--match-head-commit", "fresh-head"]
+    assert output["post_merge_verification"]["merged"] is True
+
+
+def test_merge_pr_execute_reports_github_merge_failure(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_current_approval(head_sha="head123"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+    monkeypatch.setattr(
+        cli,
+        "run_github_merge",
+        lambda **kwargs: MergeCommandResult(
+            command=("gh", "pr", "merge", "123", "--merge", "--match-head-commit", "head123"),
+            returncode=1,
+            stdout="",
+            stderr="head sha did not match",
+        ),
+    )
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--execute", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["mutation_attempted"] is True
+    assert output["merge_command"]["returncode"] == 1
+    assert output["merge_command"]["stderr"] == "head sha did not match"
+    assert output["post_merge_verification"] is None
+    assert "GitHub merge command failed." in output["blocking_reasons"]
+
+
+def test_merge_pr_execute_fails_when_post_merge_verification_is_not_merged(monkeypatch, capsys):
+    contexts = iter(
+        (
+            scenario_current_approval(head_sha="head123"),
+            with_context(scenario_current_approval(head_sha="head123"), state="CLOSED", raw={"merged": False}),
+        )
+    )
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: next(contexts))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+    monkeypatch.setattr(
+        cli,
+        "run_github_merge",
+        lambda **kwargs: MergeCommandResult(
+            command=("gh", "pr", "merge", "123", "--merge", "--match-head-commit", "head123"),
+            returncode=0,
+            stdout="merged",
+            stderr="",
+        ),
+    )
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--execute", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["merge_command"]["ok"] is True
+    assert output["post_merge_verification"]["merged"] is False
+    assert output["post_merge_verification"]["state"] == "CLOSED"
+    assert "GitHub does not report PR as merged (state=CLOSED)." in output["blocking_reasons"]
 
 
 def test_target_branch_check_json_output_passes_for_matching_default_branch(monkeypatch, capsys):
