@@ -34,7 +34,7 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 
 - The repository has no available independent GitHub approver.
 - Review was performed in a separate session from the session that implemented the reviewed head SHA.
-- The review is recorded on GitHub against the current head SHA.
+- The review is recorded on GitHub against the current head SHA as a PR review submission summary.
 - The review summary explicitly states that no blockers remain for that exact head SHA.
 - For automation, the GitHub review summary should include `solo-maintainer override accepted` and `no blockers remain for <head-sha>`.
 - The review summary should explicitly say when formal GitHub approval is unavailable and that the solo-maintainer override is the approval to rely on for the current head SHA.
@@ -44,11 +44,11 @@ A solo-maintainer override may substitute for formal GitHub approval only when a
 - Required CI/checks have completed successfully for the current head SHA.
 - Optional adapter gates are passing, absent by policy, or explicitly waived in GitHub.
 
-This override is a bootstrap/solo-maintainer exception, not the default approval path. It must be visible in GitHub history and must not be used when an independent GitHub approver is available.
+This override is a bootstrap/solo-maintainer exception, not the default approval path. It must be visible in GitHub history and must not be used when an independent GitHub approver is available. The expected GitHub evidence surface is the PR review submission summary attached to the reviewed head SHA. A top-level issue or PR conversation comment is not the default or preferred place for this override evidence because it is not the same SHA-bound review submission surface.
 
 A PR may be reviewed while draft, but neither formal approval nor a solo-maintainer override may be relied on for merge until the PR is marked Ready for review. When a review session determines that no blockers remain, the reviewer should mark the PR Ready for review before issuing the final approval or solo-maintainer override summary.
 
-Recommended review summary template:
+Recommended PR review summary template:
 
 ```text
 Reviewed head SHA `<head-sha>`.
@@ -61,6 +61,8 @@ Formal GitHub approval is unavailable because no independent GitHub approver is 
 
 This solo-maintainer override is the approval to rely on for the current head SHA.
 ```
+
+Review-evidence tooling may inspect normalized review data from GraphQL surfaces such as `latestReviews` and `reviews`. Those fields are discovery surfaces for PR review submissions; references to them do not make issue comments an equivalent policy surface for solo-maintainer override evidence.
 
 ## SHA-Bound Approval
 
