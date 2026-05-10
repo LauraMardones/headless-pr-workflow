@@ -183,7 +183,7 @@ def _looks_like_override(body: str) -> bool:
     return "solo-maintainer override" in body.lower()
 
 
-def _is_accepted_override(review: ReviewSummary, *, head_sha: str) -> bool:
+def is_accepted_solo_maintainer_override(review: ReviewSummary, *, head_sha: str) -> bool:
     if review.state != "COMMENTED" or review.commit_oid != head_sha:
         return False
 
@@ -194,6 +194,10 @@ def _is_accepted_override(review: ReviewSummary, *, head_sha: str) -> bool:
         and "approval to rely on for the current head sha" in body
         and "no independent github approver is available" in body
     )
+
+
+def _is_accepted_override(review: ReviewSummary, *, head_sha: str) -> bool:
+    return is_accepted_solo_maintainer_override(review, head_sha=head_sha)
 
 
 def _blocking_reason(approval_status: str, override_status: str, latest_review_state: str | None) -> str:

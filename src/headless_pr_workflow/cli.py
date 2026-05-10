@@ -24,6 +24,7 @@ from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
 from .pre_merge import summarize_pre_merge
 from .re_review_needed import summarize_re_review_needed
+from .review_delta import comparison_failure_summary, fetch_commit_comparison, select_review_delta_baseline, summarize_review_delta
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
 
@@ -233,6 +234,74 @@ def _print_re_review_needed(target: str | None, *, repo: str | None, as_json: bo
             print(f"- {reason}")
     print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
     return 0 if summary.hard_gate_passed else 1
+
+
+def _print_review_delta(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    baseline = select_review_delta_baseline(context)
+    comparison = None
+    if baseline is not None and baseline.sha != context.head_ref_oid:
+        repo_name = repo or context.head_repository
+        if not repo_name:
+            summary = comparison_failure_summary(context, "missing-repository")
+            _print_review_delta_summary(summary, as_json=as_json)
+            return 1
+        try:
+            comparison = fetch_commit_comparison(repo_name, baseline.sha, context.head_ref_oid)
+        except GHCommandError as error:
+            summary = comparison_failure_summary(context, error.error)
+            if as_json:
+                payload = summary.to_dict()
+                payload["command"] = error.command
+                payload["returncode"] = error.returncode
+                payload["stderr"] = error.stderr
+                print(json.dumps(payload, indent=2))
+            else:
+                _print_review_delta_summary(summary, as_json=False)
+                print(error, file=sys.stderr)
+            return 1
+
+    summary = summarize_review_delta(context, comparison)
+    _print_review_delta_summary(summary, as_json=as_json)
+    return 0 if summary.report_generated else 1
+
+
+def _print_review_delta_summary(summary, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"repository: {summary.repository or 'unknown'}")
+    print(f"baseline sha: {summary.baseline.sha if summary.baseline else 'none'}")
+    print(f"baseline source: {summary.baseline.source if summary.baseline else 'none'}")
+    print(f"baseline review state: {summary.baseline.review_state if summary.baseline else 'none'}")
+    print(f"baseline review author: {summary.baseline.review_author if summary.baseline else 'none'}")
+    print(f"current head sha: {summary.current_head_sha or 'unknown'}")
+    print(f"head ref: {summary.head_ref_name or 'unknown'}")
+    print(f"delta exists: {str(summary.delta_exists).lower()}")
+    print(f"status: {summary.status}")
+    if summary.changed_file_count is not None:
+        print(f"changed files: {summary.changed_file_count}")
+    if summary.additions is not None:
+        print(f"additions: {summary.additions}")
+    if summary.deletions is not None:
+        print(f"deletions: {summary.deletions}")
+    if summary.files:
+        print("files:")
+        for file in summary.files:
+            additions = "unknown" if file.additions is None else str(file.additions)
+            deletions = "unknown" if file.deletions is None else str(file.deletions)
+            print(f"- {file.path} ({file.status or 'unknown'}, +{additions}/-{deletions})")
+    if summary.messages:
+        print("messages:")
+        for message in summary.messages:
+            print(f"- {message}")
 
 
 def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> int:
@@ -544,6 +613,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "re-review-needed":
         return _print_re_review_needed(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "review-delta":
+        return _print_review_delta(args.target, repo=args.repo, as_json=args.json)
 
     if args.command == "ci-summary":
         return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)
