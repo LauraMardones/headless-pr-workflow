@@ -83,7 +83,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `prompt-version-check.sh` | Depends on repo-specific prompt docs and code paths. |
 | `events-contract-check.sh` | Depends on repo-specific event contracts. |
 | `determinism-check.sh` | Depends on project-specific forbidden AI/runtime boundaries. |
-| `human-gate-check.sh` | Depends on repo-specific manual approval policy. |
+| `human-gate-check.sh` | Depends on project-specific manual approval policy. |
 | `protected-files.sh` | Depends on repo-specific protected path rules. |
 | `mandatory-docs.sh` | Depends on repo-specific documentation policy. |
 | `contract-drift.sh` | Depends on repo-specific contract model. |
