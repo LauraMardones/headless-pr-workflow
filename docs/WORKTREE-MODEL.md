@@ -45,6 +45,8 @@ At session start:
 - Confirm whether the current worktree has uncommitted or unpushed changes.
 - Determine next action from GitHub state.
 
+`hpw worktree-status [path]` is the read-only local-state report for these checks. It inspects the Git worktree containing the supplied path, reports branch, HEAD, upstream, ahead/behind, dirty-state, unpushed commit, and linked-worktree facts, and does not fetch or mutate local or GitHub state. Ahead/behind counts are relative to the local upstream tracking ref and may be stale until another command performs an explicit fetch.
+
 ## Cleanup
 
 Worktrees can be cleaned when:
