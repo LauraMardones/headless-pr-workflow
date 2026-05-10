@@ -23,6 +23,7 @@ from .github import (
 from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
 from .pre_merge import summarize_pre_merge
+from .re_review_needed import summarize_re_review_needed
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
 
@@ -194,6 +195,38 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
     print(f"override review sha: {summary.solo_override.review_commit_oid or 'none'}")
     print(f"approval source: {summary.approval_source or 'none'}")
     print(f"satisfied by: {summary.satisfied_by or 'none'}")
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"- {reason}")
+    print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
+    return 0 if summary.hard_gate_passed else 1
+
+
+def _print_re_review_needed(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    summary = summarize_re_review_needed(context)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.hard_gate_passed else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"head sha: {summary.head_ref_oid or 'unknown'}")
+    print(f"latest review sha: {summary.latest_review_sha or 'none'}")
+    print(f"latest review state: {summary.latest_review_state or 'none'}")
+    print(f"latest review author: {summary.latest_review_author or 'none'}")
+    print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
+    print(f"approval status: {summary.approval_status}")
+    print(f"solo-maintainer override: {summary.solo_override.status}")
+    print(f"approval source: {summary.approval_source or 'none'}")
+    print(f"satisfied by: {summary.satisfied_by or 'none'}")
+    print(f"re-review needed: {str(summary.re_review_needed).lower()}")
     if summary.blocking_reasons:
         print("blocking reasons:")
         for reason in summary.blocking_reasons:
@@ -508,6 +541,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "approval-check":
         return _print_approval_check(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "re-review-needed":
+        return _print_re_review_needed(args.target, repo=args.repo, as_json=args.json)
 
     if args.command == "ci-summary":
         return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)

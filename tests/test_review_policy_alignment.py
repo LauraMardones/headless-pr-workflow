@@ -2,6 +2,7 @@ import pytest
 
 from headless_pr_workflow.approval_check import summarize_approval_check
 from headless_pr_workflow.pre_merge import summarize_pre_merge
+from headless_pr_workflow.re_review_needed import summarize_re_review_needed
 from headless_pr_workflow.review_sha import summarize_review_sha
 
 from tests.github_scenarios import (
@@ -64,24 +65,33 @@ def test_review_gate_truth_stays_aligned_across_commands(
 ):
     review_sha = summarize_review_sha(context)
     approval = summarize_approval_check(context)
+    re_review = summarize_re_review_needed(context)
     pre_merge = summarize_pre_merge(context, expected_base_ref_name="main", required_check_names=())
     approval_gate = next(check for check in pre_merge.checks if check.code == "approval-current-head")
 
     assert review_sha.approval_status == expected_approval_status
     assert approval.approval_status == expected_approval_status
+    assert re_review.approval_status == expected_approval_status
     assert approval.solo_override.status == expected_override_status
+    assert re_review.solo_override.status == expected_override_status
 
     assert review_sha.hard_gate_passed is expected_hard_gate
     assert approval.hard_gate_passed is expected_hard_gate
+    assert re_review.hard_gate_passed is expected_hard_gate
+    assert re_review.re_review_needed is (not expected_hard_gate)
     assert pre_merge.approval.hard_gate_passed is expected_hard_gate
     assert approval_gate.ok is expected_hard_gate
 
     if expected_blocking_reason is None:
         assert approval.blocking_reason is None
         assert approval.blocking_reasons == ()
+        assert re_review.blocking_reason is None
+        assert re_review.blocking_reasons == ()
         assert approval_gate.details == ()
     else:
         assert approval.blocking_reason == expected_blocking_reason
         assert approval.blocking_reasons == (expected_blocking_reason,)
+        assert re_review.blocking_reason == expected_blocking_reason
+        assert re_review.blocking_reasons == (expected_blocking_reason,)
         assert expected_blocking_reason in pre_merge.blocking_reasons
         assert approval_gate.details == (expected_blocking_reason,)
