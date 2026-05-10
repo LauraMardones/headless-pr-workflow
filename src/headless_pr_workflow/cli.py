@@ -26,6 +26,7 @@ from .pre_merge import summarize_pre_merge
 from .re_review_needed import summarize_re_review_needed
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
+from .worktree_status import summarize_worktree_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -517,6 +518,53 @@ def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
     return 1
 
 
+def _print_worktree_status(target: str | None, *, as_json: bool) -> int:
+    summary = summarize_worktree_status(target)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.ok else 1
+
+    if not summary.ok:
+        message = summary.error["message"] if summary.error else "unable to inspect local Git state"
+        print(f"worktree-status: {message}", file=sys.stderr)
+        return 1
+
+    print(f"repository root: {summary.repository_root}")
+    print(f"worktree path: {summary.worktree_path}")
+    if summary.branch.detached:
+        print(f"branch: detached HEAD ({summary.head_sha or 'unknown'})")
+    else:
+        print(f"branch: {summary.branch.name or 'unknown'}")
+        print(f"head sha: {summary.head_sha or 'none'}")
+    print(f"upstream: {summary.branch.upstream or 'none'}")
+    print(f"upstream sha: {summary.branch.upstream_sha or 'none'}")
+    if summary.branch.ahead is None or summary.branch.behind is None:
+        print("ahead/behind: unavailable")
+    else:
+        print(f"ahead/behind: {summary.branch.ahead} ahead, {summary.branch.behind} behind")
+        print("tracking caveat: ahead/behind counts may be stale until fetch")
+    print(
+        "changes: "
+        f"{len(summary.status.staged)} staged, "
+        f"{len(summary.status.unstaged)} unstaged, "
+        f"{len(summary.status.untracked)} untracked, "
+        f"{len(summary.status.conflicted)} conflicted"
+    )
+    print(f"unpushed commits: {len(summary.unpushed_commits)}")
+    if summary.branch_in_use_by_other_worktree is True:
+        print("linked worktree warning: current branch is checked out by another linked worktree")
+    elif summary.branch_in_use_by_other_worktree is False:
+        print("linked worktree warning: none")
+    else:
+        print("linked worktree warning: not determinable")
+    if summary.warnings:
+        print("warnings:")
+        for warning in summary.warnings:
+            print(f"- {warning}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -567,6 +615,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "unresolved-review-threads":
         return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "worktree-status":
+        return _print_worktree_status(args.target, as_json=args.json)
 
     return _print_scaffold(args.command, args.target, args.json)
 
