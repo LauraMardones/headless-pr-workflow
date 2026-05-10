@@ -36,7 +36,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `review-sha` | Report current head SHA and approval SHA relationship. | reviewer, implementer | P0-blocking | F-review | hard-gate | core | implemented |
 | `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | implemented |
 | `re-review-needed` | Detect whether new commits require review re-evaluation. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |
-| `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P2-medium | F-review | report | core | scaffolded |
+| `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P1-high | F-review | report | core | implemented |
 | `unresolved-review-threads` | Detect unresolved GitHub review threads. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |
 | `blocking-comments` | Detect blocking review comments or labels. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
 | `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | implemented |
