@@ -32,7 +32,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 |---|---|---|---|---|---|---|---|
 | `pr-context` | Fetch complete current PR context from GitHub. | all | P1-high | C-session | report | core | implemented |
 | `pr-takeover` | Produce safe takeover context for a PR. | implementer, orchestrator | P1-high | C-session | action | core | scaffolded |
-| `worktree-status` | Report local worktrees, branches, and dirty state. | all | P1-high | C-session | report | core | scaffolded |
+| `worktree-status` | Report local worktrees, branches, and dirty state. | all | P1-high | C-session | report | core | implemented |
 | `review-sha` | Report current head SHA and approval SHA relationship. | reviewer, implementer | P0-blocking | F-review | hard-gate | core | implemented |
 | `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | implemented |
 | `re-review-needed` | Detect whether new commits require review re-evaluation. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |
@@ -83,7 +83,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `prompt-version-check.sh` | Depends on repo-specific prompt docs and code paths. |
 | `events-contract-check.sh` | Depends on repo-specific event contracts. |
 | `determinism-check.sh` | Depends on project-specific forbidden AI/runtime boundaries. |
-| `human-gate-check.sh` | Depends on project-specific manual approval policy. |
+| `human-gate-check.sh` | Depends on repo-specific manual approval policy. |
 | `protected-files.sh` | Depends on repo-specific protected path rules. |
 | `mandatory-docs.sh` | Depends on repo-specific documentation policy. |
 | `contract-drift.sh` | Depends on repo-specific contract model. |
