@@ -207,7 +207,7 @@ def _git(path: str, *args: str) -> str:
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         raise GitCommandError(command=command, returncode=result.returncode, stderr=result.stderr.strip())
-    return result.stdout.strip()
+    return result.stdout.rstrip("\n")
 
 
 def _git_optional(path: str, *args: str) -> str | None:
