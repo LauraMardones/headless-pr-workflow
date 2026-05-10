@@ -28,6 +28,7 @@ from .re_review_needed import summarize_re_review_needed
 from .review_delta import comparison_failure_summary, fetch_commit_comparison, select_review_delta_baseline, summarize_review_delta
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
+from .workflow_status import summarize_workflow_status
 from .worktree_status import summarize_worktree_status
 
 
@@ -77,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "Perform the GitHub merge after fresh readiness gates pass. "
                     "No --admin, --auto, or branch deletion behavior is supported."
                 ),
+            )
+        if command.name == "workflow-status":
+            command_parser.add_argument(
+                "--path",
+                help="Local worktree path to inspect. Defaults to current working directory.",
             )
 
     return parser
@@ -683,6 +689,166 @@ def _print_unresolved_review_threads(target: str | None, *, repo: str | None, as
     return 0 if summary.hard_gate_passed else 1
 
 
+def _print_workflow_status(target: str | None, *, repo: str | None, as_json: bool, path: str | None) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+        expected_base_ref_name = fetch_repo_default_branch(repo=repo)
+        required_checks = fetch_required_status_check_context(repo or context.head_repository or "", expected_base_ref_name)
+        raw_threads = fetch_review_threads_for_context(context, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    repository = repo or context.head_repository
+    approval = summarize_approval_check(context)
+    re_review = summarize_re_review_needed(context)
+    ci = summarize_ci(context, required_checks=required_checks)
+    review_threads = summarize_review_threads(context, raw_threads)
+    merge_readiness = summarize_pre_merge(
+        context,
+        expected_base_ref_name=expected_base_ref_name,
+        required_checks=required_checks,
+        review_threads=review_threads,
+    )
+    local_state = summarize_worktree_status(path)
+
+    if not local_state.ok:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "command": "workflow-status",
+                        "ok": False,
+                        "errors": local_state.error or {"message": "Unable to inspect local Git state."},
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            message = local_state.error["message"] if local_state.error else "unable to inspect local Git state"
+            print(f"workflow-status: local worktree inspection failed: {message}", file=sys.stderr)
+        return 1
+
+    summary = summarize_workflow_status(
+        context,
+        repository=repository,
+        approval=approval,
+        re_review=re_review,
+        ci=ci,
+        review_threads=review_threads,
+        merge_readiness=merge_readiness,
+        local_state=local_state,
+    )
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0
+
+    ctx = summary.context
+    counts = ctx.check_counts
+
+    print(f"PR #{ctx.number}: {ctx.title}")
+    print(f"url: {ctx.url}")
+    print(f"state: {ctx.state}")
+    print(f"draft: {str(ctx.is_draft).lower()}")
+    print(f"base: {ctx.base_ref_name}")
+    print(f"head: {ctx.head_ref_name} ({ctx.head_ref_oid})")
+    if repository:
+        print(f"repository: {repository}")
+    if ctx.labels:
+        print(f"labels: {', '.join(ctx.labels)}")
+    if ctx.review_requests:
+        print(f"review requests: {', '.join(ctx.review_requests)}")
+    print()
+
+    print("[local worktree]")
+    ls = summary.local_state
+    print(f"repository root: {ls.repository_root or 'unknown'}")
+    print(f"worktree path: {ls.worktree_path or 'unknown'}")
+    if ls.branch.detached:
+        print(f"branch: detached HEAD ({ls.head_sha or 'unknown'})")
+    else:
+        print(f"branch: {ls.branch.name or 'unknown'}")
+        print(f"local head sha: {ls.head_sha or 'none'}")
+    print(f"upstream: {ls.branch.upstream or 'none'}")
+    if ls.branch.ahead is None or ls.branch.behind is None:
+        print("ahead/behind: unavailable (stale tracking data)")
+    else:
+        print(f"ahead/behind: {ls.branch.ahead} ahead, {ls.branch.behind} behind (may be stale until fetch)")
+    print(
+        "changes: "
+        f"{len(ls.status.staged)} staged, "
+        f"{len(ls.status.unstaged)} unstaged, "
+        f"{len(ls.status.untracked)} untracked, "
+        f"{len(ls.status.conflicted)} conflicted"
+    )
+    print(f"unpushed commits: {len(ls.unpushed_commits)}")
+    print()
+
+    print("[github truth]")
+    print(f"approval status: {approval.approval_status}")
+    print(f"latest review sha: {approval.latest_review_sha or 'none'}")
+    print(f"latest approval sha: {approval.latest_approval_sha or 'none'}")
+    print(f"solo-maintainer override: {approval.solo_override.status}")
+    print(f"approval source: {approval.approval_source or 'none'}")
+    print(f"satisfied by: {approval.satisfied_by or 'none'}")
+    re_review_needed = re_review.re_review_needed
+    print(f"re-review needed: {str(re_review_needed).lower()}")
+    if approval.blocking_reasons:
+        print("approval blocking reasons:")
+        for reason in approval.blocking_reasons:
+            print(f"- {reason}")
+    print()
+
+    print(f"status rollup: {ci.status_rollup}")
+    print(f"required checks: {ci.required_check_status}")
+    print(
+        "checks: "
+        f"{counts['success']} success, "
+        f"{counts['failure']} failure, "
+        f"{counts['pending']} pending, "
+        f"{counts['skipped']} skipped, "
+        f"{counts['unknown']} unknown"
+    )
+    if ci.messages:
+        for message in ci.messages:
+            print(f"- {message}")
+    print()
+
+    thread_counts = review_threads.thread_counts
+    print(
+        "review threads: "
+        f"{thread_counts['unresolved_blocking']} active unresolved, "
+        f"{thread_counts['resolved']} resolved, "
+        f"{thread_counts['outdated_or_superseded']} outdated/superseded"
+    )
+    print()
+
+    print(f"merge readiness: {'pass' if merge_readiness.hard_gate_passed else 'blocked'}")
+    print(f"mergeable: {ctx.mergeable or 'unknown'}")
+    if merge_readiness.blocking_reasons:
+        print("merge blocking reasons:")
+        for reason in merge_readiness.blocking_reasons:
+            print(f"- {reason}")
+    print()
+
+    posture = summary.workflow_posture
+    print(f"workflow posture: {posture.status}")
+    print(f"posture summary: {posture.summary}")
+    if posture.reasons:
+        print("posture reasons:")
+        for reason in posture.reasons:
+            print(f"- {reason}")
+    print(f"posture sources: {', '.join(posture.source_commands)}")
+
+    if summary.warnings:
+        print()
+        print("warnings:")
+        for warning in summary.warnings:
+            print(f"- {warning}")
+
+    return 0
+
+
 def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
     if as_json:
         print(
@@ -808,6 +974,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "worktree-status":
         return _print_worktree_status(args.target, as_json=args.json)
+
+    if args.command == "workflow-status":
+        return _print_workflow_status(
+            args.target,
+            repo=args.repo,
+            as_json=args.json,
+            path=args.path,
+        )
 
     return _print_scaffold(args.command, args.target, args.json)
 

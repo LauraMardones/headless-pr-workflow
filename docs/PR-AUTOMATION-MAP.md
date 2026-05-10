@@ -46,7 +46,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `merge-pr` | Dry-run merge after fresh pre-merge gates pass. | merge-owner | P0-blocking | H-merge | action | core | implemented |
 | `post-merge-sync` | Sync local state after merge. | merge-owner, implementer | P1-high | I-post-merge | action | core | scaffolded |
 | `branch-cleanup` | Remove stale merged local branches when safe. | implementer | P2-medium | I-post-merge | action | core | scaffolded |
-| `workflow-status` | Summarize PR state and next action. | orchestrator | P1-high | C-session | report | core | scaffolded |
+| `workflow-status` | Summarize PR state and next action. | orchestrator | P1-high | C-session | report | core | implemented |
 | `next-action` | Suggest exact next safe workflow action. | orchestrator | P1-high | C-session | advisory | core | scaffolded |
 
 ## Generic But Renamed
