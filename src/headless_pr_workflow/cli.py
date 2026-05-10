@@ -23,6 +23,7 @@ from .github import (
 from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
 from .pre_merge import summarize_pre_merge
+from .pr_takeover import summarize_pr_takeover
 from .re_review_needed import summarize_re_review_needed
 from .review_delta import comparison_failure_summary, fetch_commit_comparison, select_review_delta_baseline, summarize_review_delta
 from .review_sha import summarize_review_sha
@@ -303,6 +304,120 @@ def _print_review_delta_summary(summary, *, as_json: bool) -> None:
         print("messages:")
         for message in summary.messages:
             print(f"- {message}")
+
+
+def _print_pr_takeover(target: str | None, *, repo: str | None, as_json: bool) -> int:
+    try:
+        context = fetch_pr_context(target, repo=repo)
+        expected_base_ref_name = fetch_repo_default_branch(repo=repo)
+        required_checks = fetch_required_status_check_context(repo or context.head_repository or "", expected_base_ref_name)
+        raw_threads = fetch_review_threads_for_context(context, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    repository = repo or context.head_repository
+    approval = summarize_approval_check(context)
+    ci = summarize_ci(context, required_checks=required_checks)
+    review_threads = summarize_review_threads(context, raw_threads)
+    merge_readiness = summarize_pre_merge(
+        context,
+        expected_base_ref_name=expected_base_ref_name,
+        required_checks=required_checks,
+        review_threads=review_threads,
+    )
+    summary = summarize_pr_takeover(
+        context,
+        repository=repository,
+        approval=approval,
+        ci=ci,
+        review_threads=review_threads,
+        merge_readiness=merge_readiness,
+    )
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0
+
+    ctx = summary.context
+    counts = ctx.check_counts
+    print(f"PR #{ctx.number}: {ctx.title}")
+    print(f"url: {ctx.url}")
+    print(f"state: {ctx.state}")
+    print(f"draft: {str(ctx.is_draft).lower()}")
+    print(f"base: {ctx.base_ref_name}")
+    print(f"head: {ctx.head_ref_name} ({ctx.head_ref_oid})")
+    if repository:
+        print(f"repository: {repository}")
+    if ctx.labels:
+        print(f"labels: {', '.join(ctx.labels)}")
+    if ctx.review_requests:
+        print(f"review requests: {', '.join(ctx.review_requests)}")
+    print()
+
+    print(f"approval status: {approval.approval_status}")
+    print(f"latest review sha: {approval.latest_review_sha or 'none'}")
+    print(f"latest approval sha: {approval.latest_approval_sha or 'none'}")
+    print(f"solo-maintainer override: {approval.solo_override.status}")
+    print(f"approval source: {approval.approval_source or 'none'}")
+    print(f"satisfied by: {approval.satisfied_by or 'none'}")
+    re_review_needed = not approval.hard_gate_passed
+    print(f"re-review needed: {str(re_review_needed).lower()}")
+    if approval.blocking_reasons:
+        print("approval blocking reasons:")
+        for reason in approval.blocking_reasons:
+            print(f"- {reason}")
+    print()
+
+    print(f"status rollup: {ci.status_rollup}")
+    print(f"required checks: {ci.required_check_status}")
+    print(
+        "checks: "
+        f"{counts['success']} success, "
+        f"{counts['failure']} failure, "
+        f"{counts['pending']} pending, "
+        f"{counts['skipped']} skipped, "
+        f"{counts['unknown']} unknown"
+    )
+    if ci.messages:
+        for message in ci.messages:
+            print(f"- {message}")
+    print()
+
+    thread_counts = review_threads.thread_counts
+    print(
+        "review threads: "
+        f"{thread_counts['unresolved_blocking']} active unresolved, "
+        f"{thread_counts['resolved']} resolved, "
+        f"{thread_counts['outdated_or_superseded']} outdated/superseded"
+    )
+    print()
+
+    print(f"merge readiness: {'pass' if merge_readiness.hard_gate_passed else 'blocked'}")
+    if merge_readiness.blocking_reasons:
+        print("merge blocking reasons:")
+        for reason in merge_readiness.blocking_reasons:
+            print(f"- {reason}")
+    print()
+
+    na = summary.next_action
+    print(f"next action: {na.action_class}")
+    print(f"summary: {na.summary}")
+    if na.reasons:
+        print("reasons:")
+        for reason in na.reasons:
+            print(f"- {reason}")
+    if na.follow_up_commands:
+        print("suggested follow-up commands:")
+        for cmd in na.follow_up_commands:
+            print(f"- {cmd}")
+
+    if summary.warnings:
+        print()
+        print("warnings:")
+        for warning in summary.warnings:
+            print(f"- {warning}")
+
+    return 0
 
 
 def _print_pre_merge(target: str | None, *, repo: str | None, as_json: bool) -> int:
@@ -652,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
             as_json=args.json,
             include_raw=args.include_raw,
         )
+
+    if args.command == "pr-takeover":
+        return _print_pr_takeover(args.target, repo=args.repo, as_json=args.json)
 
     if args.command == "review-sha":
         return _print_review_sha(args.target, repo=args.repo, as_json=args.json)

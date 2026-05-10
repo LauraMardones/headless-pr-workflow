@@ -31,7 +31,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | Command | Description | Role | Priority | Phase | Type | Layer | Status |
 |---|---|---|---|---|---|---|---|
 | `pr-context` | Fetch complete current PR context from GitHub. | all | P1-high | C-session | report | core | implemented |
-| `pr-takeover` | Produce safe takeover context for a PR. | implementer, orchestrator | P1-high | C-session | action | core | scaffolded |
+| `pr-takeover` | Produce safe takeover context for a PR. | implementer, orchestrator | P1-high | C-session | action | core | implemented |
 | `worktree-status` | Report local worktrees, branches, and dirty state. | all | P1-high | C-session | report | core | implemented |
 | `review-sha` | Report current head SHA and approval SHA relationship. | reviewer, implementer | P0-blocking | F-review | hard-gate | core | implemented |
 | `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | implemented |

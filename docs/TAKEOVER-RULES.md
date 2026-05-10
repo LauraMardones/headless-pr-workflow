@@ -10,6 +10,17 @@ Takeover is the process of continuing PR work from a different assistant, sessio
 - Takeover must not assume approval is still valid.
 - Takeover must identify whether the next action is implementation, review, merge, or human decision.
 
+## Takeover Command
+
+Run `hpw pr-takeover <pr> --repo <owner/repo>` to produce a complete takeover context from GitHub state. The command:
+
+- Fetches fresh PR context, approval state, CI status, and review threads.
+- Reports PR identity, draft status, approval state, re-review evidence, check rollup, and unresolved thread counts.
+- Recommends exactly one next action class: `implementation`, `review`, `merge`, or `human_decision`.
+- Emits deterministic JSON for downstream orchestration via `--json`.
+
+Use `hpw pr-takeover <pr> --repo <owner/repo>` as the first step in any takeover session. It does not require prior chat history, local branches, or assistant memory.
+
 ## Required Takeover Steps
 
 Before acting on a PR, a takeover session must:
@@ -22,6 +33,8 @@ Before acting on a PR, a takeover session must:
 6. Check whether new commits exist after approval.
 7. Identify the last implementation source when known.
 8. Select the next safe action.
+
+Use `hpw pr-takeover` to perform all of the above steps in one command.
 
 ## Implementation Takeover
 
