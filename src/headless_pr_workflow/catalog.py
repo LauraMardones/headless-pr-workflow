@@ -34,7 +34,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("post-merge-sync", "Sync local state after merge.", "P1-high", "I-post-merge", "action", "core"),
     CommandSpec("branch-cleanup", "Remove stale merged local branches when safe.", "P2-medium", "I-post-merge", "action", "core"),
     CommandSpec("workflow-status", "Summarize PR state and next action.", "P1-high", "C-session", "report", "core", "implemented"),
-    CommandSpec("next-action", "Suggest exact next safe workflow action.", "P1-high", "C-session", "advisory", "core"),
+    CommandSpec("next-action", "Suggest exact next safe workflow action.", "P1-high", "C-session", "advisory", "core", "implemented"),
 )
 
 
