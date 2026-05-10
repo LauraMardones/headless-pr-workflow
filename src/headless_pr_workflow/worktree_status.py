@@ -282,13 +282,14 @@ def _unpushed_commits(path: str, *, has_head: bool, has_upstream: bool) -> tuple
     if not has_head or not has_upstream:
         return ()
     output = _git_optional(path, "log", "--format=%H%x00%s", "@{upstream}..HEAD")
-    if output is None:
+    if not output:
         return ()
-    parts = output.split("\0") if output else []
     commits: list[UnpushedCommit] = []
-    for index in range(0, len(parts) - 1, 2):
-        sha = parts[index].strip()
-        subject = parts[index + 1].strip()
+    for line in output.splitlines():
+        if "\0" not in line:
+            continue
+        sha, _, subject = line.partition("\0")
+        sha = sha.strip()
         if sha:
             commits.append(UnpushedCommit(sha=sha, subject=subject))
     return tuple(commits)

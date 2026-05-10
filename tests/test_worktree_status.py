@@ -141,6 +141,23 @@ def test_unpushed_commit_and_stale_tracking_counts_use_local_tracking_ref(tmp_pa
     assert STALE_TRACKING_WARNING in summary.warnings
 
 
+def test_multiple_unpushed_commits_are_all_reported_with_correct_subjects(tmp_path):
+    repo, _remote = setup_tracking_repo(tmp_path)
+    sha1 = commit_file(repo, "a.txt", "a\n", "first unpushed")
+    sha2 = commit_file(repo, "b.txt", "b\n", "second unpushed")
+
+    summary = summarize_worktree_status(str(repo))
+
+    assert summary.ok is True
+    assert summary.branch.ahead == 2
+    subjects = [c.subject for c in summary.unpushed_commits]
+    shas = [c.sha for c in summary.unpushed_commits]
+    assert subjects == ["second unpushed", "first unpushed"]
+    assert sha2 in shas
+    assert sha1 in shas
+    assert all(len(s) == 40 for s in shas)
+
+
 def test_linked_worktrees_are_reported_and_branch_in_use_helper_detects_other_path(tmp_path):
     repo = init_repo(tmp_path / "repo")
     commit_file(repo)
