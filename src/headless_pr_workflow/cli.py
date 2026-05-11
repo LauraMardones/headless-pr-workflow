@@ -22,6 +22,7 @@ from .github import (
 )
 from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
+from .post_merge_sync import fetch_post_merge_pr_state, fetch_pr_changed_paths, summarize_post_merge_sync
 from .pre_merge import summarize_pre_merge
 from .pr_takeover import summarize_pr_takeover
 from .re_review_needed import summarize_re_review_needed
@@ -78,6 +79,19 @@ def build_parser() -> argparse.ArgumentParser:
                     "Perform the GitHub merge after fresh readiness gates pass. "
                     "No --admin, --auto, or branch deletion behavior is supported."
                 ),
+            )
+        if command.name == "post-merge-sync":
+            command_parser.add_argument(
+                "--execute",
+                action="store_true",
+                help=(
+                    "Perform the verified local sync sequence: backup, restore, fast-forward, verify, cleanup. "
+                    "Without this flag the command is dry-run/report-only."
+                ),
+            )
+            command_parser.add_argument(
+                "--worktree",
+                help="Inspect and operate on the Git worktree containing this path. Defaults to current directory.",
             )
         if command.name == "workflow-status":
             command_parser.add_argument(
@@ -868,6 +882,122 @@ def _print_gh_error(error: GHCommandError, *, as_json: bool) -> int:
     return 1
 
 
+def _print_post_merge_sync(
+    target: str | None,
+    *,
+    repo: str | None,
+    worktree: str | None,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    try:
+        pr_state = fetch_post_merge_pr_state(target, repo=repo)
+        pr_changed_paths = fetch_pr_changed_paths(target, repo=repo)
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=as_json)
+
+    worktree_status = summarize_worktree_status(worktree)
+
+    mode = "execute" if execute else "dry_run"
+    summary = summarize_post_merge_sync(pr_state, worktree_status, pr_changed_paths, mode=mode)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.ok else 1
+
+    print(f"PR #{summary.number}: {summary.title}")
+    print(f"url: {summary.url}")
+    print(f"state: {summary.state}")
+    print(f"merged: {str(summary.merged).lower()}")
+    print(f"base branch: {summary.base_branch}")
+    print(f"head sha: {summary.head_sha or 'unknown'}")
+    print(f"merge sha: {summary.merge_sha or 'unavailable'}")
+    print(f"mode: {'execute' if execute else 'dry-run'}")
+
+    local = summary.local
+    if "error" in local and local.get("error"):
+        err = local["error"]
+        print(f"local state error: {err.get('message', 'unknown')}", file=sys.stderr)
+    else:
+        print(f"repository root: {local.get('repository_root') or 'unknown'}")
+        print(f"worktree path: {local.get('worktree_path') or 'unknown'}")
+        branch_info = local.get("branch", {})
+        if branch_info.get("detached"):
+            print(f"branch: detached HEAD ({local.get('head_sha') or 'unknown'})")
+        else:
+            print(f"branch: {branch_info.get('name') or 'unknown'}")
+            print(f"head sha (local): {local.get('head_sha') or 'none'}")
+        upstream = branch_info.get("upstream")
+        upstream_sha = branch_info.get("upstream_sha")
+        print(f"upstream: {upstream or 'none'}")
+        print(f"upstream sha: {upstream_sha or 'none'}")
+        ahead = branch_info.get("ahead")
+        behind = branch_info.get("behind")
+        if ahead is None or behind is None:
+            print("ahead/behind: unavailable")
+        else:
+            print(f"ahead/behind: {ahead} ahead, {behind} behind")
+        st = summary.status
+        print(
+            f"changes: {len(st.get('staged', []))} staged, "
+            f"{len(st.get('unstaged', []))} unstaged, "
+            f"{len(st.get('untracked', []))} untracked, "
+            f"{len(st.get('conflicted', []))} conflicted"
+        )
+
+    print(f"classification: {summary.classification}")
+
+    if summary.verified_pr_paths:
+        print(f"verified stale PR paths ({len(summary.verified_pr_paths)}):")
+        for path in summary.verified_pr_paths:
+            print(f"  {path}")
+
+    if summary.blocked_paths:
+        print("blocked paths:")
+        for reason, paths in summary.blocked_paths.items():
+            print(f"  [{reason}]: {', '.join(paths)}")
+
+    if summary.plan:
+        print("sync plan:")
+        for step in summary.plan:
+            prefix = "  [blocked]" if step.blocked else " "
+            cmd_part = f"\n    command: {step.command}" if step.command else ""
+            print(f"{prefix} {step.description}{cmd_part}")
+
+    if summary.execution:
+        ex = summary.execution
+        print(f"execution backup: {ex.backup_path or 'none'}")
+        if ex.steps_executed:
+            print("executed:")
+            for s in ex.steps_executed:
+                print(f"  - {s}")
+        if ex.steps_skipped:
+            print("skipped:")
+            for s in ex.steps_skipped:
+                print(f"  - {s}")
+        if ex.failed_step:
+            print(f"failed step: {ex.failed_step}")
+        print(f"verification: {ex.verification_result or 'none'}")
+        print(f"cleanup: {ex.cleanup_result or 'none'}")
+
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"  - {reason}")
+
+    if summary.manual_commands:
+        print("manual commands:")
+        for cmd in summary.manual_commands:
+            print(f"  {cmd}")
+
+    if summary.warnings:
+        print("warnings:")
+        for warning in summary.warnings:
+            print(f"  - {warning}")
+
+    return 0 if summary.ok else 1
+
+
 def _print_worktree_status(target: str | None, *, as_json: bool) -> int:
     summary = summarize_worktree_status(target)
 
@@ -981,6 +1111,15 @@ def main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             as_json=args.json,
             path=args.path,
+        )
+
+    if args.command == "post-merge-sync":
+        return _print_post_merge_sync(
+            args.target,
+            repo=args.repo,
+            worktree=getattr(args, "worktree", None),
+            execute=getattr(args, "execute", False),
+            as_json=args.json,
         )
 
     return _print_scaffold(args.command, args.target, args.json)
