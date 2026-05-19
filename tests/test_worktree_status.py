@@ -248,3 +248,72 @@ def test_cli_usage_error_exits_two(capsys):
 
     assert error.value.code == 2
     assert "usage:" in capsys.readouterr().err
+
+
+def _add_gitignore(repo: Path, content: str) -> None:
+    (repo / ".gitignore").write_text(content)
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-m", "add .gitignore")
+
+
+def test_ignored_claude_artifacts_not_counted_as_untracked(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    commit_file(repo)
+    _add_gitignore(repo, ".claude/\n")
+    claude_dir = repo / ".claude" / "worktrees" / "session-abc"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "state.json").write_text("{}\n")
+
+    summary = summarize_worktree_status(str(repo))
+
+    assert summary.ok is True
+    assert summary.status.clean is True
+    assert summary.status.untracked == ()
+
+
+def test_genuine_untracked_files_still_reported_alongside_ignored_claude(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    commit_file(repo)
+    _add_gitignore(repo, ".claude/\n")
+    claude_dir = repo / ".claude" / "worktrees" / "session-abc"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "state.json").write_text("{}\n")
+    (repo / "scratch.txt").write_text("notes\n")
+
+    summary = summarize_worktree_status(str(repo))
+
+    assert summary.ok is True
+    assert summary.status.clean is False
+    assert "scratch.txt" in summary.status.untracked
+    assert not any(p.startswith(".claude") for p in summary.status.untracked)
+
+
+def test_cli_json_ignored_claude_artifacts_not_in_untracked(tmp_path, capsys):
+    repo = init_repo(tmp_path / "repo")
+    commit_file(repo)
+    _add_gitignore(repo, ".claude/\n")
+    claude_dir = repo / ".claude" / "worktrees" / "session-abc"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "state.json").write_text("{}\n")
+
+    exit_code = cli.main(["worktree-status", str(repo), "--json"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"]["clean"] is True
+    assert output["status"]["untracked"] == []
+
+
+def test_cli_human_ignored_claude_artifacts_show_zero_untracked(tmp_path, capsys):
+    repo = init_repo(tmp_path / "repo")
+    commit_file(repo)
+    _add_gitignore(repo, ".claude/\n")
+    claude_dir = repo / ".claude" / "worktrees" / "session-abc"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "state.json").write_text("{}\n")
+
+    exit_code = cli.main(["worktree-status", str(repo)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "0 untracked" in output
