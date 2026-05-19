@@ -75,6 +75,8 @@ class WorkflowStatusSummary:
             "local_state": self.local_state.to_dict(),
             "approval": {
                 "approval_status": self.approval.approval_status,
+                "effective_status": "satisfied" if self.approval.hard_gate_passed else self.approval.approval_status,
+                "effective_source": self.approval.approval_source if self.approval.hard_gate_passed else None,
                 "latest_review_sha": self.approval.latest_review_sha,
                 "latest_approval_sha": self.approval.latest_approval_sha,
                 "solo_override": self.approval.solo_override.to_dict(),
