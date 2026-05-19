@@ -9,6 +9,7 @@ import sys
 from dataclasses import asdict
 
 from .approval_check import summarize_approval_check
+from .branch_cleanup import summarize_branch_cleanup
 from .catalog import COMMANDS, find_command
 from .ci_summary import summarize_ci
 from .github import (
@@ -92,6 +93,15 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument(
                 "--worktree",
                 help="Inspect and operate on the Git worktree containing this path. Defaults to current directory.",
+            )
+        if command.name == "branch-cleanup":
+            command_parser.add_argument(
+                "--execute",
+                action="store_true",
+                help=(
+                    "Perform verified safe deletions of local and remote branches. "
+                    "Without this flag the command is dry-run/report-only."
+                ),
             )
         if command.name == "workflow-status":
             command_parser.add_argument(
@@ -998,6 +1008,101 @@ def _print_post_merge_sync(
     return 0 if summary.ok else 1
 
 
+def _print_branch_cleanup(
+    target: str | None,
+    *,
+    repo: str | None,
+    execute: bool,
+    as_json: bool,
+) -> int:
+    if not target:
+        if as_json:
+            print(json.dumps({"ok": False, "error": "missing-target", "message": "target (PR number or branch name) is required"}, indent=2))
+        else:
+            print("branch-cleanup: target (PR number or branch name) is required", file=sys.stderr)
+        return 2
+
+    if not repo:
+        if as_json:
+            print(json.dumps({"ok": False, "error": "missing-repo", "message": "--repo is required for branch-cleanup"}, indent=2))
+        else:
+            print("branch-cleanup: --repo is required", file=sys.stderr)
+        return 2
+
+    mode = "execute" if execute else "dry_run"
+    summary = summarize_branch_cleanup(target, repo=repo, mode=mode)
+
+    if as_json:
+        print(json.dumps(summary.to_dict(), indent=2))
+        return 0 if summary.ok else 1
+
+    if summary.number is not None:
+        print(f"PR #{summary.number}: {summary.title}")
+        print(f"url: {summary.url}")
+        print(f"state: {summary.state}")
+        print(f"merged: {str(summary.merged).lower()}")
+    print(f"target: {target} ({summary.target_type})")
+    print(f"head branch: {summary.head_branch or 'unknown'}")
+    print(f"base branch: {summary.base_branch or 'unknown'}")
+    print(f"mode: {'execute' if execute else 'dry-run'}")
+    print()
+
+    if summary.worktrees_checked:
+        print("worktrees checked:")
+        for wt in summary.worktrees_checked:
+            dirty_flag = " [dirty]" if wt.dirty else ""
+            branch_label = wt.branch or "detached"
+            print(f"  {wt.path} ({branch_label}){dirty_flag}")
+        print()
+
+    if summary.candidates:
+        print("candidates:")
+        for candidate in summary.candidates:
+            action = candidate.disposition.replace("_", " ")
+            wt_note = f" [worktree: {candidate.worktree}]" if candidate.worktree else ""
+            content_note = " [content-verified]" if candidate.content_verified else ""
+            ahead_note = f" [ahead_by={candidate.ahead_by}]" if candidate.ahead_by is not None else ""
+            reason_note = f": {candidate.reason}" if candidate.reason else ""
+            print(f"  [{candidate.type}] {candidate.branch} -> {action}{reason_note}{wt_note}{content_note}{ahead_note}")
+        print()
+
+    if summary.deleted:
+        print(f"deleted ({len(summary.deleted)}):")
+        for branch in summary.deleted:
+            print(f"  - {branch}")
+        print()
+
+    if summary.kept:
+        print(f"kept ({len(summary.kept)}):")
+        for entry in summary.kept:
+            print(f"  - {entry['branch']}: {entry['reason']}")
+        print()
+
+    if summary.manual_commands:
+        print("manual commands:")
+        for cmd in summary.manual_commands:
+            print(f"  {cmd}")
+        print()
+
+    if summary.blocking_reasons:
+        print("blocking reasons:")
+        for reason in summary.blocking_reasons:
+            print(f"  - {reason}")
+
+    if summary.warnings:
+        print("warnings:")
+        for warning in summary.warnings:
+            print(f"  - {warning}")
+
+    n_safe = sum(1 for c in summary.candidates if c.disposition in ("safe_to_delete", "deleted"))
+    n_kept = len(summary.kept)
+    n_skipped = sum(1 for c in summary.candidates if c.disposition == "skipped")
+    print()
+    print(f"summary: {len(summary.deleted)} deleted, {n_safe if mode == 'dry_run' else 0} safe to delete (dry-run), {n_kept} kept, {n_skipped} skipped")
+
+    return 0 if summary.ok else 1
+
+
 def _print_worktree_status(target: str | None, *, as_json: bool) -> int:
     summary = summarize_worktree_status(target)
 
@@ -1118,6 +1223,14 @@ def main(argv: list[str] | None = None) -> int:
             args.target,
             repo=args.repo,
             worktree=getattr(args, "worktree", None),
+            execute=getattr(args, "execute", False),
+            as_json=args.json,
+        )
+
+    if args.command == "branch-cleanup":
+        return _print_branch_cleanup(
+            args.target,
+            repo=args.repo,
             execute=getattr(args, "execute", False),
             as_json=args.json,
         )
