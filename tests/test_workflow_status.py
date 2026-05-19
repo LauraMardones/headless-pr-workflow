@@ -32,6 +32,7 @@ from tests.github_scenarios import (
     scenario_current_approval,
     scenario_draft_pr,
     scenario_failing_checks,
+    scenario_merged_pr,
     scenario_mergeable_unknown,
     scenario_pending_checks,
     scenario_solo_override,
@@ -286,6 +287,24 @@ def test_posture_merge_validation_solo_override():
 
 
 # ---------------------------------------------------------------------------
+# Workflow posture: merged
+# ---------------------------------------------------------------------------
+
+def test_posture_merged_terminal_state_suppresses_merge_blockers():
+    context = scenario_merged_pr(head_sha="head123")
+    summary = make_workflow_status(context)
+
+    assert summary.workflow_posture.status == "merged"
+    assert summary.workflow_posture.summary == (
+        "PR is merged. No further merge action required. Run post-merge-sync to update local state."
+    )
+    assert summary.workflow_posture.reasons == ()
+    assert "pre-merge" not in summary.workflow_posture.source_commands
+    assert summary.merge_readiness.blocking_reasons == ()
+    assert not any("mergeability" in warning.lower() for warning in summary.warnings)
+
+
+# ---------------------------------------------------------------------------
 # Workflow posture: human_decision_required
 # ---------------------------------------------------------------------------
 
@@ -452,6 +471,22 @@ def test_json_output_merge_readiness_fields():
         assert key in mr, f"Missing merge_readiness key: {key}"
 
 
+def test_json_output_merged_pr_contract():
+    context = scenario_merged_pr(head_sha="head123")
+    output = make_workflow_status(context).to_dict()
+
+    assert output["ok"] is True
+    assert output["pr"]["state"] == "MERGED"
+    assert output["github_truth"]["state"] == "MERGED"
+    assert output["workflow_posture"]["status"] == "merged"
+    assert output["workflow_posture"]["summary"] == (
+        "PR is merged. No further merge action required. Run post-merge-sync to update local state."
+    )
+    assert "pre-merge" not in output["workflow_posture"]["source_commands"]
+    assert output["merge_readiness"]["blocking_reasons"] == []
+    assert not any("mergeability" in warning.lower() for warning in output["warnings"])
+
+
 def test_json_output_workflow_posture_fields():
     context = scenario_current_approval(head_sha="head123")
     posture = make_workflow_status(context).to_dict()["workflow_posture"]
@@ -463,6 +498,7 @@ def test_json_output_workflow_posture_fields():
         "merge_validation_required",
         "waiting",
         "human_decision_required",
+        "merged",
     )
 
 
@@ -634,6 +670,28 @@ def test_cli_workflow_status_json_output(capsys):
     assert output["workflow_posture"]["status"] == "merge_validation_required"
 
 
+def test_cli_workflow_status_json_output_merged_pr(capsys):
+    context = scenario_merged_pr(head_sha="head123")
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo", "--json"])
+
+    assert rc == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["pr"]["state"] == "MERGED"
+    assert output["github_truth"]["state"] == "MERGED"
+    assert output["workflow_posture"]["status"] == "merged"
+    assert output["merge_readiness"]["blocking_reasons"] == []
+
+
 def test_cli_workflow_status_human_output(capsys):
     context = scenario_stale_approval(head_sha="new-head", approval_sha="old-head")
     required_checks = RequiredStatusChecks(names=(), status="not_configured")
@@ -652,6 +710,35 @@ def test_cli_workflow_status_human_output(capsys):
     out = capsys.readouterr().out
     assert "PR #123" in out
     assert "workflow posture: review_required" in out
+
+
+def test_cli_workflow_status_human_output_merged_pr(capsys):
+    context = scenario_merged_pr(head_sha="head123")
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "state: MERGED" in out
+    assert "workflow posture: merged" in out
+    assert (
+        "posture summary: PR is merged. No further merge action required. "
+        "Run post-merge-sync to update local state."
+    ) in out
+    assert "workflow posture: human_decision_required" not in out
+    assert "merge readiness: blocked" not in out
+    assert "merge blocking reasons:" not in out
+    assert "PR mergeable state is UNKNOWN." not in out
+    assert "PR merge state status is UNKNOWN." not in out
 
 
 def test_cli_workflow_status_github_fetch_failure_json(capsys):

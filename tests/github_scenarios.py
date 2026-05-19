@@ -188,6 +188,17 @@ def scenario_mergeable_unknown(*, head_sha: str = "head123", **overrides: Any) -
     return scenario_current_approval(head_sha=head_sha, mergeable="UNKNOWN", **overrides)
 
 
+def scenario_merged_pr(*, head_sha: str = "head123", **overrides: Any) -> PullRequestContext:
+    return scenario_current_approval(
+        head_sha=head_sha,
+        state="MERGED",
+        mergeable="UNKNOWN",
+        merge_state_status="UNKNOWN",
+        raw={"merged": True},
+        **overrides,
+    )
+
+
 def scenario_dirty_merge_state(*, head_sha: str = "head123", **overrides: Any) -> PullRequestContext:
     return scenario_current_approval(head_sha=head_sha, merge_state_status="DIRTY", **overrides)
 
