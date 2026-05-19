@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .github.pr_context import GHCommandError, _gh_env
+from .github import fetch_repo_default_branch
 from .post_merge_sync import PRMergeState, fetch_post_merge_pr_state
 from .worktree_status import GitCommandError, LinkedWorktree, _file_status, _git, _git_optional, _linked_worktrees
 
@@ -384,7 +385,6 @@ def summarize_branch_cleanup(
             "using local Git ancestry and GitHub compare API only."
         )
         try:
-            from .github import fetch_repo_default_branch
             base_branch = fetch_repo_default_branch(repo=repo)
         except GHCommandError:
             base_branch = "main"
