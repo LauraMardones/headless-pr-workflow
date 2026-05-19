@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .approval_check import ApprovalCheckSummary, summarize_approval_check
@@ -123,6 +123,8 @@ def summarize_workflow_status(
     merge_readiness: PreMergeSummary,
     local_state: WorktreeStatusSummary,
 ) -> WorkflowStatusSummary:
+    if _is_merged_pr(context):
+        merge_readiness = _terminal_merged_merge_readiness(merge_readiness)
     workflow_posture = _determine_workflow_posture(context, approval, ci, review_threads, merge_readiness)
     warnings = _compute_warnings(context, ci, local_state)
     return WorkflowStatusSummary(
@@ -148,6 +150,14 @@ def _determine_workflow_posture(
     review_threads: ReviewThreadGateSummary,
     merge_readiness: PreMergeSummary,
 ) -> WorkflowPosture:
+    if _is_merged_pr(context):
+        return WorkflowPosture(
+            status="merged",
+            summary="PR is merged. No further merge action required. Run post-merge-sync to update local state.",
+            reasons=(),
+            source_commands=("workflow-status",),
+        )
+
     implementation_reasons: list[str] = []
 
     if context.is_draft:
@@ -229,6 +239,19 @@ def _merge_passing_reasons(
     return tuple(reasons)
 
 
+def _is_merged_pr(context: PullRequestContext) -> bool:
+    return context.state == "MERGED"
+
+
+def _terminal_merged_merge_readiness(merge_readiness: PreMergeSummary) -> PreMergeSummary:
+    return replace(
+        merge_readiness,
+        checks=tuple(check for check in merge_readiness.checks if check.code != "mergeability"),
+        blocking_reasons=(),
+        hard_gate_passed=True,
+    )
+
+
 def _compute_warnings(
     context: PullRequestContext,
     ci: CiSummary,
@@ -246,7 +269,7 @@ def _compute_warnings(
         )
     if ci.required_check_status == "not_configured":
         warnings.append("No required status checks are configured for the target branch; CI gate is absent.")
-    if context.mergeable == "UNKNOWN":
+    if context.mergeable == "UNKNOWN" and not _is_merged_pr(context):
         warnings.append(
             "GitHub reports PR mergeability as UNKNOWN; mergeability cannot be confirmed without a fresh fetch."
         )

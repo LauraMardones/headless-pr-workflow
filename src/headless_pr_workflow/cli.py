@@ -847,11 +847,12 @@ def _print_workflow_status(target: str | None, *, repo: str | None, as_json: boo
     )
     print()
 
-    print(f"merge readiness: {'pass' if merge_readiness.hard_gate_passed else 'blocked'}")
+    effective_merge_readiness = summary.merge_readiness
+    print(f"merge readiness: {'pass' if effective_merge_readiness.hard_gate_passed else 'blocked'}")
     print(f"mergeable: {ctx.mergeable or 'unknown'}")
-    if merge_readiness.blocking_reasons:
+    if effective_merge_readiness.blocking_reasons:
         print("merge blocking reasons:")
-        for reason in merge_readiness.blocking_reasons:
+        for reason in effective_merge_readiness.blocking_reasons:
             print(f"- {reason}")
     print()
 
