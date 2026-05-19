@@ -606,6 +606,15 @@ def test_untracked_only_no_warning():
     assert not any("uncommitted changes" in w for w in summary.warnings)
 
 
+def test_ignored_claude_artifacts_produce_no_uncommitted_warning():
+    # After .claude/ is gitignored, worktree-status reports clean=True and untracked=().
+    # workflow-status must not emit an uncommitted-changes warning in that state.
+    context = scenario_current_approval(head_sha="head123")
+    local = make_clean_local_state()
+    summary = make_workflow_status(context, local_state=local)
+    assert not any("uncommitted changes" in w for w in summary.warnings)
+
+
 # ---------------------------------------------------------------------------
 # Warnings
 # ---------------------------------------------------------------------------
