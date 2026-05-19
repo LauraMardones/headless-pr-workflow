@@ -809,7 +809,11 @@ def _print_workflow_status(target: str | None, *, repo: str | None, as_json: boo
     print()
 
     print("[github truth]")
-    print(f"approval status: {approval.approval_status}")
+    if approval.hard_gate_passed and approval.approval_source == "solo-maintainer-override":
+        print("approval status: satisfied (solo-maintainer override)")
+        print(f"formal approval status: {approval.approval_status}")
+    else:
+        print(f"approval status: {approval.approval_status}")
     print(f"latest review sha: {approval.latest_review_sha or 'none'}")
     print(f"latest approval sha: {approval.latest_approval_sha or 'none'}")
     print(f"solo-maintainer override: {approval.solo_override.status}")

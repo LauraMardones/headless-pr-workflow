@@ -286,7 +286,6 @@ def test_posture_merge_validation_solo_override():
     assert summary.approval.approval_source == "solo-maintainer-override"
 
 
-# ---------------------------------------------------------------------------
 # Workflow posture: merged
 # ---------------------------------------------------------------------------
 
@@ -302,6 +301,59 @@ def test_posture_merged_terminal_state_suppresses_merge_blockers():
     assert "pre-merge" not in summary.workflow_posture.source_commands
     assert summary.merge_readiness.blocking_reasons == ()
     assert not any("mergeability" in warning.lower() for warning in summary.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Effective approval status for solo-maintainer override (issue #79)
+# ---------------------------------------------------------------------------
+
+def test_solo_override_json_effective_status_satisfied():
+    context = scenario_solo_override(head_sha="head123")
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["effective_status"] == "satisfied"
+    assert approval["effective_source"] == "solo-maintainer-override"
+
+
+def test_solo_override_json_preserves_formal_approval_status():
+    context = scenario_solo_override(head_sha="head123")
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["approval_status"] == "missing"
+
+
+def test_solo_override_json_preserves_existing_fields():
+    context = scenario_solo_override(head_sha="head123")
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["solo_override"]["status"] == "accepted"
+    assert approval["approval_source"] == "solo-maintainer-override"
+    assert approval["satisfied_by"] == "solo-maintainer-override"
+    assert approval["hard_gate_passed"] is True
+
+
+def test_formal_approval_json_effective_status_satisfied():
+    context = scenario_current_approval(head_sha="head123")
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["effective_status"] == "satisfied"
+    assert approval["effective_source"] == "formal"
+
+
+def test_missing_approval_json_effective_status_not_satisfied():
+    context = build_pr_context(head_ref_oid="head123", latest_reviews=())
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["effective_status"] == "missing"
+    assert approval["effective_source"] is None
+
+
+def test_stale_approval_json_effective_status_not_satisfied():
+    context = scenario_stale_approval(head_sha="new-head", approval_sha="old-head")
+    output = make_workflow_status(context).to_dict()
+    approval = output["approval"]
+    assert approval["effective_status"] == "stale"
+    assert approval["effective_source"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -891,3 +943,96 @@ def test_cli_workflow_status_human_shows_dirty_warning(capsys):
     out = capsys.readouterr().out
     assert "warnings:" in out
     assert "uncommitted changes" in out
+
+
+# ---------------------------------------------------------------------------
+# CLI tests: solo-maintainer override approval label (issue #79)
+# ---------------------------------------------------------------------------
+
+def test_cli_workflow_status_human_solo_override_shows_satisfied(capsys):
+    context = scenario_solo_override(head_sha="head123")
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert "approval status: satisfied (solo-maintainer override)" in lines
+    assert "formal approval status: missing" in lines
+    assert "approval status: missing" not in lines
+
+
+def test_cli_workflow_status_human_solo_override_preserves_override_facts(capsys):
+    context = scenario_solo_override(head_sha="head123")
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "solo-maintainer override: accepted" in out
+    assert "approval source: solo-maintainer-override" in out
+    assert "satisfied by: solo-maintainer-override" in out
+
+
+def test_cli_workflow_status_human_formal_approval_unchanged(capsys):
+    context = scenario_current_approval(head_sha="head123", status_checks=())
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "approval status: current" in out
+    assert "formal approval status:" not in out
+
+
+def test_cli_workflow_status_json_solo_override_effective_fields(capsys):
+    context = scenario_solo_override(head_sha="head123")
+    required_checks = RequiredStatusChecks(names=(), status="not_configured")
+    local_state = make_clean_local_state()
+
+    with (
+        patch("headless_pr_workflow.cli.fetch_pr_context", return_value=context),
+        patch("headless_pr_workflow.cli.fetch_repo_default_branch", return_value="main"),
+        patch("headless_pr_workflow.cli.fetch_required_status_check_context", return_value=required_checks),
+        patch("headless_pr_workflow.cli.fetch_review_threads_for_context", return_value=()),
+        patch("headless_pr_workflow.cli.summarize_worktree_status", return_value=local_state),
+    ):
+        rc = main(["workflow-status", "123", "--repo", "owner/repo", "--json"])
+
+    assert rc == 0
+    output = json.loads(capsys.readouterr().out)
+    approval = output["approval"]
+    assert approval["effective_status"] == "satisfied"
+    assert approval["effective_source"] == "solo-maintainer-override"
+    assert approval["approval_status"] == "missing"
+    assert approval["solo_override"]["status"] == "accepted"
+    assert approval["approval_source"] == "solo-maintainer-override"
+    assert approval["satisfied_by"] == "solo-maintainer-override"
+    assert approval["hard_gate_passed"] is True
