@@ -216,6 +216,29 @@ def test_merged_pr_recommends_post_merge_sync_before_unknown_mergeability_guard(
     assert output["errors"] is None
 
 
+def test_closed_pr_returns_closed_action_before_unknown_mergeability_guard():
+    result = summarize_next_action(
+        workflow_status_payload(
+            "human_decision_required",
+            reasons=("PR mergeable state is UNKNOWN.",),
+            mergeable="UNKNOWN",
+            state="CLOSED",
+        )
+    )
+    output = result.to_dict()
+
+    assert result.ok is True
+    assert result.action == "closed"
+    assert result.rationale == "PR is closed without merging. No further workflow action is required."
+    assert result.source_posture == "human_decision_required"
+    assert result.blocking_reasons == ()
+    assert output["ok"] is True
+    assert output["action"] == "closed"
+    assert "closed without merging" in output["rationale"]
+    assert output["blocking_reasons"] == []
+    assert output["errors"] is None
+
+
 def test_unknown_posture_recommends_escalate():
     result = summarize_next_action(workflow_status_payload("new_future_posture"))
 
