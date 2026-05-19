@@ -16,3 +16,4 @@ The core workflow must remain valid without these examples.
 
 - `generic/IMPLEMENT-PR.md`: assistant-agnostic implementation prompt for GitHub PRs.
 - `generic/REVIEW-PR.md`: assistant-agnostic review prompt for GitHub PRs.
+- `generic/TAKEOVER-PR.md`: assistant-agnostic takeover prompt for post-review, post-conflict, and merge-owner handoff sessions.
