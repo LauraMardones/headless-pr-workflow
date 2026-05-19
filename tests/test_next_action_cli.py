@@ -71,6 +71,28 @@ def test_next_action_human_output(monkeypatch, capsys):
     assert "Warnings:" in output
 
 
+def test_next_action_human_output_for_merged_pr(monkeypatch, capsys):
+    result = NextActionResult(
+        ok=True,
+        repository="owner/repo",
+        pr=123,
+        action="post-merge-sync",
+        rationale="PR is merged. Run post-merge-sync to update local state.",
+        source_posture="human_decision_required",
+        blocking_reasons=(),
+        source_commands=("workflow-status",),
+        warnings=(),
+    )
+    monkeypatch.setattr(cli, "summarize_next_action_from_subprocess", lambda target, repo, path=None: result)
+
+    exit_code = cli.main(["next-action", "123", "--repo", "owner/repo"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Next action: post-merge-sync" in output
+    assert "Rationale: PR is merged. Run post-merge-sync to update local state." in output
+
+
 def test_next_action_json_error_output(monkeypatch, capsys):
     result = NextActionResult(
         ok=False,
