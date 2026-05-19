@@ -14,6 +14,7 @@ ACTION_BY_POSTURE = {
     "implementation_required": "implement",
     "review_required": "review",
     "merge_validation_required": "merge_validate",
+    "merged": "post-merge-sync",
     "waiting": "wait",
     "human_decision_required": "escalate",
 }
@@ -211,6 +212,18 @@ def _safety_guard_result(
     merge_readiness = (
         workflow_status.get("merge_readiness") if isinstance(workflow_status.get("merge_readiness"), dict) else {}
     )
+
+    if pr_info.get("state") == "MERGED":
+        return _guarded_result(
+            "post-merge-sync",
+            "PR is merged. Run post-merge-sync to update local state.",
+            repository,
+            pr,
+            source_posture,
+            (),
+            source_commands,
+            warnings,
+        )
 
     if merge_readiness.get("mergeable") == "UNKNOWN":
         reasons = _reasons(posture_reasons, "GitHub mergeability is UNKNOWN.")
