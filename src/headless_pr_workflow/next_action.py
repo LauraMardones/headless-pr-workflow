@@ -225,6 +225,18 @@ def _safety_guard_result(
             warnings,
         )
 
+    if pr_info.get("state") == "CLOSED":
+        return _guarded_result(
+            "closed",
+            "PR is closed without merging. No further workflow action is required.",
+            repository,
+            pr,
+            source_posture,
+            (),
+            source_commands,
+            warnings,
+        )
+
     if merge_readiness.get("mergeable") == "UNKNOWN":
         reasons = _reasons(posture_reasons, "GitHub mergeability is UNKNOWN.")
         return _guarded_result(
