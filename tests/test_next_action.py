@@ -27,6 +27,7 @@ def workflow_status_payload(
     check_buckets: dict[str, list[str]] | None = None,
     unresolved_blocking: int = 0,
     mergeable: str = "MERGEABLE",
+    state: str = "OPEN",
     warnings: tuple[str, ...] = (),
 ) -> dict:
     return {
@@ -35,6 +36,7 @@ def workflow_status_payload(
         "repository": "owner/repo",
         "pr": {
             "number": 123,
+            "state": state,
             "is_draft": is_draft,
         },
         "workflow_posture": {
@@ -81,6 +83,7 @@ def workflow_status_payload(
         ("implementation_required", "implement"),
         ("review_required", "review"),
         ("merge_validation_required", "merge_validate"),
+        ("merged", "post-merge-sync"),
         ("waiting", "wait"),
         ("human_decision_required", "escalate"),
     ),
@@ -188,6 +191,29 @@ def test_unknown_mergeability_recommends_escalate():
 
     assert result.action == "escalate"
     assert any("UNKNOWN" in reason for reason in result.blocking_reasons)
+
+
+def test_merged_pr_recommends_post_merge_sync_before_unknown_mergeability_guard():
+    result = summarize_next_action(
+        workflow_status_payload(
+            "human_decision_required",
+            reasons=("PR mergeable state is UNKNOWN.",),
+            mergeable="UNKNOWN",
+            state="MERGED",
+        )
+    )
+    output = result.to_dict()
+
+    assert result.ok is True
+    assert result.action == "post-merge-sync"
+    assert result.rationale == "PR is merged. Run post-merge-sync to update local state."
+    assert result.source_posture == "human_decision_required"
+    assert result.blocking_reasons == ()
+    assert output["ok"] is True
+    assert output["action"] == "post-merge-sync"
+    assert "merged" in output["rationale"]
+    assert output["blocking_reasons"] == []
+    assert output["errors"] is None
 
 
 def test_unknown_posture_recommends_escalate():
