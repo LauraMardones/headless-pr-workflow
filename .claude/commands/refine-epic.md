@@ -43,20 +43,6 @@ Before creating any new issues, inventory what already exists:
 - Do not create a duplicate of any existing issue that already covers the same scope.
 - If an existing issue is misclassified, mislabeled, or missing its parent epic reference, note it under Open Questions rather than silently fixing it during this refinement.
 
-## Lens Selection
-
-Before starting the breakdown, apply refinement lenses:
-
-**Token Economics** (always applied — load `.claude/commands/refinement-lenses/token-economics.md`):
-- Identify documentation clusters at the feature level: features whose stories would all write to the same files with no hard dependencies → flag as merge candidates within features.
-- Verify model tier assignments for any direct stories: haiku = docs/config/boilerplate, sonnet = logic/integration, opus = architecture/review.
-- Ask: "Are the proposed features sized to deliver meaningfully independent value, or would they collapse into a single coherent delivery?"
-
-**Domain-specific lenses** (label-triggered):
-- For each label on the issue, check if `.claude/commands/refinement-lenses/{label-slug}.md` exists.
-- If it does, load and apply that lens before proceeding.
-- Lens questions must be answered before creating any issues.
-
 ## Feature Assessment
 
 Before breaking an epic into stories, assess whether a Feature level is warranted:
@@ -79,17 +65,6 @@ If Features are not warranted:
 - Create new issues only for scope gaps not yet covered by existing issues.
 
 Always list all related issues in the epic body — both pre-existing and newly created.
-
-## Devil's Advocate
-
-After completing the initial breakdown, challenge it before finalising:
-
-- "What is the minimum number of features that correctly and completely delivers this epic?"
-- "Can any proposed features be merged without losing independent deliverability?"
-- "Are any features so small they should just be stories directly under the epic?"
-- "Are any features so large they need their own sub-feature level?"
-
-If merging reduces feature count without sacrificing clarity: merge them and update the breakdown.
 
 ## Refinement Standard
 
