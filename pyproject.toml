@@ -19,6 +19,11 @@ hpw = "headless_pr_workflow.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+[project.urls]
+Homepage = "https://github.com/lauramardones/headless-pr-workflow"
+Issues = "https://github.com/lauramardones/headless-pr-workflow/issues"
+Documentation = "https://github.com/lauramardones/headless-pr-workflow/tree/main/docs"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
