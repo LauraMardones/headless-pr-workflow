@@ -256,7 +256,7 @@ def _fetch_review_thread_page(*, owner: str, name: str, number: int, cursor: str
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)

@@ -223,7 +223,7 @@ def fetch_pr_context(target: str | None = None, *, repo: str | None = None) -> P
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)
@@ -250,7 +250,7 @@ def fetch_repo_default_branch(repo: str | None = None) -> str:
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)
@@ -284,7 +284,7 @@ def fetch_required_status_check_context(repo: str, branch: str) -> RequiredStatu
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         payload = _json_or_none(result.stdout)

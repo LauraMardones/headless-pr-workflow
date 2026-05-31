@@ -161,7 +161,7 @@ def fetch_post_merge_pr_state(target: str | None, *, repo: str | None) -> PRMerg
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)
@@ -188,7 +188,7 @@ def fetch_pr_changed_paths(target: str | None, *, repo: str | None) -> tuple[str
     try:
         result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
     except FileNotFoundError as error:
-        raise GHCommandError(command, None, "GitHub CLI executable not found: gh", error="gh-not-found") from error
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh. Install from https://cli.github.com and authenticate with 'gh auth login'.", error="gh-not-found") from error
 
     if result.returncode != 0:
         raise GHCommandError(command, result.returncode, result.stderr)

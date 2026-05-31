@@ -4,6 +4,15 @@ Reusable, assistant-agnostic workflow policy and automation patterns for GitHub-
 
 This repository treats GitHub as the system of record for issues, pull requests, reviews, approvals, CI status, blockers, and merge state. Local branches, worktrees, and assistant sessions are temporary execution contexts.
 
+## Prerequisites
+
+- Python ≥ 3.10
+- [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated
+
+  ```bash
+  gh auth login
+  ```
+
 ## Quickstart
 
 **Prerequisites:** Python 3.10+, [GitHub CLI (`gh`)](https://cli.github.com/) authenticated.
