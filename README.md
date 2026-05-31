@@ -64,6 +64,29 @@ hpw catalog
 - Repo-specific rules belong in repo adapters.
 - Assistant-specific behavior belongs in optional assistant adapters.
 
+## Why HPW / How it fits
+
+HPW is a governance layer. Tools like Claude Code Actions, OpenAI Codex, GitHub Copilot Coding Agent, PR-Agent, and Pullfrog operate at the execution layer: they use AI to implement code, open pull requests, generate reviews, and automate delivery. HPW does not replace them — it defines the invariants that any session must satisfy before a PR is merged.
+
+Three invariants HPW enforces by design:
+
+- **SHA-bound approval** — an approval is valid only for the exact head commit SHA that was reviewed. Any new commit after approval requires re-review before merge.
+- **Session separation** — the session that implements a PR head SHA must not also approve that same SHA in the same session. Implementation and review are structurally separate acts.
+- **GitHub as system-of-record** — all workflow state (approvals, CI, review threads, merge readiness) is read from and written to GitHub, not inferred from local state or assistant memory.
+
+These properties are checkable and deterministic. `hpw pre-merge` enforces them as a blocking gate; `hpw workflow-status` surfaces current state against them at any point.
+
+| Tool | Layer | Focus |
+|---|---|---|
+| HPW | Governance | Auditable merge invariants, deterministic policy gate, session contracts |
+| claude-code-action | Execution | AI-driven code implementation and PR creation via GitHub Actions |
+| OpenAI Codex | Execution | AI-driven code generation and implementation |
+| GitHub Copilot Coding Agent | Execution | AI-driven code suggestions, implementation, and PR automation |
+| PR-Agent | Execution | AI-driven code review, suggestions, and PR management |
+| Pullfrog | Execution | AI-driven PR description and change summarisation |
+
+A team running any execution-layer tool can add HPW as a required status check (`hpw pre-merge`) to enforce the governance invariants before every merge, without changing how their existing AI tooling works.
+
 ## Implemented Commands
 
 All `hpw` commands are fully implemented:
