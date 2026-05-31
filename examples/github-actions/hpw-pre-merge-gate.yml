@@ -1,0 +1,38 @@
+# GitHub Actions workflow: enforce hpw pre-merge as a required status check.
+# Copy this file into .github/workflows/ in your repository to use it.
+#
+# Usage:
+#   1. Copy to .github/workflows/hpw-pre-merge-gate.yml in your repo.
+#   2. In your repo's branch protection rules, add "hpw / pre-merge-gate" as a
+#      required status check.
+#   3. No secrets configuration is needed — GITHUB_TOKEN is provided automatically.
+
+name: hpw
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Minimum token scopes required for hpw pre-merge to read PR metadata and CI status.
+permissions:
+  pull-requests: read
+  statuses: read
+
+jobs:
+  pre-merge-gate:
+    name: pre-merge-gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install hpw
+        # Install the headless-pr-workflow CLI directly from the GitHub repository.
+        run: pip install git+https://github.com/LauraMardones/headless-pr-workflow.git
+
+      - name: Run hpw pre-merge gate
+        # Authenticate the gh CLI via GH_TOKEN — no explicit `gh auth login` needed on
+        # GitHub-hosted runners when this environment variable is set.
+        # Exits non-zero (failing the check) when any blocking reason is found.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          hpw pre-merge ${{ github.event.pull_request.number }} --repo ${{ github.repository }}

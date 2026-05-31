@@ -127,8 +127,14 @@ scripts/                     Thin shell convenience wrappers (hpw, hpw.ps1)
 examples/                    Assistant and repo adapter examples
   assistants/                Per-assistant adapter examples
   repos/                     Per-repo adapter examples
+  github-actions/            GitHub Actions integration examples
+    hpw-pre-merge-gate.yml   Copy-paste workflow: enforce hpw pre-merge as a required check
 tests/                       Deterministic tests for all modules
 ```
+
+## Integration Examples
+
+- `examples/github-actions/hpw-pre-merge-gate.yml` — copy-paste GitHub Actions workflow that enforces `hpw pre-merge` as a required status check before merge
 
 ## Policy Documentation
 
