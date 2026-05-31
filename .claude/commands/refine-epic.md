@@ -43,6 +43,22 @@ Before creating any new issues, inventory what already exists:
 - Do not create a duplicate of any existing issue that already covers the same scope.
 - If an existing issue is misclassified, mislabeled, or missing its parent epic reference, note it under Open Questions rather than silently fixing it during this refinement.
 
+## Lens Selection
+
+Before breaking down the epic, apply refinement lenses to ensure the breakdown is sound:
+
+1. Read all `.md` files in `.claude/commands/refinement-lenses/`
+2. Always apply the `token-economics.md` lens (default, regardless of labels)
+3. Additionally, for each lens file whose `## Trigger Labels` section matches any of the current issue's GitHub labels, apply that lens as well
+4. For each active lens, present its `## Lens Questions` to the user and incorporate the lens perspective into your analysis before proposing the breakdown
+
+The lens questions will help identify:
+- Per-session token overhead problems that suggest different story/feature boundaries
+- Documentation work that should be clustered in a single story
+- Executor tier misalignments that need correction
+
+Proceed to the feature assessment and breakdown steps only after lens questions have been answered.
+
 ## Feature Assessment
 
 Before breaking an epic into stories, assess whether a Feature level is warranted:
@@ -65,6 +81,19 @@ If Features are not warranted:
 - Create new issues only for scope gaps not yet covered by existing issues.
 
 Always list all related issues in the epic body — both pre-existing and newly created.
+
+## Devil's Advocate Closing Step
+
+After the breakdown is proposed (whether features or stories), challenge it with this question:
+
+**"What is the minimum number of features or stories that correctly and completely implements this epic? Can any proposed features or stories be merged without losing clarity or parallelism?"**
+
+Review the proposed features/stories and ask:
+- Are there features or stories that could be combined without losing independent deliverability or parallel execution potential?
+- Is any feature or story duplicating work or setup cost that another already includes?
+- Would merging any pair of features or stories actually reduce complexity or coordination overhead?
+
+If merging is justified, modify the breakdown accordingly. If the breakdown is already minimal, document why each feature or story is necessary.
 
 ## Refinement Standard
 
