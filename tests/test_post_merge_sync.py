@@ -398,6 +398,7 @@ def init_repo(path: Path) -> Path:
     subprocess.run(("git", "init", "-b", "main", str(path)), check=True, capture_output=True, text=True)
     git(path, "config", "user.email", "test@example.com")
     git(path, "config", "user.name", "Test User")
+    git(path, "config", "commit.gpgsign", "false")
     return path
 
 
