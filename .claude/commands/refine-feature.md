@@ -33,12 +33,24 @@ Do not implement code.
 When starting: move status to `In refinement`.
 When complete: move to `Refined` or `Ready for implementation`.
 
+## Existing Issues Inventory
+
+Before creating any new issues, inventory what already exists:
+
+- Search GitHub for open and closed issues that reference this feature number in their body (`Feature group: #X` or `Parent feature: #X`).
+- Also check the feature body for any existing Seed Stories list.
+- Classify each found issue by type (`type:story`, `type:task`, `type:bug`) and state (open/closed).
+- Do not create a duplicate of any existing issue that already covers the same scope.
+- If an existing issue is misclassified, mislabeled, or missing its parent reference, note it under Open Questions rather than silently fixing it during this refinement.
+
 ## Breakdown
 
 A feature refines into Story/Task/Bug issues — not into further Features.
 
-- Create one GitHub issue per Story/Task/Bug with the correct `type:` label, linked to this feature and its parent epic.
-- List created issues under Seed Stories in the feature body.
+- Include existing Story/Task/Bug issues in the Seed Stories list.
+- Create new issues only for scope gaps not yet covered by existing issues.
+- Link all new issues to this feature and its parent epic.
+- List all related issues — both pre-existing and newly created — under Seed Stories in the feature body.
 - If the breakdown reveals that the feature itself should be split into two features, stop and raise it as an Open Question rather than silently splitting.
 
 ## Refinement Standard
@@ -120,6 +132,7 @@ After updating GitHub, reply only with:
 
 - Issue URL
 - Final PO status
+- Existing issues found and included (with numbers)
 - Stories/Tasks/Bugs created with issue numbers
 - Labels changed
 - Remaining Open Questions

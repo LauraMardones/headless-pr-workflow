@@ -33,12 +33,22 @@ Do not implement code.
 When starting: move status to `In refinement`.
 When complete: move status to `Refined` or `Ready for implementation` depending on whether blockers remain.
 
+## Existing Issues Inventory
+
+Before creating any new issues, inventory what already exists:
+
+- Search GitHub for open and closed issues that reference this epic number in their body (`Parent epic: #X`).
+- Also check the epic body for any existing Seed Features or Seed Stories lists.
+- Classify each found issue by type (`type:feature`, `type:story`, `type:task`, `type:bug`) and state (open/closed).
+- Do not create a duplicate of any existing issue that already covers the same scope.
+- If an existing issue is misclassified, mislabeled, or missing its parent epic reference, note it under Open Questions rather than silently fixing it during this refinement.
+
 ## Feature Assessment
 
 Before breaking an epic into stories, assess whether a Feature level is warranted:
 
 **Create Features if:**
-- The epic contains more than ~6 stories, OR
+- The epic contains more than ~6 stories (counting existing ones), OR
 - There are clearly distinct capability clusters that can be delivered and closed independently.
 
 **Skip Features and create stories directly if:**
@@ -46,13 +56,15 @@ Before breaking an epic into stories, assess whether a Feature level is warrante
 - A Feature would be a 1:1 wrapper around the epic with no grouping benefit.
 
 If Features are warranted:
-- Create one GitHub issue per Feature with label `type:feature`, linked to this epic.
+- Include existing `type:feature` issues in the Seed Features list.
+- Create new Feature issues only for capability clusters not yet covered.
 - Do not create Story/Task/Bug issues yet — that is the job of `refine-feature`.
-- List the created Feature issues under Seed Features in the epic body.
 
 If Features are not warranted:
-- Create Story/Task/Bug issues directly, linked to this epic.
-- List them under Seed Stories in the epic body.
+- Include existing Story/Task/Bug issues in the Seed Stories list.
+- Create new issues only for scope gaps not yet covered by existing issues.
+
+Always list all related issues in the epic body — both pre-existing and newly created.
 
 ## Refinement Standard
 
@@ -142,6 +154,7 @@ After updating GitHub, reply only with:
 
 - Issue URL
 - Final PO status
+- Existing issues found and included (with numbers)
 - Features created (if any) with issue numbers
 - Stories/Tasks created (if any) with issue numbers
 - Labels changed
