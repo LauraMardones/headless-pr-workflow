@@ -14,3 +14,11 @@ When working in this repository from Codex or a similar sandboxed assistant envi
 ## Intent
 
 The goal is to reduce wasted retries and command rewrites caused by sandbox restrictions, while still keeping ordinary repository edits and local checks lightweight.
+
+## Workflow Commands
+
+To refine an issue: Follow `.claude/commands/refine.md` with the issue number.
+To implement an issue: Follow `.claude/commands/implement.md` with the issue number.
+To review a PR: Follow `.claude/commands/review.md` with the PR number.
+To merge a PR: Follow `.claude/commands/merge.md` with the PR number.
+To clean up after a merged PR: Follow `.claude/commands/cleanup.md` with the PR number.
