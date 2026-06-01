@@ -39,3 +39,20 @@ Stop. Do not guess. Reply with:
 - What label the user should add to proceed
 
 Never silently pick a type or apply a wrong label.
+
+---
+
+## Required GitHub Output — Must Not Be Skipped
+
+**Issue body updated on GitHub** with refined content and **PO status updated** to `Refined` or `Ready for implementation` using `mcp__github__issue_write`.
+
+After refining, post a comment on the issue using this structure (omit inapplicable fields):
+
+```
+## Session Summary
+Command: refine
+Issue / PR: #<issue-number>
+Checks run: none — refinement only
+Blockers: <list, or "none">
+Next action: <"Ready for implementation" or "Needs PO decision">
+```

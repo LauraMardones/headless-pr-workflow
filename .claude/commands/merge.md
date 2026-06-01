@@ -52,3 +52,20 @@ Safe post-merge cleanup:
 
 Treat GitHub as authoritative for the merge decision.
 Never merge a stale or ambiguously approved head SHA.
+
+---
+
+## Required GitHub Output — Must Not Be Skipped
+
+**Merge confirmation comment posted on the merged PR** using `mcp__github__add_issue_comment`.
+
+Post the confirmation comment using this structure (omit inapplicable fields):
+
+```
+## Session Summary
+Command: merge
+Issue / PR: #<pr-number>
+Head SHA: <merged-sha>
+Checks run: <list, or "none">
+Next action: cleanup
+```
