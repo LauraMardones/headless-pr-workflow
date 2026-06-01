@@ -376,3 +376,51 @@ If story N is still in early implementation and key interfaces are unresolved, h
 ### Parallel lanes
 
 Refinement of stories in parallel lanes (no sequential dependency between them) may proceed independently of this gate. The gate applies only to stories that are sequentially dependent.
+
+---
+
+## File Ownership Tagging
+
+Every story body must include a `## Files affected` section before it can move to **Ready for implementation**. The PO adds this section during refinement so executors can detect file ownership conflicts before pulling new work.
+
+The section is a plain markdown list of repository-relative file paths:
+
+```md
+## Files affected
+
+- `docs/PROJECT-STATUS.md`
+- `.claude/commands/implement.md`
+```
+
+The list declares expected ownership for the story. It does not have to predict every incidental test or documentation file, but it must include every known primary file, command file, workflow contract, and shared surface the story is expected to modify.
+
+If the affected files are unknown during refinement, keep the story in **In refinement** or **Refined** and record the uncertainty in Open Questions. Do not move it to **Ready for implementation** until the file list is actionable.
+
+---
+
+## WIP Pre-Flight Check
+
+Before pulling a story from **Ready for implementation** into **In implementation**, an executor must run a WIP pre-flight check using GitHub as the source of truth.
+
+The pre-flight check is:
+
+1. Read the candidate story's `## Files affected` section.
+2. Scan open stories currently in **In implementation**.
+3. Read each active story's `## Files affected` section.
+4. Count active **In implementation** stories.
+5. Compare file lists for overlap with the candidate story.
+
+The WIP limit is **maximum 2 parallel stories**. Parallel implementation is allowed only when both of these conditions are true:
+
+- Fewer than 2 stories are already **In implementation**.
+- The candidate story's declared files do not overlap with any active **In implementation** story.
+
+If 2 or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
+
+If no overlap exists and the WIP count is below 2, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
+
+This pre-flight logic is part of the workflow contract. Model-specific commands, prompts, and adapter files must reference this contract instead of redefining incompatible rules.
+
+### OSS compatibility invariant
+
+Workflow policy must live first in repository documentation such as this file. Model commands are adapters: they may operationalize the policy for Claude Code, Codex, or another executor, but they must not be the only place where the rule exists.
