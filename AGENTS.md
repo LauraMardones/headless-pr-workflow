@@ -19,6 +19,8 @@ The sandbox workspace may be initialized from an older checkout and `git fetch` 
 3. If they differ, the local checkout is stale — do not trust local file contents.
 4. Read all repository files via the GitHub plugin (`get_file_contents`) instead of the local filesystem until the checkout is current.
 5. For edits: write changes to local files as normal, but verify against the remote version first so edits apply on top of the current content.
+6. If `git push` or `git fetch` fails due to sandbox restrictions, use the GitHub plugin's `push_files` tool to push file changes directly via the API — do not give up or report a blocker.
+7. To create a PR when git CLI is unavailable, use the GitHub plugin's `create_pull_request` tool directly.
 
 ## Intent
 
