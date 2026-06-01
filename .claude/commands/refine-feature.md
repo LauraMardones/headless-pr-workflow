@@ -83,12 +83,12 @@ After the breakdown is finalized, derive implementation order from the Dependenc
 
 ## Devil's Advocate Closing Step
 
-After the breakddown is proposed, challenge it with this question:
+After the breakdown is proposed, challenge it with this question:
 
 **"What is the minimum number of stories that correctly and completely implements this feature? Can any proposed stories be merged without losing clarity or parallelism?"**
 
 Review the proposed stories and ask:
-- Are there stories that could be combined into a single story without losing independent deliverability or parallel execution potential>
+- Are there stories that could be combined into a single story without losing independent deliverability or parallel execution potential?
 - Is any story duplicating work or setup cost that another story already includes?
 - Would merging any pair of stories actually reduce complexity or coordination overhead?
 
@@ -151,14 +151,14 @@ Relation to parent epic and business value.
 
 ## Implementation Order
 
-Step 1 — no hard dependencies (can start immediately, run in parallel):
+Step 1 - no hard dependencies (can start immediately, run in parallel):
 - #X ...
 - #Y ...
 
-Step 2 — hard depends on Step 1:
+Step 2 - hard depends on Step 1:
 - #Z ...
 
-Step 3 — hard depends on Step 2:
+Step 3 - hard depends on Step 2:
 - #W ...
 
 ## Dependencies
