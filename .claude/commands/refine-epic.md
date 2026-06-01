@@ -68,7 +68,7 @@ Before breaking an epic into stories, assess whether a Feature level is warrante
 - There are clearly distinct capability clusters that can be delivered and closed independently.
 
 **Skip Features and create stories directly if:**
-- The epic is small that all work is one coherent delivery.
+- The epic is small enough that all work is one coherent delivery.
 - A Feature would be a 1:1 wrapper around the epic with no grouping benefit.
 
 If Features are warranted:
@@ -84,7 +84,7 @@ Always list all related issues in the epic body - both pre-existing and newly cr
 
 ## Implementation Order Derivation
 
-After the breakddown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:
+After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:
 
 - Inspect each seed issue's `Hard depends on:` and `Soft depends on:` dependency lists.
 - Use hard dependencies to create step boundaries. Step 1 contains issues with no hard dependencies; Step 2 contains issues whose hard dependencies are satisfied by Step 1; continue until all placeable seed issues are placed.
