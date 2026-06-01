@@ -66,3 +66,48 @@ An adapter should declare:
 - Whether failure is blocking or advisory.
 
 Adapter output should be structured enough for another assistant or script to consume.
+
+## Executor Routing
+
+Executor routing is data-driven. Capability profiles are declared per executor; no routing logic is hardcoded anywhere. This is an OSS compatibility invariant: any open-source model or future executor can participate by declaring a capability profile — routing must never depend on executor-specific logic embedded in commands or prompts.
+
+### Executor Roles
+
+| Executor | Role | Rationale |
+|---|---|---|
+| Claude Code | Implementation | Faster output, better context awareness, stronger on UI and code style. |
+| Codex | Code review, CI/CD, algorithmically complex tasks | Stronger bug identification, structured reasoning, 2–3× more token-efficient. |
+
+The Claude Code / Codex split is a declared capability boundary, not a policy preference. Any executor that declares equivalent capabilities may take either role.
+
+### Claude Model Tiers (Claude Code)
+
+| Label | Model | Appropriate task types |
+|---|---|---|
+| `executor:claude-code-haiku` | Haiku 4.5 | Setup, boilerplate, quick edits, scaffolding |
+| `executor:claude-code-sonnet` | Sonnet 4.6 | Standard implementation, agentic workflows |
+| `executor:claude-code-opus` | Opus 4.8 | Deep code review, complex reasoning, long-horizon tasks |
+
+### `executor:` Label Format
+
+Four label values are defined:
+
+- `executor:claude-code-haiku`
+- `executor:claude-code-sonnet`
+- `executor:claude-code-opus`
+- `executor:codex`
+
+The `executor:` label is applied to a story when its status moves to **Ready for implementation**. It signals which executor profile should pick up the story. Executors pull only from "Ready for implementation" — never from "Refined" or any other status.
+
+### Capability Profile Structure
+
+Each executor declares its own capability profile. The profile is the source of truth for routing decisions. Profiles are not inferred from executor names, tool versions, or runtime behavior.
+
+A capability profile declares:
+
+- Executor identifier (matches the `executor:` label value).
+- Roles the executor can fulfil.
+- Task types the executor is optimised for.
+- Any capacity or token constraints relevant to story sizing.
+
+Routing logic must read declared profiles, not branch on executor names. This is the OSS invariant: the workflow remains portable to any executor that can declare a conforming profile.
