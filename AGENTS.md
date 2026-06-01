@@ -30,9 +30,9 @@ Run the test suite with:
 python -m pytest
 ```
 
-The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` (repo-relative) to avoid permission errors in sandboxed environments like Codex where the system temp directory may not be writable.
+The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail.
 
-**Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the repo-relative path is also restricted), set the environment variable before running:
+**Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the parent directory is also restricted), set the environment variable before running:
 
 ```
 PYTEST_DEBUG_TEMPROOT=C:\tmp  # Windows / Codex Windows sandbox
