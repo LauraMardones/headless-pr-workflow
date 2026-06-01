@@ -90,6 +90,25 @@ Examples of work that belongs here:
 - usage-flow documentation
 - top-level documentation alignment
 
+### Milestone 5: Multi-Executor Orchestration
+
+Goal: coordinate project-driven workflow status, executor routing, and automation intent across Codex, Claude Code, future executors, and human operators while preserving GitHub as the operational source of truth.
+
+Feature list:
+
+- #109 Feature: Define and document project-driven workflow model.
+- #110 Feature: Project status sync command contract.
+- #111 Feature: Prototype project status automation.
+
+High-level acceptance criteria:
+
+- `docs/PROJECT-STATUS.md` is the canonical workflow contract for project status semantics, handoff, recovery, blocked status, closure, rolling refinement, WIP pre-flight, and OSS compatibility invariants.
+- `docs/ADAPTERS.md` documents executor routing, capability profiles, and adapter boundaries without hardcoding executor-specific routing logic.
+- Project-status sync has a dry-run command contract before any live mutation behavior.
+- Workflow-intent detection is prototyped without automatic hands-off execution.
+- GitHub Actions vs external runner tradeoffs are recorded in a formal ADR before runner automation is adopted.
+- Open-source executor compatibility remains protected by explicit invariants for GitHub wrappers, routing, capacity, pre-flight policy, and handoff format.
+
 ## Sequencing Rules
 
 - Implement factual commands before advisory/orchestration commands.
