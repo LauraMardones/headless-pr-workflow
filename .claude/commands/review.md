@@ -55,7 +55,7 @@ Do not rely on chat-only feedback as workflow-authoritative if it is not also re
 - If blockers remain: submit with event `REQUEST_CHANGES`.
 - If no blockers remain: submit with event `APPROVE`, or leave a solo-maintainer override summary if GitHub blocks self-approval.
 
-Include this structure in the review body (omit inapplicable fields):
+The Session Summary block is **unconditionally required** — include it in every review regardless of whether findings exist. `Blockers` and `Next action` must never be omitted. When no blockers are found, write `Blockers: none` and `Next action: merge`. Only `Head SHA` may be omitted for non-code reviews where no commit SHA was examined.
 
 ```
 ## Session Summary
