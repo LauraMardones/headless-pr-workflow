@@ -14,7 +14,7 @@ Important:
 - If GitHub blocks approval because the authenticated account owns the PR, follow the documented solo-maintainer override path exactly.
 
 Workflow status goals:
-- If blockers are found: "In review" -> "In progress"
+- If blockers are found: "In review" -> "In implementation"
 - If no blockers remain for the current head SHA: "In review" -> "In merge"
 
 Required behavior:
@@ -33,7 +33,7 @@ Required behavior:
    - record findings on GitHub in the correct PR review surfaces
    - use "Request changes" when available
    - clearly describe the blockers
-   - set the story status to "In progress"
+   - set the story status to "In implementation"
    - state that the next action is implementation
 7. If no blockers remain:
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
