@@ -74,13 +74,23 @@ Before breaking an epic into stories, assess whether a Feature level is warrante
 If Features are warranted:
 - Include existing `type:feature` issues in the Seed Features list.
 - Create new Feature issues only for capability clusters not yet covered.
-- Do not create Story/Task/Bug issues yet — that is the job of `refine-feature`.
+- Do not create Story/Task/Bug issues yet - that is the job of `refine-feature`.
 
 If Features are not warranted:
 - Include existing Story/Task/Bug issues in the Seed Stories list.
 - Create new issues only for scope gaps not yet covered by existing issues.
 
-Always list all related issues in the epic body — both pre-existing and newly created.
+Always list all related issues in the epic body - both pre-existing and newly created.
+
+## Implementation Order Derivation
+
+After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:
+
+- Inspect each seed issue's `Hard depends on:` and `Soft depends on:` dependency lists.
+- Use hard dependencies to create step boundaries. Step 1 contains issues with no hard dependencies; Step 2 contains issues whose hard dependencies are satisfied by Step 1; continue until all seed issues are placed.
+- Do not use soft dependencies to create step boundaries. Mention soft dependencies only when they are useful context inside an existing step.
+- Group issues that can run in parallel within the same step.
+- Document the derived sequence as numbered steps under `## Implementation Order` in the epic body.
 
 ## Devil's Advocate Closing Step
 
@@ -105,6 +115,7 @@ Refinement is complete when the epic has:
 - Non-goals
 - Success Criteria (testable)
 - Seed Features or Seed Stories (created as GitHub issues)
+- Implementation Order derived from seed issue hard dependencies
 - Dependencies (Hard / Soft)
 - Open Questions
 - Related epics or milestones
@@ -157,6 +168,18 @@ If no features needed:
 
 - #X Story: ...
 - #Y Task: ...
+
+## Implementation Order
+
+Step 1 — no hard dependencies (can start immediately, run in parallel):
+- #X ...
+- #Y ...
+
+Step 2 — hard depends on Step 1:
+- #Z ...
+
+Step 3 — hard depends on Step 2:
+- #W ...
 
 ## Dependencies
 
