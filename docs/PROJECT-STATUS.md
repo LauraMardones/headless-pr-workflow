@@ -424,3 +424,49 @@ This pre-flight logic is part of the workflow contract. Model-specific commands,
 ### OSS compatibility invariant
 
 Workflow policy must live first in repository documentation such as this file. Model commands are adapters: they may operationalize the policy for Claude Code, Codex, or another executor, but they must not be the only place where the rule exists.
+
+---
+
+## OSS Compatibility Invariants
+
+These invariants preserve the workflow's ability to support future open-source executors such as Llama, Mistral, Qwen, or other local models. Open-source model integration is deferred, but these architectural decisions must remain portable.
+
+### GitHub Tool Use Is A Separable Wrapper
+
+Risk level: HIGH.
+
+Decision point to preserve: workflow logic must be documented and implemented independently from GitHub API calls. GitHub is the current source-of-truth system, but calls to GitHub must remain wrapper behavior around the workflow, not the workflow policy itself.
+
+If adding an OSS executor, ensure this invariant is preserved: the executor may use a different GitHub wrapper, relay service, or human-mediated sync path without changing the orchestrator's core status, routing, handoff, or blocker rules.
+
+### Executor Routing Is Data-Driven, Not Logic-Driven
+
+Risk level: HIGH.
+
+Decision point to preserve: routing decisions must come from declared capability profiles and labels, not from hardcoded branches such as `if executor == "codex"` or `if model == "claude"`.
+
+If adding an OSS executor, ensure this invariant is preserved: add or update a capability profile and routing label instead of adding executor-specific conditional logic to orchestration code or command instructions.
+
+### Capacity Is Abstracted For Metered And Unmetered Executors
+
+Risk level: MEDIUM.
+
+Decision point to preserve: orchestrator capacity must not assume that all executors are API-metered by tokens. Some executors may be constrained by API budget, local hardware, queue depth, wall-clock time, or availability windows.
+
+If adding an OSS executor, ensure this invariant is preserved: express capacity as an abstract scheduling input rather than as a provider-specific token counter.
+
+### Pre-Flight Logic Lives In Workflow Contract Docs First
+
+Risk level: MEDIUM.
+
+Decision point to preserve: pre-flight rules, including the WIP conflict check, live in this workflow contract before they are wired into model-specific commands such as `/implement`.
+
+If adding an OSS executor, ensure this invariant is preserved: adapter commands may operationalize the pre-flight policy, but the canonical rule remains in `docs/PROJECT-STATUS.md`.
+
+### Handoff Note Format Is Plain Markdown Only
+
+Risk level: MEDIUM.
+
+Decision point to preserve: handoff notes use plain structured markdown with no tool-specific syntax, hidden metadata, YAML front matter, or model-specific annotations.
+
+If adding an OSS executor, ensure this invariant is preserved: the executor must be able to read and write handoff notes as ordinary markdown comments in GitHub or another durable planning surface.
