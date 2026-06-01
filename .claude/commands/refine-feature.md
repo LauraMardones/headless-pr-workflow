@@ -61,15 +61,28 @@ Proceed to the breakdown step only after lens questions have been answered.
 
 ## Breakdown
 
-A feature refines into Story/Task/Bug issues — not into further Features.
+A feature refines into Story/Task/Bug issues - not into further Features.
 
 - Include existing Story/Task/Bug issues in the Seed Stories list.
 - Create new issues only for scope gaps not yet covered by existing issues.
 - Link all new issues to this feature and its parent epic.
-- List all related issues — both pre-existing and newly created — under Seed Stories in the feature body.
+- List all related issues - both pre-existing and newly created - under Seed Stories in the feature body.
 - If the breakdown reveals that the feature itself should be split into two features, stop and raise it as an Open Question rather than silently splitting.
 
 After the breakdown is complete, apply the devil's advocate closing step (see below).
+
+## Implementation Order Derivation
+
+After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed story, task, or bug:
+
+- Inspect each seed issue's `Hard depends on:` and `Soft depends on:` dependency lists.
+- Use hard dependencies to create step boundaries. Step 1 contains issues with no hard dependencies; Step 2 contains issues whose hard dependencies are satisfied by Step 1; continue until all placeable seed issues are placed.
+- Do not use soft dependencies to create step boundaries. Mention soft dependencies only when they are useful context inside an existing step.
+- Group issues that can run in parallel within the same step.
+- If a seed issue has an unresolved hard dependency outside the seed set, do not place it in a runnable step. List it under `Blocked / Unresolved Hard Dependencies` with the external dependency.
+- If the seed issue hard-dependency graph has a cycle, do not invent an order for the cyclic issues. List the cycle under `Blocked / Unresolved Hard Dependencies`.
+- If any seed issue is blocked by an external unresolved hard dependency or a cycle, leave final PO status as `Refined`, not `Ready for implementation`, until those hard dependencies are resolved.
+- Document the derived sequence as numbered steps under `## Implementation Order` in the feature body.
 
 ## Devil's Advocate Closing Step
 
@@ -94,6 +107,8 @@ Refinement is complete when the feature has:
 - Out of Scope
 - Success Criteria (testable)
 - Seed Stories (created as GitHub issues)
+- Implementation Order derived from seed issue hard dependencies
+- Blocked / Unresolved Hard Dependencies when any seed issue cannot be ordered
 - Dependencies (Hard / Soft)
 - Assumptions
 - Open Questions
@@ -137,6 +152,22 @@ Relation to parent epic and business value.
 
 - #X Story: ...
 - #Y Task: ...
+
+## Implementation Order
+
+Step 1 - no hard dependencies (can start immediately, run in parallel):
+- #X ...
+- #Y ...
+
+Step 2 - hard depends on Step 1:
+- #Z ...
+
+Step 3 - hard depends on Step 2:
+- #W ...
+
+Blocked / Unresolved Hard Dependencies:
+- #A blocked by external hard dependency #B ...
+- #C blocked by cycle: #C -> #D -> #C
 
 ## Dependencies
 
