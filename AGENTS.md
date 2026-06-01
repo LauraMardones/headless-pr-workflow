@@ -40,6 +40,17 @@ PYTEST_DEBUG_TEMPROOT=C:\tmp  # Windows / Codex Windows sandbox
 
 `C:\tmp` is a confirmed writable location in the Codex Windows sandbox. On Linux/macOS, the `conftest.py` fix should be sufficient without any env-var override.
 
+## Codex Sandbox Constraints
+
+Quick reference for constraints specific to the Codex Windows sandbox. Each entry: constraint — symptom — workaround.
+
+| Constraint | Symptom | Workaround |
+|---|---|---|
+| `.git/` directory operations blocked | `git switch`, `git fetch` fail with lock or permission errors | Use `mcp__github__*` tools for all branch and commit operations. See [Stale Checkout Handling](#stale-checkout-handling). |
+| Default Python version lacks pytest | `python -m pytest` → `No module named pytest` | Use `py -3.12 -m pytest`. Run `py -0p` to list available Python versions. |
+| pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` redirects temp root automatically (fix from #135). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
+| `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. See [GitHub Operations](#github-operations). |
+
 ## Intent
 
 The goal is to avoid wasted retries caused by sandbox restrictions. The GitHub plugin handles all GitHub API needs; local execution handles repo file operations only when the checkout is confirmed current.
