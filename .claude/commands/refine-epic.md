@@ -95,6 +95,16 @@ Review the proposed features/stories and ask:
 
 If merging is justified, modify the breakdown accordingly. If the breakdown is already minimal, document why each feature or story is necessary.
 
+## Implementation Order
+
+After the breakdown is finalised, derive the implementation order:
+
+- Inspect the Dependencies field of each seed feature or story.
+- Group them into sequenced steps: Step 1 = no hard dependencies, Step 2 = hard depends on Step 1, etc.
+- Note which issues within a step can run in parallel.
+- Hard dependencies create step boundaries; soft dependencies do not.
+- Document the result under `## Implementation Order` in the issue body.
+
 ## Refinement Standard
 
 Refinement is complete when the epic has:
@@ -157,6 +167,18 @@ If no features needed:
 
 - #X Story: ...
 - #Y Task: ...
+
+## Implementation Order
+
+Step 1 — no hard dependencies (can start immediately, run in parallel):
+- #X ...
+- #Y ...
+
+Step 2 — hard depends on Step 1:
+- #Z ...
+
+Step 3 — hard depends on Step 2:
+- #W ...
 
 ## Dependencies
 
