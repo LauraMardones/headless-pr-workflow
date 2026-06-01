@@ -76,6 +76,43 @@ Refinement is complete when the issue has:
 - clear command surface if the issue affects the CLI
 - clear JSON output, human-readable output, and exit-code behavior if it affects a command
 
+## Open Questions Format
+
+Each open question must be structured as:
+
+```md
+### [Question title]
+**Context:** [One sentence explaining why this matters]
+
+**Option A: [Name]**
+- Pros: ...
+- Cons: ...
+
+**Option B: [Name]**
+- Pros: ...
+- Cons: ...
+
+**Recommendation:** Option A — [brief reason in plain language, no jargon]
+```
+
+Rules:
+- Language must be non-technical — assume the reader has no engineering background
+- Each option must have at least one pro and one con
+- A recommendation is required; if genuinely too close to call, state why and what information is needed to decide
+- If there are more than two options, include all of them
+
+## Decisions Format
+
+When a PO closes an open question during or after refinement, move it from Open Questions to Decisions with the chosen option, rejected alternatives, and date. Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
+
+Each decision must be structured as:
+
+```md
+### [Decision title] — YYYY-MM-DD
+**Chosen:** [Option name] — [brief reason in plain language]
+**Rejected:** [Option name] — [brief reason why not]
+```
+
 ## Label Handling
 
 - Inspect existing repository labels first.
@@ -199,6 +236,10 @@ Revalidate after dependency closes: yes/no
 ## Open Questions
 
 - ...
+
+## Decisions
+
+...
 
 ## Technical Notes
 
