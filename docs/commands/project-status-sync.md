@@ -39,7 +39,7 @@ All other flags are optional.
 | `--dry-run` | boolean | false | Report what would change without mutating any GitHub Projects state. |
 | `--json` | boolean | false | Emit all output as machine-readable JSON to stdout instead of human-readable summary. Compatible with `--dry-run`. |
 | `--item <number>` | integer | (all items) | Scope sync to a single issue or PR number. Useful for debugging a specific story. |
-| `--project <project-number>` | integer | (auto-detected) | Target a specific GitHub Projects board by number. If omitted, the command auto-detects the board linked to the repository. Fails with exit code 2 if the repo is linked to zero or more than one project and this flag is omitted. |
+| `--project <project-number>` | integer | (auto-detected) | Target a specific GitHub Projects board by number. If omitted, the command auto-detects the board linked to the repository. Fails with exit code 3 if no board is linked and this flag is omitted, or with exit code 4 if the repo is linked to more than one board and this flag is omitted. |
 
 ### Environment variables
 
@@ -135,7 +135,7 @@ Written to stdout as a single JSON object. No human-readable text is mixed into 
 ```
 
 **Notes:**
-- `action` is `"transition"` in live mode and `"transition"` in dry-run (the `transition.applied` field distinguishes them — `false` in dry-run).
+- `action` is `"transition"` in both live and dry-run modes; `transition.applied` distinguishes them — `false` in dry-run, `true` if the mutation succeeded in live mode.
 - All fields are required except `skip_reason` (null when `action != "skipped"`) and `transition` (null when `action != "transition"`).
 - The top-level object is always emitted, even when `items` is empty.
 
@@ -174,15 +174,23 @@ The sync command derives an expected status from observable repository facts. Ea
 
 **Notes:** A merged PR is the sole fact that confirms `Done`. The rule applies regardless of the current Projects status.
 
-### Rule 2 — In review
+### Rule 2 — Needs rework
 
-**Condition:** A linked PR exists AND the PR is marked ready for review (not draft) AND the PR is not merged AND it does not have an active approval that passes all required checks.
+**Condition:** A linked PR is open, not merged, not draft AND the most recent review on the PR has status `CHANGES_REQUESTED`.
+
+**Detected status:** `Needs rework`
+
+**Notes:** "Most recent review" means the latest review event per reviewer. If any reviewer has requested changes and no subsequent approval supersedes it, the item is in `Needs rework`. This rule is evaluated before Rule 3 (In review) because it is more specific — `CHANGES_REQUESTED` state is a subset of the open-ready-not-merged conditions; placing the more specific rule first ensures `Needs rework` items are not mis-classified as `In review`.
+
+### Rule 3 — In review
+
+**Condition:** A linked PR exists AND the PR is marked ready for review (not draft) AND the PR is not merged AND the most recent review per reviewer does not include an unresolved `CHANGES_REQUESTED` (i.e., Rule 2 did not match).
 
 **Detected status:** `In review`
 
-**Notes:** "Linked" means the PR body contains `Closes #<number>`, `Fixes #<number>`, or `Resolves #<number>` (case-insensitive), or the PR is manually linked to the issue via GitHub's issue tracker. A PR that is open but still in draft is not `In review` — see Rule 3.
+**Notes:** "Linked" means the PR body contains `Closes #<number>`, `Fixes #<number>`, or `Resolves #<number>` (case-insensitive), or the PR is manually linked to the issue via GitHub's issue tracker. A PR that is open but still in draft is not `In review` — see Rule 4.
 
-### Rule 3 — In implementation
+### Rule 4 — In implementation
 
 **Condition:** A branch matching the naming convention `*/issue-<number>-*` or `codex/issue-<number>-*` or `claude/issue-<number>-*` exists AND either no PR exists yet, or the linked PR is in draft state.
 
@@ -191,14 +199,6 @@ The sync command derives an expected status from observable repository facts. Ea
 **Branch naming convention:** the prefix `*/` matches any prefix followed by `/issue-<number>-`. Exact prefix list: `codex/`, `claude/`, `feature/`, `fix/`. Additional prefixes may be supported; the rule matches if the branch name contains `issue-<number>-` after the first `/`.
 
 **Notes:** Branch existence is checked against the remote (origin). Local-only branches are not sufficient to trigger this rule.
-
-### Rule 4 — Needs rework
-
-**Condition:** A linked PR is open, not merged, not draft AND the most recent review on the PR has status `CHANGES_REQUESTED`.
-
-**Detected status:** `Needs rework`
-
-**Notes:** "Most recent review" means the latest review event per reviewer. If any reviewer has requested changes and no subsequent approval supersedes it, the item is in `Needs rework`.
 
 ### Rule 5 — No detectable state
 
