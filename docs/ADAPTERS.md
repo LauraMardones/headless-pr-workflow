@@ -111,3 +111,13 @@ A capability profile declares:
 - Any capacity or token constraints relevant to story sizing.
 
 Routing logic must read declared profiles, not branch on executor names. This is the OSS invariant: the workflow remains portable to any executor that can declare a conforming profile.
+
+## Cross-Reference
+
+The canonical executor routing entry points are split by responsibility:
+
+- Status semantics, pull eligibility, WIP pre-flight checks, handoff format, blocker protocol, closure protocol, and OSS compatibility invariants are defined in `docs/PROJECT-STATUS.md`.
+- Adapter boundaries, executor roles, `executor:` labels, and capability profile structure are defined in this file.
+- Lifecycle and source-of-truth rules are defined in `docs/HEADLESS-PR-WORKFLOW.md`.
+
+When adding or changing executor routing, update this file for adapter-facing capability details and update `docs/PROJECT-STATUS.md` only when the workflow contract itself changes. Do not duplicate canonical status or protocol definitions in adapter-specific prompts or commands.
