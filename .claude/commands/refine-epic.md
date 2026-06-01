@@ -68,7 +68,7 @@ Before breaking an epic into stories, assess whether a Feature level is warrante
 - There are clearly distinct capability clusters that can be delivered and closed independently.
 
 **Skip Features and create stories directly if:**
-- The epic is small enough that all work is one coherent delivery.
+- The epic is small that all work is one coherent delivery.
 - A Feature would be a 1:1 wrapper around the epic with no grouping benefit.
 
 If Features are warranted:
@@ -84,12 +84,15 @@ Always list all related issues in the epic body - both pre-existing and newly cr
 
 ## Implementation Order Derivation
 
-After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:
+After the breakddown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:
 
 - Inspect each seed issue's `Hard depends on:` and `Soft depends on:` dependency lists.
-- Use hard dependencies to create step boundaries. Step 1 contains issues with no hard dependencies; Step 2 contains issues whose hard dependencies are satisfied by Step 1; continue until all seed issues are placed.
+- Use hard dependencies to create step boundaries. Step 1 contains issues with no hard dependencies; Step 2 contains issues whose hard dependencies are satisfied by Step 1; continue until all placeable seed issues are placed.
 - Do not use soft dependencies to create step boundaries. Mention soft dependencies only when they are useful context inside an existing step.
 - Group issues that can run in parallel within the same step.
+- If a seed issue has an unresolved hard dependency outside the seed set, do not place it in a runnable step. List it under `Blocked / Unresolved Hard Dependencies` with the external dependency.
+- If the seed issue hard-dependency graph has a cycle, do not invent an order for the cyclic issues. List the cycle under `Blocked / Unresolved Hard Dependencies`.
+- If any seed issue is blocked by an external unresolved hard dependency or a cycle, leave final PO status as `Refined`, not `Ready for implementation`, until those hard dependencies are resolved.
 - Document the derived sequence as numbered steps under `## Implementation Order` in the epic body.
 
 ## Devil's Advocate Closing Step
@@ -116,6 +119,7 @@ Refinement is complete when the epic has:
 - Success Criteria (testable)
 - Seed Features or Seed Stories (created as GitHub issues)
 - Implementation Order derived from seed issue hard dependencies
+- Blocked / Unresolved Hard Dependencies when any seed issue cannot be ordered
 - Dependencies (Hard / Soft)
 - Open Questions
 - Related epics or milestones
@@ -180,6 +184,10 @@ Step 2 — hard depends on Step 1:
 
 Step 3 — hard depends on Step 2:
 - #W ...
+
+Blocked / Unresolved Hard Dependencies:
+- #A blocked by external hard dependency #B ...
+- #C blocked by cycle: #C -> #D -> #C
 
 ## Dependencies
 
