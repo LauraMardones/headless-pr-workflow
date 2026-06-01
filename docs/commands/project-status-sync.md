@@ -119,7 +119,7 @@ Written to stdout as a single JSON object. No human-readable text is mixed into 
       "detected_status": string | null, // status derived from repo facts; null if undetectable
       "action": "transition" | "no_change" | "skipped",
       "skip_reason": string | null, // non-null when action == "skipped"
-      "transition": {           // present only when action == "transition" (or "would_transition" in dry_run)
+      "transition": {           // present only when action == "transition"
         "from": string,
         "to": string,
         "applied": boolean      // false in dry_run; true if mutation succeeded
@@ -184,7 +184,7 @@ The sync command derives an expected status from observable repository facts. Ea
 
 ### Rule 3 — In review
 
-**Condition:** A linked PR exists AND the PR is marked ready for review (not draft) AND the PR is not merged AND the most recent review per reviewer does not include an unresolved `CHANGES_REQUESTED` (i.e., Rule 2 did not match).
+**Condition:** A linked PR exists AND the PR is marked ready for review (not draft) AND the PR is not merged AND it does not have an active approval that passes all required checks AND the most recent review per reviewer does not include an unresolved `CHANGES_REQUESTED` (i.e., Rule 2 did not match).
 
 **Detected status:** `In review`
 
