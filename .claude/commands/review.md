@@ -1,7 +1,6 @@
 Review PR #$ARGUMENTS in LauraMardones/headless-pr-workflow.
 
 Follow:
-- examples/assistants/generic/REVIEW-PR.md
 - docs/MERGE-POLICY.md
 
 You are acting only as reviewer in this session.
@@ -46,3 +45,24 @@ Required behavior:
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 
 Do not rely on chat-only feedback as workflow-authoritative if it is not also recorded on GitHub.
+
+---
+
+## Required GitHub Output — Must Not Be Skipped
+
+**Formal PR review posted on the current head SHA** via `mcp__github__pull_request_review_write`.
+
+- If blockers remain: submit with event `REQUEST_CHANGES`.
+- If no blockers remain: submit with event `APPROVE`, or leave a solo-maintainer override summary if GitHub blocks self-approval.
+
+Include this structure in the review body (omit inapplicable fields):
+
+```
+## Session Summary
+Command: review
+Issue / PR: #<pr-number>
+Head SHA: <reviewed-sha>
+Checks run: <list, or "none">
+Blockers: <list, or "none">
+Next action: <"implementation" or "merge">
+```

@@ -54,3 +54,22 @@ Required behavior:
 Do not merge the PR.
 Do not perform review approval.
 Record workflow-relevant facts in GitHub, not only in chat.
+
+---
+
+## Required GitHub Output — Must Not Be Skipped
+
+**Draft PR created early** using `mcp__github__create_pull_request` (draft: true), linked to the issue.
+**Handoff comment posted on the PR** at completion using `mcp__github__add_issue_comment`.
+
+Post the handoff comment using this structure (omit inapplicable fields):
+
+```
+## Session Summary
+Command: implement
+Issue / PR: #<issue-number>
+Head SHA: <current-head-sha>
+Checks run: <list, or "none — markdown only">
+Blockers: <list, or "none">
+Next action: review
+```

@@ -103,3 +103,19 @@ If local main has uncommitted modifications that are exactly the merged PR chang
 
 Do not create a new local commit for changes that are already merged on GitHub.
 Do not treat stale local PR diffs as unique work once they have been verified against the merged PR.
+
+---
+
+## Required GitHub Output — Must Not Be Skipped
+
+**Closing comment posted on the closed issue** using `mcp__github__add_issue_comment`.
+
+Post the closing comment using this structure (omit inapplicable fields):
+
+```
+## Session Summary
+Command: cleanup
+Issue / PR: #<issue-number>
+Checks run: <list, or "none">
+Next action: none
+```
