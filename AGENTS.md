@@ -22,6 +22,24 @@ The sandbox workspace may be initialized from an older checkout and `git fetch` 
 6. If `git push` or `git fetch` fails due to sandbox restrictions, use the GitHub plugin's `push_files` tool to push file changes directly via the API — do not give up or report a blocker.
 7. To create a PR when git CLI is unavailable, use the GitHub plugin's `create_pull_request` tool directly.
 
+## Running Tests
+
+Run the test suite with:
+
+```
+python -m pytest
+```
+
+The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` (repo-relative) to avoid permission errors in sandboxed environments like Codex where the system temp directory may not be writable.
+
+**Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the repo-relative path is also restricted), set the environment variable before running:
+
+```
+PYTEST_DEBUG_TEMPROOT=C:\tmp  # Windows / Codex Windows sandbox
+```
+
+`C:\tmp` is a confirmed writable location in the Codex Windows sandbox. On Linux/macOS, the `conftest.py` fix should be sufficient without any env-var override.
+
 ## Intent
 
 The goal is to avoid wasted retries caused by sandbox restrictions. The GitHub plugin handles all GitHub API needs; local execution handles repo file operations only when the checkout is confirmed current.
