@@ -26,7 +26,7 @@ Required behavior:
 6. If any merge gate is stale, missing, ambiguous, or failing:
    - stop
    - report the blocker instead of merging
-   - if new implementation is required, set the story status to "In progress"
+   - if new implementation is required, set the story status to "In implementation"
    - if only renewed review is required, set the story status to "In review"
 7. If local state is dirty or unrelated work exists, report the safe next step instead of forcing sync or cleanup.
 8. Do not rely on local branch state unless it is required for a documented post-merge follow-up.
