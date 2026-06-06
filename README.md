@@ -146,7 +146,11 @@ src/headless_pr_workflow/    Python CLI implementation (~20 modules)
   target_branch.py           target-branch-check command
   catalog.py                 command catalog registry
 
-scripts/                     Thin shell convenience wrappers (hpw, hpw.ps1)
+scripts/                     Shell scripts for automation and notifications
+  hpw                        Thin shell wrapper (Unix)
+  hpw.ps1                    Thin shell wrapper (Windows PowerShell)
+  flow-review.sh             Weekly flow review report from GitHub Projects v2
+  slack-notify.sh            Slack notification adapter — posts Block Kit messages to an incoming webhook
 examples/                    Assistant and repo adapter examples
   assistants/                Per-assistant adapter examples
   repos/                     Per-repo adapter examples
@@ -158,6 +162,17 @@ tests/                       Deterministic tests for all modules
 ## Integration Examples
 
 - `examples/github-actions/hpw-pre-merge-gate.yml` — copy-paste GitHub Actions workflow that enforces `hpw pre-merge` as a required status check before merge
+
+## Required Secrets
+
+The following GitHub Actions secrets are required for full automation:
+
+| Secret | Used by | Description |
+|---|---|---|
+| `GH_TOKEN` | `scripts/flow-review.sh` | GitHub personal access token with `repo` and `read:project` scopes |
+| `SLACK_WEBHOOK_URL` | `scripts/slack-notify.sh` | Slack incoming webhook URL for dispatcher notifications |
+
+Set these in **Settings → Secrets and variables → Actions** in the repository.
 
 ## Policy Documentation
 
