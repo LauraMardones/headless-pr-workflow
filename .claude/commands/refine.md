@@ -14,12 +14,12 @@ Before identifying the issue type, check whether recent implementations under th
 - If not found, log a note ("Parent Feature/Epic could not be determined — skipping usage-feedback check") and proceed immediately to Step 2.
 
 **Fetch recently closed/merged work under the parent (14-day lookback):**
-- Use `gh issue list --repo LauraMardones/headless-pr-workflow --state closed` filtered to the parent issue number mentioned in other issues' bodies, or search for issues/PRs referencing the same parent.
-- Limit to items closed or merged within the last 14 days.
+- Use `mcp__github__list_issues` with `state: closed` and a `since` filter set to 14 days ago, scoped to the repository `LauraMardones/headless-pr-workflow`.
+- Filter results to items whose body references the parent issue number (e.g. `Parent epic: #N` or `Feature group: #N`), or search closed PRs via `mcp__github__list_pull_requests` with `state: closed` and the same date window.
 - If no recent items exist, proceed immediately to Step 2 without prompting the PO.
 
 **Check for PO usage feedback comments:**
-- For each recently closed issue or merged PR found, fetch its comments.
+- For each recently closed issue or merged PR found, use `mcp__github__issue_read` (method: `get_comments`) to fetch its comments.
 - Look for PO comments (author: LauraMardones or comments describing usage observations, unexpected behaviour, or product feedback).
 - "Usage feedback" means observations from actually using the delivered product — not refinement discussion, implementation notes, or approval comments.
 
