@@ -1,0 +1,40 @@
+# Dispatcher workflow — autonomous story-level execution entry point
+#
+# Prototype divergences:
+# D1: dispatcher-poll.sh does not yet exist on main (story #170 is in review).
+#     This workflow references the script by path; the run step will fail gracefully
+#     if the script is absent until #170 lands. No guard is added here — the log
+#     output of a missing script is diagnostic and sufficient.
+
+name: Dispatcher
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard — check DISPATCHER_ENABLED
+        id: guard
+        env:
+          DISPATCHER_ENABLED: ${{ vars.DISPATCHER_ENABLED }}
+        run: |
+          if [ "$DISPATCHER_ENABLED" != "true" ]; then
+            echo "Dispatcher disabled"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run dispatcher poll (dry-run)
+        if: steps.guard.outputs.enabled == 'true'
+        run: bash scripts/dispatcher-poll.sh
