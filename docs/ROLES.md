@@ -73,7 +73,7 @@ Responsibilities:
 
 ## Human Approver
 
-A human approver supplies judgment that should not be automated away.
+A human approver supplies judgment that should not be automated away. This role is triggered by AI escalation — the Human Approver is not part of the normal code review flow and does not perform code review.
 
 Responsibilities:
 
@@ -81,7 +81,23 @@ Responsibilities:
 - Resolve ambiguous policy conflicts.
 - Decide whether an adapter-specific gate is required for a repo.
 
+Note: Code review is explicitly not part of this role. The Human Approver acts when an AI assistant escalates a decision that should not be automated — not because they are positioned in the review flow.
+
+## Product Validator
+
+The product validator tests the delivered product through actual usage and feeds findings back into the workflow as first-class inputs.
+
+Responsibilities:
+
+- Test the delivered product through actual usage after implementation is complete.
+- Post usage findings as GitHub comments on the relevant issue or PR.
+- Distinguish usage feedback from implementation blockers when reporting.
+
+Usage findings posted by the Product Validator carry the same weight as review blockers: they are valid workflow inputs that must be addressed before a story can close. The Product Validator is not a code reviewer and does not evaluate the implementation at the code level.
+
 ## Worked Solo-Maintainer Flow
+
+Note: In a solo-maintainer setup, the product owner holds both the Human Approver and Product Validator roles simultaneously.
 
 Implementation session responsibilities:
 
