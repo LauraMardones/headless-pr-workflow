@@ -5,7 +5,7 @@
 # "Ready for implementation" or "Ready for refinement" and output a JSON
 # object with both result lists.
 # Contract: issue #170 (initial implementation), issue #181 (dual-status extension),
-#           issue #182 (ready-for-refinement notification)
+#           issue #182 (ready-for-refinement notification), issue #180 (Red flow health notification)
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-poll.sh --repo <owner/repo> [--dry-run]
@@ -13,11 +13,15 @@
 # Environment (optional):
 #   SLACK_WEBHOOK_URL  Required by slack-notify.sh for ready_for_refinement notifications.
 #                      If unset, slack-notify.sh exits 1; the poll loop continues (|| true).
+#   BOARD_URL          GitHub Projects board URL included in Red flow health notifications.
+#                      Falls back to "" if unset; slack-notify.sh renders "(no URL)" gracefully.
 #
 # Side effects:
 #   For each "Ready for refinement" issue not yet notified this runner session,
 #   calls scripts/slack-notify.sh ready_for_refinement. Notification state is
 #   tracked in a local temp file (see "Ready for refinement notification" section).
+#   For Red flow health: calls scripts/slack-notify.sh red_flow_health when
+#   flow_health == "Red". No de-duplication; fires on every Red-health poll run.
 #   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
 # Requirements: bash, curl, jq
@@ -46,6 +50,9 @@
 #   D6  Refinement notification de-duplication resets on runner restart. The
 #       state file lives in TMPDIR and is not persisted across CI runner
 #       restarts. Accepted prototype limitation; document in ops runbooks.
+#   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
+#       independently. Acceptable at current scale; future refactor can share
+#       the query result.
 
 set -euo pipefail
 
@@ -234,6 +241,37 @@ if [[ "$REFINE_COUNT" -gt 0 ]]; then
             fi
         fi
     done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
+fi
+
+# ─── Flow health notification (Red only) ─────────────────────────────────────
+
+# D7: flow-review.sh makes an independent board query; || true ensures a
+# transient API failure does not abort the poll loop under set -euo pipefail.
+FLOW_JSON=$(bash "$(dirname "$0")/flow-review.sh" --repo "$REPO" --json) || true
+FLOW_HEALTH=$(printf '%s' "$FLOW_JSON" | jq -r '.flow_health // ""' 2>/dev/null) || FLOW_HEALTH=""
+
+if [[ "$FLOW_HEALTH" == "Red" ]]; then
+    WIP_COUNT=$(echo "$FLOW_JSON" | jq '.wip_count')
+    BLOCKED_COUNT=$(echo "$FLOW_JSON" | jq '.blocked | length')
+    WIP_VIOLATION=$(echo "$FLOW_JSON" | jq -r '.wip_violation')
+    STALE_BLOCKED=$(echo "$FLOW_JSON" | jq '[.blocked[] | select(.days_without_update > 7)] | length')
+
+    if [[ "$WIP_VIOLATION" == "true" ]]; then
+        SIGNAL="WIP limit exceeded"
+    elif [[ "$STALE_BLOCKED" -gt 0 ]]; then
+        SIGNAL="Blocked item stale >7 days"
+    else
+        SIGNAL="Empty ready queue with active WIP"
+    fi
+
+    CONTEXT=$(jq -n \
+        --arg s "$SIGNAL" \
+        --arg w "$WIP_COUNT" \
+        --arg b "$BLOCKED_COUNT" \
+        --arg u "${BOARD_URL:-}" \
+        '{"signal":$s,"wip_count":$w,"blocked_count":$b,"board_url":$u}')
+
+    bash "$(dirname "$0")/slack-notify.sh" red_flow_health "$CONTEXT" >/dev/null || true
 fi
 
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────
