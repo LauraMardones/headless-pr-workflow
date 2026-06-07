@@ -41,7 +41,7 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ## GitHub Token — `PROJECT_TOKEN`
 
-The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `read:project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to read and update story status.
+The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to both read board state and write story status (via `updateProjectV2ItemFieldValue`).
 
 Provision a personal access token (PAT) with the following scopes and store it as a repository secret named `PROJECT_TOKEN`:
 
@@ -49,7 +49,7 @@ Provision a personal access token (PAT) with the following scopes and store it a
 
 | Secret | Type | Required scopes |
 |---|---|---|
-| `PROJECT_TOKEN` | Classic PAT or fine-grained PAT | `repo` (full), `read:project` (or `project` for write access to update board status) |
+| `PROJECT_TOKEN` | Classic PAT | `repo` (full), `project` (full — required for write access to update board status) |
 
 The workflow maps this secret to the `GH_TOKEN` environment variable, which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
 
