@@ -6,7 +6,9 @@
 # invocation (/implement → /review → /merge → /cleanup) with board status
 # transitions. After each story completes or is blocked, the loop finds the
 # next "Ready for implementation" story and repeats the full pre-flight + cycle.
-# Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162)
+# Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
+#             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
+#                         feature_closure_confirmation, epic_closure_approval)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -36,6 +38,18 @@
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
 #   In GitHub Actions, reference secrets via ${{ secrets.GH_TOKEN }}.
 #   Do not hardcode any token or API key in this script.
+#
+# ─── Notification events (issue #179) ────────────────────────────────────────
+#
+# Four Slack events are wired into this script via scripts/slack-notify.sh:
+#   decision_blocker          — executor declared Type: decision during /implement or /review
+#   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
+#   feature_closure_confirmation — all stories in a feature group reached Done
+#   epic_closure_approval     — all features in an epic have all stories Done
+#
+# Notification calls are guarded with || true; adapter failure never aborts the loop.
+# Under --dry-run, calls are suppressed and logged instead.
+# Conflict and dependency blockers (WIP overflow, file overlap) do NOT fire decision_blocker.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -111,6 +125,10 @@ NOW_TS=$(date -u +%s)
 STALE_THRESHOLD=7200   # 2 hours in seconds
 WIP_LIMIT=2
 
+# Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
+LAST_ACTION="initializing"
+DISPATCH_HANDLED=false  # set true before any expected exit 1 (blocker posted)
+
 # ─── Utility: ISO-8601 timestamp to unix seconds (Linux + macOS) ──────────────
 
 iso_to_ts() {
@@ -182,6 +200,199 @@ post_comment() {
     fi
 }
 
+# ─── Utility: send a Slack notification via slack-notify.sh (issue #179) ─────
+# All calls use || true so adapter failure never aborts the invoke loop.
+# Under --dry-run, calls are suppressed and logged.
+
+notify_slack() {
+    local event_type="$1"
+    local context_json="$2"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would notify Slack: $event_type $context_json"
+        return 0
+    fi
+    SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}" \
+        bash "$script_dir/slack-notify.sh" "$event_type" "$context_json" || true
+}
+
+# ─── Dispatcher error EXIT trap (issue #179) ──────────────────────────────────
+# Fires dispatcher_error notification on unexpected exits.
+# DISPATCH_HANDLED=true suppresses the notification for expected exits (blockers posted).
+
+_dispatcher_exit_hook() {
+    local rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    $DISPATCH_HANDLED && return 0
+    notify_slack "dispatcher_error" \
+        "$(jq -n \
+               --arg desc "Dispatcher exited unexpectedly (exit code $rc)" \
+               --arg action "$LAST_ACTION" \
+               '{error_description: $desc, last_action: $action}')"
+}
+trap _dispatcher_exit_hook EXIT
+
+# ─── Utility: detect decision-type blocker and notify Slack (issue #179) ─────
+# Called after an executor fails mid-cycle. Scans recent issue comments for a
+# ## Blocked Declaration with Type: decision (posted by the executor). Fires
+# decision_blocker Slack event only for decision-type blockers — conflict and
+# dependency blockers (WIP, file overlap) do NOT trigger this notification.
+
+check_and_notify_decision_blocker() {
+    local issue_num="$1"
+    local issue_title="$2"
+    local blocker_body
+    blocker_body=$(gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
+        | jq -r '[.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
+                  | last | .body // empty' 2>/dev/null || true)
+    [[ -z "$blocker_body" ]] && return 0
+    local unblocked_when issue_url
+    unblocked_when=$(echo "$blocker_body" \
+        | grep -oP '(?<=Unblocked when: ).*' | head -1 \
+        | sed 's/[[:space:]]*$//' || echo "condition to be determined by PO")
+    issue_url="https://github.com/$REPO/issues/$issue_num"
+    notify_slack "decision_blocker" \
+        "$(jq -n \
+               --arg st "$issue_title" \
+               --arg iu "$issue_url" \
+               --arg bt "decision" \
+               --arg uw "$unblocked_when" \
+               '{story_title: $st, issue_url: $iu, blocker_type: $bt, unblocked_when: $uw}')"
+}
+
+# ─── Utility: notify Slack on feature/epic closure after a story completes ───
+# Uses the BOARD_DATA snapshot from the start of the run. Treats the
+# just-completed story as Done regardless of snapshot state. Sends
+# feature_closure_confirmation when all feature stories are Done, then sends
+# epic_closure_approval when all features in the epic are also Done.
+
+notify_closure_if_complete() {
+    local completed_story_num="$1"
+
+    # ── Feature closure ──────────────────────────────────────────────────────
+    local feature_num
+    feature_num=$(echo "$TARGET_BODY" \
+        | grep -oP '(?<=Feature group: #)[0-9]+' | head -1 || true)
+    [[ -z "$feature_num" ]] && return 0
+
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check feature #$feature_num closure after #$completed_story_num Done"
+        return 0
+    fi
+
+    local feature_total feature_done
+    feature_total=$(echo "$BOARD_DATA" | jq \
+        --arg fn "$feature_num" \
+        '[.data.repository.projectsV2.nodes[0].items.nodes[]
+          | select(
+              (.content | type) == "object" and
+              (.content.number != null) and
+              ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)"))
+            )] | length')
+
+    [[ -z "$feature_total" || "$feature_total" -eq 0 ]] && return 0
+
+    # Count Done stories; treat the just-completed story as Done even if board snapshot is stale
+    feature_done=$(echo "$BOARD_DATA" | jq \
+        --arg fn "$feature_num" \
+        --argjson cn "$completed_story_num" \
+        '[.data.repository.projectsV2.nodes[0].items.nodes[]
+          | select(
+              (.content | type) == "object" and
+              (.content.number != null) and
+              ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
+              (
+                .content.number == $cn or
+                ([.fieldValues.nodes[]
+                  | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
+                ] | length > 0)
+              )
+            )] | length')
+
+    [[ -z "$feature_done" || "$feature_done" -lt "$feature_total" ]] && return 0
+
+    # All stories in the feature are Done — notify feature closure confirmation
+    local feature_title feature_url
+    feature_title=$(gh api "repos/$REPO/issues/$feature_num" --jq '.title' 2>/dev/null \
+                    || echo "Feature #$feature_num")
+    feature_url="https://github.com/$REPO/issues/$feature_num"
+    echo "Feature #$feature_num: all $feature_total stories Done. Notifying Slack (feature_closure_confirmation)."
+    notify_slack "feature_closure_confirmation" \
+        "$(jq -n \
+               --arg ft "$feature_title" \
+               --arg su "$feature_url" \
+               '{feature_title: $ft, summary_url: $su}')"
+
+    # ── Epic closure ─────────────────────────────────────────────────────────
+    local feature_body epic_num
+    feature_body=$(gh api "repos/$REPO/issues/$feature_num" --jq '.body // ""' 2>/dev/null \
+                   || echo "")
+    epic_num=$(echo "$feature_body" \
+        | grep -oP '(?<=Parent epic: #)[0-9]+' | head -1 || true)
+    [[ -z "$epic_num" ]] && return 0
+
+    # Collect all features in the epic from the board (features reference epic via body)
+    local epic_feature_nums
+    epic_feature_nums=$(echo "$BOARD_DATA" | jq -r \
+        --arg en "$epic_num" \
+        '.data.repository.projectsV2.nodes[0].items.nodes[]
+          | select(
+              (.content | type) == "object" and
+              (.content.number != null) and
+              ((.content.body // "") | test("Parent epic: #" + $en + "([^0-9]|$)"))
+            )
+          | .content.number')
+    [[ -z "$epic_feature_nums" ]] && return 0
+
+    # Verify all features' stories on the board are Done
+    local all_features_done=true
+    while IFS= read -r fn; do
+        local ftotal fdone
+        ftotal=$(echo "$BOARD_DATA" | jq \
+            --arg fn "$fn" \
+            '[.data.repository.projectsV2.nodes[0].items.nodes[]
+              | select(
+                  (.content | type) == "object" and
+                  (.content.number != null) and
+                  ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)"))
+                )] | length')
+        fdone=$(echo "$BOARD_DATA" | jq \
+            --arg fn "$fn" \
+            --argjson cn "$completed_story_num" \
+            '[.data.repository.projectsV2.nodes[0].items.nodes[]
+              | select(
+                  (.content | type) == "object" and
+                  (.content.number != null) and
+                  ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
+                  (
+                    .content.number == $cn or
+                    ([.fieldValues.nodes[]
+                      | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
+                    ] | length > 0)
+                  )
+                )] | length')
+        if [[ -n "$ftotal" && "$ftotal" -gt 0 && "$fdone" -lt "$ftotal" ]]; then
+            all_features_done=false
+            break
+        fi
+    done <<< "$epic_feature_nums"
+
+    $all_features_done || return 0
+
+    # All features' stories are Done — notify epic closure approval
+    local epic_title epic_url
+    epic_title=$(gh api "repos/$REPO/issues/$epic_num" --jq '.title' 2>/dev/null \
+                 || echo "Epic #$epic_num")
+    epic_url="https://github.com/$REPO/issues/$epic_num"
+    echo "Epic #$epic_num: all features complete. Notifying Slack (epic_closure_approval)."
+    notify_slack "epic_closure_approval" \
+        "$(jq -n \
+               --arg et "$epic_title" \
+               --arg su "$epic_url" \
+               '{epic_title: $et, summary_url: $su}')"
+}
+
 # ─── Utility: post a conflict blocker on the target issue and exit 1 ─────────
 
 post_conflict_blocker() {
@@ -198,6 +409,7 @@ Owner: PO (@LauraMardones)
 State of in-progress work: none"
     echo "BLOCKED: posting conflict blocker on #$issue_num"
     post_comment "$issue_num" "$body"
+    DISPATCH_HANDLED=true
     exit 1
 }
 
@@ -345,6 +557,7 @@ find_next_ready_story() {
 
 # ─── Fetch project board data (single query) ──────────────────────────────────
 
+LAST_ACTION="fetching project board"
 echo "Fetching project board..."
 BOARD_DATA=$(gh api graphql -f query='
 query($owner: String!, $repo: String!) {
@@ -422,6 +635,7 @@ get_status_option_id() {
 
 # ─── Step 1: Fetch target story ───────────────────────────────────────────────
 
+LAST_ACTION="fetching target story #$ISSUE_NUMBER"
 echo "Fetching target story #$ISSUE_NUMBER..."
 TARGET=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER") || {
     echo "Error: Could not fetch issue #$ISSUE_NUMBER from $REPO." >&2; exit 1
@@ -433,6 +647,7 @@ TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
 
 # ─── Step 2: Executor label routing ──────────────────────────────────────────
 
+LAST_ACTION="executor label routing for #$ISSUE_NUMBER"
 EXECUTOR_LABEL=""
 for lbl in $TARGET_LABELS; do
     if [[ "$lbl" == executor:* ]]; then
@@ -462,6 +677,7 @@ echo "Executor: $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
 
 # ─── Step 3: Collect "In implementation" stories ─────────────────────────────
 
+LAST_ACTION="collecting in-implementation stories"
 IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
     .data.repository.projectsV2.nodes[0].items.nodes[]
     | select(
@@ -511,6 +727,7 @@ set_project_status_ready() {
     || echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
 }
 
+LAST_ACTION="stale story detection"
 STALE_COUNT=0
 for ((i=0; i < IN_IMPL_COUNT; i++)); do
     item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
@@ -633,6 +850,7 @@ fi
 # ─── Step 5: WIP limit check ──────────────────────────────────────────────────
 # Policy: max 2 parallel stories In implementation (docs/PROJECT-STATUS.md)
 
+LAST_ACTION="WIP limit check"
 echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"
 
 if [[ $IN_IMPL_COUNT -ge $WIP_LIMIT ]]; then
@@ -645,6 +863,7 @@ fi
 
 # ─── Step 6: File overlap check ───────────────────────────────────────────────
 
+LAST_ACTION="file overlap check"
 TARGET_FILE_LIST=$(extract_files "$TARGET_BODY")
 
 if [[ -z "$TARGET_FILE_LIST" ]]; then
@@ -707,46 +926,56 @@ fi
 
 # ─── Step E1: /implement ──────────────────────────────────────────────────────
 
+LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
 echo ""
 echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
 if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
+    check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+    DISPATCH_HANDLED=true
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
 
 # ─── Step E2: /review ─────────────────────────────────────────────────────────
 
+LAST_ACTION="invoking /review for #$ISSUE_NUMBER"
 echo ""
 echo "── E2: /review for #$ISSUE_NUMBER ──────────────────────────────────────"
 PR_NUMBER=$(find_linked_pr "$ISSUE_NUMBER")
 if [[ -z "$PR_NUMBER" ]]; then
     echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    DISPATCH_HANDLED=true
     exit 1
 fi
 echo "Linked PR: #$PR_NUMBER"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
 if ! invoke_executor_command "review" "$PR_NUMBER"; then
+    check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    DISPATCH_HANDLED=true
     exit 1
 fi
 echo "✓ /review completed for PR #$PR_NUMBER"
 
 # ─── Step E3: /merge ──────────────────────────────────────────────────────────
 
+LAST_ACTION="invoking /merge for PR #$PR_NUMBER"
 echo ""
 echo "── E3: /merge PR #$PR_NUMBER ────────────────────────────────────────────"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready to merge"
 if ! invoke_executor_command "merge" "$PR_NUMBER"; then
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge"
+    DISPATCH_HANDLED=true
     exit 1
 fi
 echo "✓ /merge completed for PR #$PR_NUMBER"
 
 # ─── Step E4: /cleanup ────────────────────────────────────────────────────────
 
+LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
 echo ""
 echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
@@ -756,14 +985,21 @@ if ! invoke_executor_command "cleanup" "$ISSUE_NUMBER"; then
 fi
 echo "✓ Story #$ISSUE_NUMBER completed (Done)."
 
+# ─── Feature/epic closure check (issue #179) ──────────────────────────────────
+
+LAST_ACTION="feature/epic closure check after #$ISSUE_NUMBER Done"
+notify_closure_if_complete "$ISSUE_NUMBER" || true
+
 # ─── Loop: find and process the next Ready for implementation story ───────────
 
+LAST_ACTION="searching for next Ready for implementation story"
 echo ""
 echo "Searching for next \"Ready for implementation\" story..."
 NEXT_ISSUE=$(find_next_ready_story || true)
 
 if [[ -z "$NEXT_ISSUE" ]]; then
     echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
+    DISPATCH_HANDLED=true
     exit 0
 fi
 
@@ -771,7 +1007,9 @@ echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution 
 
 if $DRY_RUN; then
     echo "[DRY RUN] Would exec: bash $0 --repo $REPO --issue $NEXT_ISSUE --dry-run"
+    DISPATCH_HANDLED=true
     exit 0
 fi
 
+DISPATCH_HANDLED=true
 exec bash "$0" --repo "$REPO" --issue "$NEXT_ISSUE"
