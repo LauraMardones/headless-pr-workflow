@@ -4,10 +4,21 @@
 # Prototype: query GitHub Projects v2 for items with status
 # "Ready for implementation" or "Ready for refinement" and output a JSON
 # object with both result lists.
-# Contract: issue #170 (initial implementation), issue #181 (dual-status extension)
+# Contract: issue #170 (initial implementation), issue #181 (dual-status extension),
+#           issue #182 (ready-for-refinement notification)
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-poll.sh --repo <owner/repo> [--dry-run]
+#
+# Environment (optional):
+#   SLACK_WEBHOOK_URL  Required by slack-notify.sh for ready_for_refinement notifications.
+#                      If unset, slack-notify.sh exits 1; the poll loop continues (|| true).
+#
+# Side effects:
+#   For each "Ready for refinement" issue not yet notified this runner session,
+#   calls scripts/slack-notify.sh ready_for_refinement. Notification state is
+#   tracked in a local temp file (see "Ready for refinement notification" section).
+#   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
 # Requirements: bash, curl, jq
 #
@@ -32,6 +43,9 @@
 #       line to stderr; behaviour is otherwise identical.
 #   D5  Single GraphQL round-trip: both status filters are applied in jq
 #       against the same items response. No second network request is made.
+#   D6  Refinement notification de-duplication resets on runner restart. The
+#       state file lives in TMPDIR and is not persisted across CI runner
+#       restarts. Accepted prototype limitation; document in ops runbooks.
 
 set -euo pipefail
 
@@ -192,6 +206,32 @@ else
 fi
 
 echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(s) ready for refinement." >&2
+
+# ─── Ready for refinement notification ───────────────────────────────────────
+#
+# De-duplication state file: one notified issue number per line.
+# Survives within a single runner session; resets on runner restart (D6).
+# State file path: ${TMPDIR:-/tmp}/dispatcher-poll-notified-refinement-${REPO//\//-}
+
+REFINE_NOTIFIED_FILE="${TMPDIR:-/tmp}/dispatcher-poll-notified-refinement-${REPO//\//-}"
+
+if [[ "$REFINE_COUNT" -gt 0 ]]; then
+    while IFS= read -r item; do
+        NUMBER=$(echo "$item" | jq -r '.number')
+        TITLE=$(echo "$item" | jq -r '.title')
+        URL="https://github.com/${REPO}/issues/${NUMBER}"
+
+        if ! grep -qxF "$NUMBER" "$REFINE_NOTIFIED_FILE" 2>/dev/null; then
+            CONTEXT_JSON=$(jq -n \
+                --arg issue_title "$TITLE" \
+                --arg issue_url "$URL" \
+                '{"issue_title": $issue_title, "issue_url": $issue_url}')
+            bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON" || true
+            echo "$NUMBER" >> "$REFINE_NOTIFIED_FILE"
+            echo "[POLL] Notified: ready_for_refinement #${NUMBER} ${TITLE}" >&2
+        fi
+    done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
+fi
 
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────
 
