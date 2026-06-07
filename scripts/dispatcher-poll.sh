@@ -226,9 +226,12 @@ if [[ "$REFINE_COUNT" -gt 0 ]]; then
                 --arg issue_title "$TITLE" \
                 --arg issue_url "$URL" \
                 '{"issue_title": $issue_title, "issue_url": $issue_url}')
-            bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON" || true
-            echo "$NUMBER" >> "$REFINE_NOTIFIED_FILE"
-            echo "[POLL] Notified: ready_for_refinement #${NUMBER} ${TITLE}" >&2
+            if bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON"; then
+                echo "$NUMBER" >> "$REFINE_NOTIFIED_FILE"
+                echo "[POLL] Notified: ready_for_refinement #${NUMBER} ${TITLE}" >&2
+            else
+                echo "[POLL] Warning: slack-notify.sh failed for #${NUMBER}; will retry next cycle" >&2
+            fi
         fi
     done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
 fi
