@@ -2,8 +2,9 @@
 # scripts/dispatcher-poll.sh
 #
 # Prototype: query GitHub Projects v2 for items with status
-# "Ready for implementation" and output a JSON array of results.
-# Contract: issue #170 (Story: Implement scripts/dispatcher-poll.sh)
+# "Ready for implementation" or "Ready for refinement" and output a JSON
+# object with both result lists.
+# Contract: issue #170 (initial implementation), issue #181 (dual-status extension)
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-poll.sh --repo <owner/repo> [--dry-run]
@@ -11,8 +12,12 @@
 # Requirements: bash, curl, jq
 #
 # Output (stdout):
-#   JSON array: [{"number": N, "title": "..."}, ...]
-#   Empty array ([]) when no items match.
+#   JSON object:
+#     {
+#       "ready_for_implementation": [{"number": N, "title": "..."}, ...],
+#       "ready_for_refinement":     [{"number": N, "title": "..."}, ...]
+#     }
+#   Both keys are always present; each value is [] when no items match.
 #
 # Prototype divergences from expected behaviour:
 #   D1  Pagination: fetches max 100 project items per request; repos with
@@ -24,7 +29,9 @@
 #       items) are skipped entirely.
 #   D4  Dry-run is the only supported mode: no executor invocation or GitHub
 #       state mutation occurs in any run. The --dry-run flag adds a header
-#       line to stdout; behaviour is otherwise identical.
+#       line to stderr; behaviour is otherwise identical.
+#   D5  Single GraphQL round-trip: both status filters are applied in jq
+#       against the same items response. No second network request is made.
 
 set -euo pipefail
 
@@ -130,9 +137,9 @@ ITEMS=$(graphql "{
   }
 }")
 
-# ─── Filter items with "Ready for implementation" status ──────────────────────
+# ─── Filter by status (D5: single response, two jq passes) ───────────────────
 
-READY=$(echo "$ITEMS" | jq '[
+READY_FOR_IMPL=$(echo "$ITEMS" | jq '[
   .data.repository.projectsV2.nodes[0].items.nodes[] |
   select(
     (.content.number? != null) and
@@ -143,7 +150,19 @@ READY=$(echo "$ITEMS" | jq '[
   { number: .content.number, title: .content.title }
 ]')
 
-SIGNAL_COUNT=$(echo "$READY" | jq 'length')
+READY_FOR_REFINE=$(echo "$ITEMS" | jq '[
+  .data.repository.projectsV2.nodes[0].items.nodes[] |
+  select(
+    (.content.number? != null) and
+    ([ .fieldValues.nodes[] |
+       select((.field.name? // "") == "Status" and (.name? // "") == "Ready for refinement")
+    ] | length > 0)
+  ) |
+  { number: .content.number, title: .content.title }
+]')
+
+IMPL_COUNT=$(echo "$READY_FOR_IMPL" | jq 'length')
+REFINE_COUNT=$(echo "$READY_FOR_REFINE" | jq 'length')
 
 # ─── Dry-run header ───────────────────────────────────────────────────────────
 
@@ -154,16 +173,29 @@ fi
 
 # ─── Log found items ──────────────────────────────────────────────────────────
 
-if [[ "$SIGNAL_COUNT" -eq 0 ]]; then
+if [[ "$IMPL_COUNT" -eq 0 ]]; then
     echo "No items found with status \"Ready for implementation\"." >&2
 else
-    echo "Items ready for implementation: $SIGNAL_COUNT" >&2
+    echo "Items ready for implementation: $IMPL_COUNT" >&2
     echo "" >&2
-    echo "$READY" | jq -r '.[] | "[POLL] #\(.number) \(.title)"' >&2
+    echo "$READY_FOR_IMPL" | jq -r '.[] | "[POLL] #\(.number) \(.title)"' >&2
     echo "" >&2
-    echo "Summary: $SIGNAL_COUNT item(s) found." >&2
 fi
+
+if [[ "$REFINE_COUNT" -eq 0 ]]; then
+    echo "No items found with status \"Ready for refinement\"." >&2
+else
+    echo "Items ready for refinement: $REFINE_COUNT" >&2
+    echo "" >&2
+    echo "$READY_FOR_REFINE" | jq -r '.[] | "[POLL] #\(.number) \(.title)"' >&2
+    echo "" >&2
+fi
+
+echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(s) ready for refinement." >&2
 
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────
 
-echo "$READY"
+jq -n \
+    --argjson impl "$READY_FOR_IMPL" \
+    --argjson refine "$READY_FOR_REFINE" \
+    '{ready_for_implementation: $impl, ready_for_refinement: $refine}'
