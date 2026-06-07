@@ -57,6 +57,34 @@ For local development, copy `.env.example` to `.env` and set your webhook URL th
 
 ---
 
+## GitHub Authentication Token
+
+The dispatcher workflow uses `GH_TOKEN` to authenticate all GitHub API and GraphQL calls, including the Projects v2 board query in `scripts/dispatcher-poll.sh`.
+
+`GITHUB_TOKEN` — the default token available in GitHub Actions — does not carry the `read:project` scope for user-owned GitHub Projects v2 boards. Without this scope, the `repository.projectsV2` GraphQL query returns an empty list and `dispatcher-poll.sh` exits with `Error: No GitHub Projects (v2) board linked to <repo>`, making the entire dispatcher loop non-functional.
+
+To fix this, `GH_TOKEN` must be set to a personal access token (PAT) stored as the repository secret `PROJECT_TOKEN`.
+
+### Required PAT scopes
+
+| Scope | Reason |
+|---|---|
+| `repo` | Read and write access to repository contents, issues, and pull requests |
+| `read:project` | Read access to user-owned GitHub Projects v2 boards |
+| `workflow` | Permission to trigger and manage GitHub Actions workflow runs |
+
+### Adding the secret
+
+Add `PROJECT_TOKEN` as a **repository secret** (not a variable) at:
+
+`https://github.com/LauraMardones/headless-pr-workflow/settings/secrets/actions`
+
+The dispatcher workflow reads it automatically via `GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}` in the `dispatch` job `env` block — no other changes are needed.
+
+**If the secret is absent**, the GraphQL call will fail with an authentication error and no stories will be dispatched.
+
+---
+
 ## Dispatcher Toggle
 
 | Variable | Values | Default |
