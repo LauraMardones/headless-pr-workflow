@@ -243,12 +243,24 @@ STATUS_FIELD_ID=$(echo "$BOARD_DATA" | jq -r '
 
 get_status_option_id() {
     local status_name="$1"
-    echo "$BOARD_DATA" | jq -r --arg n "$status_name" '
+    # The project board may abbreviate "Ready for implementation" as "Ready".
+    # Try the exact name first, then the short alias.
+    local result
+    result=$(echo "$BOARD_DATA" | jq -r --arg n "$status_name" '
         .data.repository.projectsV2.nodes[0].fields.nodes[]
         | select(.name? == "Status")
         | .options[]
         | select(.name == $n)
-        | .id // empty' | head -1
+        | .id // empty' | head -1)
+    if [[ -z "$result" && "$status_name" == "Ready for implementation" ]]; then
+        result=$(echo "$BOARD_DATA" | jq -r '
+            .data.repository.projectsV2.nodes[0].fields.nodes[]
+            | select(.name? == "Status")
+            | .options[]
+            | select(.name == "Ready")
+            | .id // empty' | head -1)
+    fi
+    echo "$result"
 }
 
 # ─── Step 1: Fetch target story ───────────────────────────────────────────────
