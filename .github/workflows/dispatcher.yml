@@ -57,7 +57,7 @@ jobs:
           restore-keys: |
             budget-${{ env.TODAY }}-
 
-      - name: Run dispatcher invoke (dry-run)
+      - name: Run dispatcher invoke
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
         id: invoke
         env:
@@ -68,8 +68,7 @@ jobs:
         run: |
           bash scripts/dispatcher-invoke.sh \
             --repo "${{ github.repository }}" \
-            --issue "${{ steps.poll.outputs.issue_number }}" \
-            --dry-run
+            --issue "${{ steps.poll.outputs.issue_number }}"
 
       - name: Save budget state cache
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''

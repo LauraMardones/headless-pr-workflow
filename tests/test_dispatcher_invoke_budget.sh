@@ -345,7 +345,39 @@ test_all_budget_blocked_suppressed_when_no_github_output() {
         "$output" "all_budget_blocked=true"
 }
 
-# ─── Test 9: dispatcher-budget.sh estimate is called for size label ─────────────
+# ─── Test 9: Exit code 2 (config error) — warning logged, no skip ─────────────
+
+test_budget_config_error_warns_and_proceeds() {
+    local tmpdir
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+
+    local call_log
+    call_log=$(setup_mock_budget "$tmpdir" 2)   # exit 2 = config error
+
+    local output
+    output=$(bash -c "
+        set -euo pipefail
+        BUDGET_SCRIPT='$tmpdir/dispatcher-budget.sh'
+        BUDGET_TYPE='sonnet'
+        DRY_RUN=false
+
+        _budget_rc=0
+        bash \"\$BUDGET_SCRIPT\" check \"\$BUDGET_TYPE\" >/dev/null || _budget_rc=\$?
+        if [[ \$_budget_rc -eq 2 ]]; then
+            echo \"Warning: Budget configuration error for \$BUDGET_TYPE (exit 2); proceeding without budget enforcement.\" >&2
+        elif [[ \$_budget_rc -eq 1 ]]; then
+            echo \"[BUDGET SKIP] cap reached\"
+        fi
+        echo 'proceed'
+    " 2>&1)
+
+    assert_contains "exit-2: warning message logged" "$output" \
+        "Budget configuration error for sonnet (exit 2)"
+    assert_not_contains "exit-2: no BUDGET SKIP logged" "$output" "[BUDGET SKIP]"
+    assert_contains "exit-2: execution continues" "$output" "proceed"
+}
+
+# ─── Test 10: dispatcher-budget.sh estimate is called for size label ────────────
 
 test_estimate_called_with_size_label() {
     [[ -f "$BUDGET_SCRIPT" ]] || {
@@ -379,6 +411,7 @@ run_all_tests() {
     test_dry_run_logs_not_executes
     test_budget_script_absent_graceful
     test_all_budget_blocked_suppressed_when_no_github_output
+    test_budget_config_error_warns_and_proceeds
     test_estimate_called_with_size_label
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed"

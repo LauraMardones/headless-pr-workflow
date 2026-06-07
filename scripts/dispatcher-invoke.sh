@@ -982,26 +982,32 @@ TOTAL_READY_COUNT=$(( TOTAL_READY_COUNT + 1 ))
 if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
     if $DRY_RUN; then
         echo "[DRY RUN] Would check: dispatcher-budget.sh check $BUDGET_TYPE"
-    elif ! bash "$BUDGET_SCRIPT" check "$BUDGET_TYPE" >/dev/null; then
-        echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
-        BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
-        LAST_ACTION="budget-skip for #$ISSUE_NUMBER; searching for next story"
-        NEXT_ISSUE=$(find_next_ready_story || true)
-        if [[ -z "$NEXT_ISSUE" ]]; then
-            if [[ $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
-                [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+    else
+        _budget_rc=0
+        bash "$BUDGET_SCRIPT" check "$BUDGET_TYPE" >/dev/null || _budget_rc=$?
+        if [[ $_budget_rc -eq 2 ]]; then
+            echo "Warning: Budget configuration error for $BUDGET_TYPE (exit 2); proceeding without budget enforcement." >&2
+        elif [[ $_budget_rc -eq 1 ]]; then
+            echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
+            BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
+            LAST_ACTION="budget-skip for #$ISSUE_NUMBER; searching for next story"
+            NEXT_ISSUE=$(find_next_ready_story || true)
+            if [[ -z "$NEXT_ISSUE" ]]; then
+                if [[ $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
+                    [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+                fi
+                echo "No more \"Ready for implementation\" stories after budget skip. Dispatcher exiting cleanly."
+                DISPATCH_HANDLED=true
+                exit 0
             fi
-            echo "No more \"Ready for implementation\" stories after budget skip. Dispatcher exiting cleanly."
+            echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+            _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+                --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
+                --total-ready-count "$TOTAL_READY_COUNT")
+            $DRY_RUN && _NEXT_ARGS+=(--dry-run)
             DISPATCH_HANDLED=true
-            exit 0
+            exec bash "$0" "${_NEXT_ARGS[@]}"
         fi
-        echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-        _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
-            --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-            --total-ready-count "$TOTAL_READY_COUNT")
-        $DRY_RUN && _NEXT_ARGS+=(--dry-run)
-        DISPATCH_HANDLED=true
-        exec bash "$0" "${_NEXT_ARGS[@]}"
     fi
 fi
 
