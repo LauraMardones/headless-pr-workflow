@@ -44,10 +44,35 @@ jobs:
           NEXT_ISSUE=$(echo "$POLL_JSON" | jq -r '.ready_for_implementation[0].number // empty')
           echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"
 
-      - name: Run dispatcher invoke (dry-run)
+      - name: Set cache date
+        if: steps.guard.outputs.enabled == 'true'
+        run: echo "TODAY=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Restore budget state cache
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: .dispatcher-budget
+          key: budget-${{ env.TODAY }}-${{ github.run_id }}
+          restore-keys: |
+            budget-${{ env.TODAY }}-
+
+      - name: Run dispatcher invoke
+        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        id: invoke
+        env:
+          BUDGET_DAILY_HAIKU: ${{ vars.BUDGET_DAILY_HAIKU }}
+          BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
+          BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
+          BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
         run: |
           bash scripts/dispatcher-invoke.sh \
             --repo "${{ github.repository }}" \
-            --issue "${{ steps.poll.outputs.issue_number }}" \
-            --dry-run
+            --issue "${{ steps.poll.outputs.issue_number }}"
+
+      - name: Save budget state cache
+        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .dispatcher-budget
+          key: budget-${{ env.TODAY }}-${{ github.run_id }}

@@ -169,7 +169,7 @@ The following GitHub Actions secrets are required for full automation:
 
 | Secret | Used by | Description |
 |---|---|---|
-| `GH_TOKEN` | `scripts/flow-review.sh` | GitHub personal access token with `repo` and `read:project` scopes |
+| `PROJECT_TOKEN` | `.github/workflows/dispatcher.yml`, `scripts/flow-review.sh` | Classic PAT with `repo` (full) and `project` (full) scopes — required for Projects v2 write access; mapped to `GH_TOKEN` in the environment |
 | `SLACK_WEBHOOK_URL` | `scripts/slack-notify.sh` | Slack incoming webhook URL for dispatcher notifications |
 
 Set these in **Settings → Secrets and variables → Actions** in the repository.

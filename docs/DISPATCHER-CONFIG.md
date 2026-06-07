@@ -39,6 +39,24 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ---
 
+## GitHub Token — `PROJECT_TOKEN`
+
+The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to both read board state and write story status (via `updateProjectV2ItemFieldValue`).
+
+Provision a personal access token (PAT) with the following scopes and store it as a repository secret named `PROJECT_TOKEN`:
+
+`https://github.com/<owner>/<repo>/settings/secrets/actions`
+
+| Secret | Type | Required scopes |
+|---|---|---|
+| `PROJECT_TOKEN` | Classic PAT | `repo` (full), `project` (full — required for write access to update board status) |
+
+The workflow maps this secret to the `GH_TOKEN` environment variable, which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+
+**If the secret is absent**, the `gh` CLI will fail to authenticate and the workflow will exit with an error on the first API call.
+
+---
+
 ## Slack Notifications
 
 The dispatcher sends Slack notifications for key events (story dispatched, blocked, error, closed) via `scripts/slack-notify.sh`. To enable notifications, add `SLACK_WEBHOOK_URL` as a **repository secret** (not a variable):
@@ -99,9 +117,34 @@ To update this variable:
 
 ---
 
+## Budget Check in the Invoke Loop
+
+Budget enforcement is wired into `scripts/dispatcher-invoke.sh` (Story #203). Before each `/implement` invocation, the dispatcher calls `dispatcher-budget.sh check <executor_type>`. If the daily cap is reached, the story is skipped and the loop continues to the next available story:
+
+```
+[BUDGET SKIP] #<N>: <story title> — <executor_type> daily cap reached; skipping
+```
+
+After each successful `/implement` invocation, the counter is incremented:
+
+```
+[BUDGET] Increment: <executor_type> +<tokens> after #<N>
+```
+
+If every available "Ready for implementation" story is skipped due to budget, `all_budget_blocked=true` is written to `$GITHUB_OUTPUT` (guarded: only when the env var is set). This output is consumed by the Slack pause notification step (Story C, issue #204).
+
+Under `--dry-run`, budget check and increment calls are logged but not executed:
+
+```
+[DRY RUN] Would check: dispatcher-budget.sh check <executor_type>
+[DRY RUN] Would call: dispatcher-budget.sh increment <executor_type> <tokens>
+```
+
+---
+
 ## Token Estimate Constants
 
-When integrating the budget check into `dispatcher-invoke.sh` (Story #203), use `scripts/dispatcher-budget.sh estimate <size_label>` to look up the per-invocation token estimate for a story size label:
+Token estimates per invocation are derived from the story's size label via `scripts/dispatcher-budget.sh estimate <size_label>`. Constants are defined in `dispatcher-budget.sh` and must not be redefined elsewhere:
 
 | Story size label | Estimated tokens |
 |---|---|
