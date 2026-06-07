@@ -20,9 +20,9 @@ def temp_repo_root():
         shutil.rmtree(repo_root.parent, ignore_errors=True)
 
 
-def write_policy(repo_root):
+def write_policy(repo_root, ci_workflows="present_non_required"):
     policy_path = repo_root / "docs" / "required-check-policy.json"
-    policy_path.parent.mkdir()
+    policy_path.parent.mkdir(exist_ok=True)
     policy_path.write_text(
         json.dumps(
             {
@@ -30,7 +30,7 @@ def write_policy(repo_root):
                 "branches": {
                     "main": {
                         "required_status_checks": "absent",
-                        "ci_workflows": "absent",
+                        "ci_workflows": ci_workflows,
                         "source": "docs/MERGE-POLICY.md#main-required-check-policy",
                     }
                 },
@@ -91,9 +91,22 @@ def test_policy_does_not_mask_reported_failing_pending_or_unknown_checks():
     assert required is original
 
 
-def test_policy_does_not_apply_when_workflows_exist():
+def test_policy_applies_when_non_required_workflows_exist():
     with temp_repo_root() as repo_root:
-        write_policy(repo_root)
+        write_policy(repo_root, ci_workflows="present_non_required")
+        workflows = repo_root / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "dispatcher.yml").write_text("name: dispatcher\n", encoding="utf-8")
+        original = RequiredStatusChecks(names=(), status="unavailable", message="Not Found")
+
+        required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
+
+    assert required.status == "policy_absent"
+
+
+def test_policy_does_not_apply_when_ci_workflows_absent_but_workflows_exist():
+    with temp_repo_root() as repo_root:
+        write_policy(repo_root, ci_workflows="absent")
         workflows = repo_root / ".github" / "workflows"
         workflows.mkdir(parents=True)
         (workflows / "ci.yml").write_text("name: ci\n", encoding="utf-8")
@@ -111,3 +124,21 @@ def test_missing_policy_keeps_unavailable_required_check_data():
         required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
 
     assert required is original
+
+
+def test_policy_ci_workflows_not_absent_when_workflows_exist_on_main():
+    """Regression: policy file must not declare ci_workflows 'absent' when .github/workflows has files."""
+    repo_root = Path(__file__).parent.parent
+    workflow_dir = repo_root / ".github" / "workflows"
+    workflows_present = workflow_dir.exists() and any(
+        p.is_file() and p.suffix.lower() in {".yml", ".yaml"} for p in workflow_dir.iterdir()
+    )
+    if not workflows_present:
+        return  # nothing to assert when no workflows exist
+
+    policies = load_required_check_policy(repo_root=repo_root)
+    assert "main" in policies, "Policy for main must be defined when workflows exist"
+    assert policies["main"].ci_workflows != "absent", (
+        "docs/required-check-policy.json declares ci_workflows 'absent' but workflow files exist "
+        "in .github/workflows — update ci_workflows to 'present_non_required' or the correct value"
+    )
