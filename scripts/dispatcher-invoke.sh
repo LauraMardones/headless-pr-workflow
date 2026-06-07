@@ -25,12 +25,12 @@
 # GitHub Secret. Do not add executor-specific conditional logic elsewhere
 # (OSS compatibility invariant: routing is data-driven, not logic-driven).
 #
-# | executor: label             | Executor type  | GitHub Secret name         |
-# |-----------------------------|----------------|----------------------------|
-# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY_HAIKU    |
-# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY_SONNET   |
-# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY_OPUS     |
-# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       |
+# | executor: label             | Executor type  | GitHub Secret name         | CLI env var name    |
+# |-----------------------------|----------------|----------------------------|---------------------|
+# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY_HAIKU    | ANTHROPIC_API_KEY   |
+# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY_SONNET   | ANTHROPIC_API_KEY   |
+# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY_OPUS     | ANTHROPIC_API_KEY   |
+# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | OPENAI_API_KEY      |
 #
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
@@ -58,6 +58,17 @@ declare -A EXECUTOR_CLI=(
     ["claude-code-sonnet"]="claude"
     ["claude-code-opus"]="claude"
     ["codex"]="codex"
+)
+
+# ─── Executor API key env-var table (data-driven, parallel to EXECUTOR_CLI) ───
+# Maps executor label suffix to the env-var name that its CLI expects for auth.
+# The GitHub Secret name (EXECUTOR_SECRET) holds the value; this table names the
+# variable under which that value is passed to the CLI.
+declare -A EXECUTOR_API_KEY_ENV=(
+    ["claude-code-haiku"]="ANTHROPIC_API_KEY"
+    ["claude-code-sonnet"]="ANTHROPIC_API_KEY"
+    ["claude-code-opus"]="ANTHROPIC_API_KEY"
+    ["codex"]="OPENAI_API_KEY"
 )
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -279,12 +290,14 @@ invoke_executor_command() {
         return 1
     fi
 
+    local api_key_env="${EXECUTOR_API_KEY_ENV[$EXECUTOR_LABEL]:-ANTHROPIC_API_KEY}"
+
     if $DRY_RUN; then
-        echo "[DRY RUN] Would invoke: ANTHROPIC_API_KEY=<secret> $cli --dangerously-skip-permissions -p \"/$slash_command $target_arg\""
+        echo "[DRY RUN] Would invoke: ${api_key_env}=<secret> $cli --dangerously-skip-permissions -p \"/$slash_command $target_arg\""
         return 0
     fi
 
-    ANTHROPIC_API_KEY="$api_key_value" \
+    env "${api_key_env}=${api_key_value}" \
         "$cli" --dangerously-skip-permissions -p "/$slash_command $target_arg"
 }
 
