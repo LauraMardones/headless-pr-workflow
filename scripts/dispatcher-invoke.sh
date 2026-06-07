@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # scripts/dispatcher-invoke.sh
 #
-# Dispatcher pre-flight gate — executor routing, WIP check, stale detection,
-# file-overlap check, and conflict blocker.
-# Implements: issue #171 (Feature #162)
+# Dispatcher pre-flight gate and execution loop — executor routing, WIP check,
+# stale detection, file-overlap check, conflict blocker, and full story-cycle
+# invocation (/implement → /review → /merge → /cleanup) with board status
+# transitions. After each story completes or is blocked, the loop finds the
+# next "Ready for implementation" story and repeats the full pre-flight + cycle.
+# Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -11,8 +14,8 @@
 #       --repo <owner/repo> --issue <issue-number> [--dry-run]
 #
 # Exit codes:
-#   0  — all pre-flight checks pass; safe to proceed to executor invocation
-#   1  — pre-flight check failed; conflict blocker posted on the target issue
+#   0  — story completed (Done) or no more "Ready for implementation" stories
+#   1  — pre-flight check failed or mid-cycle executor failure; blocker posted on issue
 #
 # Requirements: bash 4+, gh (GitHub CLI), jq
 #
@@ -45,6 +48,16 @@ declare -A EXECUTOR_ROUTING=(
     ["claude-code-sonnet"]="Claude Sonnet:ANTHROPIC_API_KEY_SONNET"
     ["claude-code-opus"]="Claude Opus:ANTHROPIC_API_KEY_OPUS"
     ["codex"]="Codex:OPENAI_API_KEY_CODEX"
+)
+
+# ─── Executor CLI routing table (data-driven, parallel to EXECUTOR_ROUTING) ───
+# Maps executor label suffix to the CLI binary used for command invocation.
+# Add a new row here when adding a new executor tier (OSS invariant: data-driven).
+declare -A EXECUTOR_CLI=(
+    ["claude-code-haiku"]="claude"
+    ["claude-code-sonnet"]="claude"
+    ["claude-code-opus"]="claude"
+    ["codex"]="codex"
 )
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -186,6 +199,148 @@ State of in-progress work: none"
     echo "BLOCKED: posting conflict blocker on #$issue_num"
     post_comment "$issue_num" "$body"
     exit 1
+}
+
+# ─── Utility: get project item ID for an issue from the board data ───────────
+
+get_project_item_id() {
+    local issue_num="$1"
+    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
+        .data.repository.projectsV2.nodes[0].items.nodes[]
+        | select(.content.number == $n)
+        | .id // empty' | head -1
+}
+
+# ─── Utility: set any project board status by name ───────────────────────────
+
+set_project_status() {
+    local item_id="$1"
+    local issue_num="$2"
+    local status_name="$3"
+    local option_id
+    option_id=$(get_status_option_id "$status_name")
+    if [[ -z "$STATUS_FIELD_ID" || -z "$option_id" ]]; then
+        echo "Warning: Could not resolve Status field/option IDs for '$status_name'; skipping board update for #$issue_num." >&2
+        return
+    fi
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
+        return
+    fi
+    gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: { singleSelectOptionId: $optionId }
+      }) { projectV2Item { id } }
+    }
+    ' -f projectId="$PROJECT_ID" \
+      -f itemId="$item_id" \
+      -f fieldId="$STATUS_FIELD_ID" \
+      -f optionId="$option_id" >/dev/null \
+    || echo "Warning: Board status update failed for #$issue_num to '$status_name'; manual update required." >&2
+}
+
+# ─── Utility: post a mid-cycle blocker comment (reuses Blocked Declaration format) ──
+
+post_mid_cycle_blocker() {
+    local issue_num="$1"
+    local issue_title="$2"
+    local failed_command="$3"
+    local body
+    body="## Blocked Declaration
+Type: external
+Declared by: $DECLARED_BY
+Blocks: #$issue_num — $issue_title
+Unblocked when: /$failed_command completes successfully for #$issue_num with exit code 0
+Owner: PO (@LauraMardones)
+State of in-progress work: execution loop halted after /$failed_command failed; board reflects last successful state"
+    echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
+    post_comment "$issue_num" "$body"
+}
+
+# ─── Utility: invoke an executor command via the executor CLI ─────────────────
+
+invoke_executor_command() {
+    local slash_command="$1"
+    local target_arg="$2"
+
+    local cli="${EXECUTOR_CLI[$EXECUTOR_LABEL]:-}"
+    if [[ -z "$cli" ]]; then
+        echo "Error: No CLI entry for executor '$EXECUTOR_LABEL' in EXECUTOR_CLI table." >&2
+        return 1
+    fi
+
+    local api_key_value="${!EXECUTOR_SECRET:-}"
+    if [[ -z "$api_key_value" ]]; then
+        echo "Error: Secret '$EXECUTOR_SECRET' is not set in the environment." >&2
+        return 1
+    fi
+
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would invoke: ANTHROPIC_API_KEY=<secret> $cli --dangerously-skip-permissions -p \"/$slash_command $target_arg\""
+        return 0
+    fi
+
+    ANTHROPIC_API_KEY="$api_key_value" \
+        "$cli" --dangerously-skip-permissions -p "/$slash_command $target_arg"
+}
+
+# ─── Utility: find the open PR linked to an issue (Closes #N pattern) ────────
+
+find_linked_pr() {
+    local issue_num="$1"
+    gh api "repos/$REPO/pulls?state=open&per_page=100" \
+        | jq -r --argjson n "$issue_num" '
+            map(select(
+                (.body // "") | ascii_downcase |
+                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
+            )) | first | .number // empty'
+}
+
+# ─── Utility: find next Ready for implementation story (re-fetches board) ────
+
+find_next_ready_story() {
+    local board
+    board=$(gh api graphql -f query='
+    query($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        projectsV2(first: 1) {
+          nodes {
+            items(first: 100) {
+              nodes {
+                content { ... on Issue { number title } }
+                fieldValues(first: 20) {
+                  nodes {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                      field { ... on ProjectV2SingleSelectField { name } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    ' -f owner="$OWNER" -f repo="$REPO_NAME") || return 1
+
+    echo "$board" | jq -r '
+        .data.repository.projectsV2.nodes[0].items.nodes[]
+        | select(
+            (.content | type) == "object" and
+            (.content.number != null) and
+            ([.fieldValues.nodes[]
+              | select(
+                  (.field.name? // "") == "Status" and
+                  ((.name? // "") == "Ready for implementation" or (.name? // "") == "Ready")
+                )
+             ] | length > 0)
+          )
+        | .content.number' | head -1
 }
 
 # ─── Fetch project board data (single query) ──────────────────────────────────
@@ -540,4 +695,83 @@ echo "✓ File overlap:      none"
 [[ $STALE_COUNT -gt 0 ]] && echo "✓ Stale recovery:    $STALE_COUNT story(ies) rolled back"
 echo ""
 echo "Pre-flight passed for #$ISSUE_NUMBER — proceed to executor invocation."
-exit 0
+
+# ─── Execution loop ───────────────────────────────────────────────────────────
+# Policy source: docs/PROJECT-STATUS.md — board status transitions are facts;
+# each status is set only after the preceding executor command succeeds.
+
+TARGET_ITEM_ID=$(get_project_item_id "$ISSUE_NUMBER")
+if [[ -z "$TARGET_ITEM_ID" ]]; then
+    echo "Warning: Could not find project item ID for #$ISSUE_NUMBER; board updates will be skipped." >&2
+fi
+
+# ─── Step E1: /implement ──────────────────────────────────────────────────────
+
+echo ""
+echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
+if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+    exit 1
+fi
+echo "✓ /implement completed for #$ISSUE_NUMBER"
+
+# ─── Step E2: /review ─────────────────────────────────────────────────────────
+
+echo ""
+echo "── E2: /review for #$ISSUE_NUMBER ──────────────────────────────────────"
+PR_NUMBER=$(find_linked_pr "$ISSUE_NUMBER")
+if [[ -z "$PR_NUMBER" ]]; then
+    echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    exit 1
+fi
+echo "Linked PR: #$PR_NUMBER"
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
+if ! invoke_executor_command "review" "$PR_NUMBER"; then
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    exit 1
+fi
+echo "✓ /review completed for PR #$PR_NUMBER"
+
+# ─── Step E3: /merge ──────────────────────────────────────────────────────────
+
+echo ""
+echo "── E3: /merge PR #$PR_NUMBER ────────────────────────────────────────────"
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready to merge"
+if ! invoke_executor_command "merge" "$PR_NUMBER"; then
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge"
+    exit 1
+fi
+echo "✓ /merge completed for PR #$PR_NUMBER"
+
+# ─── Step E4: /cleanup ────────────────────────────────────────────────────────
+
+echo ""
+echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
+# Cleanup failure is non-fatal: story is already Done; log and continue to loop.
+if ! invoke_executor_command "cleanup" "$ISSUE_NUMBER"; then
+    echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
+fi
+echo "✓ Story #$ISSUE_NUMBER completed (Done)."
+
+# ─── Loop: find and process the next Ready for implementation story ───────────
+
+echo ""
+echo "Searching for next \"Ready for implementation\" story..."
+NEXT_ISSUE=$(find_next_ready_story || true)
+
+if [[ -z "$NEXT_ISSUE" ]]; then
+    echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
+    exit 0
+fi
+
+echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+
+if $DRY_RUN; then
+    echo "[DRY RUN] Would exec: bash $0 --repo $REPO --issue $NEXT_ISSUE --dry-run"
+    exit 0
+fi
+
+exec bash "$0" --repo "$REPO" --issue "$NEXT_ISSUE"
