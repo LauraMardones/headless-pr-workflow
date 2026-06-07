@@ -3,9 +3,9 @@
   "branches": {
     "main": {
       "required_status_checks": "absent",
-      "ci_workflows": "absent",
+      "ci_workflows": "present_non_required",
       "source": "docs/MERGE-POLICY.md#main-required-check-policy",
-      "rationale": "This repository intentionally has no CI workflows and no required status checks for main. Required-check gating may treat unavailable branch-protection required-check data as policy-absent only when no failing, pending, unknown, or missing checks are reported."
+      "rationale": "GitHub Actions workflows are present (.github/workflows/dispatcher.yml) but none are configured as required status checks for main. Required-check gating may treat unavailable branch-protection required-check data as policy-absent only when no failing, pending, unknown, or missing checks are reported."
     }
   }
 }

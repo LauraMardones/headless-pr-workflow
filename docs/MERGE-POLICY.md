@@ -17,14 +17,24 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 
 ## Main Required-Check Policy
 
+### Workflow state values
+
+| Value | Meaning |
+|---|---|
+| `absent` | No GitHub Actions workflow files exist in `.github/workflows`. |
+| `present_non_required` | Workflow files exist in `.github/workflows` but none are configured as required status checks for the branch. |
+
+### Required-check gate
+
 For `main` in this repository, required status checks are absent by policy while all of these are true:
 
-- No GitHub Actions workflows are present in `.github/workflows`.
 - GitHub does not report configured required status checks for `main`, or branch-protection required-check data is unavailable for this private repository.
 - The current PR status-check rollup is empty, or every reported check is passing or skipped.
-- The machine-readable policy source in `docs/required-check-policy.json` declares `required_status_checks` and `ci_workflows` as `absent` for `main`.
+- The machine-readable policy source in `docs/required-check-policy.json` declares `required_status_checks` as `absent` and `ci_workflows` as `absent` or `present_non_required` for `main`.
 
 When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report the required-check gate as passing because required checks are absent by explicit repository policy. Unavailable branch-protection data is not enough by itself; failing, pending, unknown, missing, or configured required checks must still block merge readiness.
+
+Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not affect the required-check gate. Only the presence or absence of *configured required status checks* determines whether the gate passes.
 
 ## Solo-Maintainer Bootstrap Override
 

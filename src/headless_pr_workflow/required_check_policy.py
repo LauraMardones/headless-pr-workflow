@@ -13,6 +13,9 @@ from .github import CheckSummary, RequiredStatusChecks
 DEFAULT_POLICY_PATH = Path("docs/required-check-policy.json")
 POLICY_ABSENT_STATUS = "policy_absent"
 
+CI_WORKFLOWS_ABSENT = "absent"
+CI_WORKFLOWS_PRESENT_NON_REQUIRED = "present_non_required"
+
 
 @dataclass(frozen=True)
 class RequiredCheckPolicy:
@@ -24,7 +27,10 @@ class RequiredCheckPolicy:
 
     @property
     def declares_no_ci_required_checks(self) -> bool:
-        return self.required_status_checks == "absent" and self.ci_workflows == "absent"
+        return self.required_status_checks == "absent" and self.ci_workflows in (
+            CI_WORKFLOWS_ABSENT,
+            CI_WORKFLOWS_PRESENT_NON_REQUIRED,
+        )
 
 
 def load_required_check_policy(
@@ -71,7 +77,11 @@ def apply_required_check_policy(
         return required_checks
 
     root = Path.cwd() if repo_root is None else repo_root
-    if _workflow_files_present(root) or _has_blocking_reported_checks(status_checks):
+    # When policy declares ci_workflows absent, block if workflows actually exist (consistency guard).
+    # When policy declares present_non_required, workflows are expected and do not block.
+    if policy.ci_workflows == CI_WORKFLOWS_ABSENT and _workflow_files_present(root):
+        return required_checks
+    if _has_blocking_reported_checks(status_checks):
         return required_checks
 
     return RequiredStatusChecks(
