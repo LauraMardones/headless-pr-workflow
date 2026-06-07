@@ -39,6 +39,24 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ---
 
+## GitHub Token — `PROJECT_TOKEN`
+
+The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `read:project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to read and update story status.
+
+Provision a personal access token (PAT) with the following scopes and store it as a repository secret named `PROJECT_TOKEN`:
+
+`https://github.com/<owner>/<repo>/settings/secrets/actions`
+
+| Secret | Type | Required scopes |
+|---|---|---|
+| `PROJECT_TOKEN` | Classic PAT or fine-grained PAT | `repo` (full), `read:project` (or `project` for write access to update board status) |
+
+The workflow maps this secret to the `GH_TOKEN` environment variable, which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+
+**If the secret is absent**, the `gh` CLI will fail to authenticate and the workflow will exit with an error on the first API call.
+
+---
+
 ## Slack Notifications
 
 The dispatcher sends Slack notifications for key events (story dispatched, blocked, error, closed) via `scripts/slack-notify.sh`. To enable notifications, add `SLACK_WEBHOOK_URL` as a **repository secret** (not a variable):

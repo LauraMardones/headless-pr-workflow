@@ -36,7 +36,9 @@
 #
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
-#   In GitHub Actions, reference secrets via ${{ secrets.GH_TOKEN }}.
+#   In GitHub Actions, the workflow sets GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}.
+#   PROJECT_TOKEN must be a PAT with repo + read:project scopes; the built-in
+#   GITHUB_TOKEN lacks read:project for user-owned Projects v2.
 #   Do not hardcode any token or API key in this script.
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
