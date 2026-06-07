@@ -73,7 +73,7 @@ build_payload() {
                         },
                         {
                             type: "section",
-                            text: { type: "mrkdwn", text: ("*Issue:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)") end) }
+                            text: { type: "mrkdwn", text: ("*Issue:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)" end)) }
                         }
                     ]
                 }'
@@ -98,7 +98,7 @@ build_payload() {
                         },
                         {
                             type: "section",
-                            text: { type: "mrkdwn", text: ("*Summary:* " + (if $summary_url != "" then "<" + $summary_url + "|View summary>" else "(no URL)") end) }
+                            text: { type: "mrkdwn", text: ("*Summary:* " + (if $summary_url != "" then "<" + $summary_url + "|View summary>" else "(no URL)" end)) }
                         }
                     ]
                 }'
@@ -123,7 +123,7 @@ build_payload() {
                         },
                         {
                             type: "section",
-                            text: { type: "mrkdwn", text: ("*Summary:* " + (if $summary_url != "" then "<" + $summary_url + "|View summary>" else "(no URL)") end) }
+                            text: { type: "mrkdwn", text: ("*Summary:* " + (if $summary_url != "" then "<" + $summary_url + "|View summary>" else "(no URL)" end)) }
                         }
                     ]
                 }'
@@ -152,7 +152,7 @@ build_payload() {
                         },
                         {
                             type: "section",
-                            text: { type: "mrkdwn", text: ("*Board:* " + (if $board_url != "" then "<" + $board_url + "|View board>" else "(no URL)") end) }
+                            text: { type: "mrkdwn", text: ("*Board:* " + (if $board_url != "" then "<" + $board_url + "|View board>" else "(no URL)" end)) }
                         }
                     ]
                 }'
@@ -202,7 +202,7 @@ build_payload() {
                         },
                         {
                             type: "section",
-                            text: { type: "mrkdwn", text: ("*Link:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)") end) }
+                            text: { type: "mrkdwn", text: ("*Link:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)" end)) }
                         }
                     ]
                 }'
