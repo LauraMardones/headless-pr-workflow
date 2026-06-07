@@ -986,7 +986,10 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
         _budget_rc=0
         bash "$BUDGET_SCRIPT" check "$BUDGET_TYPE" >/dev/null || _budget_rc=$?
         if [[ $_budget_rc -eq 2 ]]; then
-            echo "Warning: Budget configuration error for $BUDGET_TYPE (exit 2); proceeding without budget enforcement." >&2
+            echo "Error: Budget configuration error for executor '$BUDGET_TYPE' (dispatcher-budget.sh exit 2)." >&2
+            echo "       Ensure BUDGET_DAILY_$(echo "$BUDGET_TYPE" | tr '[:lower:]' '[:upper:]') is set in the workflow environment." >&2
+            DISPATCH_HANDLED=true
+            exit 1
         elif [[ $_budget_rc -eq 1 ]]; then
             echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
             BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
