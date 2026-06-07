@@ -39,6 +39,24 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ---
 
+## Slack Notifications
+
+The dispatcher sends Slack notifications for key events (story dispatched, blocked, error, closed) via `scripts/slack-notify.sh`. To enable notifications, add `SLACK_WEBHOOK_URL` as a **repository secret** (not a variable):
+
+`https://github.com/<owner>/<repo>/settings/secrets/actions`
+
+| Secret | Required value |
+|---|---|
+| `SLACK_WEBHOOK_URL` | Incoming webhook URL from your Slack app (format: `https://hooks.slack.com/services/...`) |
+
+The dispatcher workflow passes this secret to the shell environment automatically — no changes to workflow files are needed beyond what is already wired.
+
+**If the secret is absent or invalid**, `slack-notify.sh` exits with code 1, but `dispatcher-invoke.sh` wraps the call in `|| true` so a missing webhook never aborts the workflow. Notifications silently fail; the dispatch run continues normally.
+
+For local development, copy `.env.example` to `.env` and set your webhook URL there. `.env` is listed in `.gitignore` and must not be committed.
+
+---
+
 ## Dispatcher Toggle
 
 | Variable | Values | Default |
