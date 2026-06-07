@@ -35,6 +35,18 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run dispatcher poll (dry-run)
+      - name: Run dispatcher poll
         if: steps.guard.outputs.enabled == 'true'
-        run: bash scripts/dispatcher-poll.sh
+        id: poll
+        run: |
+          POLL_JSON=$(bash scripts/dispatcher-poll.sh --repo "${{ github.repository }}")
+          NEXT_ISSUE=$(echo "$POLL_JSON" | jq -r '.ready_for_implementation[0].number // empty')
+          echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"
+
+      - name: Run dispatcher invoke (dry-run)
+        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        run: |
+          bash scripts/dispatcher-invoke.sh \
+            --repo "${{ github.repository }}" \
+            --issue "${{ steps.poll.outputs.issue_number }}" \
+            --dry-run
