@@ -125,20 +125,22 @@ extract_files() {
 
 has_handoff_note() {
     local issue_num="$1"
+    local pr_number="${2:-}"  # optional pre-fetched PR number; avoids a redundant API call
     # Check issue comments
     if gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
             | jq -e '[.[] | select(.body | test("## Handoff Note"))] | length > 0' \
             >/dev/null 2>&1; then
         return 0
     fi
-    # Find linked open PR and check its body + comments
-    local pr_number
-    pr_number=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
-        | jq -r --argjson n "$issue_num" '
-            map(select(
-                (.body // "") | ascii_downcase |
-                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-            )) | first | .number // empty')
+    # If caller did not supply a PR number, find the linked open PR now
+    if [[ -z "$pr_number" ]]; then
+        pr_number=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+            | jq -r --argjson n "$issue_num" '
+                map(select(
+                    (.body // "") | ascii_downcase |
+                    test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
+                )) | first | .number // empty')
+    fi
     if [[ -n "$pr_number" ]]; then
         if gh api "repos/$REPO/pulls/$pr_number" \
                 | jq -e '.body | test("## Handoff Note")' >/dev/null 2>&1; then
@@ -362,26 +364,59 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
     issue_title=$(echo "$item" | jq -r '.title')
     updated_at=$(echo "$item" | jq -r '.updatedAt')
 
+    # Baseline: issue updatedAt (covers issue comments, label changes, etc.)
     last_ts=$(iso_to_ts "$updated_at")
+
+    # Fetch linked open PR once — reused for activity timestamps, handoff check, and branch name.
+    # Policy (docs/PROJECT-STATUS.md): activity includes commits, comments, AND PR updates.
+    linked_pr=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+        | jq --argjson n "$issue_num" '
+            map(select(
+                (.body // "") | ascii_downcase |
+                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
+            )) | first // null')
+    pr_number=$(echo "$linked_pr" | jq -r '.number // empty')
+    pr_updated_at=$(echo "$linked_pr" | jq -r '.updated_at // empty')
+
+    # PR updated_at covers PR description edits, review comments, and CI status updates
+    if [[ -n "$pr_updated_at" ]]; then
+        pr_ts=$(iso_to_ts "$pr_updated_at")
+        [[ $pr_ts -gt $last_ts ]] && last_ts=$pr_ts
+    fi
+
+    # Latest commit pushed to the PR branch — a push updates neither issue nor PR timestamps
+    if [[ -n "$pr_number" ]]; then
+        latest_commit=$(gh api "repos/$REPO/pulls/$pr_number/commits?per_page=100" \
+            | jq -r '[.[].commit | (.committer.date // .author.date // "")] | map(select(. != "")) | sort | last // empty')
+        if [[ -n "$latest_commit" ]]; then
+            commit_ts=$(iso_to_ts "$latest_commit")
+            [[ $commit_ts -gt $last_ts ]] && last_ts=$commit_ts
+        fi
+    fi
+
     inactivity=$(( NOW_TS - last_ts ))
 
     if [[ $inactivity -le $STALE_THRESHOLD ]]; then
         continue
     fi
 
-    # Check for handoff note before declaring stale
-    if has_handoff_note "$issue_num"; then
+    # Both conditions must be true for stale: >2h inactivity AND no handoff note
+    if has_handoff_note "$issue_num" "$pr_number"; then
         continue
     fi
 
     hours_inactive=$(( inactivity / 3600 ))
     echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
 
-    # Find branch name (best-effort)
-    branch=$(gh api "repos/$REPO/branches?per_page=100" \
-        | jq -r --argjson n "$issue_num" '
-            map(select(.name | test("/(issue|implement)-\($n)[-_]"; "i")))
-            | first | .name // "(unknown)"') || branch="(unknown)"
+    # Branch name: prefer PR head ref (authoritative); fall back to naming-convention search
+    branch=""
+    [[ -n "$pr_number" ]] && branch=$(echo "$linked_pr" | jq -r '.head.ref // empty')
+    if [[ -z "$branch" ]]; then
+        branch=$(gh api "repos/$REPO/branches?per_page=100" \
+            | jq -r --argjson n "$issue_num" '
+                map(select(.name | test("/(issue|implement)-\($n)[-_]"; "i")))
+                | first | .name // "(unknown)"') || branch="(unknown)"
+    fi
 
     recovery_comment="## Recovery Comment
 Detected: story in \"In implementation\" with no activity for >2h and no handoff note.
