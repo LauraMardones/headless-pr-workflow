@@ -71,9 +71,34 @@ To update this variable:
 
 ---
 
+## Budget Check in the Invoke Loop
+
+Budget enforcement is wired into `scripts/dispatcher-invoke.sh` (Story #203). Before each `/implement` invocation, the dispatcher calls `dispatcher-budget.sh check <executor_type>`. If the daily cap is reached, the story is skipped and the loop continues to the next available story:
+
+```
+[BUDGET SKIP] #<N>: <story title> — <executor_type> daily cap reached; skipping
+```
+
+After each successful `/implement` invocation, the counter is incremented:
+
+```
+[BUDGET] Increment: <executor_type> +<tokens> after #<N>
+```
+
+If every available "Ready for implementation" story is skipped due to budget, `all_budget_blocked=true` is written to `$GITHUB_OUTPUT` (guarded: only when the env var is set). This output is consumed by the Slack pause notification step (Story C, issue #204).
+
+Under `--dry-run`, budget check and increment calls are logged but not executed:
+
+```
+[DRY RUN] Would check: dispatcher-budget.sh check <executor_type>
+[DRY RUN] Would call: dispatcher-budget.sh increment <executor_type> <tokens>
+```
+
+---
+
 ## Token Estimate Constants
 
-When integrating the budget check into `dispatcher-invoke.sh` (Story #203), use `scripts/dispatcher-budget.sh estimate <size_label>` to look up the per-invocation token estimate for a story size label:
+Token estimates per invocation are derived from the story's size label via `scripts/dispatcher-budget.sh estimate <size_label>`. Constants are defined in `dispatcher-budget.sh` and must not be redefined elsewhere:
 
 | Story size label | Estimated tokens |
 |---|---|

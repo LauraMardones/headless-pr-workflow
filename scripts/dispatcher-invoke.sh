@@ -85,11 +85,23 @@ declare -A EXECUTOR_API_KEY_ENV=(
     ["codex"]="OPENAI_API_KEY"
 )
 
+# ─── Executor budget type table (data-driven, parallel to EXECUTOR_ROUTING) ───
+# Maps executor label suffix to the budget executor type accepted by dispatcher-budget.sh.
+# Add a new row here when adding a new executor tier (OSS invariant: data-driven).
+declare -A EXECUTOR_BUDGET_TYPE=(
+    ["claude-code-haiku"]="haiku"
+    ["claude-code-sonnet"]="sonnet"
+    ["claude-code-opus"]="opus"
+    ["codex"]="codex"
+)
+
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 
 REPO=""
 ISSUE_NUMBER=""
 DRY_RUN=false
+BUDGET_BLOCKED_COUNT=0
+TOTAL_READY_COUNT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -101,6 +113,12 @@ while [[ $# -gt 0 ]]; do
             ISSUE_NUMBER="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=true; shift ;;
+        --budget-blocked-count)
+            [[ $# -ge 2 ]] || { echo "Error: --budget-blocked-count requires a value." >&2; exit 1; }
+            BUDGET_BLOCKED_COUNT="$2"; shift 2 ;;
+        --total-ready-count)
+            [[ $# -ge 2 ]] || { echo "Error: --total-ready-count requires a value." >&2; exit 1; }
+            TOTAL_READY_COUNT="$2"; shift 2 ;;
         *)
             echo "Error: Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -135,6 +153,9 @@ DECLARED_BY="dispatcher"
 NOW_TS=$(date -u +%s)
 STALE_THRESHOLD=7200   # 2 hours in seconds
 WIP_LIMIT=2
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
 
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
@@ -937,6 +958,53 @@ if [[ -z "$TARGET_ITEM_ID" ]]; then
     echo "Warning: Could not find project item ID for #$ISSUE_NUMBER; board updates will be skipped." >&2
 fi
 
+# ─── Budget check before /implement (issue #203) ─────────────────────────────
+# Check daily token budget before invoking /implement. Skip and log if the cap
+# is reached; track counts for all_budget_blocked detection.
+
+BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$EXECUTOR_LABEL]:-}"
+
+SIZE_LABEL=""
+for _lbl in $TARGET_LABELS; do
+    if [[ "$_lbl" == size:* || "$_lbl" == "small" || "$_lbl" == "medium" || "$_lbl" == "large" ]]; then
+        SIZE_LABEL="$_lbl"
+        break
+    fi
+done
+
+ESTIMATED_TOKENS=75000
+if [[ -f "$BUDGET_SCRIPT" ]]; then
+    ESTIMATED_TOKENS=$(bash "$BUDGET_SCRIPT" estimate "${SIZE_LABEL:-medium}" 2>/dev/null || echo 75000)
+fi
+
+TOTAL_READY_COUNT=$(( TOTAL_READY_COUNT + 1 ))
+
+if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check: dispatcher-budget.sh check $BUDGET_TYPE"
+    elif ! bash "$BUDGET_SCRIPT" check "$BUDGET_TYPE" >/dev/null; then
+        echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
+        BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
+        LAST_ACTION="budget-skip for #$ISSUE_NUMBER; searching for next story"
+        NEXT_ISSUE=$(find_next_ready_story || true)
+        if [[ -z "$NEXT_ISSUE" ]]; then
+            if [[ $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
+                [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+            fi
+            echo "No more \"Ready for implementation\" stories after budget skip. Dispatcher exiting cleanly."
+            DISPATCH_HANDLED=true
+            exit 0
+        fi
+        echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+        _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+            --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
+            --total-ready-count "$TOTAL_READY_COUNT")
+        $DRY_RUN && _NEXT_ARGS+=(--dry-run)
+        DISPATCH_HANDLED=true
+        exec bash "$0" "${_NEXT_ARGS[@]}"
+    fi
+fi
+
 # ─── Step E1: /implement ──────────────────────────────────────────────────────
 
 LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
@@ -950,6 +1018,17 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
+
+# Budget increment after successful /implement (issue #203)
+if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would call: dispatcher-budget.sh increment $BUDGET_TYPE $ESTIMATED_TOKENS"
+    else
+        echo "[BUDGET] Increment: $BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER"
+        bash "$BUDGET_SCRIPT" increment "$BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
+            echo "Warning: Budget increment failed for $BUDGET_TYPE; continuing." >&2
+    fi
+fi
 
 # ─── Step E2: /review ─────────────────────────────────────────────────────────
 
@@ -1011,6 +1090,10 @@ echo "Searching for next \"Ready for implementation\" story..."
 NEXT_ISSUE=$(find_next_ready_story || true)
 
 if [[ -z "$NEXT_ISSUE" ]]; then
+    # Check all_budget_blocked: every story that reached the budget check was skipped.
+    if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
+        [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+    fi
     echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
     DISPATCH_HANDLED=true
     exit 0
@@ -1018,11 +1101,16 @@ fi
 
 echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
 
+_NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+    --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
+    --total-ready-count "$TOTAL_READY_COUNT")
+$DRY_RUN && _NEXT_ARGS+=(--dry-run)
+
 if $DRY_RUN; then
-    echo "[DRY RUN] Would exec: bash $0 --repo $REPO --issue $NEXT_ISSUE --dry-run"
+    echo "[DRY RUN] Would exec: bash $0 ${_NEXT_ARGS[*]}"
     DISPATCH_HANDLED=true
     exit 0
 fi
 
 DISPATCH_HANDLED=true
-exec bash "$0" --repo "$REPO" --issue "$NEXT_ISSUE"
+exec bash "$0" "${_NEXT_ARGS[@]}"
