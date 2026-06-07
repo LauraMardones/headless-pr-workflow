@@ -82,6 +82,80 @@ If Features are not warranted:
 
 Always list all related issues in the epic body - both pre-existing and newly created.
 
+## Parent-Link Assignment
+
+After each new Feature issue is created and added to GitHub Projects, immediately set its parent link so the Epic → Feature hierarchy is visible on the board. Run this step for every newly created Feature before moving on.
+
+### How to set the parent link
+
+**Step 1 — Locate project item IDs**
+
+List all items in project #3 and find the relevant IDs:
+
+```
+gh project item-list 3 --owner LauraMardones --format json
+```
+
+Filter the output by `content.number` to find:
+- The Epic's project item ID (the `id` field matching the Epic's issue number)
+- The newly created Feature's project item ID
+
+If the Epic is not present in the project output, skip to Step 4.
+
+**Step 2 — Attempt `updateProjectV2ItemFieldValue`**
+
+Try setting the parent field using the Epic's project item ID:
+
+```
+gh api graphql -f query='
+  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $parentId: String!) {
+    updateProjectV2ItemFieldValue(input: {
+      projectId: $projectId
+      itemId: $itemId
+      fieldId: $fieldId
+      value: { text: $parentId }
+    }) {
+      projectV2Item { id }
+    }
+  }
+' -f projectId="PVT_kwHOBBqYlM4BV_cG" \
+  -f itemId="FEATURE_PROJECT_ITEM_ID" \
+  -f fieldId="PVTF_lAHOBBqYlM4BV_cGzhRXJTY" \
+  -f parentId="EPIC_PROJECT_ITEM_ID"
+```
+
+If this mutation succeeds, the parent link is set — proceed to the next Feature.
+
+**Step 3 — Fallback: `addSubIssue` mutation**
+
+If Step 2 fails (the built-in PARENT_ISSUE field may not accept `updateProjectV2ItemFieldValue`), fall back to setting the relationship at the issue level. First obtain the issue node IDs:
+
+```
+gh issue view EPIC_NUMBER --json id --jq '.id'
+gh issue view FEATURE_NUMBER --json id --jq '.id'
+```
+
+Then run:
+
+```
+gh api graphql -f query='
+  mutation($parentId: ID!, $childId: ID!) {
+    addSubIssue(input: { issueId: $parentId, subIssueId: $childId }) {
+      issue { number }
+      subIssue { number }
+    }
+  }
+' -f parentId="EPIC_ISSUE_NODE_ID" -f childId="FEATURE_ISSUE_NODE_ID"
+```
+
+**Step 4 — Graceful failure**
+
+If the Epic item is not found in project #3, or if all mutation attempts fail, emit a warning and continue without blocking refinement:
+
+> Warning: Epic #NUMBER not found in project #3 — parent link not set for Feature #NUMBER. Continuing refinement.
+
+Do not fail or halt the refinement session if parent-link assignment cannot be completed.
+
 ## Implementation Order Derivation
 
 After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed feature or seed story:

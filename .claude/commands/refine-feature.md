@@ -71,6 +71,80 @@ A feature refines into Story/Task/Bug issues - not into further Features.
 
 After the breakdown is complete, apply the devil's advocate closing step (see below).
 
+## Parent-Link Assignment
+
+After each new Story, Task, or Bug issue is created and added to GitHub Projects, immediately set its parent link so the Feature → Story hierarchy is visible on the board. Run this step for every newly created child issue before moving on.
+
+### How to set the parent link
+
+**Step 1 — Locate project item IDs**
+
+List all items in project #3 and find the relevant IDs:
+
+```
+gh project item-list 3 --owner LauraMardones --format json
+```
+
+Filter the output by `content.number` to find:
+- The Feature's project item ID (the `id` field matching the Feature's issue number)
+- The newly created child issue's project item ID
+
+If the Feature is not present in the project output, skip to Step 4.
+
+**Step 2 — Attempt `updateProjectV2ItemFieldValue`**
+
+Try setting the parent field using the Feature's project item ID:
+
+```
+gh api graphql -f query='
+  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $parentId: String!) {
+    updateProjectV2ItemFieldValue(input: {
+      projectId: $projectId
+      itemId: $itemId
+      fieldId: $fieldId
+      value: { text: $parentId }
+    }) {
+      projectV2Item { id }
+    }
+  }
+' -f projectId="PVT_kwHOBBqYlM4BV_cG" \
+  -f itemId="CHILD_PROJECT_ITEM_ID" \
+  -f fieldId="PVTF_lAHOBBqYlM4BV_cGzhRXJTY" \
+  -f parentId="FEATURE_PROJECT_ITEM_ID"
+```
+
+If this mutation succeeds, the parent link is set — proceed to the next child issue.
+
+**Step 3 — Fallback: `addSubIssue` mutation**
+
+If Step 2 fails (the built-in PARENT_ISSUE field may not accept `updateProjectV2ItemFieldValue`), fall back to setting the relationship at the issue level. First obtain the issue node IDs:
+
+```
+gh issue view FEATURE_NUMBER --json id --jq '.id'
+gh issue view CHILD_NUMBER --json id --jq '.id'
+```
+
+Then run:
+
+```
+gh api graphql -f query='
+  mutation($parentId: ID!, $childId: ID!) {
+    addSubIssue(input: { issueId: $parentId, subIssueId: $childId }) {
+      issue { number }
+      subIssue { number }
+    }
+  }
+' -f parentId="FEATURE_ISSUE_NODE_ID" -f childId="CHILD_ISSUE_NODE_ID"
+```
+
+**Step 4 — Graceful failure**
+
+If the Feature item is not found in project #3, or if all mutation attempts fail, emit a warning and continue without blocking refinement:
+
+> Warning: Feature #NUMBER not found in project #3 — parent link not set for issue #NUMBER. Continuing refinement.
+
+Do not fail or halt the refinement session if parent-link assignment cannot be completed.
+
 ## Implementation Order Derivation
 
 After the breakdown is finalized, derive implementation order from the Dependencies fields on each seed story, task, or bug:
