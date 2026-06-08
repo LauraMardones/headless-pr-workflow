@@ -105,6 +105,7 @@ ISSUE_NUMBER=""
 DRY_RUN=false
 BUDGET_BLOCKED_COUNT=0
 TOTAL_READY_COUNT=0
+SKIPPED_ISSUES=""  # space-separated issue numbers skipped due to budget cap
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -122,6 +123,9 @@ while [[ $# -gt 0 ]]; do
         --total-ready-count)
             [[ $# -ge 2 ]] || { echo "Error: --total-ready-count requires a value." >&2; exit 1; }
             TOTAL_READY_COUNT="$2"; shift 2 ;;
+        --skipped-issues)
+            [[ $# -ge 2 ]] || { echo "Error: --skipped-issues requires a value." >&2; exit 1; }
+            SKIPPED_ISSUES="$2"; shift 2 ;;
         *)
             echo "Error: Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -552,6 +556,8 @@ find_linked_pr() {
 # ─── Utility: find next Ready for implementation story (re-fetches board) ────
 
 find_next_ready_story() {
+    # Optional first arg: space-separated issue numbers to exclude (already budget-skipped)
+    local _fnrs_exclude="${1:-}"
     local board
     board=$(gh api graphql -f query='
     query($owner: String!, $repo: String!) {
@@ -577,7 +583,8 @@ find_next_ready_story() {
     }
     ' -f owner="$OWNER" -f repo="$REPO_NAME") || return 1
 
-    echo "$board" | jq -r '
+    local _all_ready
+    _all_ready=$(echo "$board" | jq -r '
         .data.repository.projectsV2.nodes[0].items.nodes[]
         | select(
             (.content | type) == "object" and
@@ -589,7 +596,24 @@ find_next_ready_story() {
                 )
              ] | length > 0)
           )
-        | .content.number' | head -1
+        | .content.number') || return 1
+
+    if [[ -z "$_fnrs_exclude" ]]; then
+        echo "$_all_ready" | head -1
+        return 0
+    fi
+
+    # Return first Ready story not in the exclusion list
+    local _num _skip _excl
+    while IFS= read -r _num; do
+        [[ -z "$_num" ]] && continue
+        _skip=false
+        for _excl in $_fnrs_exclude; do
+            [[ "$_num" == "$_excl" ]] && { _skip=true; break; }
+        done
+        if ! $_skip; then echo "$_num"; return 0; fi
+    done <<< "$_all_ready"
+    return 0  # empty output: all Ready stories are excluded
 }
 
 # ─── Fetch project board data (single query) ──────────────────────────────────
@@ -996,8 +1020,10 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
         elif [[ $_budget_rc -eq 1 ]]; then
             echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
             BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
+            # Track this issue as skipped so find_next_ready_story won't reselect it
+            SKIPPED_ISSUES="${SKIPPED_ISSUES:+$SKIPPED_ISSUES }$ISSUE_NUMBER"
             LAST_ACTION="budget-skip for #$ISSUE_NUMBER; searching for next story"
-            NEXT_ISSUE=$(find_next_ready_story || true)
+            NEXT_ISSUE=$(find_next_ready_story "$SKIPPED_ISSUES" || true)
             if [[ -z "$NEXT_ISSUE" ]]; then
                 if [[ $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
                     [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
@@ -1009,7 +1035,8 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
             echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
             _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
                 --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-                --total-ready-count "$TOTAL_READY_COUNT")
+                --total-ready-count "$TOTAL_READY_COUNT" \
+                --skipped-issues "$SKIPPED_ISSUES")
             $DRY_RUN && _NEXT_ARGS+=(--dry-run)
             DISPATCH_HANDLED=true
             exec bash "$0" "${_NEXT_ARGS[@]}"
