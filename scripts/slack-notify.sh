@@ -2,8 +2,8 @@
 # scripts/slack-notify.sh
 #
 # Slack notification adapter — posts a Block Kit message to an incoming webhook
-# for any of the six dispatcher notification event types.
-# Implements: issue #178
+# for any of the seven dispatcher notification event types.
+# Implements: issue #178, issue #204
 #
 # Usage:
 #   SLACK_WEBHOOK_URL=<url> bash scripts/slack-notify.sh <EVENT_TYPE> <CONTEXT_JSON>
@@ -15,6 +15,7 @@
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
 #   dispatcher_error          fields: error_description, last_action
 #   ready_for_refinement      fields: issue_title, issue_url
+#   budget_cap_reached        fields: remaining_haiku, remaining_sonnet, remaining_opus, remaining_codex, settings_url
 #
 # Exit codes:
 #   0  — message sent successfully, or unrecognised event type (warning logged, no request made)
@@ -208,6 +209,17 @@ build_payload() {
                 }'
             ;;
 
+
+        budget_cap_reached)
+            local remaining_haiku remaining_sonnet remaining_opus remaining_codex settings_url
+            remaining_haiku=$(echo "$ctx" | jq -r '.remaining_haiku // "(unknown)"')
+            remaining_sonnet=$(echo "$ctx" | jq -r '.remaining_sonnet // "(unknown)"')
+            remaining_opus=$(echo "$ctx" | jq -r '.remaining_opus // "(unknown)"')
+            remaining_codex=$(echo "$ctx" | jq -r '.remaining_codex // "(unknown)"')
+            settings_url=$(echo "$ctx" | jq -r '.settings_url // ""')
+            jq -n --arg remaining_haiku "$remaining_haiku" --arg remaining_sonnet "$remaining_sonnet" --arg remaining_opus "$remaining_opus" --arg remaining_codex "$remaining_codex" --arg settings_url "$settings_url" '{ blocks: [ { type: "section", text: { type: "mrkdwn", text: ":no_entry: *Budget Cap Reached -- Dispatcher Paused*" } }, { type: "section", text: { type: "mrkdwn", text: ("*Remaining tokens:*  Haiku: " + $remaining_haiku + "  Sonnet: " + $remaining_sonnet + "  Opus: " + $remaining_opus + "  Codex: " + $remaining_codex) } }, { type: "section", text: { type: "mrkdwn", text: (if $settings_url != "" then "<" + $settings_url + "|Adjust caps or toggle DISPATCHER_ENABLED in GitHub Settings>" else "Adjust caps or toggle DISPATCHER_ENABLED in GitHub Settings" end) } } ] }'
+            ;;
+
         *)
             echo "__UNKNOWN_EVENT__"
             ;;
@@ -216,7 +228,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement"
+KNOWN_EVENTS="decision_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement budget_cap_reached"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0
