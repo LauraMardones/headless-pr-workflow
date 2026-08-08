@@ -42,6 +42,7 @@ def passing_context():
 
 def arrange_live(monkeypatch, module, *, context=None, threads=0, policy=("pass(present_non_required)", "present_non_required")):
     context = context or passing_context()
+    monkeypatch.setattr(module, "_resolve_base_repository", lambda repo: repo or "owner/base")
     monkeypatch.setattr(module, "fetch_pr_context", lambda target, repo=None: context)
     monkeypatch.setattr(module, "fetch_repo_default_branch", lambda repo=None: "main")
     monkeypatch.setattr(module, "_policy_for_branch", lambda branch: policy)
@@ -110,6 +111,60 @@ def test_all_pass_has_fixed_field_order(monkeypatch, module, capsys):
         "Merge gate: policy=pass(present_non_required), checks=absent-ok, "
         "approval=formal, threads=none, mergeable=yes, head=abcdef1\n"
     )
+
+
+def test_cross_repository_pr_uses_base_repo_for_every_lookup(monkeypatch, module):
+    context = replace(
+        passing_context(),
+        head_repository="contributor/fork",
+        is_cross_repository=True,
+    )
+    calls = []
+    monkeypatch.setattr(module, "_resolve_base_repository", lambda repo: "owner/base")
+    monkeypatch.setattr(
+        module,
+        "fetch_pr_context",
+        lambda target, repo=None: calls.append(("context", repo)) or context,
+    )
+    monkeypatch.setattr(
+        module,
+        "fetch_repo_default_branch",
+        lambda repo=None: calls.append(("default", repo)) or "main",
+    )
+    monkeypatch.setattr(module, "_policy_for_branch", lambda branch: ("pass(present_non_required)", "present_non_required"))
+    monkeypatch.setattr(
+        module,
+        "fetch_required_status_check_context",
+        lambda repo, branch: calls.append(("protection", repo))
+        or RequiredStatusChecks(names=(), status="unavailable"),
+    )
+    monkeypatch.setattr(
+        module,
+        "fetch_review_threads_for_context",
+        lambda context, repo=None: calls.append(("threads", repo)) or (),
+    )
+    monkeypatch.setattr(
+        module,
+        "summarize_review_threads",
+        lambda context, raw: SimpleNamespace(unresolved_blocking_threads=()),
+    )
+
+    assert module.evaluate(12, None).passed
+    assert calls == [
+        ("context", "owner/base"),
+        ("default", "owner/base"),
+        ("protection", "owner/base"),
+        ("threads", "owner/base"),
+    ]
+    assert all(repo != "contributor/fork" for _, repo in calls)
+
+
+def test_explicit_repo_needs_no_resolution_subprocess(monkeypatch, module):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("gh repo view must not run for explicit --repo")
+
+    monkeypatch.setattr(module.subprocess, "run", unexpected)
+    assert module._resolve_base_repository("owner/base") == "owner/base"
 
 
 def test_unresolved_threads_block(monkeypatch, module, capsys):

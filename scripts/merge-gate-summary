@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,27 +170,68 @@ def _mergeable_value(context, expected_base: str | None) -> str:
     return "yes"
 
 
+def _resolve_base_repository(repo: str | None) -> str:
+    """Return the base repository, never the PR head/fork repository."""
+
+    if repo:
+        return repo
+
+    command = ["gh", "repo", "view", "--json", "nameWithOwner"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except FileNotFoundError as error:
+        raise GHCommandError(command, None, "GitHub CLI executable not found: gh.", error="gh-not-found") from error
+    if result.returncode != 0:
+        raise GHCommandError(command, result.returncode, result.stderr)
+
+    try:
+        raw = json.loads(result.stdout)
+        resolved = raw["nameWithOwner"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise GHCommandError(
+            command,
+            result.returncode,
+            f"GitHub repo payload could not be parsed: {error}",
+            error="gh-parse-failed",
+        ) from error
+    if not isinstance(resolved, str) or not REPO_PATTERN.fullmatch(resolved):
+        raise GHCommandError(
+            command,
+            result.returncode,
+            "GitHub repo payload did not include a valid nameWithOwner.",
+            error="gh-parse-failed",
+        )
+    return resolved
+
+
 def evaluate(pr: int, repo: str | None) -> GateResult:
-    context = fetch_pr_context(str(pr), repo=repo)
+    base_repo = _resolve_base_repository(repo)
+    context = fetch_pr_context(str(pr), repo=base_repo)
     if not re.fullmatch(r"[0-9a-fA-F]{7,}", context.head_ref_oid or ""):
         raise ValueError("GitHub did not return a valid current PR head SHA")
 
     try:
-        expected_base = fetch_repo_default_branch(repo=repo)
+        expected_base = fetch_repo_default_branch(repo=base_repo)
     except GHCommandError:
         expected_base = None
     policy, policy_kind = _policy_for_branch(expected_base)
 
     try:
         required_checks = fetch_required_status_check_context(
-            repo or context.head_repository or "", expected_base or context.base_ref_name
+            base_repo, expected_base or context.base_ref_name
         )
         checks = _checks_value(context, required_checks, policy_kind)
     except GHCommandError:
         checks = "warn(unavailable)"
 
     try:
-        raw_threads = fetch_review_threads_for_context(context, repo=repo)
+        raw_threads = fetch_review_threads_for_context(context, repo=base_repo)
         thread_summary = summarize_review_threads(context, raw_threads)
         count = len(thread_summary.unresolved_blocking_threads)
         threads = "none" if count == 0 else f"fail({count})"
