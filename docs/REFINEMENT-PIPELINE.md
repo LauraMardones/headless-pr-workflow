@@ -1,5 +1,13 @@
 # Refinement Pipeline
 
+## Token-saving conventions
+
+Use the repository helper scripts for stable, repeated workflow fields instead of reconstructing those fields in freeform prose. In particular, implementation, review, and merge handoffs use `scripts/session-summary.sh`; merge decisions retain the separate one-line output from `scripts/merge-gate-summary`; and self-review may use focused helpers such as `scripts/ac-summary.sh` and `scripts/dispatcher-change-check.sh`.
+
+Reserve prose for information that the generated fields cannot safely replace: blockers, deviations, residual risk, and decisions. Do not repeat the PR body, implementation summary, or AC/DoD coverage after a generated Session Summary. Helper output is generate-only; the acting executor remains responsible for posting it through the approved GitHub operation transport.
+
+Applicable handoffs must never omit the issue and/or PR number, the relevant fresh head SHA, checks, blockers, or next action. Compactness must not remove approval evidence, unresolved-thread results, merge-policy gates, or any other phase-specific safety requirement. A merge helper's `Merge gate:` line is separate evidence and must not be inserted as an unsupported field inside the generated Session Summary block.
+
 This document defines the normative strategy for issue refinement in HPW-based AI-assisted development. It covers pipeline shape, buffer targets, the usage-feedback loop, parent-linking requirements, and escalation triggers.
 
 ---

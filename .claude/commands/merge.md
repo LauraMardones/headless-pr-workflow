@@ -32,6 +32,9 @@ Required behavior:
    - a formal GitHub approval on the current head SHA, or
    - a valid solo-maintainer override recorded on the current head SHA according to docs/MERGE-POLICY.md
 5. Merge only if the relied-on approval source still applies to the current PR head SHA and all merge gates pass.
+   - immediately before deciding, run `python3 scripts/merge-gate-summary --pr $ARGUMENTS --repo LauraMardones/headless-pr-workflow` against the freshly refreshed evidence
+   - preserve its exact single `Merge gate:` stdout line as merge evidence
+   - only exit `0` permits a merge; exit `1` means one or more evaluated gates do not pass, and exit `2` means the PR/head could not be safely evaluated, so both non-zero outcomes block the merge
 6. If any merge gate is stale, missing, ambiguous, or failing:
    - stop
    - report the blocker instead of merging
@@ -68,13 +71,4 @@ Never merge a stale or ambiguously approved head SHA.
 
 **Merge confirmation comment posted on the merged PR** using the available GitHub operation fallback.
 
-Post the confirmation comment using this structure (omit inapplicable fields):
-
-```
-## Session Summary
-Command: merge
-Issue / PR: #<pr-number>
-Head SHA: <merged-sha>
-Checks run: <list, or "none">
-Next action: cleanup
-```
+Include the exact `Merge gate:` evidence line produced immediately before the decision. Generate the post-merge handoff with `scripts/session-summary.sh --command merge --pr $ARGUMENTS --head <merged-head-sha> --checks <checks> --blockers none --next cleanup`, then post its exact stdout. Use repeatable `--deviation <text>` flags for deviations, residual risks, or decisions. Do not place the merge-gate line inside the generated block, and do not add recap sections or freeform PR-body/AC repetition after the generated Session Summary.

@@ -65,14 +65,4 @@ Do not rely on chat-only feedback as workflow-authoritative if it is not also re
 - If blockers remain: submit with event `REQUEST_CHANGES`.
 - If no blockers remain: submit with event `APPROVE`, or leave a solo-maintainer override summary if GitHub blocks self-approval.
 
-The Session Summary block is **unconditionally required** — include it in every review regardless of whether findings exist. `Blockers` and `Next action` must never be omitted. When no blockers are found, write `Blockers: none` and `Next action: merge`. Only `Head SHA` may be omitted for non-code reviews where no commit SHA was examined.
-
-```
-## Session Summary
-Command: review
-Issue / PR: #<pr-number>
-Head SHA: <reviewed-sha>
-Checks run: <list, or "none">
-Blockers: <list, or "none">
-Next action: <"implementation" or "merge">
-```
+The Session Summary block is **unconditionally required**. Generate it with `scripts/session-summary.sh --command review --pr $ARGUMENTS --head <reviewed-sha> --checks <checks> --blockers <blockers> --next <implementation|merge>` and post the exact stdout with the formal review. Use `--next implementation` when blockers require another implementation cycle and `--next merge` when none remain. Supply every required argument; use explicit values such as `--blockers none`. Use repeatable `--deviation <text>` flags for deviations, residual risks, or decisions. Do not add any recap section or freeform PR-body/AC repetition after the generated block.
