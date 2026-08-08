@@ -3,6 +3,15 @@ Implement issue #$ARGUMENTS in LauraMardones/headless-pr-workflow using GitHub a
 You are acting only as implementer in this session.
 Do not review or approve the same PR head SHA that you implement in this session.
 
+## GitHub operation fallback
+
+- Prefer the GitHub plugin/MCP integration for GitHub reads and mutations when it is available.
+- If the plugin/MCP integration is unavailable, use the authenticated `gh` CLI for required reads and mutations.
+- Use a direct GitHub API request only when neither the plugin/MCP integration nor `gh` supports the required operation.
+- Before any mutation, verify the target repository and issue or PR number. For review- or merge-related mutations, also verify the current head SHA where applicable.
+- Never expose, print, log, persist, or commit GitHub credentials.
+- The fallback changes only the transport. It never bypasses workflow gates, and it must produce the same durable GitHub evidence as the preferred integration.
+
 Follow core workflow policy and keep repo-specific or governance rules out of core commands.
 
 Workflow status goals:
@@ -51,7 +60,7 @@ Required behavior:
    - run `git diff main` (or the equivalent against the base branch) and verify the diff matches the issue scope exactly
    - confirm the PR body contains `Closes #$ARGUMENTS` and a meaningful description
    - confirm the issue link in the PR references the correct issue number
-   - confirm no occurrence of `In progress` appears in any command file changed — use `In implementation` instead
+   - confirm command files use `In implementation`, not the legacy progress-status spelling
    - confirm the PR title and body are accurate and not auto-generated boilerplate
 16. When implementation is complete:
    - run the most relevant documented local checks
@@ -79,8 +88,8 @@ Record workflow-relevant facts in GitHub, not only in chat.
 
 ## Required GitHub Output — Must Not Be Skipped
 
-**Draft PR created early** using `mcp__github__create_pull_request` (draft: true), linked to the issue.
-**Handoff comment posted on the PR** at completion using `mcp__github__add_issue_comment`.
+**Draft PR created early** using the available GitHub operation fallback (draft: true), linked to the issue.
+**Handoff comment posted on the PR** at completion using the available GitHub operation fallback.
 
 Post the handoff comment using this structure (omit inapplicable fields):
 
