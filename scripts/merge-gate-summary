@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Emit a compact, fail-closed summary of a pull request's merge gates."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from headless_pr_workflow.approval_check import summarize_approval_check
+from headless_pr_workflow.github import (
+    GHCommandError,
+    fetch_pr_context,
+    fetch_repo_default_branch,
+    fetch_required_status_check_context,
+    fetch_review_threads_for_context,
+    summarize_review_threads,
+)
+
+
+DRY_RUN_LINE = (
+    "Merge gate: policy=pass(present_non_required), checks=absent-ok, "
+    "approval=solo-maintainer, threads=none, mergeable=yes, head=b607aa9"
+)
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PASSING_POLICY_VALUES = {"absent", "present_non_required"}
+
+
+@dataclass(frozen=True)
+class GateResult:
+    policy: str
+    checks: str
+    approval: str
+    threads: str
+    mergeable: str
+    head: str
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.policy.startswith("pass(")
+            and self.checks in {"pass", "absent-ok"}
+            and self.approval in {"formal", "solo-maintainer"}
+            and self.threads == "none"
+            and self.mergeable == "yes"
+            and bool(re.fullmatch(r"[0-9a-fA-F]{7}", self.head))
+        )
+
+    def line(self) -> str:
+        return (
+            f"Merge gate: policy={self.policy}, checks={self.checks}, "
+            f"approval={self.approval}, threads={self.threads}, "
+            f"mergeable={self.mergeable}, head={self.head}"
+        )
+
+
+def positive_pr(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if number <= 0 or str(number) != value:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def repository(value: str) -> str:
+    if not REPO_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("must use owner/repo format")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pr", required=True, type=positive_pr, help="positive pull request number")
+    parser.add_argument("--repo", type=repository, help="GitHub repository in owner/repo format")
+    parser.add_argument("--dry-run", action="store_true", help="emit deterministic mock output without calling gh")
+    return parser
+
+
+def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tuple[str, str | None]:
+    path = repo_root / "docs" / "required-check-policy.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "fail(missing-policy)", None
+    except (OSError, json.JSONDecodeError):
+        return "fail(malformed-policy)", None
+
+    if raw.get("schema") != "headless-pr-workflow.required-check-policy.v1":
+        return "fail(invalid-schema)", None
+    branches = raw.get("branches")
+    entry = branches.get(branch) if isinstance(branches, dict) and branch else None
+    if not isinstance(entry, dict):
+        return "fail(missing-base-policy)", None
+    required = entry.get("required_status_checks")
+    workflows = entry.get("ci_workflows")
+    if required != "absent" or workflows not in PASSING_POLICY_VALUES:
+        return "fail(inconsistent-policy)", None
+
+    workflow_dir = repo_root / ".github" / "workflows"
+    workflow_files = workflow_dir.exists() and any(
+        item.is_file() and item.suffix.lower() in {".yml", ".yaml"} for item in workflow_dir.iterdir()
+    )
+    if workflows == "absent" and workflow_files:
+        return "fail(workflows-present)", None
+    if workflows == "present_non_required" and not workflow_files:
+        return "fail(workflows-missing)", None
+    return f"pass({workflows})", workflows
+
+
+def _checks_value(context, required_checks, policy_kind: str | None) -> str:
+    buckets = {check.bucket for check in context.status_checks}
+    if "failure" in buckets:
+        return "fail(failing)"
+    if "pending" in buckets:
+        return "fail(pending)"
+    if "unknown" in buckets:
+        return "warn(unknown)"
+
+    reported_names = {check.name for check in context.status_checks if check.name}
+    if required_checks.status != "unavailable":
+        if any(name not in reported_names for name in required_checks.names):
+            return "fail(missing-required)"
+    elif policy_kind is None:
+        return "warn(unavailable)"
+
+    if context.status_checks:
+        return "pass"
+    if policy_kind in PASSING_POLICY_VALUES:
+        return "absent-ok"
+    return "fail(missing-required)"
+
+
+def _approval_value(context) -> str:
+    approval = summarize_approval_check(context)
+    if not approval.hard_gate_passed:
+        if approval.approval_status == "stale":
+            return "fail(stale)"
+        return "fail(missing-or-blocked)"
+    if approval.approval_source == "formal":
+        return "formal"
+    if approval.approval_source == "solo-maintainer-override":
+        return "solo-maintainer"
+    return "warn(unknown-source)"
+
+
+def _mergeable_value(context, expected_base: str | None) -> str:
+    if not expected_base:
+        return "warn(expected-base-unavailable)"
+    if context.state != "OPEN":
+        return "fail(not-open)"
+    if context.is_draft:
+        return "fail(draft)"
+    if context.base_ref_name != expected_base:
+        return "fail(wrong-base)"
+    if context.mergeable == "CONFLICTING":
+        return "fail(conflicting)"
+    if context.mergeable != "MERGEABLE":
+        return "warn(unknown)"
+    return "yes"
+
+
+def evaluate(pr: int, repo: str | None) -> GateResult:
+    context = fetch_pr_context(str(pr), repo=repo)
+    if not re.fullmatch(r"[0-9a-fA-F]{7,}", context.head_ref_oid or ""):
+        raise ValueError("GitHub did not return a valid current PR head SHA")
+
+    try:
+        expected_base = fetch_repo_default_branch(repo=repo)
+    except GHCommandError:
+        expected_base = None
+    policy, policy_kind = _policy_for_branch(expected_base)
+
+    try:
+        required_checks = fetch_required_status_check_context(
+            repo or context.head_repository or "", expected_base or context.base_ref_name
+        )
+        checks = _checks_value(context, required_checks, policy_kind)
+    except GHCommandError:
+        checks = "warn(unavailable)"
+
+    try:
+        raw_threads = fetch_review_threads_for_context(context, repo=repo)
+        thread_summary = summarize_review_threads(context, raw_threads)
+        count = len(thread_summary.unresolved_blocking_threads)
+        threads = "none" if count == 0 else f"fail({count})"
+    except GHCommandError:
+        threads = "warn(unavailable)"
+
+    return GateResult(
+        policy=policy,
+        checks=checks,
+        approval=_approval_value(context),
+        threads=threads,
+        mergeable=_mergeable_value(context, expected_base),
+        head=context.head_ref_oid[:7],
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.dry_run:
+        print(DRY_RUN_LINE)
+        return 0
+
+    try:
+        result = evaluate(args.pr, args.repo)
+    except (GHCommandError, ValueError) as error:
+        print(f"merge-gate-summary: {error}", file=sys.stderr)
+        return 2
+
+    print(result.line())
+    return 0 if result.passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
