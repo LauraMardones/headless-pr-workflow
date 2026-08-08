@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Print a compact, read-only pull-request context summary."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+from typing import Any, Sequence
+
+
+DRY_RUN_OUTPUT = """PR: #42 Add compact PR context helper
+Linked issue: #213
+Head SHA: 0123456789abcdef0123456789abcdef01234567
+Base SHA: fedcba9876543210fedcba9876543210fedcba98
+Changed files (2):
+- scripts/pr-context
+- tests/test_pr_context_script.py
+Latest Session Summary:
+## Session Summary
+Command: implement
+Issue / PR: #213 / #42
+Head SHA: 0123456789abcdef0123456789abcdef01234567
+Checks run: python -m pytest
+Blockers: none
+Next action: review
+Unresolved review threads: 0
+Checks: pass=3 fail=0 pending=1 other=0
+"""
+
+THREADS_QUERY = """
+query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved }
+      }
+    }
+  }
+}
+""".strip()
+
+
+class ContextError(RuntimeError):
+    """A safe, user-facing live context failure."""
+
+
+def positive_integer(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def repository(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        raise argparse.ArgumentTypeError("must use owner/repo format")
+    return value
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Print bounded pull-request context using read-only GitHub CLI calls.",
+        epilog=(
+            "Exit codes: 0 output produced; 1 GitHub or payload failure; "
+            "2 invalid command-line usage. This command never mutates GitHub state."
+        ),
+    )
+    result.add_argument("--pr", required=True, type=positive_integer, metavar="N", help="positive pull-request number (required)")
+    result.add_argument("--repo", type=repository, metavar="OWNER/REPO", help="GitHub repository (defaults to the current repository)")
+    result.add_argument("--dry-run", action="store_true", help="print fixed representative output without calling GitHub")
+    return result
+
+
+def run_gh(arguments: list[str]) -> Any:
+    try:
+        completed = subprocess.run(
+            ["gh", *arguments], capture_output=True, text=True, check=False, shell=False
+        )
+    except (FileNotFoundError, OSError) as error:
+        raise ContextError("GitHub CLI could not be started") from error
+    if completed.returncode != 0:
+        raise ContextError("GitHub CLI request failed")
+    try:
+        return json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ContextError("GitHub returned invalid data") from error
+
+
+def fetch_pr(number: int, repo: str | None) -> dict[str, Any]:
+    fields = "number,title,body,headRefOid,baseRefOid,files,statusCheckRollup,comments"
+    arguments = ["pr", "view", str(number)]
+    if repo:
+        arguments.extend(["--repo", repo])
+    arguments.extend(["--json", fields])
+    raw = run_gh(arguments)
+    if not isinstance(raw, dict):
+        raise ContextError("GitHub returned an invalid pull-request payload")
+    return raw
+
+
+def resolve_repo(repo: str | None) -> str:
+    if repo:
+        return repo
+    raw = run_gh(["repo", "view", "--json", "nameWithOwner"])
+    try:
+        value = raw["nameWithOwner"]
+    except (KeyError, TypeError) as error:
+        raise ContextError("GitHub did not identify the current repository") from error
+    if not isinstance(value, str) or not re.fullmatch(r"[^/]+/[^/]+", value):
+        raise ContextError("GitHub did not identify the current repository")
+    return value
+
+
+def fetch_unresolved_threads(number: int, repo: str) -> int:
+    owner, name = repo.split("/", 1)
+    cursor: str | None = None
+    unresolved = 0
+    while True:
+        arguments = [
+            "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}",
+            "-F", f"number={number}", "-f", f"query={THREADS_QUERY}",
+        ]
+        if cursor is not None:
+            arguments.extend(["-f", f"cursor={cursor}"])
+        raw = run_gh(arguments)
+        try:
+            threads = raw["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = threads["nodes"]
+            page = threads["pageInfo"]
+        except (KeyError, TypeError) as error:
+            raise ContextError("GitHub returned invalid review-thread data") from error
+        if not isinstance(nodes, list) or not isinstance(page, dict):
+            raise ContextError("GitHub returned invalid review-thread data")
+        for node in nodes:
+            if not isinstance(node, dict) or not isinstance(node.get("isResolved"), bool):
+                raise ContextError("GitHub returned invalid review-thread data")
+            unresolved += not node["isResolved"]
+        if not page.get("hasNextPage"):
+            return unresolved
+        cursor = page.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise ContextError("GitHub returned incomplete review-thread data")
+
+
+def sanitize_line(value: str) -> str:
+    return "".join(" " if unicodedata.category(character).startswith("C") else character for character in value).strip()
+
+
+def linked_issue(body: str) -> int | None:
+    match = re.search(r"(?i)\b(?:closes|fixes)\s+#([1-9][0-9]*)\b", body)
+    return int(match.group(1)) if match else None
+
+
+def latest_summary(comments: list[Any]) -> list[str] | None:
+    candidates: list[tuple[str, list[str]]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            raise ContextError("GitHub returned invalid comment data")
+        body, created = comment.get("body"), comment.get("createdAt")
+        if not isinstance(body, str) or not isinstance(created, str):
+            raise ContextError("GitHub returned invalid comment data")
+        lines = body.splitlines()
+        try:
+            start = lines.index("## Session Summary")
+        except ValueError:
+            continue
+        block: list[str] = []
+        for line in lines[start:]:
+            if not line.strip():
+                break
+            block.append(sanitize_line(line))
+        candidates.append((created, block))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def check_counts(checks: list[Any]) -> dict[str, int]:
+    counts = {"pass": 0, "fail": 0, "pending": 0, "other": 0}
+    passing = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    failing = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE", "ERROR"}
+    pending = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ContextError("GitHub returned invalid check data")
+        conclusion = check.get("conclusion")
+        status = check.get("status")
+        state = check.get("state")
+        values = {str(value).upper() for value in (conclusion, status, state) if value is not None}
+        if values & passing:
+            counts["pass"] += 1
+        elif values & failing:
+            counts["fail"] += 1
+        elif values & pending or status is not None and conclusion is None:
+            counts["pending"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def render(raw: dict[str, Any], unresolved: int) -> str:
+    required = ("number", "title", "body", "headRefOid", "baseRefOid", "files", "statusCheckRollup", "comments")
+    if any(field not in raw for field in required):
+        raise ContextError("GitHub pull-request data is incomplete")
+    number, title, body = raw["number"], raw["title"], raw["body"]
+    head, base = raw["headRefOid"], raw["baseRefOid"]
+    files, checks, comments = raw["files"], raw["statusCheckRollup"], raw["comments"]
+    if not isinstance(number, int) or not all(isinstance(value, str) for value in (title, body, head, base)):
+        raise ContextError("GitHub returned invalid pull-request data")
+    if not all(isinstance(value, list) for value in (files, checks, comments)):
+        raise ContextError("GitHub returned invalid pull-request data")
+    paths: list[str] = []
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ContextError("GitHub returned invalid changed-file data")
+        paths.append(sanitize_line(item["path"]))
+    issue = linked_issue(body)
+    summary = latest_summary(comments)
+    counts = check_counts(checks)
+    lines = [
+        f"PR: #{number} {sanitize_line(title)}", f"Linked issue: #{issue}" if issue else "Linked issue: none",
+        f"Head SHA: {sanitize_line(head)}", f"Base SHA: {sanitize_line(base)}", f"Changed files ({len(paths)}):",
+        *([f"- {path}" for path in paths] if paths else ["- none"]), "Latest Session Summary:",
+        *(summary if summary else ["none"]), f"Unresolved review threads: {unresolved}",
+        f"Checks: pass={counts['pass']} fail={counts['fail']} pending={counts['pending']} other={counts['other']}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    if args.dry_run:
+        sys.stdout.write(DRY_RUN_OUTPUT)
+        return 0
+    try:
+        raw = fetch_pr(args.pr, args.repo)
+        repo = resolve_repo(args.repo)
+        unresolved = fetch_unresolved_threads(args.pr, repo)
+        sys.stdout.write(render(raw, unresolved))
+    except ContextError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
