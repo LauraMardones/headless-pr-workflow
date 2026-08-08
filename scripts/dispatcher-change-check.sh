@@ -99,7 +99,7 @@ for file in "${eligible[@]}"; do
     logical_source "$file" >"$tmp"
     calls=$(awk '
       /^[[:space:]]*#/ { next }
-      /(^|[[:space:]"'"''])([^[:space:]"'"'']*\/)?slack-notify\.sh([[:space:]"'"'']|$)/ { print NR ":" $0 }
+      /^[[:space:]]*(if[[:space:]]+|![[:space:]]+)?(bash[[:space:]]+)?(".*slack-notify\.sh"|[^[:space:];|&]*slack-notify\.sh"?)([[:space:]]|$)/ { print NR ":" $0 }
     ' "$tmp")
     if [[ $base == slack-notify.sh || -z $calls ]]; then
         result SKIP "$file" slack-guard 'no direct Slack adapter calls'
@@ -115,7 +115,7 @@ for file in "${eligible[@]}"; do
         result SKIP "$file" dry-run 'file has no dry-run path'
     elif awk '
       { lines[NR]=$0 }
-      /slack-notify\.sh/ && $0 !~ /^[[:space:]]*#/ { call[NR]=1 }
+      /^[[:space:]]*(if[[:space:]]+|![[:space:]]+)?(bash[[:space:]]+)?(".*slack-notify\.sh"|[^[:space:];|&]*slack-notify\.sh"?)([[:space:]]|$)/ { call[NR]=1 }
       END {
         for (n in call) {
           safe=0; seen_else=0
@@ -151,7 +151,7 @@ for file in "${eligible[@]}"; do
       }
       { src[NR]=$0 }
       /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{/ { inspect(); start=NR; has_call=0 }
-      start && /slack-notify\.sh/ && $0 !~ /^[[:space:]]*#/ { has_call=1 }
+      start && /^[[:space:]]*(if[[:space:]]+|![[:space:]]+)?(bash[[:space:]]+)?(".*slack-notify\.sh"|[^[:space:];|&]*slack-notify\.sh"?)([[:space:]]|$)/ { has_call=1 }
       start && /^[[:space:]]*}[[:space:]]*$/ { end=NR; inspect(); start=0; has_call=0 }
       END { if (start) { end=NR; inspect() }; if (!applicable) exit 2; exit bad }
     ' "$tmp"; then
