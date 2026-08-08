@@ -4,6 +4,15 @@ Refine GitHub issue #$ARGUMENTS in LauraMardones/headless-pr-workflow by identif
 
 Do not implement code.
 
+## GitHub operation fallback
+
+- Prefer the GitHub plugin/MCP integration for GitHub reads and mutations when it is available.
+- If the plugin/MCP integration is unavailable, use the authenticated `gh` CLI for required reads and mutations.
+- Use a direct GitHub API request only when neither the plugin/MCP integration nor `gh` supports the required operation.
+- Before any mutation, verify the target repository and issue or PR number. For review- or merge-related mutations, also verify the current head SHA where applicable.
+- Never expose, print, log, persist, or commit GitHub credentials.
+- The fallback changes only the transport. It never bypasses workflow gates, and it must produce the same durable GitHub evidence as the preferred integration.
+
 ## Step 0 — Check for PO usage feedback
 
 Before identifying the issue type, check whether recent implementations under the same Feature or Epic have attracted PO usage feedback that should inform this refinement.
@@ -72,7 +81,7 @@ Never silently pick a type or apply a wrong label.
 
 ## Required GitHub Output — Must Not Be Skipped
 
-**Issue body updated on GitHub** with refined content and **PO status updated** to `Refined` or `Ready for implementation` using `mcp__github__issue_write`.
+**Issue body updated on GitHub** with refined content and **PO status updated** to `Refined` or `Ready for implementation` using the available GitHub operation fallback.
 
 After refining, post a comment on the issue using this structure (omit inapplicable fields):
 

@@ -4,6 +4,15 @@ Treat this as a post-merge cleanup session, not a merge-decision session.
 
 Use GitHub as source of truth for whether the PR is merged. Use local git state carefully for cleanup decisions.
 
+## GitHub operation fallback
+
+- Prefer the GitHub plugin/MCP integration for GitHub reads and mutations when it is available.
+- If the plugin/MCP integration is unavailable, use the authenticated `gh` CLI for required reads and mutations.
+- Use a direct GitHub API request only when neither the plugin/MCP integration nor `gh` supports the required operation.
+- Before any mutation, verify the target repository and issue or PR number. For PR-related cleanup, also verify the current head SHA where applicable.
+- Never expose, print, log, persist, or commit GitHub credentials.
+- The fallback changes only the transport. It never bypasses workflow gates, and it must produce the same durable GitHub evidence as the preferred integration.
+
 Goals:
 - confirm the PR is merged
 - replace stale local working-tree copies of already-merged PR changes with the real GitHub main history
@@ -108,7 +117,7 @@ Do not treat stale local PR diffs as unique work once they have been verified ag
 
 ## Required GitHub Output — Must Not Be Skipped
 
-**Closing comment posted on the closed issue** using `mcp__github__add_issue_comment`.
+**Closing comment posted on the closed issue** using the available GitHub operation fallback.
 
 Post the closing comment using this structure (omit inapplicable fields):
 

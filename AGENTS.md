@@ -13,6 +13,17 @@ When working in this repository from Codex or a similar sandboxed assistant envi
 - Before mutating a pull request, review, issue, or branch, verify the target repository and resource number. For review- or merge-related operations, also verify the current head SHA where relevant.
 - Use normal workspace-scoped execution for local file reads, local file edits, and deterministic checks.
 
+The fallback changes only the transport used for a GitHub operation. It does not
+relax approval, review, status-transition, branch-protection, or merge gates. A
+fallback mutation must produce the same durable GitHub evidence required by the
+workflow that requested it.
+
+For review-thread resolution, refresh the pull request and thread first, confirm
+that the thread belongs to the verified pull request, and resolve it only when
+the finding is superseded. For formal reviews and solo-maintainer overrides,
+record evidence against the verified current head SHA. For merges, refresh the
+head SHA and every required gate immediately before the merge mutation.
+
 ## Stale Checkout Handling
 
 The sandbox workspace may be initialized from an older checkout and `git fetch` may be blocked. At the start of each session:

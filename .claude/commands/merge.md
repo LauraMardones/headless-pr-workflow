@@ -5,6 +5,15 @@ Treat this as a merge-owner session.
 Follow:
 - docs/MERGE-POLICY.md
 
+## GitHub operation fallback
+
+- Prefer the GitHub plugin/MCP integration for GitHub reads and mutations when it is available.
+- If the plugin/MCP integration is unavailable, use the authenticated `gh` CLI for required reads and mutations.
+- Use a direct GitHub API request only when neither the plugin/MCP integration nor `gh` supports the required operation.
+- Before any mutation, verify the target repository, PR number, and current head SHA. Refresh the head SHA and every required merge gate immediately before merging.
+- Never expose, print, log, persist, or commit GitHub credentials.
+- The fallback changes only the transport. It never bypasses workflow gates, and it must produce the same durable GitHub evidence as the preferred integration.
+
 Workflow status goal:
 - If merge succeeds and all remaining Definition of Done criteria are satisfied: "In merge" -> "Done"
 
@@ -57,7 +66,7 @@ Never merge a stale or ambiguously approved head SHA.
 
 ## Required GitHub Output — Must Not Be Skipped
 
-**Merge confirmation comment posted on the merged PR** using `mcp__github__add_issue_comment`.
+**Merge confirmation comment posted on the merged PR** using the available GitHub operation fallback.
 
 Post the confirmation comment using this structure (omit inapplicable fields):
 
