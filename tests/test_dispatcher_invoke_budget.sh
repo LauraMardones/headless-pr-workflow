@@ -411,6 +411,82 @@ test_estimate_called_with_size_label() {
     assert_contains "estimate: unknown label returns default 75000" "$output" "75000"
 }
 
+# ─── Test 11: All ready stories exhausted via SKIPPED_ISSUES exclusion ──────────
+#
+# Regression for the blocker in PR #221 review:
+# find_next_ready_story() must exclude already-skipped issues so the loop
+# terminates and writes all_budget_blocked=true once all Ready stories are
+# exhausted, rather than infinitely re-selecting the same blocked issue.
+
+test_all_ready_exhausted_via_exclusion() {
+    local tmpdir
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    local github_output="$tmpdir/github_output"
+
+    local output
+    output=$(bash -c "
+        set -euo pipefail
+        GITHUB_OUTPUT='$github_output'
+
+        # Mock find_next_ready_story: two stories [101, 102], filtered by exclusion list.
+        find_next_ready_story() {
+            local _excl=\"\${1:-}\"
+            local _num
+            for _num in 101 102; do
+                local _skip=false
+                local _e
+                for _e in \$_excl; do
+                    [[ \"\$_num\" == \"\$_e\" ]] && { _skip=true; break; }
+                done
+                \$_skip || { echo \"\$_num\"; return 0; }
+            done
+            return 0  # empty: all ready stories excluded
+        }
+
+        SKIPPED_ISSUES=\"\"
+        BUDGET_BLOCKED_COUNT=0
+        TOTAL_READY_COUNT=2
+
+        # Round 1: issue 101 hits budget cap.
+        ISSUE_NUMBER=101
+        BUDGET_BLOCKED_COUNT=\$(( BUDGET_BLOCKED_COUNT + 1 ))
+        SKIPPED_ISSUES=\"\${SKIPPED_ISSUES:+\$SKIPPED_ISSUES }\$ISSUE_NUMBER\"
+        NEXT_ISSUE=\$(find_next_ready_story \"\$SKIPPED_ISSUES\" || true)
+        echo \"after-round1: NEXT=\$NEXT_ISSUE SKIPPED=\$SKIPPED_ISSUES\"
+
+        # Round 2: issue 102 (the next story) also hits budget cap.
+        if [[ -n \"\$NEXT_ISSUE\" ]]; then
+            ISSUE_NUMBER=\"\$NEXT_ISSUE\"
+            BUDGET_BLOCKED_COUNT=\$(( BUDGET_BLOCKED_COUNT + 1 ))
+            SKIPPED_ISSUES=\"\${SKIPPED_ISSUES:+\$SKIPPED_ISSUES }\$ISSUE_NUMBER\"
+            NEXT_ISSUE=\$(find_next_ready_story \"\$SKIPPED_ISSUES\" || true)
+            echo \"after-round2: NEXT=\$NEXT_ISSUE SKIPPED=\$SKIPPED_ISSUES\"
+        fi
+
+        # Exhaustion: no story left; every ready story was budget-blocked.
+        if [[ -z \"\$NEXT_ISSUE\" ]]; then
+            if [[ \$BUDGET_BLOCKED_COUNT -eq \$TOTAL_READY_COUNT ]]; then
+                [[ -n \"\${GITHUB_OUTPUT:-}\" ]] && echo \"all_budget_blocked=true\" >> \"\$GITHUB_OUTPUT\"
+            fi
+            echo \"loop-exhausted\"
+        fi
+    " 2>&1)
+
+    assert_file_contains \
+        "exhaustion: all_budget_blocked=true written after both stories skipped" \
+        "$github_output" "all_budget_blocked=true"
+    assert_contains \
+        "exhaustion: round1 finds issue 102 (not 101 again)" \
+        "$output" "after-round1: NEXT=102"
+    assert_contains \
+        "exhaustion: round2 finds no further story" \
+        "$output" "after-round2: NEXT= "
+    assert_contains \
+        "exhaustion: loop terminated cleanly" \
+        "$output" "loop-exhausted"
+}
+
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 run_all_tests() {
@@ -425,6 +501,7 @@ run_all_tests() {
     test_all_budget_blocked_suppressed_when_no_github_output
     test_budget_config_error_hard_fails
     test_estimate_called_with_size_label
+    test_all_ready_exhausted_via_exclusion
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed"
     [[ $FAIL -eq 0 ]]

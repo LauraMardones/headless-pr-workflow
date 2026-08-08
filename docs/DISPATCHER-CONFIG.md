@@ -117,6 +117,21 @@ To update this variable:
 
 ---
 
+## Budget Cap Notification
+
+When every "Ready for implementation" story in a dispatcher run is skipped due to daily token cap limits, the dispatcher workflow sends a `budget_cap_reached` Slack notification. This notification fires only when `all_budget_blocked=true` is output by the invoke step. It does not fire if the dispatcher exits early for other reasons (e.g., `DISPATCHER_ENABLED=false`, no stories available, or only some stories were budget-blocked).
+
+The Slack message contains:
+- A header identifying the pause: `:no_entry: Budget Cap Reached -- Dispatcher Paused`
+- Per-executor remaining token counts (Haiku, Sonnet, Opus, Codex)
+- A direct link to [GitHub Settings - Variables](https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions) to adjust caps or toggle `DISPATCHER_ENABLED`
+
+The notification step calls `dispatcher-budget.sh check <executor_type> || true` for each executor type to obtain remaining tokens, then passes the values to `scripts/slack-notify.sh budget_cap_reached`. The `|| true` ensures the step captures the remaining count even when exit code 1 (cap reached) is returned.
+
+To enable this notification, ensure `SLACK_WEBHOOK_URL` is configured as a repository secret (see Slack Notifications section above).
+
+---
+
 ## Budget Check in the Invoke Loop
 
 Budget enforcement is wired into `scripts/dispatcher-invoke.sh` (Story #203). Before each `/implement` invocation, the dispatcher calls `dispatcher-budget.sh check <executor_type>`. If the daily cap is reached, the story is skipped and the loop continues to the next available story:

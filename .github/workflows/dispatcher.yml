@@ -76,3 +76,20 @@ jobs:
         with:
           path: .dispatcher-budget
           key: budget-${{ env.TODAY }}-${{ github.run_id }}
+
+      - name: Notify budget cap reached
+        if: steps.guard.outputs.enabled == 'true' && steps.invoke.outputs.all_budget_blocked == 'true'
+        env:
+          BUDGET_DAILY_HAIKU: ${{ vars.BUDGET_DAILY_HAIKU }}
+          BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
+          BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
+          BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "[BUDGET NOTIFY] Sending budget_cap_reached Slack notification"
+          remaining_haiku=$(bash scripts/dispatcher-budget.sh check haiku || true)
+          remaining_sonnet=$(bash scripts/dispatcher-budget.sh check sonnet || true)
+          remaining_opus=$(bash scripts/dispatcher-budget.sh check opus || true)
+          remaining_codex=$(bash scripts/dispatcher-budget.sh check codex || true)
+          context_json=$(jq -n --arg remaining_haiku "$remaining_haiku" --arg remaining_sonnet "$remaining_sonnet" --arg remaining_opus "$remaining_opus" --arg remaining_codex "$remaining_codex" --arg settings_url "https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions" '{remaining_haiku: $remaining_haiku, remaining_sonnet: $remaining_sonnet, remaining_opus: $remaining_opus, remaining_codex: $remaining_codex, settings_url: $settings_url}')
+          bash scripts/slack-notify.sh budget_cap_reached "$context_json"
