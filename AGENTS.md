@@ -6,8 +6,11 @@ This file defines project-level assistant guidance for work in this repository. 
 
 When working in this repository from Codex or a similar sandboxed assistant environment:
 
-- Use the GitHub plugin for all GitHub operations (reading issues, creating PRs, posting comments, updating issues, adding reviews).
-- Do not use `gh` CLI for GitHub API operations — the GitHub plugin is available and works within the sandbox without escalation.
+- Use the GitHub plugin/MCP integration for GitHub operations when it is available.
+- If the GitHub plugin/MCP integration is not available in the current session, use the authenticated `gh` CLI for required GitHub reads and mutations.
+- Use direct GitHub API calls such as `curl` only when neither the plugin/MCP integration nor `gh` supports the required operation.
+- Never expose, print, log, persist, or commit GitHub credentials.
+- Before mutating a pull request, review, issue, or branch, verify the target repository and resource number. For review- or merge-related operations, also verify the current head SHA where relevant.
 - Use normal workspace-scoped execution for local file reads, local file edits, and deterministic checks.
 
 ## Stale Checkout Handling
