@@ -73,11 +73,17 @@ result() {
 # Join backslash-continued source lines. This is intentionally not a full parser.
 logical_source() {
     awk '
-      { sub(/\r$/, "") }
-      pending { line=line $0; pending=0 }
-      !pending { line=$0 }
-      /\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, "", line); pending=1; next }
-      { print line; line="" }
+      {
+        sub(/\r$/, "")
+        continued=($0 ~ /\\[[:space:]]*$/)
+        if (continued) sub(/\\[[:space:]]*$/, "")
+        if (pending) line=line $0
+        else line=$0
+        if (continued) { pending=1; next }
+        print line
+        line=""
+        pending=0
+      }
       END { if (line != "") print line }
     ' "$1"
 }

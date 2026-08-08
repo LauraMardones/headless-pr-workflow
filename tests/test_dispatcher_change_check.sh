@@ -73,6 +73,25 @@ run_check "$TMP/out" "$TMP/err" --files "$unguarded"
 assert_rc 'unguarded call exits one' 1
 assert_has 'unguarded call is reported' "$TMP/out" "FAIL $unguarded slack-guard -"
 
+# Backslash continuations remain one logical command for guard analysis.
+multiline_safe="$TMP/dispatcher-multiline-safe.sh"
+write_clean "$multiline_safe"
+sed -i 's/ || true$/ || \\/' "$multiline_safe"
+sed -i '/slack-notify.sh/a\            true' "$multiline_safe"
+run_check "$TMP/out" "$TMP/err" --files "$multiline_safe"
+assert_rc 'multiline true guard exits zero' 0
+assert_has 'multiline true guard passes' "$TMP/out" "PASS $multiline_safe slack-guard -"
+
+multiline_unsafe="$TMP/dispatcher-multiline-unsafe.sh"
+write_clean "$multiline_unsafe"
+sed -i 's/ || true$/ || \\/' "$multiline_unsafe"
+sed -i '/slack-notify.sh/a\            false' "$multiline_unsafe"
+run_check "$TMP/out" "$TMP/err" --files "$multiline_unsafe"
+assert_rc 'unsafe multiline guard exits one' 1
+assert_has 'unsafe multiline guard is reported' "$TMP/out" "FAIL $multiline_unsafe slack-guard -"
+assert_has 'unsafe multiline call remains visible to dry-run check' "$TMP/out" "$multiline_unsafe dry-run -"
+assert_has 'unsafe multiline call remains visible to stdout check' "$TMP/out" "$multiline_unsafe stdout-json -"
+
 # A Slack call directly in the dry-run arm is not suppressed.
 broken_dry="$TMP/dispatcher-broken-dry.sh"
 cat >"$broken_dry" <<'FIXTURE'
