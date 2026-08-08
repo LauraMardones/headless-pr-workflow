@@ -56,11 +56,24 @@ assert_failure() {
 }
 
 test_exact_output() {
-    local expected actual
+    local expected actual expected_file actual_file
     expected=$'## Session Summary\nCommand: implement\nIssue/PR: #207 / #999\nHead: abc1234\nChecks: bash-n=pass\nBlockers: none\nNext: review'
     actual=$("$SUMMARY_SCRIPT" --command implement --issue 207 --pr 999 \
         --head abc1234 --checks bash-n=pass --blockers none --next review)
     assert_equal "exact normal output" "$expected" "$actual"
+
+    expected_file=$(mktemp)
+    actual_file=$(mktemp)
+    printf '%s\n' "$expected" >"$expected_file"
+    "$SUMMARY_SCRIPT" --command implement --issue 207 --pr 999 \
+        --head abc1234 --checks bash-n=pass --blockers none --next review \
+        >"$actual_file"
+    if cmp -s "$expected_file" "$actual_file"; then
+        pass "exact output includes one final newline"
+    else
+        fail "exact output includes one final newline"
+    fi
+    rm -f "$expected_file" "$actual_file"
 }
 
 test_identifiers_and_cleanup() {
