@@ -51,6 +51,30 @@ List all available commands:
 hpw catalog
 ```
 
+### Compact merge-gate summary
+
+From a repository checkout, emit the current merge gates as one stable line:
+
+```bash
+python3 scripts/merge-gate-summary --pr 42 --repo OWNER/REPO
+```
+
+The fields always appear in this order:
+
+```text
+Merge gate: policy=<value>, checks=<value>, approval=<value>, threads=<value>, mergeable=<value>, head=<7-char-sha>
+```
+
+The command exits `0` only when every field passes, exits `1` after a complete
+evaluation containing a failure, warning, or unavailable value, and exits `2`
+when invalid input or missing PR/head evidence prevents a safe evaluation. A
+completed blocked evaluation still prints all six fields. Use `--dry-run` for
+deterministic mock output without a GitHub call.
+
+The helper reports the rules defined by [the merge policy](docs/MERGE-POLICY.md)
+and [required-check policy](docs/required-check-policy.json); it does not replace
+or mutate either policy.
+
 ## Core Principles
 
 - GitHub is the source of truth.
@@ -146,9 +170,11 @@ src/headless_pr_workflow/    Python CLI implementation (~20 modules)
   target_branch.py           target-branch-check command
   catalog.py                 command catalog registry
 
-scripts/                     Shell scripts for automation and notifications
+scripts/                     Automation, notification, and compact-summary helpers
   hpw                        Thin shell wrapper (Unix)
   hpw.ps1                    Thin shell wrapper (Windows PowerShell)
+  merge-gate-summary         Python helper for a compact, fail-closed merge-gate line
+  session-summary.sh         Compact workflow handoff formatter
   flow-review.sh             Weekly flow review report from GitHub Projects v2
   slack-notify.sh            Slack notification adapter — posts Block Kit messages to an incoming webhook
 examples/                    Assistant and repo adapter examples
