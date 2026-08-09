@@ -562,8 +562,18 @@ find_linked_pr() {
 # (they do not vary per page).
 
 fetch_board_data() {
-    local all_items="[]" cursor="" page_count=0 max_pages=50
-    local project_id="" fields_json="[]" page page_nodes has_next
+    local cursor="" page_count=0 max_pages=50
+    local project_id="" page has_next
+    # Items accumulate on disk, not in a shell variable passed via --argjson:
+    # past ~100 project items (each carrying a full issue body) the growing
+    # JSON blob exceeds the OS argument-length limit ("Argument list too
+    # long"). jq reads file contents directly, which has no such limit.
+    local tmp_dir items_file fields_file page_file
+    tmp_dir="$(mktemp -d)"
+    items_file="$tmp_dir/items.json"
+    fields_file="$tmp_dir/fields.json"
+    echo '[]' > "$items_file"
+    echo '[]' > "$fields_file"
 
     while :; do
         page_count=$(( page_count + 1 ))
@@ -603,7 +613,7 @@ fetch_board_data() {
                 }
               }
             }
-            ' -f owner="$OWNER" -f repo="$REPO_NAME") || return 1
+            ' -f owner="$OWNER" -f repo="$REPO_NAME") || { rm -rf "$tmp_dir"; return 1; }
         else
             page=$(gh api graphql -f query='
             query($owner: String!, $repo: String!, $after: String) {
@@ -635,16 +645,19 @@ fetch_board_data() {
                 }
               }
             }
-            ' -f owner="$OWNER" -f repo="$REPO_NAME" -f after="$cursor") || return 1
+            ' -f owner="$OWNER" -f repo="$REPO_NAME" -f after="$cursor") || { rm -rf "$tmp_dir"; return 1; }
         fi
 
         if [[ "$page_count" -eq 1 ]]; then
             project_id=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].id // empty')
-            fields_json=$(echo "$page" | jq -c '.data.repository.projectsV2.nodes[0].fields.nodes')
+            echo "$page" | jq -c '.data.repository.projectsV2.nodes[0].fields.nodes' > "$fields_file"
         fi
 
-        page_nodes=$(echo "$page" | jq '.data.repository.projectsV2.nodes[0].items.nodes')
-        all_items=$(jq -c -n --argjson a "$all_items" --argjson b "$page_nodes" '$a + $b')
+        page_file="$tmp_dir/page_${page_count}.json"
+        echo "$page" | jq '.data.repository.projectsV2.nodes[0].items.nodes' > "$page_file"
+        jq -s 'add' "$items_file" "$page_file" > "$tmp_dir/items_new.json"
+        mv "$tmp_dir/items_new.json" "$items_file"
+        rm -f "$page_file"
 
         has_next=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.hasNextPage')
         cursor=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.endCursor')
@@ -652,8 +665,9 @@ fetch_board_data() {
         [[ "$has_next" == "true" ]] || break
     done
 
-    jq -n --arg pid "$project_id" --argjson fields "$fields_json" --argjson items "$all_items" \
-        '{data:{repository:{projectsV2:{nodes:[{id:$pid, fields:{nodes:$fields}, items:{nodes:$items}}]}}}}'
+    jq -n --arg pid "$project_id" --slurpfile fields "$fields_file" --slurpfile items "$items_file" \
+        '{data:{repository:{projectsV2:{nodes:[{id:$pid, fields:{nodes:$fields[0]}, items:{nodes:$items[0]}}]}}}}'
+    rm -rf "$tmp_dir"
 }
 
 # ─── Utility: find next Ready for implementation story (re-fetches board) ────

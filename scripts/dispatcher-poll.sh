@@ -142,8 +142,17 @@ PROJECT_NUMBER=$(echo "$PROJECTS" | jq '.data.repository.projectsV2.nodes[0].num
 # ─── Fetch project items with status (paginated) ──────────────────────────────
 
 # D1: walks every page via cursor pagination, capped at 50 pages as a
-# runaway-loop safety valve.
-ALL_ITEMS="[]"
+# runaway-loop safety valve. Items accumulate on disk, not in a shell
+# variable passed via --argjson: past a few hundred project items the
+# growing JSON blob risks exceeding the OS argument-length limit
+# ("Argument list too long") — jq reading file contents directly has no
+# such limit. See scripts/dispatcher-invoke.sh's fetch_board_data() for the
+# same fix, hit in production once its richer per-item query (which
+# includes full issue bodies) crossed that limit at ~130 items.
+POLL_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$POLL_TMP_DIR"' EXIT
+ITEMS_FILE="$POLL_TMP_DIR/items.json"
+echo '[]' > "$ITEMS_FILE"
 CURSOR=""
 PAGE_COUNT=0
 MAX_PAGES=50
@@ -183,8 +192,11 @@ while :; do
   }
 }")
 
-    PAGE_NODES=$(echo "$PAGE" | jq '.data.repository.projectsV2.nodes[0].items.nodes')
-    ALL_ITEMS=$(jq -c -n --argjson a "$ALL_ITEMS" --argjson b "$PAGE_NODES" '$a + $b')
+    PAGE_FILE="$POLL_TMP_DIR/page_${PAGE_COUNT}.json"
+    echo "$PAGE" | jq '.data.repository.projectsV2.nodes[0].items.nodes' > "$PAGE_FILE"
+    jq -s 'add' "$ITEMS_FILE" "$PAGE_FILE" > "$POLL_TMP_DIR/items_new.json"
+    mv "$POLL_TMP_DIR/items_new.json" "$ITEMS_FILE"
+    rm -f "$PAGE_FILE"
 
     HAS_NEXT=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.hasNextPage')
     CURSOR=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.endCursor')
@@ -192,7 +204,7 @@ while :; do
     [[ "$HAS_NEXT" == "true" ]] || break
 done
 
-ITEMS=$(jq -n --argjson nodes "$ALL_ITEMS" '{data:{repository:{projectsV2:{nodes:[{items:{nodes:$nodes}}]}}}}')
+ITEMS=$(jq -n --slurpfile nodes "$ITEMS_FILE" '{data:{repository:{projectsV2:{nodes:[{items:{nodes:$nodes[0]}}]}}}}')
 
 # ─── Filter by status (D5: single response, two jq passes) ───────────────────
 
