@@ -118,6 +118,12 @@ environment limits is `BLOCKED`, never `PASS`.
 
 ## 7. Decide without weakening the gate
 
+The deterministic safety model for these gates lives in
+`src/headless_pr_workflow/closure_verification.py`. Use its validation semantics
+when normalizing the freshly collected GitHub, checkout, evidence-row, check,
+and existing-comment state. Do not bypass a modeled blocker based on narrative
+judgment.
+
 Verification passes only when all of the following are true:
 
 - preflight and final freshness checks pass;

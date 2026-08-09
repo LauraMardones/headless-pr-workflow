@@ -1,126 +1,176 @@
-from pathlib import Path
+from dataclasses import replace
+from unittest.mock import Mock
+
+import pytest
+
+from headless_pr_workflow.closure_verification import (
+    CheckResult,
+    EvidenceRow,
+    Issue,
+    PullRequest,
+    VerificationBlocked,
+    parse_issue_number,
+    verify_closure,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
+SHA = "a" * 40
 
 
-def read(relative_path: str) -> str:
-    return (ROOT / relative_path).read_text(encoding="utf-8")
+@pytest.fixture
+def github() -> Mock:
+    target = Issue(10, "Feature", "OPEN", frozenset({"type:feature"}))
+    child = Issue(11, "Story", "CLOSED", frozenset({"type:story"}), 10)
+    client = Mock()
+    client.repository_name.return_value = "LauraMardones/headless-pr-workflow"
+    client.issue.return_value = target
+    client.native_children.return_value = [child]
+    client.metadata_children.return_value = [child]
+    client.linked_pull_requests.return_value = [PullRequest(20, True, "b" * 40)]
+    client.main_sha.return_value = SHA
+    client.summary_urls.return_value = []
+    return client
 
 
-def test_command_validates_exactly_one_positive_issue_number_before_mutation() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "Require exactly one token" in command
-    assert "`[1-9][0-9]*`" in command
-    assert "Missing, extra, zero, negative, flag-like, or non-numeric input" in command
-    assert "stop before any GitHub comment" in command
-
-
-def test_command_verifies_repository_target_type_and_fresh_main() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "exact repository" in command
-    assert "identity `LauraMardones/headless-pr-workflow`" in command
-    assert "Require it to exist and be open" in command
-    assert "Require exactly one supported label" in command
-    assert "`type:feature` or `type:epic`" in command
-    assert "`git rev-parse HEAD`" in command
-    assert "require the full local SHA to equal the full" in command
-    assert "remote `main` SHA" in command
-    assert "immediately before the permitted comment mutation" in command
+@pytest.fixture
+def local() -> Mock:
+    checkout = Mock()
+    checkout.head_sha.return_value = SHA
+    checkout.evidence_rows.return_value = [
+        EvidenceRow("Criterion one", "PASS", ("src/example.py:1-5",))
+    ]
+    checkout.check_results.return_value = [
+        CheckResult("python -m pytest tests/test_verify_closure_command.py", "PASS"),
+        CheckResult("python -m pytest", "PASS"),
+    ]
+    return checkout
 
 
-def test_feature_branch_inventories_children_and_merged_prs() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "Query GitHub-native sub-issue relationships" in command
-    assert "Search open and closed issues" in command
-    assert "Combine and deduplicate by issue number" in command
-    assert "rather than choosing one source silently" in command
-    assert "Include all open and closed direct children" in command
-    assert "An unmerged or merely mentioned PR is not delivered evidence" in command
-
-
-def test_epic_branch_fails_closed_for_open_child_feature() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "Include every direct child Feature" in command
-    assert "Require each child to have exactly the `type:feature` label and to be closed" in command
-    assert "Any open child Feature blocks a ready-for-PO result" in command
-    assert "map delivery to the Epic goal and every Epic criterion" in command
+@pytest.mark.parametrize("argument", ["", "1 2", "0", "-1", "abc", "--json"])
+def test_invalid_arguments_fail_before_collaborators_are_called(
+    argument: str, github: Mock, local: Mock
+) -> None:
+    with pytest.raises(VerificationBlocked, match="exactly one positive integer"):
+        verify_closure(argument, github, local)
+    github.repository_name.assert_not_called()
+    local.head_sha.assert_not_called()
 
 
-def test_criterion_matrix_requires_concrete_non_stale_evidence() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "Create exactly one row per declared criterion" in command
-    assert "repository file paths with line ranges at the verified SHA" in command
-    assert "exact test commands with recorded passing outcomes" in command
-    assert "Narrative confidence" in command
-    assert "environment-limited check is not passing evidence" in command
-    assert "unproven or contradicted row `FAIL` or `BLOCKED`" in command
+def test_positive_issue_number_is_accepted() -> None:
+    assert parse_issue_number("232") == 232
 
 
-def test_required_checks_classify_failures_and_environment_limits() -> None:
-    command = read(".claude/commands/verify-closure.md")
+def test_feature_success_inventories_children_and_only_merged_prs(
+    github: Mock, local: Mock
+) -> None:
+    github.linked_pull_requests.return_value = [
+        PullRequest(20, True, "b" * 40),
+        PullRequest(21, False, None),
+    ]
 
-    assert "`python -m pytest tests/test_verify_closure_command.py`" in command
-    assert "`python -m pytest`" in command
-    assert "classify its result as `PASS`, `FAIL`, or" in command
-    assert "`BLOCKED`" in command
-    assert "A non-zero test result is `FAIL`" in command
-    assert "environment limits is `BLOCKED`, never `PASS`" in command
+    result = verify_closure("10", github, local)
 
-
-def test_failed_verification_neither_posts_summary_nor_requests_po() -> None:
-    command = read(".claude/commands/verify-closure.md")
-
-    assert "do not post the authoritative technical delivery summary" in command
-    assert "do not request PO product confirmation" in command
-    assert "do not mutate repository or issue lifecycle state" in command
-    assert "return a human-readable blocker summary" in command
+    assert result.target_type == "type:feature"
+    assert [item.issue.number for item in result.inventory] == [11]
+    assert [pr.number for pr in result.inventory[0].merged_prs] == [20]
+    assert result.should_post_summary is True
+    github.native_children.assert_called_once_with(10)
+    github.metadata_children.assert_called_once_with(10)
 
 
-def test_success_summary_has_required_contract_and_stops_before_close() -> None:
-    command = read(".claude/commands/verify-closure.md")
+def test_epic_success_requires_closed_feature_children(github: Mock, local: Mock) -> None:
+    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    feature = Issue(11, "Feature", "CLOSED", frozenset({"type:feature"}), 10)
+    github.issue.return_value = epic
+    github.native_children.return_value = [feature]
+    github.metadata_children.return_value = [feature]
 
-    for heading in (
-        "### Child and merged PR inventory",
-        "### Criterion evidence matrix",
-        "### Checks",
-        "### Blockers",
-        "### Residual risk",
-        "### Next action",
-    ):
-        assert heading in command
+    result = verify_closure("10", github, local)
 
-    assert "PO product confirmation is required. Is this what you wanted?" in command
-    assert "Stop without detecting confirmation" in command
-    assert "performing a close or lifecycle-state mutation" in command
+    assert result.target_type == "type:epic"
+    assert result.inventory[0].issue == feature
 
 
-def test_same_sha_verification_is_idempotent_and_new_sha_is_reverified() -> None:
-    command = read(".claude/commands/verify-closure.md")
+@pytest.mark.parametrize(
+    "labels",
+    [frozenset(), frozenset({"type:story"}), frozenset({"type:feature", "type:epic"})],
+)
+def test_invalid_or_ambiguous_target_type_blocks(
+    labels: frozenset[str], github: Mock, local: Mock
+) -> None:
+    github.issue.return_value = Issue(10, "Target", "OPEN", labels)
+    with pytest.raises(VerificationBlocked, match="exactly one supported type"):
+        verify_closure("10", github, local)
 
-    assert "<!-- verify-closure:issue=$ARGUMENTS;main=<FULL_MAIN_SHA> -->" in command
-    assert "fetch all current issue comments and search for an exact marker" in command
-    assert "return its immutable comment URL and stop without posting" in command
-    assert "If more than one exists" in command
-    assert "A marker for an older SHA does not satisfy the current run" in command
+
+def test_stale_sha_blocks_before_inventory(github: Mock, local: Mock) -> None:
+    local.head_sha.return_value = "c" * 40
+    with pytest.raises(VerificationBlocked, match="does not match remote main"):
+        verify_closure("10", github, local)
+    github.native_children.assert_not_called()
 
 
-def test_workflow_docs_describe_read_only_phase_and_po_handoff() -> None:
-    agents = read("AGENTS.md")
-    status = read("docs/PROJECT-STATUS.md")
+def test_conflicting_child_sources_block(github: Mock, local: Mock) -> None:
+    native = Issue(11, "Story", "CLOSED", frozenset({"type:story"}), 10)
+    conflicting = replace(native, title="Different child data")
+    github.native_children.return_value = [native]
+    github.metadata_children.return_value = [conflicting]
+    with pytest.raises(VerificationBlocked, match="conflicting parent evidence"):
+        verify_closure("10", github, local)
 
-    assert "To verify Feature or Epic closure" in agents
-    assert "`.claude/commands/verify-closure.md`" in agents
-    assert "single successful\ntechnical-evidence comment" in agents
-    assert "### Starting deterministic closure verification" in status
-    assert "Run `/verify-closure <issue-number>`" in status
-    assert "Missing, failed, stale, ambiguous, or" in status
-    assert "environment-limited evidence" in status
-    assert "returns the existing comment instead of duplicating" in status
-    assert "asks the PO for product" in status
-    assert "confirmation and stops" in status
+
+def test_open_child_feature_blocks_epic(github: Mock, local: Mock) -> None:
+    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    feature = Issue(11, "Feature", "OPEN", frozenset({"type:feature"}), 10)
+    github.issue.return_value = epic
+    github.native_children.return_value = [feature]
+    github.metadata_children.return_value = [feature]
+    with pytest.raises(VerificationBlocked, match="open or invalid child Features"):
+        verify_closure("10", github, local)
+
+
+def test_missing_criterion_evidence_blocks(github: Mock, local: Mock) -> None:
+    local.evidence_rows.return_value = [EvidenceRow("Criterion one", "PASS", ())]
+    with pytest.raises(VerificationBlocked, match="criterion is not proven"):
+        verify_closure("10", github, local)
+
+
+def test_failed_criterion_blocks(github: Mock, local: Mock) -> None:
+    local.evidence_rows.return_value = [
+        EvidenceRow("Criterion one", "FAIL", ("test failed",))
+    ]
+    with pytest.raises(VerificationBlocked, match="criterion is not proven"):
+        verify_closure("10", github, local)
+
+
+def test_environment_limited_check_blocks(github: Mock, local: Mock) -> None:
+    local.check_results.return_value = [
+        CheckResult("python -m pytest", "BLOCKED")
+    ]
+    with pytest.raises(VerificationBlocked, match="check is BLOCKED"):
+        verify_closure("10", github, local)
+
+
+def test_changed_main_on_final_refresh_blocks(github: Mock, local: Mock) -> None:
+    github.main_sha.side_effect = [SHA, "d" * 40]
+    with pytest.raises(VerificationBlocked, match="main changed during verification"):
+        verify_closure("10", github, local)
+
+
+def test_repeated_verification_returns_existing_summary(github: Mock, local: Mock) -> None:
+    url = "https://github.com/LauraMardones/headless-pr-workflow/issues/10#issuecomment-1"
+    github.summary_urls.return_value = [url]
+
+    result = verify_closure("10", github, local)
+
+    assert result.should_post_summary is False
+    assert result.existing_summary_url == url
+    github.summary_urls.assert_called_once_with(
+        f"<!-- verify-closure:issue=10;main={SHA} -->"
+    )
+
+
+def test_duplicate_authoritative_summaries_block(github: Mock, local: Mock) -> None:
+    github.summary_urls.return_value = ["url-1", "url-2"]
+    with pytest.raises(VerificationBlocked, match="multiple authoritative summaries"):
+        verify_closure("10", github, local)
