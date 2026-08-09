@@ -349,6 +349,34 @@ See also: [Review Separation](HEADLESS-PR-WORKFLOW.md#review-separation) — the
 - Require the PO to write a detailed technical summary.
 - Wait for the PO before posting the structured closing comment — post it, then wait for the one-line product confirmation.
 
+### Starting deterministic closure verification
+
+Run `/verify-closure <issue-number>` for an open issue labeled with exactly one
+of `type:feature` or `type:epic`. The command's first phase is read-only with
+respect to repository contents and issue lifecycle state. Its only permitted
+mutation is one successful technical-evidence comment; it never closes,
+relabels, or changes the Project status of the target.
+
+The verifier first binds all local file and test evidence to a fresh remote
+`main` SHA. Feature verification inventories open and closed children and their
+merged pull requests. Epic verification requires all direct child Features to
+be closed. Both paths map each declared criterion to concrete evidence and run
+the focused and full test suites. Missing, failed, stale, ambiguous, or
+environment-limited evidence blocks a passing result and prevents a request for
+PO confirmation.
+
+A successful comment records the target and type, full verified SHA, child and
+merged-PR inventory, criterion evidence matrix, exact checks and outcomes,
+blockers, residual risk, and next action. It also includes a stable marker made
+from the target number and full `main` SHA. A repeated run for that same key
+returns the existing comment instead of duplicating authoritative evidence; a
+new `main` SHA requires complete re-verification.
+
+After the evidence comment is posted, the command asks the PO for product
+confirmation and stops. Confirmation detection and safe close mutation are a
+separate continuation phase; the technical-verification command must not infer
+approval or perform them.
+
 ---
 
 ## Rolling Refinement
