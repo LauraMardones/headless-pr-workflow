@@ -553,35 +553,116 @@ find_linked_pr() {
             )) | first | .number // empty'
 }
 
+# ─── Utility: paginated project board fetch (D1 fix) ──────────────────────────
+# Walks every page of project items via cursor pagination (capped at 50 pages /
+# 5000 items as a runaway-loop safety valve) instead of the previous hard cap
+# of the first 100 items. Returns a BOARD_DATA-shaped JSON object:
+#   {data:{repository:{projectsV2:{nodes:[{id, fields:{nodes:[...]}, items:{nodes:[...]}}]}}}}
+# Project id and field definitions are captured from the first page only
+# (they do not vary per page).
+
+fetch_board_data() {
+    local all_items="[]" cursor="" page_count=0 max_pages=50
+    local project_id="" fields_json="[]" page page_nodes has_next
+
+    while :; do
+        page_count=$(( page_count + 1 ))
+        if [[ "$page_count" -gt "$max_pages" ]]; then
+            echo "Warning: hit ${max_pages}-page pagination cap ($((max_pages * 100)) items); board results may be incomplete." >&2
+            break
+        fi
+
+        if [[ -z "$cursor" ]]; then
+            page=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!) {
+              repository(owner: $owner, name: $repo) {
+                projectsV2(first: 1) {
+                  nodes {
+                    id
+                    fields(first: 30) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                      }
+                    }
+                    items(first: 100) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        content { ... on Issue { number title body updatedAt } }
+                        fieldValues(first: 20) {
+                          nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              name
+                              field { ... on ProjectV2SingleSelectField { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            ' -f owner="$OWNER" -f repo="$REPO_NAME") || return 1
+        else
+            page=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $after: String) {
+              repository(owner: $owner, name: $repo) {
+                projectsV2(first: 1) {
+                  nodes {
+                    id
+                    fields(first: 30) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                      }
+                    }
+                    items(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        content { ... on Issue { number title body updatedAt } }
+                        fieldValues(first: 20) {
+                          nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              name
+                              field { ... on ProjectV2SingleSelectField { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            ' -f owner="$OWNER" -f repo="$REPO_NAME" -f after="$cursor") || return 1
+        fi
+
+        if [[ "$page_count" -eq 1 ]]; then
+            project_id=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].id // empty')
+            fields_json=$(echo "$page" | jq -c '.data.repository.projectsV2.nodes[0].fields.nodes')
+        fi
+
+        page_nodes=$(echo "$page" | jq '.data.repository.projectsV2.nodes[0].items.nodes')
+        all_items=$(jq -c -n --argjson a "$all_items" --argjson b "$page_nodes" '$a + $b')
+
+        has_next=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.hasNextPage')
+        cursor=$(echo "$page" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.endCursor')
+
+        [[ "$has_next" == "true" ]] || break
+    done
+
+    jq -n --arg pid "$project_id" --argjson fields "$fields_json" --argjson items "$all_items" \
+        '{data:{repository:{projectsV2:{nodes:[{id:$pid, fields:{nodes:$fields}, items:{nodes:$items}}]}}}}'
+}
+
 # ─── Utility: find next Ready for implementation story (re-fetches board) ────
 
 find_next_ready_story() {
     # Optional first arg: space-separated issue numbers to exclude (already budget-skipped)
     local _fnrs_exclude="${1:-}"
     local board
-    board=$(gh api graphql -f query='
-    query($owner: String!, $repo: String!) {
-      repository(owner: $owner, name: $repo) {
-        projectsV2(first: 1) {
-          nodes {
-            items(first: 100) {
-              nodes {
-                content { ... on Issue { number title } }
-                fieldValues(first: 20) {
-                  nodes {
-                    ... on ProjectV2ItemFieldSingleSelectValue {
-                      name
-                      field { ... on ProjectV2SingleSelectField { name } }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    ' -f owner="$OWNER" -f repo="$REPO_NAME") || return 1
+    board=$(fetch_board_data) || return 1
 
     local _all_ready
     _all_ready=$(echo "$board" | jq -r '
@@ -616,51 +697,11 @@ find_next_ready_story() {
     return 0  # empty output: all Ready stories are excluded
 }
 
-# ─── Fetch project board data (single query) ──────────────────────────────────
+# ─── Fetch project board data (paginated) ──────────────────────────────────────
 
 LAST_ACTION="fetching project board"
 echo "Fetching project board..."
-BOARD_DATA=$(gh api graphql -f query='
-query($owner: String!, $repo: String!) {
-  repository(owner: $owner, name: $repo) {
-    projectsV2(first: 1) {
-      nodes {
-        id
-        fields(first: 30) {
-          nodes {
-            ... on ProjectV2SingleSelectField {
-              id
-              name
-              options { id name }
-            }
-          }
-        }
-        items(first: 100) {
-          nodes {
-            id
-            content {
-              ... on Issue {
-                number
-                title
-                body
-                updatedAt
-              }
-            }
-            fieldValues(first: 20) {
-              nodes {
-                ... on ProjectV2ItemFieldSingleSelectValue {
-                  name
-                  field { ... on ProjectV2SingleSelectField { name } }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-' -f owner="$OWNER" -f repo="$REPO_NAME") || {
+BOARD_DATA=$(fetch_board_data) || {
     echo "Error: Failed to fetch project board data." >&2; exit 1
 }
 
@@ -867,31 +908,7 @@ done
 # Re-query the board to get updated state
 if [[ $STALE_COUNT -gt 0 && $DRY_RUN == false ]]; then
     echo "Re-fetching board after stale recovery..."
-    BOARD_DATA=$(gh api graphql -f query='
-    query($owner: String!, $repo: String!) {
-      repository(owner: $owner, name: $repo) {
-        projectsV2(first: 1) {
-          nodes {
-            id
-            items(first: 100) {
-              nodes {
-                id
-                content { ... on Issue { number title body updatedAt } }
-                fieldValues(first: 20) {
-                  nodes {
-                    ... on ProjectV2ItemFieldSingleSelectValue {
-                      name
-                      field { ... on ProjectV2SingleSelectField { name } }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    ' -f owner="$OWNER" -f repo="$REPO_NAME")
+    BOARD_DATA=$(fetch_board_data)
 
     IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
         .data.repository.projectsV2.nodes[0].items.nodes[]
