@@ -420,6 +420,27 @@ def test_stale_summary_sha_blocks(closure_github: Mock) -> None:
     closure_github.close_issue.assert_not_called()
 
 
+def test_wrong_initial_target_number_blocks(closure_github: Mock) -> None:
+    closure_github.issue.return_value = replace(
+        closure_github.issue.return_value, number=11
+    )
+
+    with pytest.raises(VerificationBlocked, match="target issue number does not match"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_wrong_target_number_on_final_refresh_blocks(closure_github: Mock) -> None:
+    initial = closure_github.issue.return_value
+    closure_github.issue.side_effect = [initial, replace(initial, number=11)]
+
+    with pytest.raises(VerificationBlocked, match="number changed before closure"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
 def test_state_change_on_final_refresh_blocks(closure_github: Mock) -> None:
     initial = closure_github.issue.return_value
     closure_github.issue.side_effect = [initial, replace(initial, state="CLOSED")]

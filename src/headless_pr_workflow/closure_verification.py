@@ -352,6 +352,8 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
         raise VerificationBlocked("repository identity does not match")
 
     target = github.issue(number)
+    if target.number != number:
+        raise VerificationBlocked("target issue number does not match")
     target_type = _target_type(target)
     summaries = tuple(github.technical_summaries(number))
     if not summaries:
@@ -405,6 +407,8 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
     if github.repository_name() != "LauraMardones/headless-pr-workflow":
         raise VerificationBlocked("repository identity changed before closure")
     refreshed = github.issue(number)
+    if refreshed.number != number:
+        raise VerificationBlocked("target issue number changed before closure")
     if _target_type(refreshed) != target_type or refreshed.state != target.state:
         raise VerificationBlocked("target type or state changed before closure")
     if github.main_sha() != main_sha:
