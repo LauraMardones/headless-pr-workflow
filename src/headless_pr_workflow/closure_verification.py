@@ -188,7 +188,8 @@ def verify_closure(
         open_features = [
             item.issue.number
             for item in inventory
-            if "type:feature" not in item.issue.labels or item.issue.state != "CLOSED"
+            if item.issue.labels & SUPPORTED_TYPES != {"type:feature"}
+            or item.issue.state != "CLOSED"
         ]
         if open_features:
             joined = ", ".join(f"#{number}" for number in open_features)

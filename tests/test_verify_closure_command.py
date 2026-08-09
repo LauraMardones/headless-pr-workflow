@@ -129,6 +129,23 @@ def test_open_child_feature_blocks_epic(github: Mock, local: Mock) -> None:
         verify_closure("10", github, local)
 
 
+def test_mixed_type_child_blocks_epic(github: Mock, local: Mock) -> None:
+    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    feature = Issue(
+        11,
+        "Ambiguous Feature",
+        "CLOSED",
+        frozenset({"type:feature", "type:epic"}),
+        10,
+    )
+    github.issue.return_value = epic
+    github.native_children.return_value = [feature]
+    github.metadata_children.return_value = [feature]
+
+    with pytest.raises(VerificationBlocked, match="open or invalid child Features"):
+        verify_closure("10", github, local)
+
+
 def test_missing_criterion_evidence_blocks(github: Mock, local: Mock) -> None:
     local.evidence_rows.return_value = [EvidenceRow("Criterion one", "PASS", ())]
     with pytest.raises(VerificationBlocked, match="criterion is not proven"):
