@@ -227,6 +227,21 @@ def test_changed_main_on_final_refresh_blocks(github: Mock, local: Mock) -> None
         verify_closure("10", github, local)
 
 
+def test_changed_criteria_on_final_refresh_blocks(github: Mock, local: Mock) -> None:
+    initial = github.issue.return_value
+    refreshed = replace(
+        initial,
+        declared_criteria=("Criterion one", "New criterion"),
+    )
+    github.issue.side_effect = [initial, refreshed]
+
+    with pytest.raises(
+        VerificationBlocked, match="declared criteria changed during verification"
+    ):
+        verify_closure("10", github, local)
+    github.summary_urls.assert_not_called()
+
+
 def test_repeated_verification_returns_existing_summary(github: Mock, local: Mock) -> None:
     url = "https://github.com/LauraMardones/headless-pr-workflow/issues/10#issuecomment-1"
     github.summary_urls.return_value = [url]

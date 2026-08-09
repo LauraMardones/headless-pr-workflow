@@ -218,6 +218,8 @@ def verify_closure(
     refreshed_main = github.main_sha()
     if refreshed.state != "OPEN" or _target_type(refreshed) != target_type:
         raise VerificationBlocked("target changed during verification")
+    if refreshed.declared_criteria != target.declared_criteria:
+        raise VerificationBlocked("declared criteria changed during verification")
     if refreshed_main != main_sha:
         raise VerificationBlocked("main changed during verification")
 
