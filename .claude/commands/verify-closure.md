@@ -1,11 +1,12 @@
 Act as the technical verifier for Feature and Epic closure in
 `LauraMardones/headless-pr-workflow`.
 
-Verify issue #$ARGUMENTS. This command performs only the technical-evidence
-phase. It must not decide whether the product is right, interpret PO approval,
-or close, reopen, relabel, or change the Project status of any issue. Its only
-permitted successful-path mutation is the one authoritative evidence comment
-defined below.
+Verify or continue closure for issue #$ARGUMENTS. The first invocation performs
+the technical-evidence phase and posts at most one authoritative summary. A
+later invocation may close that same Feature or Epic only after the exact PO
+confirmation and fresh-state gates below pass. The command never makes the
+product judgment, confirms on behalf of the PO, reopens, relabels, or changes
+the Project status of an issue.
 
 ## GitHub operation fallback
 
@@ -23,6 +24,11 @@ defined below.
 - Missing, extra, zero, negative, flag-like, or non-numeric input is invalid.
 - On invalid input, stop before any GitHub comment and report the validation
   error in the session response.
+
+After validation, fetch the target and all comments from GitHub. If at least
+one comment contains `<!-- verify-closure:issue=$ARGUMENTS;main=` then do not
+repeat technical verification: follow **Continuation after PO confirmation**
+below. Otherwise follow the technical-evidence phase in sections 2–9.
 
 ## 2. Verify identity, target, and evidence baseline
 
@@ -198,3 +204,104 @@ After posting, return only a concise human-readable result containing the issue
 URL, full verified SHA, `PASS`, the new comment URL, and that PO product
 confirmation is required. Produce no JSON. Stop without detecting confirmation
 or performing a close or lifecycle-state mutation.
+
+## Continuation after PO confirmation
+
+The continuation consumes the latest authoritative successful technical
+summary; it must never manufacture or reinterpret one. Use the deterministic
+safety model in `continue_closure` from
+`src/headless_pr_workflow/closure_verification.py`. Perform the following in
+order, using fresh GitHub responses rather than chat context or cached objects.
+
+### A. Locate and validate the authoritative summary
+
+1. Fetch repository metadata and require the exact identity
+   `LauraMardones/headless-pr-workflow`.
+2. Fetch the target, its full comments, labels, and lifecycle state.
+3. Require exactly one of `type:feature` or `type:epic`.
+4. Select the newest successful `## Technical Closure Verification` comment
+   with the target's exact `verify-closure` marker. Reject an unreadable marker,
+   wrong target/type, missing full SHA, or conflicting newest summaries.
+5. Fetch the full current remote `main` SHA. It must exactly equal the summary's
+   verified SHA. If it differs, stop with: rerun technical verification. Never
+   carry an earlier PO confirmation onto a replacement summary.
+
+### B. Require exact, fresh PO confirmation
+
+The only authorized PO is `LauraMardones`. Accept exactly one unedited comment,
+created strictly after the selected technical summary, whose trimmed body is
+exactly:
+
+- Feature: `Product confirmed for Feature #$ARGUMENTS.`
+- Epic: `Product approved for Epic #$ARGUMENTS.`
+
+Reject missing or multiple matches, another author, an edited comment, a
+comment at or before the summary, generic approval, a wrong number/type,
+reactions, issue-body text, and out-of-band messages. Report the exact required
+sentence as the next action; do not mutate anything.
+
+### C. Refresh every mutation-sensitive gate
+
+Immediately before any close request, refetch and revalidate all of the
+following together:
+
+- repository identity and target number;
+- target lifecycle state and exactly one supported type label;
+- latest authoritative summary, its immutable URL, target/type, and SHA;
+- exact PO confirmation, author, creation time, edit state, and immutable URL;
+- full current remote `main` SHA; and
+- for an Epic, the complete fresh direct-child inventory from native and
+  metadata relationships, requiring every child Feature to be closed and to
+  have exactly `type:feature`.
+
+Any API/read failure, mismatch, ambiguity, changed SHA, changed label/state,
+open or invalid Epic child, stale summary, or changed confirmation blocks the
+close. List the blocker and exact next action. Do not silently rerun phase one.
+
+### D. Enforce close idempotency and partial-failure repair
+
+Use this literal closing-evidence marker:
+
+`<!-- verify-closure-close:issue=$ARGUMENTS;main=<FULL_MAIN_SHA> -->`
+
+Search all comments for the exact marker before mutation:
+
+- Open target with no closing marker: close only this target, then post the
+  formal evidence in section E.
+- Closed target with exactly one marker: return its URL and `NOOP`; post and
+  mutate nothing.
+- Closed target with no marker: treat this only as the repair state for a prior
+  close-success/comment-failure result. Revalidate sections A–C, post the one
+  missing formal evidence comment, and do not call close again.
+- More than one exact closing marker: stop with a conflicting-authoritative-
+  evidence blocker.
+
+If the close API fails, report failure and do not post success evidence. If the
+close succeeds but comment creation fails, report the partial failure and tell
+the operator to rerun the same command; that retry must take only the repair
+path above.
+
+### E. Post exactly one formal closing-evidence comment
+
+Only after GitHub confirms the close succeeded, or during the validated repair
+path, post:
+
+```md
+## Closure Evidence
+<!-- verify-closure-close:issue=<ISSUE_NUMBER>;main=<FULL_MAIN_SHA> -->
+
+- Repository: `LauraMardones/headless-pr-workflow`
+- Target: #<number> — <title>
+- Type: `type:feature` or `type:epic`
+- Verified `main`: `<full SHA>`
+- Technical summary: <immutable comment URL>
+- PO confirmation: `<author>` at `<created timestamp>` — <immutable comment URL>
+- Checks: <checks recorded in the technical summary>
+- Blockers: none
+- Close result: closed
+```
+
+The evidence records the PO's comment; it must not claim that the verifier made
+the product judgment. Return a concise human-readable result with target URL,
+full SHA, action (`CLOSED`, `REPAIRED`, or `NOOP`), summary URL, confirmation
+URL, evidence URL, blockers, and next action. Produce no JSON.

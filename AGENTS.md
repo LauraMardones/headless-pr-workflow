@@ -80,3 +80,5 @@ To verify Feature or Epic closure: Follow `.claude/commands/verify-closure.md`
 with exactly one issue number. This first phase is read-only with respect to
 repository contents and issue lifecycle state; only its single successful
 technical-evidence comment is permitted before PO product confirmation.
+After that confirmation, run the same command again for the fail-closed,
+idempotent closure continuation documented by the command contract.
