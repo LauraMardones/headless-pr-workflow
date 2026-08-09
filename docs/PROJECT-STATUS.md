@@ -373,9 +373,35 @@ returns the existing comment instead of duplicating authoritative evidence; a
 new `main` SHA requires complete re-verification.
 
 After the evidence comment is posted, the command asks the PO for product
-confirmation and stops. Confirmation detection and safe close mutation are a
-separate continuation phase; the technical-verification command must not infer
-approval or perform them.
+confirmation and stops. Confirmation detection and safe close mutation happen
+only on a later invocation.
+
+### Continuing closure after PO confirmation
+
+After reading the successful technical summary, the PO posts exactly one brief,
+target-specific comment on the same issue:
+
+- Feature: `Product confirmed for Feature #<issue-number>.`
+- Epic: `Product approved for Epic #<issue-number>.`
+
+Run `/verify-closure <issue-number>` a second time. The command recognizes its
+authoritative technical-summary marker and enters the continuation instead of
+repeating verification. It accepts only an unedited comment by
+`LauraMardones`, created after the current summary, with the exact matching
+sentence above. Free-form approval, reactions, edited comments, other authors,
+wrong targets or types, and out-of-band messages do not authorize closure.
+
+Immediately before closing, the continuation refreshes repository and target
+identity, lifecycle state, type, summary, confirmation, and remote `main` SHA.
+For an Epic it also refreshes all direct child Features and requires every one
+to be closed. A new `main` SHA makes the summary stale and requires technical
+verification again; approval for older evidence is never carried forward.
+
+After GitHub confirms the close, the command posts one formal closing-evidence
+comment containing the verified SHA and immutable summary and confirmation
+links. Its stable marker makes repeated invocations a no-op. If closing succeeds
+but comment creation fails, rerunning the same command detects the closed issue,
+posts only the missing evidence comment, and never repeats the close request.
 
 ---
 
