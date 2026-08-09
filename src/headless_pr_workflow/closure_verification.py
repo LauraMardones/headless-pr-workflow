@@ -12,6 +12,12 @@ from typing import Protocol, Sequence
 
 
 SUPPORTED_TYPES = frozenset({"type:feature", "type:epic"})
+REQUIRED_CHECK_COMMANDS = frozenset(
+    {
+        "python -m pytest tests/test_verify_closure_command.py",
+        "python -m pytest",
+    }
+)
 
 
 class VerificationBlocked(ValueError):
@@ -29,6 +35,7 @@ class Issue:
     state: str
     labels: frozenset[str]
     parent_number: int | None = None
+    declared_criteria: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -144,16 +151,23 @@ def _inventory(github: GitHubEvidence, target: Issue) -> tuple[InventoryItem, ..
 
 
 def _validate_evidence(
-    rows: tuple[EvidenceRow, ...], checks: tuple[CheckResult, ...]
+    declared_criteria: tuple[str, ...],
+    rows: tuple[EvidenceRow, ...],
+    checks: tuple[CheckResult, ...],
 ) -> None:
     blockers: list[str] = []
-    if not rows:
-        blockers.append("no criterion evidence was provided")
+    if not declared_criteria:
+        blockers.append("target has no declared criteria")
+    row_criteria = tuple(row.criterion for row in rows)
+    if row_criteria != declared_criteria:
+        blockers.append("evidence rows do not exactly match declared criteria")
     for row in rows:
         if row.result != "PASS" or not row.evidence:
             blockers.append(f"criterion is not proven: {row.criterion}")
-    if not checks:
-        blockers.append("no checks were recorded")
+    check_commands = {check.command for check in checks}
+    missing_commands = sorted(REQUIRED_CHECK_COMMANDS - check_commands)
+    for command in missing_commands:
+        blockers.append(f"required check is missing: {command}")
     for check in checks:
         if check.outcome != "PASS":
             blockers.append(f"check is {check.outcome}: {check.command}")
@@ -197,7 +211,7 @@ def verify_closure(
 
     evidence = tuple(local.evidence_rows(target))
     checks = tuple(local.check_results())
-    _validate_evidence(evidence, checks)
+    _validate_evidence(target.declared_criteria, evidence, checks)
 
     # Model the command's mandatory final refresh immediately before mutation.
     refreshed = github.issue(number)

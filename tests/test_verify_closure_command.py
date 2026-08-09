@@ -19,7 +19,13 @@ SHA = "a" * 40
 
 @pytest.fixture
 def github() -> Mock:
-    target = Issue(10, "Feature", "OPEN", frozenset({"type:feature"}))
+    target = Issue(
+        10,
+        "Feature",
+        "OPEN",
+        frozenset({"type:feature"}),
+        declared_criteria=("Criterion one",),
+    )
     child = Issue(11, "Story", "CLOSED", frozenset({"type:story"}), 10)
     client = Mock()
     client.repository_name.return_value = "LauraMardones/headless-pr-workflow"
@@ -79,7 +85,13 @@ def test_feature_success_inventories_children_and_only_merged_prs(
 
 
 def test_epic_success_requires_closed_feature_children(github: Mock, local: Mock) -> None:
-    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    epic = Issue(
+        10,
+        "Epic",
+        "OPEN",
+        frozenset({"type:epic"}),
+        declared_criteria=("Criterion one",),
+    )
     feature = Issue(11, "Feature", "CLOSED", frozenset({"type:feature"}), 10)
     github.issue.return_value = epic
     github.native_children.return_value = [feature]
@@ -120,7 +132,13 @@ def test_conflicting_child_sources_block(github: Mock, local: Mock) -> None:
 
 
 def test_open_child_feature_blocks_epic(github: Mock, local: Mock) -> None:
-    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    epic = Issue(
+        10,
+        "Epic",
+        "OPEN",
+        frozenset({"type:epic"}),
+        declared_criteria=("Criterion one",),
+    )
     feature = Issue(11, "Feature", "OPEN", frozenset({"type:feature"}), 10)
     github.issue.return_value = epic
     github.native_children.return_value = [feature]
@@ -130,7 +148,13 @@ def test_open_child_feature_blocks_epic(github: Mock, local: Mock) -> None:
 
 
 def test_mixed_type_child_blocks_epic(github: Mock, local: Mock) -> None:
-    epic = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    epic = Issue(
+        10,
+        "Epic",
+        "OPEN",
+        frozenset({"type:epic"}),
+        declared_criteria=("Criterion one",),
+    )
     feature = Issue(
         11,
         "Ambiguous Feature",
@@ -146,7 +170,26 @@ def test_mixed_type_child_blocks_epic(github: Mock, local: Mock) -> None:
         verify_closure("10", github, local)
 
 
-def test_missing_criterion_evidence_blocks(github: Mock, local: Mock) -> None:
+def test_missing_declared_criterion_row_blocks(github: Mock, local: Mock) -> None:
+    target = replace(
+        github.issue.return_value,
+        declared_criteria=("Criterion one", "Criterion two"),
+    )
+    github.issue.return_value = target
+    with pytest.raises(VerificationBlocked, match="exactly match declared criteria"):
+        verify_closure("10", github, local)
+
+
+def test_extra_criterion_row_blocks(github: Mock, local: Mock) -> None:
+    local.evidence_rows.return_value = [
+        EvidenceRow("Criterion one", "PASS", ("src/example.py:1",)),
+        EvidenceRow("Undeclared criterion", "PASS", ("src/example.py:2",)),
+    ]
+    with pytest.raises(VerificationBlocked, match="exactly match declared criteria"):
+        verify_closure("10", github, local)
+
+
+def test_empty_evidence_for_declared_criterion_blocks(github: Mock, local: Mock) -> None:
     local.evidence_rows.return_value = [EvidenceRow("Criterion one", "PASS", ())]
     with pytest.raises(VerificationBlocked, match="criterion is not proven"):
         verify_closure("10", github, local)
@@ -166,6 +209,16 @@ def test_environment_limited_check_blocks(github: Mock, local: Mock) -> None:
     ]
     with pytest.raises(VerificationBlocked, match="check is BLOCKED"):
         verify_closure("10", github, local)
+
+
+def test_missing_required_checks_blocks_arbitrary_passing_command(
+    github: Mock, local: Mock
+) -> None:
+    local.check_results.return_value = [CheckResult("echo not-the-required-tests", "PASS")]
+    with pytest.raises(VerificationBlocked, match="required check is missing") as error:
+        verify_closure("10", github, local)
+    assert "python -m pytest tests/test_verify_closure_command.py" in str(error.value)
+    assert "python -m pytest" in str(error.value)
 
 
 def test_changed_main_on_final_refresh_blocks(github: Mock, local: Mock) -> None:
