@@ -82,11 +82,13 @@ The Claude Code / Codex split is a declared capability boundary, not a policy pr
 
 ### Claude Model Tiers (Claude Code)
 
+> Advisory only, current as of 2026-08-09 — for human calibration when choosing an `executor:` label. Routing does not depend on these values: `scripts/dispatcher-invoke.sh` routes purely off `executor:` label suffixes, never off the model names or versions in this table.
+
 | Label | Model | Appropriate task types |
 |---|---|---|
-| `executor:claude-code-haiku` | Haiku 4.5 | Setup, boilerplate, quick edits, scaffolding |
-| `executor:claude-code-sonnet` | Sonnet 4.6 | Standard implementation, agentic workflows |
-| `executor:claude-code-opus` | Opus 4.8 | Deep code review, complex reasoning, long-horizon tasks |
+| `executor:claude-code-haiku` | Haiku 4.5 (`claude-haiku-4-5-20251001`) | Setup, boilerplate, quick edits, scaffolding |
+| `executor:claude-code-sonnet` | Sonnet 5 (`claude-sonnet-5`) | Standard implementation, agentic workflows |
+| `executor:claude-code-opus` | Opus 5 (`claude-opus-5`) | Deep code review, complex reasoning, long-horizon tasks |
 
 ### `executor:` Label Format
 
@@ -111,6 +113,14 @@ A capability profile declares:
 - Any capacity or token constraints relevant to story sizing.
 
 Routing logic must read declared profiles, not branch on executor names. This is the OSS invariant: the workflow remains portable to any executor that can declare a conforming profile.
+
+## Decisions
+
+### Fable-tier executor label — 2026-08-09
+
+**Chosen:** Do not add `executor:claude-code-fable` now. The Claude Model Tiers table above stays at three tiers (Haiku, Sonnet, Opus). Revisit only if a concrete story needs Fable-level capability that Opus can't handle.
+
+**Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, new `BUDGET_DAILY_FABLE` budget variable). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
 
 ## Cross-Reference
 
