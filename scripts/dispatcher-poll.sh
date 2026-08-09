@@ -35,8 +35,10 @@
 #   Both keys are always present; each value is [] when no items match.
 #
 # Prototype divergences from expected behaviour:
-#   D1  Pagination: fetches max 100 project items per request; repos with
-#       >100 project items may produce incomplete results.
+#   D1  Pagination: fetches all project items via cursor pagination, 100 per
+#       page, capped at 50 pages (5000 items) as a runaway-loop safety valve.
+#       A repo with >5000 project items still produces incomplete results;
+#       a warning is logged to stderr if the cap is hit.
 #   D2  Project auto-detection: uses the first linked GitHub Projects (v2)
 #       board. Repos with multiple linked projects may detect the wrong board.
 #   D3  Label fetch: executor labels are fetched from the GraphQL project
@@ -45,8 +47,9 @@
 #   D4  Dry-run is the only supported mode: no executor invocation or GitHub
 #       state mutation occurs in any run. The --dry-run flag adds a header
 #       line to stderr; behaviour is otherwise identical.
-#   D5  Single GraphQL round-trip: both status filters are applied in jq
-#       against the same items response. No second network request is made.
+#   D5  Both status filters are applied in jq against the same accumulated
+#       items list, so full-board pagination is done once per poll, not once
+#       per status.
 #   D6  Refinement notification de-duplication resets on runner restart. The
 #       state file lives in TMPDIR and is not persisted across CI runner
 #       restarts. Accepted prototype limitation; document in ops runbooks.
@@ -136,27 +139,60 @@ fi
 # D2: uses the first linked project board
 PROJECT_NUMBER=$(echo "$PROJECTS" | jq '.data.repository.projectsV2.nodes[0].number')
 
-# ─── Fetch project items with status ──────────────────────────────────────────
+# ─── Fetch project items with status (paginated) ──────────────────────────────
 
-# D1: max 100 items
-ITEMS=$(graphql "{
+# D1: walks every page via cursor pagination, capped at 50 pages as a
+# runaway-loop safety valve.
+ALL_ITEMS="[]"
+CURSOR=""
+PAGE_COUNT=0
+MAX_PAGES=50
+
+while :; do
+    PAGE_COUNT=$(( PAGE_COUNT + 1 ))
+    if [[ "$PAGE_COUNT" -gt "$MAX_PAGES" ]]; then
+        echo "Warning: hit ${MAX_PAGES}-page pagination cap ($((MAX_PAGES * 100)) items); results may be incomplete." >&2
+        break
+    fi
+
+    if [[ -z "$CURSOR" ]]; then
+        AFTER_ARG=""
+    else
+        AFTER_ARG=", after:\"$CURSOR\""
+    fi
+
+    PAGE=$(graphql "{
   repository(owner:\"$OWNER\", name:\"$REPO_NAME\") {
-    projectsV2(first:1) { nodes { items(first:100) { nodes {
-      content {
-        ... on Issue {
-          number
-          title
+    projectsV2(first:1) { nodes { items(first:100$AFTER_ARG) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        content {
+          ... on Issue {
+            number
+            title
+          }
         }
+        fieldValues(first:20) { nodes {
+          ... on ProjectV2ItemFieldSingleSelectValue {
+            name
+            field { ... on ProjectV2SingleSelectField { name } }
+          }
+        }}
       }
-      fieldValues(first:20) { nodes {
-        ... on ProjectV2ItemFieldSingleSelectValue {
-          name
-          field { ... on ProjectV2SingleSelectField { name } }
-        }
-      }}
     }}}}
   }
 }")
+
+    PAGE_NODES=$(echo "$PAGE" | jq '.data.repository.projectsV2.nodes[0].items.nodes')
+    ALL_ITEMS=$(jq -c -n --argjson a "$ALL_ITEMS" --argjson b "$PAGE_NODES" '$a + $b')
+
+    HAS_NEXT=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.hasNextPage')
+    CURSOR=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.endCursor')
+
+    [[ "$HAS_NEXT" == "true" ]] || break
+done
+
+ITEMS=$(jq -n --argjson nodes "$ALL_ITEMS" '{data:{repository:{projectsV2:{nodes:[{items:{nodes:$nodes}}]}}}}')
 
 # ─── Filter by status (D5: single response, two jq passes) ───────────────────
 
