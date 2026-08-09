@@ -76,3 +76,7 @@ To implement an issue: Follow `.claude/commands/implement.md` with the issue num
 To review a PR: Follow `.claude/commands/review.md` with the PR number.
 To merge a PR: Follow `.claude/commands/merge.md` with the PR number.
 To clean up after a merged PR: Follow `.claude/commands/cleanup.md` with the PR number.
+To verify Feature or Epic closure: Follow `.claude/commands/verify-closure.md`
+with exactly one issue number. This first phase is read-only with respect to
+repository contents and issue lifecycle state; only its single successful
+technical-evidence comment is permitted before PO product confirmation.
