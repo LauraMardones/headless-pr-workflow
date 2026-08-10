@@ -9,6 +9,7 @@
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
+#             issue #254 (direct Anthropic/OpenAI API invocation — no CLI, no install step)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -19,7 +20,7 @@
 #   0  — story completed (Done) or no more "Ready for implementation" stories
 #   1  — pre-flight check failed or mid-cycle executor failure; blocker posted on issue
 #
-# Requirements: bash 4+, gh (GitHub CLI), jq
+# Requirements: bash 4+, gh (GitHub CLI), jq, curl
 #
 # ─── Executor routing table ───────────────────────────────────────────────────
 #
@@ -27,12 +28,12 @@
 # GitHub Secret. Do not add executor-specific conditional logic elsewhere
 # (OSS compatibility invariant: routing is data-driven, not logic-driven).
 #
-# | executor: label             | Executor type  | GitHub Secret name         | CLI env var name    |
-# |-----------------------------|----------------|----------------------------|---------------------|
-# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
-# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
-# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
-# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | OPENAI_API_KEY      |
+# | executor: label             | Executor type  | GitHub Secret name         | Provider   | API model ID               |
+# |-----------------------------|----------------|----------------------------|------------|-----------------------------|
+# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY          | anthropic  | claude-haiku-4-5-20251001  |
+# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY          | anthropic  | claude-sonnet-5             |
+# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY          | anthropic  | claude-opus-5               |
+# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | openai     | gpt-5-codex                 |
 #
 # All three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY): a single
 # Anthropic API key authenticates calls to any Claude model, so per-tier
@@ -41,6 +42,22 @@
 # Per-tier daily token *budgets* remain separate (see EXECUTOR_BUDGET_TYPE
 # below and dispatcher-budget.sh) — that mechanism is independent of which
 # secret authenticates the call.
+#
+# ─── Executor invocation mechanism (issue #254) ───────────────────────────────
+#
+# invoke_executor_command() calls the Anthropic Messages API (Claude tiers) or
+# the OpenAI Chat Completions API (Codex tier) directly via curl — there is no
+# CLI binary (`claude`/`codex`) and no runner install step, per ADR-002's
+# documented architecture ("invokes executors ... via API calls"). Each call
+# drives a bounded tool-use loop (run_anthropic_agent / run_openai_agent) that
+# gives the model a single `bash` tool scoped to this repository checkout; the
+# task prompt is the corresponding .claude/commands/<slash_command>.md file
+# with $ARGUMENTS substituted, so the API-invoked agent follows the exact same
+# instructions a manually-run command would. The loop ends when the model
+# responds without requesting another tool call, or fails closed (non-zero
+# return, no Blocked Declaration posted by the caller of invoke_executor_command
+# happens one level up) on an HTTP error, a malformed API response, or hitting
+# the per-invocation turn cap (AGENT_MAX_TURNS).
 #
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
@@ -53,7 +70,9 @@
 #   "Run dispatcher invoke" step (or the job-level env: block) — GitHub
 #   Actions never auto-injects a secret; it must be explicitly referenced as
 #   ${{ secrets.NAME }} in the workflow YAML or the script never sees it.
-#   Do not hardcode any token or API key in this script.
+#   Do not hardcode any token or API key in this script. Both secrets
+#   authenticate direct API calls only (issue #254) — neither is passed to a
+#   locally-installed CLI, because none is installed or required.
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
 #
@@ -71,6 +90,22 @@
 
 set -euo pipefail
 
+# ─── Job-level wall-clock deadline (ADR-003) — survives recursive exec ────────
+# One story's cycle calls invoke_executor_command() up to four times
+# (/implement, /review, /merge, /cleanup), and the tail-call
+# `exec bash "$0" ...` used to move to the next ready story replaces this
+# process without starting a new Actions job — so all of that shares one
+# 6-hour job ceiling. DISPATCH_JOB_START_TS must therefore be set ONCE, at the
+# first invocation of this script for the job, and must NOT reset on
+# subsequent phases or recursive exec calls. The idempotent-default form below
+# is what makes that true: exec inherits the current process's exported
+# environment, so on every invocation after the first, DISPATCH_JOB_START_TS
+# is already set and this line is a no-op. Do not change this to an
+# unconditional assignment — that would silently reintroduce a per-phase
+# budget instead of a job-wide one.
+DISPATCH_JOB_START_TS="${DISPATCH_JOB_START_TS:-$(date +%s)}"
+export DISPATCH_JOB_START_TS
+
 # ─── Executor routing table (data-driven) ─────────────────────────────────────
 # Format: ["<label-suffix>"]="<DisplayName>:<SECRET_NAME>"
 # The three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY) — see
@@ -82,20 +117,33 @@ declare -A EXECUTOR_ROUTING=(
     ["codex"]="Codex:OPENAI_API_KEY_CODEX"
 )
 
-# ─── Executor CLI routing table (data-driven, parallel to EXECUTOR_ROUTING) ───
-# Maps executor label suffix to the CLI binary used for command invocation.
-# Add a new row here when adding a new executor tier (OSS invariant: data-driven).
-declare -A EXECUTOR_CLI=(
-    ["claude-code-haiku"]="claude"
-    ["claude-code-sonnet"]="claude"
-    ["claude-code-opus"]="claude"
-    ["codex"]="codex"
+# ─── Executor provider + model routing table (data-driven, issue #254) ────────
+# Maps executor label suffix to the provider whose API invoke_executor_command()
+# calls directly (no CLI binary, no install step) and the model ID sent in that
+# call. Add a new row to both tables when adding a new executor tier (OSS
+# invariant: data-driven, not logic-driven — do not branch on EXECUTOR_LABEL
+# anywhere else in this script).
+declare -A EXECUTOR_PROVIDER=(
+    ["claude-code-haiku"]="anthropic"
+    ["claude-code-sonnet"]="anthropic"
+    ["claude-code-opus"]="anthropic"
+    ["codex"]="openai"
 )
 
-# ─── Executor API key env-var table (data-driven, parallel to EXECUTOR_CLI) ───
-# Maps executor label suffix to the env-var name that its CLI expects for auth.
-# The GitHub Secret name (EXECUTOR_SECRET) holds the value; this table names the
-# variable under which that value is passed to the CLI.
+declare -A EXECUTOR_MODEL=(
+    ["claude-code-haiku"]="claude-haiku-4-5-20251001"
+    ["claude-code-sonnet"]="claude-sonnet-5"
+    ["claude-code-opus"]="claude-opus-5"
+    ["codex"]="gpt-5-codex"
+)
+
+# ─── Executor API key env-var table (data-driven) ─────────────────────────────
+# Historically named the env-var a locally-installed CLI expected for auth.
+# That CLI-invocation path was removed by issue #254 in favor of direct
+# provider API calls (see EXECUTOR_PROVIDER/EXECUTOR_MODEL above), so this
+# table is not read by invoke_executor_command() today — kept as-is per issue
+# #254's scope decision (unaffected by this change) and left available for any
+# future consumer that still needs the CLI-style env-var name per tier.
 declare -A EXECUTOR_API_KEY_ENV=(
     ["claude-code-haiku"]="ANTHROPIC_API_KEY"
     ["claude-code-sonnet"]="ANTHROPIC_API_KEY"
@@ -161,7 +209,7 @@ export GH_TOKEN
 
 # ─── Dependency check ─────────────────────────────────────────────────────────
 
-for cmd in gh jq; do
+for cmd in gh jq curl; do
     command -v "$cmd" >/dev/null 2>&1 || {
         echo "Error: '$cmd' is required but not found in PATH." >&2; exit 1
     }
@@ -178,6 +226,32 @@ WIP_LIMIT=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
+COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
+
+# ─── Executor agent loop tuning (issue #254 / ADR-003) — overridable for tests ─
+# AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound, checked inside the
+# loop on every turn. AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)
+# alone is NOT a safe bound — at the defaults below that product is 60 x 900s =
+# 54000s (15h), which exceeds GitHub Actions' 6h job ceiling. Relying on the
+# platform to force-kill an over-budget job is not acceptable: an abrupt kill
+# can bypass the loop's own non-zero return and the caller's Blocked
+# Declaration. AGENT_MAX_WALLCLOCK_SECONDS makes the script fail closed through
+# its own normal exit path, comfortably before that platform kill could ever
+# fire (see ADR-003).
+AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # tool-use round-trips before failing closed
+# 8192 was the original default and was too tight for real usage: run
+# 31426452350 (PR #255, head f351a1f, live /implement of #240) hit
+# stop_reason=max_tokens on turn 14 of a documentation-synthesis story that
+# had not yet written any code, and correctly failed closed per the
+# truncated-response fix (d845ece) rather than reporting false success.
+# Raised to give a single turn real headroom for a large tool_use payload
+# (e.g. a heredoc writing a substantial file) without hitting the ceiling.
+AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-16384}"     # max_tokens requested per API turn
+AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool command may run
+AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
+AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per Actions job, shared job-wide via DISPATCH_JOB_START_TS — enforced, not incidental
+ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
+OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
@@ -527,17 +601,269 @@ State of in-progress work: execution loop halted after /$failed_command failed; 
     post_comment "$issue_num" "$body"
 }
 
-# ─── Utility: invoke an executor command via the executor CLI ─────────────────
+# ─── Utility: POST JSON to a URL, fail closed on transport/HTTP error ────────
+# The request body is written to a temp file and sent via --data @<file>,
+# never as a raw command-line argument — a large multi-turn conversation
+# payload would otherwise risk the same "Argument list too long" class of
+# failure fixed for board-data pagination in issue #251. Returns the response
+# body on stdout; a curl transport failure or a non-2xx HTTP status both
+# return non-zero with a clear error on stderr (the response body, which for
+# both providers is a JSON error object, is included for diagnosis).
+
+_curl_json() {
+    local url="$1" body="$2"; shift 2
+    local -a headers=("$@")
+    local tmp_req tmp_body http_code rc=0
+    tmp_req="$(mktemp)"
+    tmp_body="$(mktemp)"
+    printf '%s' "$body" > "$tmp_req"
+
+    http_code=$(curl -sS --max-time "$AGENT_API_TIMEOUT" \
+        -o "$tmp_body" -w '%{http_code}' \
+        -X POST "$url" "${headers[@]}" --data @"$tmp_req") || rc=$?
+    rm -f "$tmp_req"
+
+    if [[ $rc -ne 0 ]]; then
+        echo "Error: request to $url failed (curl exit $rc — network error or timeout)." >&2
+        rm -f "$tmp_body"
+        return 1
+    fi
+    if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+        echo "Error: API request to $url failed with HTTP $http_code:" >&2
+        cat "$tmp_body" >&2
+        rm -f "$tmp_body"
+        return 1
+    fi
+    cat "$tmp_body"
+    rm -f "$tmp_body"
+}
+
+# ─── Utility: execute a single bash-tool command inside the repo checkout ────
+# Combined stdout+stderr, capped to bound context growth across agent turns,
+# and time-boxed (AGENT_TOOL_TIMEOUT) so a hung command fails the tool call
+# instead of hanging the job. Results are returned via AGENT_TOOL_LAST_OUTPUT /
+# AGENT_TOOL_LAST_RC (the caller runs synchronously in the same shell, not a
+# subshell, so these are visible immediately after the call returns).
+
+_run_agent_bash_tool() {
+    local cmd="$1" out rc=0
+    out=$(timeout "$AGENT_TOOL_TIMEOUT" bash -c "$cmd" 2>&1) || rc=$?
+    if [[ ${#out} -gt 16000 ]]; then
+        out="${out:0:16000}
+... [output truncated: ${#out} bytes total, showing first 16000]"
+    elif [[ -z "$out" && $rc -ne 0 ]]; then
+        # A tool_result with is_error=true and empty content is rejected by
+        # the Anthropic API (HTTP 400) — confirmed live: a command killed by
+        # `timeout` after producing zero output hit exactly this. Every
+        # error path must give the model something to react to.
+        if [[ $rc -eq 124 ]]; then
+            out="(command timed out after ${AGENT_TOOL_TIMEOUT}s with no output)"
+        else
+            out="(command exited with status $rc and produced no output)"
+        fi
+    fi
+    AGENT_TOOL_LAST_OUTPUT="$out"
+    AGENT_TOOL_LAST_RC="$rc"
+}
+
+# ─── Utility: bounded tool-use loop against the Anthropic Messages API ───────
+# Drives the model through repeated bash-tool turns until it responds without
+# requesting a further tool call (task complete) or AGENT_MAX_TURNS is hit
+# (fails closed). Returns 0 with the model's final message on stdout, or
+# non-zero on any transport/HTTP error, malformed response, or turn-cap.
+
+run_anthropic_agent() {
+    local model="$1" api_key="$2" task_prompt="$3"
+    local system='You are an autonomous software delivery agent running inside a GitHub Actions checkout of this repository. You have exactly one tool, "bash", which runs a shell command in the repository working directory and returns its combined stdout/stderr. Use it to read files, edit files, run tests, and drive git and the gh CLI (already authenticated via GH_TOKEN) to commit, push, and open or update pull requests, following the instructions below exactly. When the task is completely finished, reply with a final plain-text message and do not request any further tool call.'
+    local tools='[{"name":"bash","description":"Execute a bash command in the repository working directory. Returns combined stdout+stderr.","input_schema":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run."}},"required":["command"]}}]'
+    local messages
+    messages=$(jq -n --arg t "$task_prompt" '[{role:"user", content:$t}]')
+    local -a headers=(-H "x-api-key: $api_key" -H "anthropic-version: 2023-06-01" -H "content-type: application/json")
+
+    local turn=0 response stop_reason assistant_content
+    local elapsed
+    while (( turn < AGENT_MAX_TURNS )); do
+        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
+        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
+            return 1
+        fi
+        turn=$(( turn + 1 ))
+        local request tmp_messages
+        # $messages grows every turn (tool outputs, file contents, PR bodies
+        # this session wrote) and is NOT safe to pass via --argjson on the
+        # command line — confirmed live (run 31425632706, PR #255, head
+        # d845ece): by turn 17 it exceeded the OS argument-length limit
+        # ("jq: Argument list too long"), and because this call sits inside a
+        # function invoked as an `if` condition, `set -e` did not catch the
+        # failure — $request was silently left empty and posted as an empty
+        # body, surfacing as a confusing "invalid JSON" error from the API
+        # instead of a clear one here. Same root cause already fixed once in
+        # this codebase for board-data pagination (issue #251); --slurpfile
+        # reads the large value from disk instead of argv, with no such limit.
+        tmp_messages="$(mktemp)"
+        printf '%s' "$messages" > "$tmp_messages"
+        local jq_rc=0
+        request=$(jq -n --arg model "$model" --arg system "$system" \
+            --argjson max_tokens "$AGENT_MAX_TOKENS" \
+            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
+            '{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
+        rm -f "$tmp_messages"
+        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
+            echo "Error: failed to build the Anthropic API request (jq exit $jq_rc)." >&2
+            return 1
+        fi
+
+        response=$(_curl_json "$ANTHROPIC_API_URL" "$request" "${headers[@]}") || return 1
+
+        echo "$response" | jq -e '.content | type == "array"' >/dev/null 2>&1 || {
+            echo "Error: malformed Anthropic API response (no .content array)." >&2
+            echo "$response" >&2
+            return 1
+        }
+
+        stop_reason=$(echo "$response" | jq -r '.stop_reason // empty')
+        assistant_content=$(echo "$response" | jq -c '.content')
+        messages=$(echo "$messages" | jq -c --argjson c "$assistant_content" '. + [{role:"assistant", content:$c}]')
+        echo "[agent turn $turn/$AGENT_MAX_TURNS] stop_reason=$stop_reason" >&2
+
+        if [[ "$stop_reason" == "end_turn" || "$stop_reason" == "stop_sequence" ]]; then
+            echo "$response" | jq -r '[.content[] | select(.type=="text") | .text] | join("\n")'
+            return 0
+        fi
+
+        if [[ "$stop_reason" != "tool_use" ]]; then
+            # Confirmed live (run 31425063548, PR #255): stop_reason=max_tokens
+            # means the response was cut off mid-generation, not that the task
+            # finished — treating it as success previously caused /implement
+            # to report "completed" with no commit and no PR ever created.
+            # Any stop_reason that isn't a genuine completion or a tool
+            # request fails closed instead of being assumed to mean success.
+            echo "Error: agent stopped with stop_reason='$stop_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
+            return 1
+        fi
+
+        local tool_results='[]' block tool_id tool_cmd
+        while IFS= read -r block; do
+            [[ -z "$block" ]] && continue
+            tool_id=$(echo "$block" | jq -r '.id')
+            tool_cmd=$(echo "$block" | jq -r '.input.command // empty')
+            echo "[agent bash] $tool_cmd" >&2
+            _run_agent_bash_tool "$tool_cmd"
+            tool_results=$(echo "$tool_results" | jq -c \
+                --arg id "$tool_id" --arg out "$AGENT_TOOL_LAST_OUTPUT" --argjson rc "$AGENT_TOOL_LAST_RC" \
+                '. + [{type:"tool_result", tool_use_id:$id, content:$out, is_error:($rc != 0)}]')
+        done < <(echo "$response" | jq -c '.content[] | select(.type=="tool_use")')
+
+        if [[ "$(echo "$tool_results" | jq 'length')" -eq 0 ]]; then
+            echo "Error: Anthropic response had stop_reason=tool_use but no tool_use content blocks." >&2
+            return 1
+        fi
+
+        messages=$(echo "$messages" | jq -c --argjson tr "$tool_results" '. + [{role:"user", content:$tr}]')
+    done
+
+    echo "Error: agent exceeded AGENT_MAX_TURNS ($AGENT_MAX_TURNS) without completing the task." >&2
+    return 1
+}
+
+# ─── Utility: bounded tool-use loop against the OpenAI Chat Completions API ──
+# Same contract as run_anthropic_agent, adapted to OpenAI's function-calling
+# message/tool_call shape (Codex tier).
+
+run_openai_agent() {
+    local model="$1" api_key="$2" task_prompt="$3"
+    local system='You are an autonomous software delivery agent running inside a GitHub Actions checkout of this repository. You have exactly one tool, "bash", which runs a shell command in the repository working directory and returns its combined stdout/stderr. Use it to read files, edit files, run tests, and drive git and the gh CLI (already authenticated via GH_TOKEN) to commit, push, and open or update pull requests, following the instructions below exactly. When the task is completely finished, reply with a final plain-text message and do not request any further tool call.'
+    local tools='[{"type":"function","function":{"name":"bash","description":"Execute a bash command in the repository working directory. Returns combined stdout+stderr.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run."}},"required":["command"]}}}]'
+    local messages
+    messages=$(jq -n --arg s "$system" --arg t "$task_prompt" \
+        '[{role:"system", content:$s}, {role:"user", content:$t}]')
+    local -a headers=(-H "Authorization: Bearer $api_key" -H "content-type: application/json")
+
+    local turn=0 response finish_reason assistant_message has_tool_calls
+    local elapsed
+    while (( turn < AGENT_MAX_TURNS )); do
+        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
+        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
+            return 1
+        fi
+        turn=$(( turn + 1 ))
+        local request tmp_messages
+        # See the matching comment in run_anthropic_agent() — $messages must
+        # never be passed via --argjson on the command line; it grows every
+        # turn and this exact failure mode (jq "Argument list too long",
+        # silently swallowed because set -e doesn't reach here) was confirmed
+        # live on run 31425632706 (PR #255, head d845ece).
+        tmp_messages="$(mktemp)"
+        printf '%s' "$messages" > "$tmp_messages"
+        local jq_rc=0
+        request=$(jq -n --arg model "$model" \
+            --argjson max_tokens "$AGENT_MAX_TOKENS" \
+            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
+            '{model:$model, max_tokens:$max_tokens, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
+        rm -f "$tmp_messages"
+        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
+            echo "Error: failed to build the OpenAI API request (jq exit $jq_rc)." >&2
+            return 1
+        fi
+
+        response=$(_curl_json "$OPENAI_API_URL" "$request" "${headers[@]}") || return 1
+
+        echo "$response" | jq -e '.choices[0].message' >/dev/null 2>&1 || {
+            echo "Error: malformed OpenAI API response (no .choices[0].message)." >&2
+            echo "$response" >&2
+            return 1
+        }
+
+        finish_reason=$(echo "$response" | jq -r '.choices[0].finish_reason // empty')
+        assistant_message=$(echo "$response" | jq -c '.choices[0].message')
+        messages=$(echo "$messages" | jq -c --argjson m "$assistant_message" '. + [$m]')
+        echo "[agent turn $turn/$AGENT_MAX_TURNS] finish_reason=$finish_reason" >&2
+
+        has_tool_calls=$(echo "$assistant_message" | jq -r '(.tool_calls // []) | length')
+
+        if [[ "$finish_reason" == "stop" ]]; then
+            echo "$assistant_message" | jq -r '.content // empty'
+            return 0
+        fi
+
+        if [[ "$finish_reason" != "tool_calls" || "$has_tool_calls" -eq 0 ]]; then
+            # Mirrors the Anthropic fix: finish_reason="length" (OpenAI's
+            # max_tokens truncation) or anything else that isn't a genuine
+            # "stop" or a tool request must not be read as task completion.
+            echo "Error: agent stopped with finish_reason='$finish_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
+            return 1
+        fi
+
+        local call call_id fn_args tool_cmd tool_msg
+        while IFS= read -r call; do
+            [[ -z "$call" ]] && continue
+            call_id=$(echo "$call" | jq -r '.id')
+            fn_args=$(echo "$call" | jq -r '.function.arguments // "{}"')
+            tool_cmd=$(echo "$fn_args" | jq -r '.command // empty' 2>/dev/null || echo "")
+            echo "[agent bash] $tool_cmd" >&2
+            _run_agent_bash_tool "$tool_cmd"
+            tool_msg=$(jq -n --arg id "$call_id" --arg out "$AGENT_TOOL_LAST_OUTPUT" \
+                '{role:"tool", tool_call_id:$id, content:$out}')
+            messages=$(echo "$messages" | jq -c --argjson m "$tool_msg" '. + [$m]')
+        done < <(echo "$assistant_message" | jq -c '.tool_calls[]')
+    done
+
+    echo "Error: agent exceeded AGENT_MAX_TURNS ($AGENT_MAX_TURNS) without completing the task." >&2
+    return 1
+}
+
+# ─── Utility: invoke an executor command via a direct provider API call ──────
+# Issue #254: no CLI binary, no install step. Resolves provider/model from the
+# data-driven tables above, loads the corresponding .claude/commands/*.md file
+# as the task prompt — the same instructions a manually-run command follows —
+# substitutes $ARGUMENTS, and drives a bounded tool-use loop against that
+# provider's API (run_anthropic_agent / run_openai_agent).
 
 invoke_executor_command() {
     local slash_command="$1"
     local target_arg="$2"
-
-    local cli="${EXECUTOR_CLI[$EXECUTOR_LABEL]:-}"
-    if [[ -z "$cli" ]]; then
-        echo "Error: No CLI entry for executor '$EXECUTOR_LABEL' in EXECUTOR_CLI table." >&2
-        return 1
-    fi
 
     local api_key_value="${!EXECUTOR_SECRET:-}"
     if [[ -z "$api_key_value" ]]; then
@@ -545,15 +871,39 @@ invoke_executor_command() {
         return 1
     fi
 
-    local api_key_env="${EXECUTOR_API_KEY_ENV[$EXECUTOR_LABEL]:-ANTHROPIC_API_KEY}"
+    local provider="${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}"
+    local model="${EXECUTOR_MODEL[$EXECUTOR_LABEL]:-}"
+    if [[ -z "$provider" || -z "$model" ]]; then
+        echo "Error: No provider/model entry for executor '$EXECUTOR_LABEL' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
+        return 1
+    fi
+
+    local command_file="$COMMANDS_DIR/${slash_command}.md"
+    if [[ ! -f "$command_file" ]]; then
+        echo "Error: Command definition not found: $command_file" >&2
+        return 1
+    fi
+
+    local task_prompt
+    task_prompt=$(sed "s/\$ARGUMENTS/$target_arg/g" "$command_file")
 
     if $DRY_RUN; then
-        echo "[DRY RUN] Would invoke: ${api_key_env}=<secret> $cli --dangerously-skip-permissions -p \"/$slash_command $target_arg\""
+        echo "[DRY RUN] Would invoke $provider ($model) directly via API for /$slash_command $target_arg — no CLI, no install step"
         return 0
     fi
 
-    env "${api_key_env}=${api_key_value}" \
-        "$cli" --dangerously-skip-permissions -p "/$slash_command $target_arg"
+    case "$provider" in
+        anthropic)
+            run_anthropic_agent "$model" "$api_key_value" "$task_prompt"
+            ;;
+        openai)
+            run_openai_agent "$model" "$api_key_value" "$task_prompt"
+            ;;
+        *)
+            echo "Error: Unknown provider '$provider' for executor '$EXECUTOR_LABEL'." >&2
+            return 1
+            ;;
+    esac
 }
 
 # ─── Utility: find the open PR linked to an issue (Closes #N pattern) ────────
