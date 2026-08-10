@@ -39,6 +39,27 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ---
 
+## Executor Secrets — `ANTHROPIC_API_KEY` and `OPENAI_API_KEY_CODEX`
+
+The dispatcher needs credentials to invoke `/implement` (and the rest of the story cycle) via each executor's CLI. There are exactly **two** required secrets, not one per `executor:` tier:
+
+| Secret | Type | Covers |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Repository secret | All three Claude tiers: `executor:claude-code-haiku`, `executor:claude-code-sonnet`, `executor:claude-code-opus` |
+| `OPENAI_API_KEY_CODEX` | Repository secret | `executor:codex` |
+
+A single Anthropic API key authenticates calls to any Claude model — Haiku, Sonnet, and Opus are model selections made per request, not separate credential scopes. There is no functional reason to provision three separate Anthropic secrets, and doing so previously blocked every dispatcher-driven invocation regardless of tier (issue #252). Per-tier **budget** enforcement (`BUDGET_DAILY_HAIKU`/`_SONNET`/`_OPUS`/`_CODEX`, see above) is a separate, already-correct mechanism — it stays per-tier and is unaffected by this consolidation.
+
+Provision both secrets at:
+
+`https://github.com/<owner>/<repo>/settings/secrets/actions`
+
+Both secrets must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}` and `OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}`. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
+
+**If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before invoking the CLI, and the dispatcher posts a mid-cycle blocker comment on the story issue.
+
+---
+
 ## GitHub Token — `PROJECT_TOKEN`
 
 The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to both read board state and write story status (via `updateProjectV2ItemFieldValue`).
