@@ -88,6 +88,7 @@ A delivery baseline is a structured artifact with the fields below. Each field i
 
 | Field | Required | Mutable after Accepted | Format |
 |---|---|---|---|
+| `state` | Yes | **Yes — only via [Allowed Transitions](#allowed-transitions)** | Exactly one of the six artifact-state names in [Artifact States](#artifact-states): `Candidate`, `Ready for approval`, `Accepted`, `Materialized`, `Rejected`, `Superseded` |
 | `baseline_version` | Yes | No | Version identifier — see [Versioning and Supersession](#versioning-and-supersession) |
 | `target` | Yes | No | Exactly one HPW Epic or Feature target — see [Target Granularity](#target-granularity) |
 | `provenance` | Yes | No | Origin of the baseline: authoring methodology or tool name, author identity, and creation timestamp (RFC 3339, UTC) |
@@ -95,6 +96,7 @@ A delivery baseline is a structured artifact with the fields below. Each field i
 | `source_specification_ref` | Yes | **No — immutable** | Durable reference (URL or repository-relative path plus `source_revision`) to the source specification document |
 | `technical_plan_ref` | Yes | **No — immutable** | Durable reference (URL or repository-relative path plus `source_revision`) to the technical plan document |
 | `in_scope_requirements` | Yes | No | Ordered list of requirement identifiers — see [Requirement Identifiers](#requirement-identifiers) |
+| `acceptance_criteria` | Yes | No | Ordered list of `{id, text}` entries defining every acceptance criterion referenced by `requirement_acceptance_mappings` — see [Requirement-to-Acceptance-Criterion Mapping](#requirement-to-acceptance-criterion-mapping) |
 | `requirement_acceptance_mappings` | Yes | No | Mapping of every requirement identifier to one or more acceptance criteria — see [Requirement-to-Acceptance-Criterion Mapping](#requirement-to-acceptance-criterion-mapping) |
 | `exclusions` | Yes (may be empty) | No | List of explicit non-goals — see [Exclusions and Non-Goals](#exclusions-and-non-goals) |
 | `unresolved_questions` | Yes (must be empty to reach Accepted) | No | List of open questions — see [Unresolved Questions](#unresolved-questions) |
@@ -102,7 +104,7 @@ A delivery baseline is a structured artifact with the fields below. Each field i
 | `supersedes` | No | No | `baseline_version` of the baseline this version replaces; absent for a first version |
 | `superseded_by` | No | Yes — write-once when this baseline becomes Superseded | `baseline_version` of the baseline that replaced this one |
 
-`superseded_by` is the single exception to post-Accepted immutability. It is a write-once audit pointer set at the moment the baseline enters `Superseded`; it records history rather than changing intent, and it may never be rewritten once set.
+`state` and `superseded_by` are the only two fields permitted to change after a baseline reaches `Accepted`. `state` changes exclusively by following an edge in the [Allowed Transitions](#allowed-transitions) table (for example `Accepted` → `Materialized`); no other field changes when `state` does. `superseded_by` is a write-once audit pointer set at the moment the baseline enters `Superseded`; it records history rather than changing intent, and it may never be rewritten once set. Every other field is frozen at `Accepted` (see [Immutability After Acceptance](#immutability-after-acceptance)).
 
 ### Provenance
 
@@ -134,19 +136,21 @@ Identifier stability rules:
 
 ### Requirement-to-Acceptance-Criterion Mapping
 
-`requirement_acceptance_mappings` maps every entry in `in_scope_requirements` to one or more acceptance criteria. Acceptance criteria use the identifier format:
+`acceptance_criteria` is the ordered list of acceptance-criterion definitions for the baseline. Each entry is a `{id, text}` pair: `id` uses the identifier format:
 
 ```
 AC-<NNN>
 ```
 
-with the same zero-padding, uniqueness, and stability rules as requirement identifiers.
+with the same zero-padding, uniqueness, and stability rules as requirement identifiers; `text` is the criterion's defining text. `acceptance_criteria` is where every `AC-<NNN>` identifier is defined — `requirement_acceptance_mappings` only references identifiers, it never defines them.
+
+`requirement_acceptance_mappings` maps every entry in `in_scope_requirements` to one or more entries in `acceptance_criteria`, by `id`.
 
 Mapping rules:
 
 - **Every requirement identifier must map to at least one acceptance criterion.** A requirement with no mapped acceptance criterion is an incomplete baseline and blocks `Accepted`.
 - A requirement may map to several acceptance criteria; an acceptance criterion may serve several requirements.
-- Every acceptance criterion referenced by a mapping must be defined in the baseline; dangling references are invalid.
+- **Every acceptance criterion referenced by a mapping must have a corresponding `{id, text}` entry in `acceptance_criteria`.** A mapping that references an `AC-<NNN>` with no matching entry in `acceptance_criteria` is a dangling reference and is invalid.
 - Identifiers appearing in `exclusions` must not appear in `in_scope_requirements`.
 
 ### Exclusions and Non-Goals
@@ -183,9 +187,9 @@ Once a baseline reaches `Accepted`, its content is frozen. Three fields in parti
 
 Independent verifiability means a third party can resolve each reference at the recorded full source revision and confirm it matches the approved content, without trusting the authoring tool, the executor, or the current state of any branch.
 
-**Permitted:** authoring a new baseline version that supersedes the Accepted one.
+**Permitted:** authoring a new baseline version that supersedes the Accepted one; advancing `state` along an edge in the [Allowed Transitions](#allowed-transitions) table; setting the write-once `superseded_by` audit pointer when `state` becomes `Superseded`.
 
-**Prohibited:** in-place mutation of accepted history — editing any field of an Accepted, Materialized, Rejected, or Superseded baseline, rewriting the commit that introduced it, or repointing a reference to different content. The only post-Accepted write permitted is the write-once `superseded_by` audit pointer.
+**Prohibited:** in-place mutation of accepted history — editing any field other than `state` or `superseded_by` on an Accepted, Materialized, Rejected, or Superseded baseline, rewriting the commit that introduced it, repointing a reference to different content, or setting `state` to any value not reached by following the Allowed Transitions table.
 
 ---
 

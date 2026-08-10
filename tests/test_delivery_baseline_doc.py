@@ -125,18 +125,44 @@ def test_delivery_baseline_schema_fields_are_documented() -> None:
     document = read("docs/DELIVERY-BASELINE.md")
 
     for field in (
+        "state",
         "baseline_version",
         "provenance",
         "source_revision",
         "source_specification_ref",
         "technical_plan_ref",
         "in_scope_requirements",
+        "acceptance_criteria",
         "requirement_acceptance_mappings",
         "exclusions",
         "unresolved_questions",
         "approval_evidence",
     ):
         assert f"`{field}`" in document, f"missing baseline schema field: {field}"
+
+
+def test_state_field_is_required_and_scoped_to_the_six_artifact_states() -> None:
+    document = read("docs/DELIVERY-BASELINE.md")
+
+    assert "| `state` | Yes |" in document
+    for state in ARTIFACT_STATES:
+        assert f"`{state}`" in document, f"state field format must name: {state}"
+    assert (
+        "the only two fields permitted to change after a baseline reaches `Accepted`"
+        in document
+    )
+
+
+def test_acceptance_criteria_field_defines_referenced_identifiers() -> None:
+    document = read("docs/DELIVERY-BASELINE.md")
+
+    assert "`acceptance_criteria` is the ordered list of acceptance-criterion definitions" in document
+    assert (
+        "Every acceptance criterion referenced by a mapping must have a corresponding "
+        "`{id, text}` entry in `acceptance_criteria`."
+        in document
+    )
+    assert "dangling reference" in document
 
 
 def test_requirement_identifiers_have_a_stable_format_and_mapping_rule() -> None:
