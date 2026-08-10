@@ -169,6 +169,18 @@ case "$FAKE_CURL_MODE" in
     fi
     echo -n "200"
     ;;
+  truncated)
+    # A single turn whose response was cut off mid-generation — reproduces
+    # the live run 31425063548 failure: the agent had created a branch and
+    # was mid-investigation when it hit the token limit, and the dispatcher
+    # logged "/implement completed" with no commit and no PR ever made.
+    if [[ "$url" == *anthropic* ]]; then
+        printf '%s' '{"stop_reason":"max_tokens","content":[{"type":"text","text":"I created a branch and was about to..."}],"usage":{"input_tokens":1,"output_tokens":8192}}' > "$outfile"
+    else
+        printf '%s' '{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"I created a branch and was about to..."}}]}' > "$outfile"
+    fi
+    echo -n "200"
+    ;;
   *)
     echo "unknown FAKE_CURL_MODE: $FAKE_CURL_MODE" >&2
     exit 99
@@ -469,6 +481,32 @@ for label in claude-code-sonnet codex; do
         assert "$label: tool_result content for the timed-out call is non-empty" 0
     else
         assert "$label: tool_result content for the timed-out call is non-empty" 1
+    fi
+done
+
+# ─── 5g. A truncated response is never treated as a successful completion ───
+# Confirmed live on run 31425063548 (PR #255, head 52c719b): the agent
+# created a branch and was mid-investigation across 10 real turns when its
+# 11th response hit stop_reason=max_tokens. The old code treated any
+# non-tool_use stop_reason as "done" and logged "/implement completed" —
+# with no commit and no PR ever made. This is a false-success bug, worse
+# than any of the earlier failures, because it reports success on nothing.
+
+echo ""
+echo "Checking a truncated (max_tokens / length) response fails closed instead of reporting success..."
+for label in claude-code-sonnet codex; do
+    state_dir="$GLOBAL_TMP/state-truncated-$label"; mkdir -p "$state_dir"
+    out=$(run_invoke "$label" truncated 60 "$state_dir") && rc=0 || rc=$?
+    if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "not a genuine completion"; then
+        assert "$label: truncated response fails closed with a clear error" 0
+    else
+        echo "      exit=$rc output: $out"
+        assert "$label: truncated response fails closed with a clear error" 1
+    fi
+    if ! echo "$out" | grep -qF "I created a branch"; then
+        assert "$label: truncated partial text is not echoed as if it were a completed result" 0
+    else
+        assert "$label: truncated partial text is not echoed as if it were a completed result" 1
     fi
 done
 

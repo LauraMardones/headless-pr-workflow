@@ -701,9 +701,20 @@ run_anthropic_agent() {
         messages=$(echo "$messages" | jq -c --argjson c "$assistant_content" '. + [{role:"assistant", content:$c}]')
         echo "[agent turn $turn/$AGENT_MAX_TURNS] stop_reason=$stop_reason" >&2
 
-        if [[ "$stop_reason" != "tool_use" ]]; then
+        if [[ "$stop_reason" == "end_turn" || "$stop_reason" == "stop_sequence" ]]; then
             echo "$response" | jq -r '[.content[] | select(.type=="text") | .text] | join("\n")'
             return 0
+        fi
+
+        if [[ "$stop_reason" != "tool_use" ]]; then
+            # Confirmed live (run 31425063548, PR #255): stop_reason=max_tokens
+            # means the response was cut off mid-generation, not that the task
+            # finished — treating it as success previously caused /implement
+            # to report "completed" with no commit and no PR ever created.
+            # Any stop_reason that isn't a genuine completion or a tool
+            # request fails closed instead of being assumed to mean success.
+            echo "Error: agent stopped with stop_reason='$stop_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
+            return 1
         fi
 
         local tool_results='[]' block tool_id tool_cmd
@@ -773,9 +784,17 @@ run_openai_agent() {
 
         has_tool_calls=$(echo "$assistant_message" | jq -r '(.tool_calls // []) | length')
 
-        if [[ "$finish_reason" != "tool_calls" || "$has_tool_calls" -eq 0 ]]; then
+        if [[ "$finish_reason" == "stop" ]]; then
             echo "$assistant_message" | jq -r '.content // empty'
             return 0
+        fi
+
+        if [[ "$finish_reason" != "tool_calls" || "$has_tool_calls" -eq 0 ]]; then
+            # Mirrors the Anthropic fix: finish_reason="length" (OpenAI's
+            # max_tokens truncation) or anything else that isn't a genuine
+            # "stop" or a tool request must not be read as task completion.
+            echo "Error: agent stopped with finish_reason='$finish_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
+            return 1
         fi
 
         local call call_id fn_args tool_cmd tool_msg
