@@ -644,6 +644,16 @@ _run_agent_bash_tool() {
     if [[ ${#out} -gt 16000 ]]; then
         out="${out:0:16000}
 ... [output truncated: ${#out} bytes total, showing first 16000]"
+    elif [[ -z "$out" && $rc -ne 0 ]]; then
+        # A tool_result with is_error=true and empty content is rejected by
+        # the Anthropic API (HTTP 400) — confirmed live: a command killed by
+        # `timeout` after producing zero output hit exactly this. Every
+        # error path must give the model something to react to.
+        if [[ $rc -eq 124 ]]; then
+            out="(command timed out after ${AGENT_TOOL_TIMEOUT}s with no output)"
+        else
+            out="(command exited with status $rc and produced no output)"
+        fi
     fi
     AGENT_TOOL_LAST_OUTPUT="$out"
     AGENT_TOOL_LAST_RC="$rc"

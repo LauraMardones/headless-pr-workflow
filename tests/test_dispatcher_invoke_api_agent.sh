@@ -149,6 +149,26 @@ case "$FAKE_CURL_MODE" in
     fi
     echo -n "200"
     ;;
+  timeout_tool)
+    # Turn 1: request a tool call that will be killed by AGENT_TOOL_TIMEOUT
+    # with zero output — reproduces the live run 31423828727 failure
+    # (Anthropic 400: tool_result content cannot be empty if is_error=true).
+    # Turn 2: final answer, only reachable if the fix sends non-empty content.
+    if [[ "$url" == *anthropic* ]]; then
+        if [[ $count -eq 1 ]]; then
+            printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"slow1","name":"bash","input":{"command":"sleep 5"}}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
+        else
+            printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"recovered-after-timeout"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
+        fi
+    else
+        if [[ $count -eq 1 ]]; then
+            printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"slow1","function":{"name":"bash","arguments":"{\"command\":\"sleep 5\"}"}}]}}]}' > "$outfile"
+        else
+            printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered-after-timeout"}}]}' > "$outfile"
+        fi
+    fi
+    echo -n "200"
+    ;;
   *)
     echo "unknown FAKE_CURL_MODE: $FAKE_CURL_MODE" >&2
     exit 99
@@ -163,8 +183,9 @@ run_invoke() {
     # $6=DISPATCH_JOB_START_TS (optional, default "now" — pass the SAME value
     #    across multiple calls to simulate phases sharing one job deadline,
     #    exactly as the real script's exec-inherited environment variable does)
+    # $7=AGENT_TOOL_TIMEOUT (optional, default 30)
     local label="$1" mode="$2" max_turns="$3" state_dir="$4" wallclock="${5:-999999}"
-    local job_start="${6:-$(date +%s)}"
+    local job_start="${6:-$(date +%s)}" tool_timeout="${7:-30}"
     bash -c '
         set -euo pipefail
         source "'"$TABLES_AND_FUNC"'"
@@ -175,7 +196,7 @@ run_invoke() {
         DRY_RUN=false
         AGENT_MAX_TURNS='"$max_turns"'
         AGENT_MAX_TOKENS=1024
-        AGENT_TOOL_TIMEOUT=30
+        AGENT_TOOL_TIMEOUT='"$tool_timeout"'
         AGENT_API_TIMEOUT=30
         AGENT_MAX_WALLCLOCK_SECONDS='"$wallclock"'
         DISPATCH_JOB_START_TS='"$job_start"'
@@ -384,6 +405,72 @@ if grep -qF 'DISPATCH_JOB_START_TS="${DISPATCH_JOB_START_TS:-$(date +%s)}"' "$IN
 else
     assert "scripts/dispatcher-invoke.sh: DISPATCH_JOB_START_TS is idempotent-default and exported" 1
 fi
+
+# ─── 5e. A tool call that fails with no output never sends empty error content ─
+# Confirmed live on run 31423828727 (PR #255, head 7461610): a bash-tool
+# command killed by AGENT_TOOL_TIMEOUT after producing zero output caused
+# Anthropic to reject the next request with HTTP 400 ("tool_result content
+# cannot be empty if is_error is true"), aborting a real /implement mid-task.
+
+echo ""
+echo "Checking _run_agent_bash_tool() never returns empty output on a failed command..."
+
+check_tool_output() {
+    # $1=label  $2=cmd  $3=AGENT_TOOL_TIMEOUT  $4=expected substring  $5=expect empty (true/false)
+    local label="$1" cmd="$2" timeout_s="$3" expect_substr="$4" expect_empty="$5"
+    local out rc
+    out=$(bash -c '
+        source "'"$TABLES_AND_FUNC"'"
+        AGENT_TOOL_TIMEOUT='"$timeout_s"'
+        _run_agent_bash_tool "'"$cmd"'"
+        printf "RC=%s\nOUT=%s" "$AGENT_TOOL_LAST_RC" "$AGENT_TOOL_LAST_OUTPUT"
+    ')
+    rc=$(echo "$out" | sed -n 's/^RC=//p')
+    local actual_out
+    actual_out=$(echo "$out" | sed -n '2,$p' | sed 's/^OUT=//')
+    if [[ "$expect_empty" == "true" ]]; then
+        if [[ -z "$actual_out" ]]; then
+            assert "$label: output correctly stays empty (rc=$rc, success path)" 0
+        else
+            assert "$label: output correctly stays empty (rc=$rc, success path), got: $actual_out" 1
+        fi
+    else
+        if [[ -n "$actual_out" ]] && echo "$actual_out" | grep -qF "$expect_substr"; then
+            assert "$label: non-empty output on failure (rc=$rc): $actual_out" 0
+        else
+            assert "$label: non-empty output on failure (rc=$rc), expected substring '$expect_substr', got: $actual_out" 1
+        fi
+    fi
+}
+
+check_tool_output "timeout with no output" "sleep 5" 1 "timed out" false
+check_tool_output "exit with no output" "exit 3" 30 "exited with status 3" false
+check_tool_output "success with no output stays empty" "true" 30 "" true
+check_tool_output "failure WITH output is preserved, not overwritten" "echo real-output; exit 1" 30 "real-output" false
+
+# ─── 5f. Integration: the request sent to the provider never has empty content
+# on a failed tool call, end to end through invoke_executor_command().
+
+echo ""
+echo "Checking the actual API request never carries empty tool_result content after a timeout..."
+for label in claude-code-sonnet codex; do
+    state_dir="$GLOBAL_TMP/state-timeouttool-$label"; mkdir -p "$state_dir"
+    out=$(run_invoke "$label" timeout_tool 60 "$state_dir" 999999 "" 1) && rc=0 || rc=$?
+    if [[ $rc -eq 0 ]] && echo "$out" | grep -qF "recovered-after-timeout"; then
+        assert "$label: agent recovers after a timed-out tool call instead of aborting" 0
+    else
+        echo "      exit=$rc output: $out"
+        assert "$label: agent recovers after a timed-out tool call instead of aborting" 1
+    fi
+    # req_2.json is the second API call, sent after the timed-out tool ran —
+    # confirm whatever content it carries for that tool result is non-empty.
+    content_field=$(jq -r 'if (.messages[-1].content | type) == "array" then (.messages[-1].content[0].content // "") else (.messages[-1].content // "") end' "$state_dir/req_2.json" 2>/dev/null || echo "")
+    if [[ -n "$content_field" ]]; then
+        assert "$label: tool_result content for the timed-out call is non-empty" 0
+    else
+        assert "$label: tool_result content for the timed-out call is non-empty" 1
+    fi
+done
 
 # ─── 6. --dry-run makes no HTTP call ──────────────────────────────────────────
 
