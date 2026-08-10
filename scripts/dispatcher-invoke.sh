@@ -29,10 +29,18 @@
 #
 # | executor: label             | Executor type  | GitHub Secret name         | CLI env var name    |
 # |-----------------------------|----------------|----------------------------|---------------------|
-# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY_HAIKU    | ANTHROPIC_API_KEY   |
-# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY_SONNET   | ANTHROPIC_API_KEY   |
-# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY_OPUS     | ANTHROPIC_API_KEY   |
+# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
+# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
+# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY          | ANTHROPIC_API_KEY   |
 # | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | OPENAI_API_KEY      |
+#
+# All three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY): a single
+# Anthropic API key authenticates calls to any Claude model, so per-tier
+# secrets (formerly ANTHROPIC_API_KEY_HAIKU/_SONNET/_OPUS) were redundant
+# credential-provisioning overhead with no functional benefit (issue #252).
+# Per-tier daily token *budgets* remain separate (see EXECUTOR_BUDGET_TYPE
+# below and dispatcher-budget.sh) — that mechanism is independent of which
+# secret authenticates the call.
 #
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
@@ -40,6 +48,11 @@
 #   PROJECT_TOKEN must be a classic PAT with repo (full) + project (full) scopes;
 #   project (full) is required because the dispatcher writes board status via
 #   updateProjectV2ItemFieldValue — read:project alone is not sufficient.
+#   ANTHROPIC_API_KEY and OPENAI_API_KEY_CODEX must be set as GitHub Secrets
+#   and wired into .github/workflows/dispatcher.yml's env: block for the
+#   "Run dispatcher invoke" step (or the job-level env: block) — GitHub
+#   Actions never auto-injects a secret; it must be explicitly referenced as
+#   ${{ secrets.NAME }} in the workflow YAML or the script never sees it.
 #   Do not hardcode any token or API key in this script.
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
@@ -60,10 +73,12 @@ set -euo pipefail
 
 # ─── Executor routing table (data-driven) ─────────────────────────────────────
 # Format: ["<label-suffix>"]="<DisplayName>:<SECRET_NAME>"
+# The three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY) — see
+# header comment above (issue #252).
 declare -A EXECUTOR_ROUTING=(
-    ["claude-code-haiku"]="Claude Haiku:ANTHROPIC_API_KEY_HAIKU"
-    ["claude-code-sonnet"]="Claude Sonnet:ANTHROPIC_API_KEY_SONNET"
-    ["claude-code-opus"]="Claude Opus:ANTHROPIC_API_KEY_OPUS"
+    ["claude-code-haiku"]="Claude Haiku:ANTHROPIC_API_KEY"
+    ["claude-code-sonnet"]="Claude Sonnet:ANTHROPIC_API_KEY"
+    ["claude-code-opus"]="Claude Opus:ANTHROPIC_API_KEY"
     ["codex"]="Codex:OPENAI_API_KEY_CODEX"
 )
 

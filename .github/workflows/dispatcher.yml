@@ -4,6 +4,12 @@
 # stopped firing the cron for this workflow (no runs between Aug 7 07:09
 # and Aug 9, despite the workflow remaining active and no config change).
 #
+# 2026-08-10 (issue #252): the "Run dispatcher invoke" step never wired any
+# executor secret (Anthropic or OpenAI) into its env:, so no dispatcher-driven
+# /implement invocation could ever authenticate regardless of what was
+# configured in repository Settings. ANTHROPIC_API_KEY and
+# OPENAI_API_KEY_CODEX are now explicitly referenced below.
+#
 # Prototype divergences:
 # D1: dispatcher-poll.sh does not yet exist on main (story #170 is in review).
 #     This workflow references the script by path; the run step will fail gracefully
@@ -69,6 +75,8 @@ jobs:
           BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
           BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
           BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
         run: |
           bash scripts/dispatcher-invoke.sh \
             --repo "${{ github.repository }}" \
