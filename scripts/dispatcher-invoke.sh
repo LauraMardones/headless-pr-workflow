@@ -239,10 +239,17 @@ COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
 # its own normal exit path, comfortably before that platform kill could ever
 # fire (see ADR-003).
 AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # tool-use round-trips before failing closed
-AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-8192}"      # max_tokens requested per API turn
+# 8192 was the original default and was too tight for real usage: run
+# 31426452350 (PR #255, head f351a1f, live /implement of #240) hit
+# stop_reason=max_tokens on turn 14 of a documentation-synthesis story that
+# had not yet written any code, and correctly failed closed per the
+# truncated-response fix (d845ece) rather than reporting false success.
+# Raised to give a single turn real headroom for a large tool_use payload
+# (e.g. a heredoc writing a substantial file) without hitting the ceiling.
+AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-16384}"     # max_tokens requested per API turn
 AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool command may run
 AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
-AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per invoke_executor_command() call — enforced, not incidental
+AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per Actions job, shared job-wide via DISPATCH_JOB_START_TS — enforced, not incidental
 ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 

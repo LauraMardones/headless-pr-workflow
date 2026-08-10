@@ -32,7 +32,7 @@ For this interim period, ADR-002's "executor sessions run outside GitHub Actions
 | Bound | Env var | Default |
 |---|---|---|
 | Tool-use round-trips before failing closed | `AGENT_MAX_TURNS` | 60 |
-| `max_tokens` requested per API turn | `AGENT_MAX_TOKENS` | 8192 |
+| `max_tokens` requested per API turn | `AGENT_MAX_TOKENS` | 16384 |
 | Seconds a single bash-tool command may run | `AGENT_TOOL_TIMEOUT` | 300 |
 | Seconds a single API call may take | `AGENT_API_TIMEOUT` | 600 |
 | **Total elapsed budget for the whole Actions job** | **`AGENT_MAX_WALLCLOCK_SECONDS`** | **10800 (3h)** |
@@ -44,6 +44,8 @@ For this interim period, ADR-002's "executor sessions run outside GitHub Actions
 The fix is `DISPATCH_JOB_START_TS`: a single timestamp set once, at the very first line of the script's execution, via the idempotent form `DISPATCH_JOB_START_TS="${DISPATCH_JOB_START_TS:-$(date +%s)}"` and exported. Because `exec` inherits the current process's exported environment, every subsequent phase and every recursively-`exec`'d story invocation within the same job sees the *same* value — the assignment is a no-op after the first. Both agent loops now check elapsed time against this one shared reference point, not a per-call one. `AGENT_MAX_WALLCLOCK_SECONDS` is therefore a true job-wide budget: no combination of phases or chained stories within one Actions job can push total agent time past 3h (plus the same ≤900s single-turn overshoot margin as before), regardless of how that time is divided between them — comfortably below the 6h ceiling, with roughly 2h45m of margin for checkout, other workflow steps, and everything not spent inside an agent loop.
 
 This is a real, explicit narrowing of ADR-002's original language — not a reinterpretation that was already latent in it. It is adopted only because it is temporary and bounded, with a concrete migration already tracked (#259) to restore the originally-intended architecture.
+
+**Correction 3 (post-review, same day):** live run `31426452350` (head `f351a1f`, `/implement` of #240) hit `stop_reason=max_tokens` on turn 14, before any code had been written — the story required synthesizing a large amount of prior context (related issues, ADRs, delivery-baseline docs) and the single-turn output budget ran out. The truncated-response fix (Correction covered by commit `d845ece`, prior to this ADR revision) meant the run correctly failed closed and posted a Blocked Declaration rather than silently reporting false success — but it is still real evidence that `AGENT_MAX_TOKENS`'s original default (8192) was too tight for real story sizes, exactly the scenario Condition for Revisiting #2 below anticipates. `AGENT_MAX_TOKENS` was raised to 16384 in response. This does not change the wall-clock safety argument above (`AGENT_MAX_TOKENS` bounds a single turn's output size, not run duration), but is recorded here because it is exactly the kind of interim-bound-too-tight finding this ADR commits to tracking.
 
 ---
 
