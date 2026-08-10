@@ -29,6 +29,12 @@
 #          Actions' 6h job ceiling; this is the enforced bound that does)
 #      all return non-zero from invoke_executor_command() with a clear stderr
 #      message, for both providers where applicable.
+#   4b. AGENT_MAX_WALLCLOCK_SECONDS is a JOB deadline (DISPATCH_JOB_START_TS),
+#       not a per-phase one: it is shared, unreset, across separate
+#       invoke_executor_command() calls the way exec's inherited environment
+#       shares it across /implement, /review, /merge, /cleanup, and recursive
+#       exec to the next story — confirmed by a two-call test where the second
+#       call fails closed on budget the first call already spent.
 #   5. --dry-run makes no HTTP call at all and does not require any secret's
 #      value beyond what pre-flight already validates.
 #
@@ -153,8 +159,12 @@ chmod +x "$FAKE_BIN/curl"
 
 run_invoke() {
     # $1=executor label  $2=FAKE_CURL_MODE  $3=AGENT_MAX_TURNS  $4=state dir (fresh)
-    # $5=AGENT_MAX_WALLCLOCK_SECONDS (optional, default effectively unlimited for these tests)
+    # $5=AGENT_MAX_WALLCLOCK_SECONDS (optional, default effectively unlimited)
+    # $6=DISPATCH_JOB_START_TS (optional, default "now" — pass the SAME value
+    #    across multiple calls to simulate phases sharing one job deadline,
+    #    exactly as the real script's exec-inherited environment variable does)
     local label="$1" mode="$2" max_turns="$3" state_dir="$4" wallclock="${5:-999999}"
+    local job_start="${6:-$(date +%s)}"
     bash -c '
         set -euo pipefail
         source "'"$TABLES_AND_FUNC"'"
@@ -168,6 +178,7 @@ run_invoke() {
         AGENT_TOOL_TIMEOUT=30
         AGENT_API_TIMEOUT=30
         AGENT_MAX_WALLCLOCK_SECONDS='"$wallclock"'
+        DISPATCH_JOB_START_TS='"$job_start"'
         ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
         OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
         COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
@@ -316,6 +327,63 @@ for label in claude-code-sonnet codex; do
         assert "$label: no API call made once the wall-clock budget is already spent" 1
     fi
 done
+
+# ─── 5c. The wall-clock budget is a JOB deadline, not a per-phase one ────────
+# A single story calls invoke_executor_command() up to four separate times
+# (/implement, /review, /merge, /cleanup), and the dispatcher's recursive
+# `exec bash "$0"` tail-call to the next ready story replaces the process
+# without starting a new Actions job — so all of that shares one 6h ceiling.
+# DISPATCH_JOB_START_TS must therefore NOT reset between separate
+# invoke_executor_command() calls. This proves it: two calls share the exact
+# same DISPATCH_JOB_START_TS (as exec's inherited environment would produce),
+# with a real ~2s sleep between them and AGENT_MAX_WALLCLOCK_SECONDS=2 — the
+# first call (simulating /implement) succeeds because almost no time has
+# elapsed yet; the second call (simulating /review), using the SAME job start
+# timestamp, fails closed because the shared budget is now spent. If the
+# deadline were (incorrectly) reset per call, the second call would also
+# succeed, since barely any time elapses within it alone.
+
+echo ""
+echo "Checking the wall-clock budget is shared across separate invoke_executor_command() calls, not reset per phase..."
+job_start=$(date +%s)
+state_dir="$GLOBAL_TMP/state-jobdeadline-implement"; mkdir -p "$state_dir"
+out=$(run_invoke "claude-code-sonnet" two_turn 60 "$state_dir" 2 "$job_start") && rc=0 || rc=$?
+if [[ $rc -eq 0 ]]; then
+    assert "simulated /implement: succeeds near job start (budget not yet spent)" 0
+else
+    echo "      output: $out"
+    assert "simulated /implement: succeeds near job start (budget not yet spent)" 1
+fi
+
+sleep 2
+
+state_dir2="$GLOBAL_TMP/state-jobdeadline-review"; mkdir -p "$state_dir2"
+out=$(run_invoke "claude-code-sonnet" two_turn 60 "$state_dir2" 2 "$job_start") && rc=0 || rc=$?
+if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "exceeded AGENT_MAX_WALLCLOCK_SECONDS"; then
+    assert "simulated /review: fails closed on the SAME job deadline the earlier phase used" 0
+else
+    echo "      exit=$rc output: $out"
+    assert "simulated /review: fails closed on the SAME job deadline the earlier phase used" 1
+fi
+if [[ ! -f "$state_dir2/counter" ]]; then
+    assert "simulated /review: no API call made — the earlier phase's elapsed time carried over" 0
+else
+    assert "simulated /review: no API call made — the earlier phase's elapsed time carried over" 1
+fi
+
+# ─── 5d. Static check: DISPATCH_JOB_START_TS uses the idempotent-default form ─
+# Guards against a regression to an unconditional assignment, which would
+# silently reintroduce a per-phase budget (this exact bug) since it would
+# overwrite the inherited value on every recursive exec.
+
+echo ""
+echo "Checking DISPATCH_JOB_START_TS is set idempotently (survives recursive exec)..."
+if grep -qF 'DISPATCH_JOB_START_TS="${DISPATCH_JOB_START_TS:-$(date +%s)}"' "$INVOKE_SCRIPT" \
+    && grep -qF 'export DISPATCH_JOB_START_TS' "$INVOKE_SCRIPT"; then
+    assert "scripts/dispatcher-invoke.sh: DISPATCH_JOB_START_TS is idempotent-default and exported" 0
+else
+    assert "scripts/dispatcher-invoke.sh: DISPATCH_JOB_START_TS is idempotent-default and exported" 1
+fi
 
 # ─── 6. --dry-run makes no HTTP call ──────────────────────────────────────────
 

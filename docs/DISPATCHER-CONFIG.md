@@ -74,7 +74,7 @@ Loop tuning is overridable via environment variables (defaults shown), primarily
 | `AGENT_MAX_TOKENS` | `8192` | `max_tokens` requested per API turn |
 | `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run |
 | `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take |
-| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget per invocation — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003) |
+| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review`/`/merge`/`/cleanup` and any chained stories via `DISPATCH_JOB_START_TS`, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003) |
 
 ---
 

@@ -90,6 +90,22 @@
 
 set -euo pipefail
 
+# ─── Job-level wall-clock deadline (ADR-003) — survives recursive exec ────────
+# One story's cycle calls invoke_executor_command() up to four times
+# (/implement, /review, /merge, /cleanup), and the tail-call
+# `exec bash "$0" ...` used to move to the next ready story replaces this
+# process without starting a new Actions job — so all of that shares one
+# 6-hour job ceiling. DISPATCH_JOB_START_TS must therefore be set ONCE, at the
+# first invocation of this script for the job, and must NOT reset on
+# subsequent phases or recursive exec calls. The idempotent-default form below
+# is what makes that true: exec inherits the current process's exported
+# environment, so on every invocation after the first, DISPATCH_JOB_START_TS
+# is already set and this line is a no-op. Do not change this to an
+# unconditional assignment — that would silently reintroduce a per-phase
+# budget instead of a job-wide one.
+DISPATCH_JOB_START_TS="${DISPATCH_JOB_START_TS:-$(date +%s)}"
+export DISPATCH_JOB_START_TS
+
 # ─── Executor routing table (data-driven) ─────────────────────────────────────
 # Format: ["<label-suffix>"]="<DisplayName>:<SECRET_NAME>"
 # The three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY) — see
@@ -648,12 +664,11 @@ run_anthropic_agent() {
     local -a headers=(-H "x-api-key: $api_key" -H "anthropic-version: 2023-06-01" -H "content-type: application/json")
 
     local turn=0 response stop_reason assistant_content
-    local start_ts elapsed
-    start_ts=$(date +%s)
+    local elapsed
     while (( turn < AGENT_MAX_TURNS )); do
-        elapsed=$(( $(date +%s) - start_ts ))
+        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
         if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
-            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) without completing the task (elapsed ${elapsed}s)." >&2
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
             return 1
         fi
         turn=$(( turn + 1 ))
@@ -719,12 +734,11 @@ run_openai_agent() {
     local -a headers=(-H "Authorization: Bearer $api_key" -H "content-type: application/json")
 
     local turn=0 response finish_reason assistant_message has_tool_calls
-    local start_ts elapsed
-    start_ts=$(date +%s)
+    local elapsed
     while (( turn < AGENT_MAX_TURNS )); do
-        elapsed=$(( $(date +%s) - start_ts ))
+        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
         if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
-            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) without completing the task (elapsed ${elapsed}s)." >&2
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
             return 1
         fi
         turn=$(( turn + 1 ))

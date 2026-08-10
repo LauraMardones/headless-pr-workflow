@@ -201,6 +201,7 @@ run_invoke() {
         AGENT_TOOL_TIMEOUT=30
         AGENT_API_TIMEOUT=30
         AGENT_MAX_WALLCLOCK_SECONDS=999999
+        DISPATCH_JOB_START_TS=$(date +%s)
         ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
         OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
         COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
