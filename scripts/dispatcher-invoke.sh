@@ -682,11 +682,30 @@ run_anthropic_agent() {
             return 1
         fi
         turn=$(( turn + 1 ))
-        local request
+        local request tmp_messages
+        # $messages grows every turn (tool outputs, file contents, PR bodies
+        # this session wrote) and is NOT safe to pass via --argjson on the
+        # command line — confirmed live (run 31425632706, PR #255, head
+        # d845ece): by turn 17 it exceeded the OS argument-length limit
+        # ("jq: Argument list too long"), and because this call sits inside a
+        # function invoked as an `if` condition, `set -e` did not catch the
+        # failure — $request was silently left empty and posted as an empty
+        # body, surfacing as a confusing "invalid JSON" error from the API
+        # instead of a clear one here. Same root cause already fixed once in
+        # this codebase for board-data pagination (issue #251); --slurpfile
+        # reads the large value from disk instead of argv, with no such limit.
+        tmp_messages="$(mktemp)"
+        printf '%s' "$messages" > "$tmp_messages"
+        local jq_rc=0
         request=$(jq -n --arg model "$model" --arg system "$system" \
             --argjson max_tokens "$AGENT_MAX_TOKENS" \
-            --argjson messages "$messages" --argjson tools "$tools" \
-            '{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages, tools:$tools}')
+            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
+            '{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
+        rm -f "$tmp_messages"
+        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
+            echo "Error: failed to build the Anthropic API request (jq exit $jq_rc)." >&2
+            return 1
+        fi
 
         response=$(_curl_json "$ANTHROPIC_API_URL" "$request" "${headers[@]}") || return 1
 
@@ -763,11 +782,24 @@ run_openai_agent() {
             return 1
         fi
         turn=$(( turn + 1 ))
-        local request
+        local request tmp_messages
+        # See the matching comment in run_anthropic_agent() — $messages must
+        # never be passed via --argjson on the command line; it grows every
+        # turn and this exact failure mode (jq "Argument list too long",
+        # silently swallowed because set -e doesn't reach here) was confirmed
+        # live on run 31425632706 (PR #255, head d845ece).
+        tmp_messages="$(mktemp)"
+        printf '%s' "$messages" > "$tmp_messages"
+        local jq_rc=0
         request=$(jq -n --arg model "$model" \
             --argjson max_tokens "$AGENT_MAX_TOKENS" \
-            --argjson messages "$messages" --argjson tools "$tools" \
-            '{model:$model, max_tokens:$max_tokens, messages:$messages, tools:$tools}')
+            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
+            '{model:$model, max_tokens:$max_tokens, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
+        rm -f "$tmp_messages"
+        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
+            echo "Error: failed to build the OpenAI API request (jq exit $jq_rc)." >&2
+            return 1
+        fi
 
         response=$(_curl_json "$OPENAI_API_URL" "$request" "${headers[@]}") || return 1
 

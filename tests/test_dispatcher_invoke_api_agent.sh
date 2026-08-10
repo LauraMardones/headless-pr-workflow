@@ -181,6 +181,32 @@ case "$FAKE_CURL_MODE" in
     fi
     echo -n "200"
     ;;
+  large_history)
+    # 15 turns, each requesting a real command that produces ~15000 chars of
+    # actual output (near _run_agent_bash_tool's truncation cap), then a
+    # final success — reproduces the live run 31425632706 shape (17 real
+    # turns of substantial tool output) that hit "jq: Argument list too
+    # long" when the accumulated message history was passed via --argjson on
+    # the command line. The tool output is real (executed by
+    # _run_agent_bash_tool, not simulated here), so the accumulated
+    # $messages this exercises is genuinely large, confirming the request
+    # still builds correctly end to end once that history is file-based.
+    gen_cmd="printf 'x%.0s' \$(seq 1 15000)"
+    if [[ $count -le 15 ]]; then
+        if [[ "$url" == *anthropic* ]]; then
+            printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"big'"$count"'","name":"bash","input":{"command":"'"$gen_cmd"'"}}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
+        else
+            printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"big'"$count"'","function":{"name":"bash","arguments":"{\"command\":\"'"$gen_cmd"'\"}"}}]}}]}' > "$outfile"
+        fi
+    else
+        if [[ "$url" == *anthropic* ]]; then
+            printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"done-with-large-history"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
+        else
+            printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done-with-large-history"}}]}' > "$outfile"
+        fi
+    fi
+    echo -n "200"
+    ;;
   *)
     echo "unknown FAKE_CURL_MODE: $FAKE_CURL_MODE" >&2
     exit 99
@@ -507,6 +533,52 @@ for label in claude-code-sonnet codex; do
         assert "$label: truncated partial text is not echoed as if it were a completed result" 0
     else
         assert "$label: truncated partial text is not echoed as if it were a completed result" 1
+    fi
+done
+
+# ─── 5h. A large accumulated message history never breaks request-building ──
+# Confirmed live on run 31425632706 (PR #255, head d845ece): by turn 17 of a
+# real /implement session, the accumulated conversation history was large
+# enough that building the request via `jq --argjson messages "$messages"`
+# hit the OS argument-length limit ("jq: Argument list too long") — the same
+# bug class already fixed once in this codebase for board-data pagination
+# (issue #251), reintroduced here. Static check first (the vulnerable
+# pattern must be gone everywhere), then a behavioral run through 15 turns
+# of real, substantial tool output (not simulated — actually executed by
+# _run_agent_bash_tool) confirming the request still builds and sends
+# correctly with a large, genuine history.
+
+echo ""
+echo "Checking no --argjson messages usage remains (the exact pattern that broke live)..."
+if grep -qF -- '--argjson messages "$messages"' "$INVOKE_SCRIPT"; then
+    assert "scripts/dispatcher-invoke.sh: no --argjson messages on the command line anywhere" 1
+else
+    assert "scripts/dispatcher-invoke.sh: no --argjson messages on the command line anywhere" 0
+fi
+
+echo ""
+echo "Checking a large, genuinely-accumulated message history still builds and sends correctly..."
+for label in claude-code-sonnet codex; do
+    state_dir="$GLOBAL_TMP/state-largehistory-$label"; mkdir -p "$state_dir"
+    out=$(run_invoke "$label" large_history 60 "$state_dir") && rc=0 || rc=$?
+    if [[ $rc -eq 0 ]] && echo "$out" | grep -qF "done-with-large-history"; then
+        assert "$label: completes successfully with a large real accumulated history" 0
+    else
+        echo "      exit=$rc output: $out"
+        assert "$label: completes successfully with a large real accumulated history" 1
+    fi
+    # req_16.json is the final request (after 15 tool-use turns) — confirm
+    # it's valid JSON of a realistic size, not truncated or corrupted.
+    final_req="$state_dir/req_16.json"
+    if [[ -f "$final_req" ]] && jq -e . "$final_req" >/dev/null 2>&1; then
+        req_size=$(wc -c < "$final_req")
+        if [[ "$req_size" -gt 200000 ]]; then
+            assert "$label: final request is valid JSON and genuinely large (${req_size} bytes)" 0
+        else
+            assert "$label: final request is valid JSON and genuinely large, got only ${req_size} bytes" 1
+        fi
+    else
+        assert "$label: final request (req_16.json) is valid JSON" 1
     fi
 done
 
