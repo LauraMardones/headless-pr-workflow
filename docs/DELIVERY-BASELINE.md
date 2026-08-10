@@ -90,25 +90,44 @@ A delivery baseline is a structured artifact with the fields below. Each field i
 |---|---|---|---|
 | `state` | Yes | **Yes — only via [Allowed Transitions](#allowed-transitions)** | Exactly one of the six artifact-state names in [Artifact States](#artifact-states): `Candidate`, `Ready for approval`, `Accepted`, `Materialized`, `Rejected`, `Superseded` |
 | `baseline_version` | Yes | No | Version identifier — see [Versioning and Supersession](#versioning-and-supersession) |
-| `target` | Yes | No | Exactly one HPW Epic or Feature target — see [Target Granularity](#target-granularity) |
-| `provenance` | Yes | No | Origin of the baseline: authoring methodology or tool name, author identity, and creation timestamp (RFC 3339, UTC) |
+| `target` | Yes | No | Exactly one HPW Epic or Feature target, as `{type, issue_url}` — see [Target](#target) |
+| `provenance` | Yes | No | Origin of the baseline, as `{source_methodology, author, created_at}` — see [Provenance](#provenance) |
 | `source_revision` | Yes | **No — immutable** | Full 40-character Git commit SHA of the source repository revision the baseline was derived from |
 | `source_specification_ref` | Yes | **No — immutable** | Durable reference (URL or repository-relative path plus `source_revision`) to the source specification document |
 | `technical_plan_ref` | Yes | **No — immutable** | Durable reference (URL or repository-relative path plus `source_revision`) to the technical plan document |
 | `in_scope_requirements` | Yes | No | Ordered list of requirement identifiers — see [Requirement Identifiers](#requirement-identifiers) |
 | `acceptance_criteria` | Yes | No | Ordered list of `{id, text}` entries defining every acceptance criterion referenced by `requirement_acceptance_mappings` — see [Requirement-to-Acceptance-Criterion Mapping](#requirement-to-acceptance-criterion-mapping) |
 | `requirement_acceptance_mappings` | Yes | No | Mapping of every requirement identifier to one or more acceptance criteria — see [Requirement-to-Acceptance-Criterion Mapping](#requirement-to-acceptance-criterion-mapping) |
-| `exclusions` | Yes (may be empty) | No | List of explicit non-goals — see [Exclusions and Non-Goals](#exclusions-and-non-goals) |
-| `unresolved_questions` | Yes (must be empty to reach Accepted) | No | List of open questions — see [Unresolved Questions](#unresolved-questions) |
+| `exclusions` | Yes (may be empty) | No | List of `{statement, reason}` non-goals — see [Exclusions and Non-Goals](#exclusions-and-non-goals) |
+| `unresolved_questions` | Yes (must be empty to reach Accepted) | No | List of `{question, owner}` open questions — see [Unresolved Questions](#unresolved-questions) |
 | `approval_evidence` | Yes to reach Accepted | No | Authority, time, and durable GitHub evidence URL — see [Approval Evidence](#approval-evidence) |
 | `supersedes` | No | No | `baseline_version` of the baseline this version replaces; absent for a first version |
 | `superseded_by` | No | Yes — write-once when this baseline becomes Superseded | `baseline_version` of the baseline that replaced this one |
 
 `state` and `superseded_by` are the only two fields permitted to change after a baseline reaches `Accepted`. `state` changes exclusively by following an edge in the [Allowed Transitions](#allowed-transitions) table (for example `Accepted` → `Materialized`); no other field changes when `state` does. `superseded_by` is a write-once audit pointer set at the moment the baseline enters `Superseded`; it records history rather than changing intent, and it may never be rewritten once set. Every other field is frozen at `Accepted` (see [Immutability After Acceptance](#immutability-after-acceptance)).
 
+### Target
+
+`target` names the single HPW delivery item this baseline version materializes into. It has exactly two mandatory sub-fields:
+
+| Sub-field | Meaning | Format |
+|---|---|---|
+| `type` | The delivery-item kind the baseline materializes into | Exactly one of `Epic` or `Feature`; no other value is permitted |
+| `issue_url` | The HPW Epic or Feature issue the baseline targets | Full GitHub issue URL (`https://github.com/<owner>/<repo>/issues/<number>`) |
+
+A baseline that names no target, names more than one target, or uses a `type` outside `Epic` and `Feature` is invalid and cannot reach `Ready for approval`. `issue_url` is the identity used to answer "which baseline versions belong to this target": version numbering, supersession, and the at-most-one-`Accepted`-per-target rule are all evaluated per `issue_url` (see [Target Granularity](#target-granularity)). For a baseline that creates its target issue, `issue_url` is recorded when the target issue exists; a baseline cannot reach `Accepted` with an empty `issue_url`.
+
 ### Provenance
 
-`provenance` records where the baseline came from so that an auditor can trace intent back to its origin without depending on the authoring tool. It records the authoring methodology or tool name, the author identity, and the creation timestamp. Provenance is descriptive metadata; it must not introduce methodology-specific required fields into this schema.
+`provenance` records where the baseline came from so that an auditor can trace intent back to its origin without depending on the authoring tool. It has exactly three mandatory sub-fields:
+
+| Sub-field | Meaning | Format |
+|---|---|---|
+| `source_methodology` | The authoring methodology or tool that produced the source material | Free-text name (for example, a discovery methodology or tool name); never a required schema field of that methodology |
+| `author` | Who authored the baseline | GitHub handle of the author |
+| `created_at` | When the baseline version was authored | RFC 3339 timestamp in UTC |
+
+Provenance is descriptive metadata; it must not introduce methodology-specific required fields into this schema.
 
 ### Immutable Source Revision
 
@@ -155,11 +174,11 @@ Mapping rules:
 
 ### Exclusions and Non-Goals
 
-`exclusions` is a **field distinct from `in_scope_requirements`**. It records what the baseline deliberately does not deliver, so that "not in scope" is an explicit, auditable statement rather than an absence a reader must infer. Each exclusion records the excluded behaviour or outcome and, where useful, the reason it is excluded. An empty `exclusions` list is valid and asserts that no non-goal was identified. Exclusions never confer delivery authority and are never materialized as in-scope work.
+`exclusions` is a **field distinct from `in_scope_requirements`**. It records what the baseline deliberately does not deliver, so that "not in scope" is an explicit, auditable statement rather than an absence a reader must infer. Each entry is a `{statement, reason}` pair: `statement` is the excluded behaviour or outcome and is mandatory; `reason` explains why it is excluded and is optional. An empty `exclusions` list is valid and asserts that no non-goal was identified. Exclusions never confer delivery authority and are never materialized as in-scope work.
 
 ### Unresolved Questions
 
-`unresolved_questions` is a **field distinct from `in_scope_requirements`**. It records open questions the baseline author could not close. Each entry records the question and its owner.
+`unresolved_questions` is a **field distinct from `in_scope_requirements`**. It records open questions the baseline author could not close. Each entry is a `{question, owner}` pair, both mandatory: `question` is the open question and `owner` is the GitHub handle of whoever must answer it.
 
 **No-unresolved-questions-at-v1 rule:** a baseline with any unresolved question cannot reach Accepted. The `unresolved_questions` list must be empty for the transition `Ready for approval` → `Accepted`; a baseline with a non-empty `unresolved_questions` list stays in `Candidate` or `Ready for approval`, or is Rejected. Unresolved questions are resolved by answering them and authoring a new baseline version, never by deleting them without an answer (Feature #238 unresolved-question handoff decision).
 

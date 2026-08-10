@@ -177,12 +177,34 @@ def test_requirement_identifiers_have_a_stable_format_and_mapping_rule() -> None
     )
 
 
+def test_target_field_has_a_machine_checkable_shape() -> None:
+    document = read("docs/DELIVERY-BASELINE.md")
+
+    assert "### Target\n" in document
+    assert "| `target` | Yes |" in document
+    for sub_field in ("`type`", "`issue_url`"):
+        assert sub_field in document, f"missing target sub-field: {sub_field}"
+    assert "Exactly one of `Epic` or `Feature`" in document
+    assert "Full GitHub issue URL" in document
+
+
+def test_provenance_sub_fields_are_documented() -> None:
+    document = read("docs/DELIVERY-BASELINE.md")
+
+    assert "### Provenance\n" in document
+    for sub_field in ("`source_methodology`", "`author`", "`created_at`"):
+        assert sub_field in document, f"missing provenance sub-field: {sub_field}"
+    assert "exactly three mandatory sub-fields" in document
+
+
 def test_exclusions_and_unresolved_questions_are_distinct_fields() -> None:
     document = read("docs/DELIVERY-BASELINE.md")
 
     assert document.count("field distinct from `in_scope_requirements`") >= 2
     assert "### Exclusions and Non-Goals" in document
     assert "### Unresolved Questions" in document
+    assert "Each entry is a `{statement, reason}` pair" in document
+    assert "Each entry is a `{question, owner}` pair" in document
 
 
 def test_materialization_record_schema_is_documented() -> None:
