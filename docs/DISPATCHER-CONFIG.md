@@ -41,7 +41,7 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ## Executor Secrets — `ANTHROPIC_API_KEY` and `OPENAI_API_KEY_CODEX`
 
-The dispatcher needs credentials to invoke `/implement` (and the rest of the story cycle) via each executor's CLI. There are exactly **two** required secrets, not one per `executor:` tier:
+The dispatcher needs credentials to invoke `/implement` (and the rest of the story cycle) via direct calls to the Anthropic and OpenAI APIs — no CLI binary is installed on the runner, and none is required (issue #254). There are exactly **two** required secrets, not one per `executor:` tier:
 
 | Secret | Type | Covers |
 |---|---|---|
@@ -56,7 +56,22 @@ Provision both secrets at:
 
 Both secrets must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}` and `OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}`. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
 
-**If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before invoking the CLI, and the dispatcher posts a mid-cycle blocker comment on the story issue.
+**If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before making any API call, and the dispatcher posts a mid-cycle blocker comment on the story issue.
+
+### Executor invocation mechanism
+
+`invoke_executor_command()` calls the Anthropic Messages API (Claude tiers) or the OpenAI Chat Completions API (Codex tier) directly, per ADR-002's documented architecture ("invokes executors ... via API calls"). No `claude` or `codex` CLI binary is installed on the `ubuntu-latest` runner, and `.github/workflows/dispatcher.yml` has no step that installs one — issue #254 replaced the prior CLI shell-out (which failed on every run with `env: 'claude': No such file or directory`, since neither binary was ever installed) with this direct-API path.
+
+Each call drives a bounded tool-use loop against the resolved provider (`run_anthropic_agent()` / `run_openai_agent()`) that gives the model a single `bash` tool scoped to the repository checkout. The task prompt is the corresponding `.claude/commands/<slash_command>.md` file with `$ARGUMENTS` substituted — the same instructions a manually-run command follows. The loop ends when the model responds without requesting a further tool call, or fails closed (non-zero return, no board mutation) on an HTTP error, a malformed API response, or exceeding the per-invocation turn cap. The model, per `executor:` tier, is declared in the `EXECUTOR_MODEL` table in `scripts/dispatcher-invoke.sh`'s header comment (data-driven, same pattern as `EXECUTOR_ROUTING`).
+
+Loop tuning is overridable via environment variables (defaults shown), primarily for tests:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_MAX_TURNS` | `60` | Tool-use round-trips before failing closed |
+| `AGENT_MAX_TOKENS` | `8192` | `max_tokens` requested per API turn |
+| `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run |
+| `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take |
 
 ---
 
