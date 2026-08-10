@@ -35,8 +35,11 @@ For this interim period, ADR-002's "executor sessions run outside GitHub Actions
 | `max_tokens` requested per API turn | `AGENT_MAX_TOKENS` | 8192 |
 | Seconds a single bash-tool command may run | `AGENT_TOOL_TIMEOUT` | 300 |
 | Seconds a single API call may take | `AGENT_API_TIMEOUT` | 600 |
+| **Total elapsed budget per invocation** | **`AGENT_MAX_WALLCLOCK_SECONDS`** | **10800 (3h)** |
 
-GitHub Actions' own 6-hour job ceiling remains a hard backstop beneath these caps.
+**Correction (post-review, same day):** the first version of this ADR claimed the four per-turn caps above kept every run "beneath" GitHub Actions' 6-hour job ceiling. That was wrong, and review caught it before merge: `AGENT_MAX_TURNS × (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)` = 60 × 900s = 54,000s ≈ **15 hours** — two and a half times the ceiling, not beneath it. Worse, relying on GitHub Actions to force-kill an over-budget job is not an acceptable backstop on its own: an abrupt platform kill can happen mid-step and bypass the loop's own non-zero return, which is what the caller depends on to post a `## Blocked Declaration` — silent failure instead of a reported one.
+
+`AGENT_MAX_WALLCLOCK_SECONDS` (3 hours) fixes this properly: it is checked inside the loop itself, at the top of every turn, against real elapsed wall-clock time since the invocation started — independent of how many turns have run or how long any individual call took. This makes the script fail closed through its own normal exit path (a plain non-zero `return 1`, caught by the caller exactly like any other failure) well before GitHub Actions could ever force-kill the job. Worst-case overshoot beyond the 3-hour budget is bounded by one more in-flight turn (≤900s), so actual worst-case elapsed time is ≈3h15m — comfortably below the 6h ceiling, with roughly 2h45m of margin left for checkout, other workflow steps, and any additional stories chained in the same dispatcher run (`exec bash "$0"` continues the *same* job, so the 6h ceiling is shared across all of them, not reset per story).
 
 This is a real, explicit narrowing of ADR-002's original language — not a reinterpretation that was already latent in it. It is adopted only because it is temporary and bounded, with a concrete migration already tracked (#259) to restore the originally-intended architecture.
 
@@ -51,7 +54,7 @@ Keep PR #255's implementation as built. Formally narrow ADR-002's session-bounda
 **Pros:**
 - Zero additional engineering — already built and tested (23 + 31 passing regression tests in PR #255).
 - Unblocks PR #255 and issue #254 immediately; Epic #160's "at least one full end-to-end cycle runs autonomously" success criterion is no longer indefinitely stalled.
-- The caps bound the worst case: no single run can exceed GitHub Actions' own job ceiling regardless of turn count.
+- `AGENT_MAX_WALLCLOCK_SECONDS` bounds the worst case directly: no single run can approach GitHub Actions' own job ceiling regardless of turn count, and the script always fails closed through its own exit path rather than relying on a platform-level kill.
 
 **Cons:**
 - Does not satisfy ADR-002's "sessions run outside GitHub Actions" as originally written — this ADR is the acknowledgment of that, not a way around it.
@@ -83,7 +86,7 @@ Option A is chosen because it is temporary and because a concrete alternative is
 - `docs/decisions/ADR-002.md` is **not edited**. It remains the accurate record of the target architecture (genuinely external executor sessions) and the reasoning that produced it, in keeping with this project's existing pattern of superseding decisions via a new ADR rather than rewriting the old one (ADR-001 was treated the same way when ADR-002 superseded it).
 - Issue #254's Acceptance Criterion "matches ADR-002's documented architecture ... with no further ADR update needed" is **not met as originally worded** — an ADR update was needed. This ADR is that update; issue #254's Decisions section is amended to reference it.
 - PR #255 may proceed to merge on the strength of this ADR, without further architectural rework, once review sign-off is otherwise satisfied.
-- `AGENT_MAX_TURNS`, `AGENT_MAX_TOKENS`, `AGENT_TOOL_TIMEOUT`, and `AGENT_API_TIMEOUT` (in `scripts/dispatcher-invoke.sh`) become load-bearing safety bounds under this ADR, not incidental tuning knobs. Changes to their defaults should be treated as changes to this ADR's accepted risk, not routine tuning.
+- `AGENT_MAX_TURNS`, `AGENT_MAX_TOKENS`, `AGENT_TOOL_TIMEOUT`, `AGENT_API_TIMEOUT`, and — above all — `AGENT_MAX_WALLCLOCK_SECONDS` (in `scripts/dispatcher-invoke.sh`) become load-bearing safety bounds under this ADR, not incidental tuning knobs. `AGENT_MAX_WALLCLOCK_SECONDS` specifically is what keeps this ADR's safety claim true; the other four bound per-turn behavior but do not, by themselves, bound total run time. Changes to any of their defaults should be treated as changes to this ADR's accepted risk, not routine tuning.
 - #259 (migrate to owned infrastructure) is the tracked path back to ADR-002's original architecture. This ADR does not set a deadline for #259; it is PO-paced.
 
 ---

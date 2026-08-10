@@ -62,7 +62,9 @@ Both secrets must also be explicitly wired into `.github/workflows/dispatcher.ym
 
 `invoke_executor_command()` calls the Anthropic Messages API (Claude tiers) or the OpenAI Chat Completions API (Codex tier) directly, per ADR-002's documented architecture ("invokes executors ... via API calls"). No `claude` or `codex` CLI binary is installed on the `ubuntu-latest` runner, and `.github/workflows/dispatcher.yml` has no step that installs one — issue #254 replaced the prior CLI shell-out (which failed on every run with `env: 'claude': No such file or directory`, since neither binary was ever installed) with this direct-API path.
 
-Each call drives a bounded tool-use loop against the resolved provider (`run_anthropic_agent()` / `run_openai_agent()`) that gives the model a single `bash` tool scoped to the repository checkout. The task prompt is the corresponding `.claude/commands/<slash_command>.md` file with `$ARGUMENTS` substituted — the same instructions a manually-run command follows. The loop ends when the model responds without requesting a further tool call, or fails closed (non-zero return, no board mutation) on an HTTP error, a malformed API response, or exceeding the per-invocation turn cap. The model, per `executor:` tier, is declared in the `EXECUTOR_MODEL` table in `scripts/dispatcher-invoke.sh`'s header comment (data-driven, same pattern as `EXECUTOR_ROUTING`).
+Each call drives a bounded tool-use loop against the resolved provider (`run_anthropic_agent()` / `run_openai_agent()`) that gives the model a single `bash` tool scoped to the repository checkout. The task prompt is the corresponding `.claude/commands/<slash_command>.md` file with `$ARGUMENTS` substituted — the same instructions a manually-run command follows. The loop ends when the model responds without requesting a further tool call, or fails closed (non-zero return, no board mutation) on an HTTP error, a malformed API response, exceeding the per-invocation turn cap, or exceeding the total wall-clock budget. The model, per `executor:` tier, is declared in the `EXECUTOR_MODEL` table in `scripts/dispatcher-invoke.sh`'s header comment (data-driven, same pattern as `EXECUTOR_ROUTING`).
+
+See [ADR-003](decisions/ADR-003-interim-executor-session-boundary.md) for why this loop runs inside the GitHub Actions job at all (an explicit, temporary exception to ADR-002, pending migration to owned infrastructure — #259) and why `AGENT_MAX_WALLCLOCK_SECONDS` specifically — not the per-turn caps alone — is what keeps a run from ever approaching GitHub Actions' 6-hour job ceiling.
 
 Loop tuning is overridable via environment variables (defaults shown), primarily for tests:
 
@@ -72,6 +74,7 @@ Loop tuning is overridable via environment variables (defaults shown), primarily
 | `AGENT_MAX_TOKENS` | `8192` | `max_tokens` requested per API turn |
 | `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run |
 | `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take |
+| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget per invocation — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003) |
 
 ---
 

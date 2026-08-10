@@ -200,6 +200,7 @@ run_invoke() {
         AGENT_MAX_TOKENS=1024
         AGENT_TOOL_TIMEOUT=30
         AGENT_API_TIMEOUT=30
+        AGENT_MAX_WALLCLOCK_SECONDS=999999
         ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
         OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
         COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
@@ -220,8 +221,7 @@ echo ""
 echo "Checking a single ANTHROPIC_API_KEY authenticates all three Claude tiers, no CLI involved..."
 : > "$CALL_LOG"
 for label in claude-code-haiku claude-code-sonnet claude-code-opus; do
-    out=$(run_invoke "$label" "shared-anthropic-key" "codex-key")
-    rc=$?
+    out=$(run_invoke "$label" "shared-anthropic-key" "codex-key") && rc=0 || rc=$?
     if [[ $rc -eq 0 ]]; then
         assert "$label: invoke_executor_command succeeds with only a shared ANTHROPIC_API_KEY set" 0
     else
@@ -238,8 +238,7 @@ fi
 echo ""
 echo "Checking codex is authenticated by its own separate secret, unaffected..."
 : > "$CALL_LOG"
-out=$(run_invoke "codex" "shared-anthropic-key" "codex-key")
-rc=$?
+out=$(run_invoke "codex" "shared-anthropic-key" "codex-key") && rc=0 || rc=$?
 assert "codex: invoke_executor_command succeeds via OPENAI_API_KEY_CODEX" "$([[ $rc -eq 0 ]] && echo 0 || echo 1)"
 if grep -qF 'Authorization: Bearer codex-key' "$CALL_LOG"; then
     assert "codex: the OpenAI API received the OPENAI_API_KEY_CODEX secret's value as a Bearer token" 0

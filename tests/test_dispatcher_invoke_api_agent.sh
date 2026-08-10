@@ -24,6 +24,9 @@
 #        - a malformed API response (missing the expected content field)
 #        - a non-2xx HTTP status from the provider
 #        - the agent loop exceeding AGENT_MAX_TURNS without completing
+#        - the agent loop exceeding AGENT_MAX_WALLCLOCK_SECONDS (ADR-003 —
+#          AGENT_MAX_TURNS alone does not bound wall-clock time under GitHub
+#          Actions' 6h job ceiling; this is the enforced bound that does)
 #      all return non-zero from invoke_executor_command() with a clear stderr
 #      message, for both providers where applicable.
 #   5. --dry-run makes no HTTP call at all and does not require any secret's
@@ -150,7 +153,8 @@ chmod +x "$FAKE_BIN/curl"
 
 run_invoke() {
     # $1=executor label  $2=FAKE_CURL_MODE  $3=AGENT_MAX_TURNS  $4=state dir (fresh)
-    local label="$1" mode="$2" max_turns="$3" state_dir="$4"
+    # $5=AGENT_MAX_WALLCLOCK_SECONDS (optional, default effectively unlimited for these tests)
+    local label="$1" mode="$2" max_turns="$3" state_dir="$4" wallclock="${5:-999999}"
     bash -c '
         set -euo pipefail
         source "'"$TABLES_AND_FUNC"'"
@@ -163,6 +167,7 @@ run_invoke() {
         AGENT_MAX_TOKENS=1024
         AGENT_TOOL_TIMEOUT=30
         AGENT_API_TIMEOUT=30
+        AGENT_MAX_WALLCLOCK_SECONDS='"$wallclock"'
         ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
         OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
         COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
@@ -284,6 +289,31 @@ for label in claude-code-sonnet codex; do
         assert "$label: made exactly AGENT_MAX_TURNS API calls before giving up" 0
     else
         assert "$label: made exactly AGENT_MAX_TURNS API calls before giving up, got $call_count" 1
+    fi
+done
+
+# ─── 5b. Fail-closed: exceeds AGENT_MAX_WALLCLOCK_SECONDS (ADR-003 review) ────
+# AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT) alone is not a
+# safe bound against GitHub Actions' 6h job ceiling (60 x 900s = 15h). This
+# confirms the wall-clock cap fails closed on its own, before AGENT_MAX_TURNS
+# is ever reached — set to 0 so the very first loop iteration is already over
+# budget, making the test deterministic with no real waiting and no API calls.
+
+echo ""
+echo "Checking the agent loop fails closed when AGENT_MAX_WALLCLOCK_SECONDS is exceeded..."
+for label in claude-code-sonnet codex; do
+    state_dir="$GLOBAL_TMP/state-wallclock-$label"; mkdir -p "$state_dir"
+    out=$(run_invoke "$label" never_ends 60 "$state_dir" 0) && rc=0 || rc=$?
+    if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "exceeded AGENT_MAX_WALLCLOCK_SECONDS"; then
+        assert "$label: exceeding AGENT_MAX_WALLCLOCK_SECONDS fails closed with a clear error" 0
+    else
+        echo "      exit=$rc output: $out"
+        assert "$label: exceeding AGENT_MAX_WALLCLOCK_SECONDS fails closed with a clear error" 1
+    fi
+    if [[ ! -f "$state_dir/counter" ]]; then
+        assert "$label: no API call made once the wall-clock budget is already spent" 0
+    else
+        assert "$label: no API call made once the wall-clock budget is already spent" 1
     fi
 done
 

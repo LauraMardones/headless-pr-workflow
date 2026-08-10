@@ -212,11 +212,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
 COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
 
-# ─── Executor agent loop tuning (issue #254) — overridable for tests ─────────
+# ─── Executor agent loop tuning (issue #254 / ADR-003) — overridable for tests ─
+# AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound, checked inside the
+# loop on every turn. AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)
+# alone is NOT a safe bound — at the defaults below that product is 60 x 900s =
+# 54000s (15h), which exceeds GitHub Actions' 6h job ceiling. Relying on the
+# platform to force-kill an over-budget job is not acceptable: an abrupt kill
+# can bypass the loop's own non-zero return and the caller's Blocked
+# Declaration. AGENT_MAX_WALLCLOCK_SECONDS makes the script fail closed through
+# its own normal exit path, comfortably before that platform kill could ever
+# fire (see ADR-003).
 AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # tool-use round-trips before failing closed
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-8192}"      # max_tokens requested per API turn
 AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool command may run
 AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
+AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per invoke_executor_command() call — enforced, not incidental
 ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 
@@ -638,7 +648,14 @@ run_anthropic_agent() {
     local -a headers=(-H "x-api-key: $api_key" -H "anthropic-version: 2023-06-01" -H "content-type: application/json")
 
     local turn=0 response stop_reason assistant_content
+    local start_ts elapsed
+    start_ts=$(date +%s)
     while (( turn < AGENT_MAX_TURNS )); do
+        elapsed=$(( $(date +%s) - start_ts ))
+        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) without completing the task (elapsed ${elapsed}s)." >&2
+            return 1
+        fi
         turn=$(( turn + 1 ))
         local request
         request=$(jq -n --arg model "$model" --arg system "$system" \
@@ -702,7 +719,14 @@ run_openai_agent() {
     local -a headers=(-H "Authorization: Bearer $api_key" -H "content-type: application/json")
 
     local turn=0 response finish_reason assistant_message has_tool_calls
+    local start_ts elapsed
+    start_ts=$(date +%s)
     while (( turn < AGENT_MAX_TURNS )); do
+        elapsed=$(( $(date +%s) - start_ts ))
+        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
+            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) without completing the task (elapsed ${elapsed}s)." >&2
+            return 1
+        fi
         turn=$(( turn + 1 ))
         local request
         request=$(jq -n --arg model "$model" \
