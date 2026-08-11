@@ -80,6 +80,19 @@ Executor routing is data-driven. Capability profiles are declared per executor; 
 
 The Claude Code / Codex split is a declared capability boundary, not a policy preference. Any executor that declares equivalent capabilities may take either role.
 
+### Cross-Provider Review Pairing
+
+The Executor Roles table above describes the intended split, but a story's `executor:` label only ever governs `/implement` — it says nothing about which provider reviews it. `scripts/dispatcher-invoke.sh` closes that gap (issue #263): `/review` is automatically paired to a different provider than whichever executor performed `/implement` on that story, computed at review time from the `REVIEW_EXECUTOR_ROUTING` table. No new `executor:` label value is introduced or stored — the pairing is derived, not assigned.
+
+| `/implement` executor | `/review` executor |
+|---|---|
+| `executor:claude-code-haiku` | Codex |
+| `executor:claude-code-sonnet` | Codex |
+| `executor:claude-code-opus` | Codex |
+| `executor:codex` | Claude Opus (the "deep code review, complex reasoning" tier — see Claude Model Tiers below) |
+
+This applies only to the dispatcher's own invocation path (`invoke_executor_command()`'s Step E2 call in `scripts/dispatcher-invoke.sh`). A human or interactive Claude Code session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
+
 ### Claude Model Tiers (Claude Code)
 
 > Advisory only, current as of 2026-08-09 — for human calibration when choosing an `executor:` label. Routing does not depend on these values: `scripts/dispatcher-invoke.sh` routes purely off `executor:` label suffixes, never off the model names or versions in this table.

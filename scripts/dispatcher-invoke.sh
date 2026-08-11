@@ -10,6 +10,7 @@
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
 #             issue #254 (direct Anthropic/OpenAI API invocation — no CLI, no install step)
+#             issue #263 (cross-provider /review pairing — no new executor: label)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -42,6 +43,20 @@
 # Per-tier daily token *budgets* remain separate (see EXECUTOR_BUDGET_TYPE
 # below and dispatcher-budget.sh) — that mechanism is independent of which
 # secret authenticates the call.
+#
+# ─── Cross-provider review pairing (issue #263) ───────────────────────────────
+#
+# The table above (and the `executor:` label on a story) governs /implement
+# only. /review is paired to a *different* provider automatically, per the
+# REVIEW_EXECUTOR_ROUTING table below:
+#
+# | /implement executor:        | /review executor       |
+# |------------------------------|-------------------------|
+# | claude-code-haiku/-sonnet/-opus (any Claude tier) | codex |
+# | codex                         | claude-code-opus        |
+#
+# This is computed at review time from the story's existing `executor:`
+# label — no new label value is introduced or persisted on the issue.
 #
 # ─── Executor invocation mechanism (issue #254) ───────────────────────────────
 #
@@ -159,6 +174,24 @@ declare -A EXECUTOR_BUDGET_TYPE=(
     ["claude-code-sonnet"]="sonnet"
     ["claude-code-opus"]="opus"
     ["codex"]="codex"
+)
+
+# ─── Review-pairing table (data-driven, issue #263) ───────────────────────────
+# Maps the /implement executor label suffix to the /review executor label
+# suffix, enforcing the cross-provider adversarial-review split documented in
+# docs/ADAPTERS.md's Executor Roles table: any Claude tier that implements is
+# reviewed by Codex, and Codex is reviewed by Claude Opus (the "deep code
+# review, complex reasoning" tier). Computed at review time from the story's
+# existing `executor:` label — no new label value is introduced or persisted,
+# and the story's `executor:` label continues to govern /implement only.
+# OSS invariant: this is a lookup table, not a conditional branch on executor
+# name — add a row here (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
+# EXECUTOR_MODEL/EXECUTOR_BUDGET_TYPE) when adding a new executor tier.
+declare -A REVIEW_EXECUTOR_ROUTING=(
+    ["claude-code-haiku"]="codex"
+    ["claude-code-sonnet"]="codex"
+    ["claude-code-opus"]="codex"
+    ["codex"]="claude-code-opus"
 )
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -860,21 +893,30 @@ run_openai_agent() {
 # as the task prompt — the same instructions a manually-run command follows —
 # substitutes $ARGUMENTS, and drives a bounded tool-use loop against that
 # provider's API (run_anthropic_agent / run_openai_agent).
+#
+# The optional third argument (issue #263) lets a caller invoke a command
+# under a *different* executor label than the story's own $EXECUTOR_LABEL —
+# used by Step E2 to run /review under the cross-provider review-pairing
+# result instead of the /implement label. It defaults to $EXECUTOR_LABEL, so
+# every other call site (implement/merge/cleanup) is unaffected.
 
 invoke_executor_command() {
     local slash_command="$1"
     local target_arg="$2"
+    local executor_label="${3:-$EXECUTOR_LABEL}"
 
-    local api_key_value="${!EXECUTOR_SECRET:-}"
-    if [[ -z "$api_key_value" ]]; then
-        echo "Error: Secret '$EXECUTOR_SECRET' is not set in the environment." >&2
+    local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
+    local executor_secret="${routing_value##*:}"
+    local api_key_value="${!executor_secret:-}"
+    if [[ -z "$executor_secret" || -z "$api_key_value" ]]; then
+        echo "Error: Secret '$executor_secret' is not set in the environment." >&2
         return 1
     fi
 
-    local provider="${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}"
-    local model="${EXECUTOR_MODEL[$EXECUTOR_LABEL]:-}"
+    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
+    local model="${EXECUTOR_MODEL[$executor_label]:-}"
     if [[ -z "$provider" || -z "$model" ]]; then
-        echo "Error: No provider/model entry for executor '$EXECUTOR_LABEL' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
+        echo "Error: No provider/model entry for executor '$executor_label' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
         return 1
     fi
 
@@ -1466,6 +1508,20 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
 fi
 
 # ─── Step E2: /review ─────────────────────────────────────────────────────────
+# Review pairing (issue #263): /review always runs under a different provider
+# than whichever executor performed /implement, per REVIEW_EXECUTOR_ROUTING —
+# no new `executor:` label is read or stored; the pairing is computed here,
+# at review time, from the story's existing $EXECUTOR_LABEL.
+
+LAST_ACTION="review-executor pairing for #$ISSUE_NUMBER"
+REVIEW_EXECUTOR_LABEL="${REVIEW_EXECUTOR_ROUTING[$EXECUTOR_LABEL]:-}"
+if [[ -z "$REVIEW_EXECUTOR_LABEL" ]]; then
+    echo "Error: No review-pairing entry for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING." >&2
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    DISPATCH_HANDLED=true
+    exit 1
+fi
+REVIEW_EXECUTOR_TYPE="${EXECUTOR_ROUTING[$REVIEW_EXECUTOR_LABEL]%%:*}"
 
 LAST_ACTION="invoking /review for #$ISSUE_NUMBER"
 echo ""
@@ -1478,14 +1534,30 @@ if [[ -z "$PR_NUMBER" ]]; then
     exit 1
 fi
 echo "Linked PR: #$PR_NUMBER"
+echo "Review executor: $REVIEW_EXECUTOR_TYPE (paired cross-provider from executor:$EXECUTOR_LABEL)"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
-if ! invoke_executor_command "review" "$PR_NUMBER"; then
+if ! invoke_executor_command "review" "$PR_NUMBER" "$REVIEW_EXECUTOR_LABEL"; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
     DISPATCH_HANDLED=true
     exit 1
 fi
 echo "✓ /review completed for PR #$PR_NUMBER"
+
+# Budget increment after successful /review (issue #263): attributed to the
+# reviewing executor's budget type, which may differ from the story's
+# /implement BUDGET_TYPE above — e.g. a Codex-implemented story reviewed by
+# Opus increments Opus's counter, not Codex's.
+REVIEW_BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$REVIEW_EXECUTOR_LABEL]:-}"
+if [[ -n "$REVIEW_BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would call: dispatcher-budget.sh increment $REVIEW_BUDGET_TYPE $ESTIMATED_TOKENS"
+    else
+        echo "[BUDGET] Increment: $REVIEW_BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER (review)"
+        bash "$BUDGET_SCRIPT" increment "$REVIEW_BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
+            echo "Warning: Budget increment failed for $REVIEW_BUDGET_TYPE; continuing." >&2
+    fi
+fi
 
 # ─── Step E3: /merge ──────────────────────────────────────────────────────────
 
