@@ -436,11 +436,19 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
         or max(refreshed_summaries, key=lambda item: item.created_at) != summary
     ):
         raise VerificationBlocked("technical summary changed before closure")
+    refreshed_comments = tuple(github.comments(number))
     refreshed_confirmations = tuple(
         comment
-        for comment in github.comments(number)
+        for comment in refreshed_comments
         if _matches_reply(comment, "LauraMardones", summary.created_at, "yes")
     )
+    refreshed_declines = tuple(
+        comment
+        for comment in refreshed_comments
+        if _matches_reply(comment, "LauraMardones", summary.created_at, "no")
+    )
+    if refreshed_declines:
+        raise ClosureDeclined(max(refreshed_declines, key=lambda item: item.created_at))
     if refreshed_confirmations != (confirmation,):
         raise VerificationBlocked("PO confirmation changed before closure")
     if tuple(github.closing_evidence_urls(marker)) != evidence_urls:
