@@ -39,6 +39,8 @@ Required behavior:
    - review/implementation separation
    - whether any new commit has made earlier approval stale
 6. If blockers are found:
+   - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
+   - only if no documented answer exists, declare the decision blocker with the Blocked Status Protocol's required `Checked:` line naming what was searched
    - record findings on GitHub in the correct PR review surfaces
    - use "Request changes" when available
    - clearly describe the blockers

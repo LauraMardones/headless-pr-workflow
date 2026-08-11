@@ -55,6 +55,8 @@ Refinement is complete when the task has:
 
 ## Open Questions Format
 
+Before adding an Open Question that requires PO input, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating the question to the PO.
+
 Each open question must be structured as:
 
 ```md
