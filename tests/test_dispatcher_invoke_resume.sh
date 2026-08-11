@@ -4,29 +4,50 @@
 # Tests for comment-triggered resume of decision blockers in
 # scripts/dispatcher-invoke.sh (issue #262 — Epic #160 Success Criterion #7).
 #
+# Unlike other tests/test_dispatcher_invoke_*.sh files, this file does NOT
+# hand-copy the functions under test into the test harness (a prior version
+# of this file did, and review flagged that the copy could silently diverge
+# from production while staying green). scripts/dispatcher-invoke.sh has no
+# source-safe guard — it runs argument parsing and real dispatch logic at
+# top level as soon as it's loaded — so it cannot be `source`d directly.
+# Instead, extract_function() below pulls the exact, current text of
+# check_and_resolve_decision_blocker_comment(), set_project_status_ready(),
+# and their constants straight out of the production file at test-run time
+# and evals them verbatim inside a mocked harness (mocked `gh` and
+# `post_comment`, the actual I/O boundary). This exercises the real
+# production logic byte-for-byte; drift is structurally impossible since
+# there is no separate copy to drift from.
+#
 # check_and_resolve_decision_blocker_comment() detects a PO comment resolving
 # a "## Blocked Declaration (Type: decision)" and resumes the story
-# immediately (recovery comment + board status set to "Ready for
-# implementation"), instead of waiting for the time-based stale-recovery
-# loop. Resolving-comment rule: a comment authored by the PO
-# ($DECISION_BLOCKER_PO_LOGIN), posted strictly after the blocker
-# declaration, containing a standalone line that trims to exactly
-# "/unblock". Comments are fetched with `gh api --paginate` so a
+# immediately (board status set to "Ready for implementation"), instead of
+# waiting for the time-based stale-recovery loop. Resolving-comment rule: a
+# comment authored by the PO ($DECISION_BLOCKER_PO_LOGIN), posted strictly
+# after the blocker declaration, containing a standalone line that trims to
+# exactly "/unblock". Comments are fetched with `gh api --paginate` so a
 # declaration or resolving comment past the first page is not missed.
-# Idempotency: a blocker already resumed (a $DECISION_BLOCKER_RESUME_MARKER
-# recovery comment already posted at/after the declaration) is not
-# re-triggered on a later poll while the story is actively back in
-# progress. The recovery marker is only posted after set_project_status_ready()
-# confirms the board transition actually happened, so a failed or
-# unresolved-ID mutation is retried on the next poll rather than silently
-# and permanently skipped.
+#
+# Idempotency uses a two-phase CLAIM/CONFIRM marker pair rather than a
+# single post-then-mutate or mutate-then-post ordering (either ordering
+# alone leaves a window where one of the two non-atomic external writes —
+# the board mutation, the marker comment — succeeds and the other doesn't):
+#   - CLAIM ($DECISION_BLOCKER_CLAIM_MARKER) is posted before the mutation
+#     is attempted (skipped on retry if already posted for this
+#     declaration); a claim failing to post is safe, nothing was mutated
+#     yet.
+#   - CONFIRM ($DECISION_BLOCKER_RESUME_MARKER) is posted only after
+#     set_project_status_ready() confirms the mutation happened, and only
+#     CONFIRM gates "already_resumed" — a bare claim never suppresses a
+#     retry, so a failed mutation (unresolved Status field/option IDs, or a
+#     failed GraphQL call) is retried on the next poll instead of being
+#     silently and permanently skipped.
 #
 # Scenarios covered:
 #   1. Regression: no decision blocker declared at all -> no resume (falls
 #      through unchanged to the existing stale-recovery path)
 #   2. Positive: decision blocker + later PO comment with decision text and
-#      a standalone /unblock line -> resume (recovery comment posted, board
-#      status set to "Ready for implementation")
+#      a standalone /unblock line -> resume (CLAIM then CONFIRM comments
+#      posted, board status set to "Ready for implementation")
 #   3. Negative: PO comment uses "unblock"/"unblocked" in ordinary prose,
 #      with no line that trims to exactly /unblock -> no resume
 #   4. Negative: non-PO author posts a standalone /unblock line -> no resume
@@ -34,19 +55,19 @@
 #      declaration -> no resume
 #   6. Negative: decision blocker declared, no comment follows at all ->
 #      no resume
-#   7. Idempotency: blocker already resumed on a prior poll (recovery
-#      comment already present after the declaration) -> no re-trigger,
-#      even though the same qualifying /unblock comment is still in the
-#      thread
+#   7. Idempotency: blocker already CONFIRMED-resumed on a prior poll -> no
+#      re-trigger, even though the same qualifying /unblock comment is
+#      still in the thread
 #   8. Pagination: declaration + resolving comment split across two pages
 #      of the comments endpoint -> still detected (gh api --paginate output
 #      merged via `jq -s add`)
-#   9. Board transition failure: set_project_status_ready() fails -> no
-#      recovery marker posted (so the next poll is not permanently skipped)
-#  10. Retry: a failed transition (scenario 9) succeeds on a later poll once
-#      the mutation itself succeeds, proving the failure is recoverable
-#  11. Drift guard: the tested copy's load-bearing fragments are still
-#      present in the production functions
+#   9. Board transition failure (missing Status field/option IDs) -> CLAIM
+#      posted, but no CONFIRM marker -> safe to retry
+#  10. Board transition failure (GraphQL mutation call fails) -> same as
+#      above, distinct failure path exercised directly
+#  11. Retry: a failed transition (scenario 10) succeeds on a later poll
+#      once the mutation itself succeeds, and does not re-post a second,
+#      duplicate CLAIM comment
 #
 # Usage: bash tests/test_dispatcher_invoke_resume.sh
 # Requires: bash 4+, jq (skips gracefully if jq not available)
@@ -99,96 +120,96 @@ skip_test() {
     SKIP=$(( SKIP + 1 ))
 }
 
-# ─── Helper: define check_and_resolve_decision_blocker_comment() exactly as
-# in scripts/dispatcher-invoke.sh, wired to a mocked `gh`. Shared by all
-# tests via bash -c heredocs below so each test controls what `gh` returns.
+# ─── Extract the real production functions/constants under test ───────────────
 
-FUNCTION_DEF='
-        DECISION_BLOCKER_PO_LOGIN="LauraMardones"
-        DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DISPATCHER_SCRIPT="$SCRIPT_DIR/scripts/dispatcher-invoke.sh"
 
-        post_comment() {
-            echo "POST_COMMENT: #$1" >> "$CALL_LOG"
-            echo "$2" | sed "s/^/  /" >> "$CALL_LOG"
-        }
+extract_function() {
+    sed -n "/^$1() {/,/^}/p" "$DISPATCHER_SCRIPT"
+}
 
-        # Mock honours MOCK_SET_STATUS_RC (default 0 = success) so tests can
-        # simulate the board transition failing (unresolved field/option IDs,
-        # or a failed GraphQL call in the real implementation).
-        set_project_status_ready() {
-            echo "SET_READY_ATTEMPT: item=$1 issue=#$2" >> "$CALL_LOG"
-            if [[ "${MOCK_SET_STATUS_RC:-0}" -eq 0 ]]; then
-                echo "SET_READY: item=$1 issue=#$2" >> "$CALL_LOG"
-                return 0
-            fi
-            echo "SET_READY_FAILED: item=$1 issue=#$2" >> "$CALL_LOG"
-            return 1
-        }
+REAL_CONSTANTS=$(grep -E '^DECISION_BLOCKER_(PO_LOGIN|CLAIM_MARKER|RESUME_MARKER)=' "$DISPATCHER_SCRIPT")
+REAL_SETTER_FN=$(extract_function set_project_status_ready)
+REAL_CHECK_FN=$(extract_function check_and_resolve_decision_blocker_comment)
 
-        check_and_resolve_decision_blocker_comment() {
-            local issue_num="$1" item_id="$2"
-            local comments
-            comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s "add")
+if [[ -z "$REAL_CONSTANTS" || -z "$REAL_SETTER_FN" || -z "$REAL_CHECK_FN" ]]; then
+    echo "FATAL: could not extract check_and_resolve_decision_blocker_comment(), set_project_status_ready(), or DECISION_BLOCKER_* constants from $DISPATCHER_SCRIPT — a rename or reformat broke this test's extraction. Update extract_function()/REAL_CONSTANTS above to match." >&2
+    exit 1
+fi
 
-            local blocker_created_at
-            blocker_created_at=$(echo "$comments" | jq -r '"'"'
-                [.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
-                | last | .created_at // empty'"'"')
-            [[ -z "$blocker_created_at" ]] && return 1
+# ─── Build the runner script once: mocked gh/post_comment (the I/O boundary)
+# plus the verbatim-extracted production logic. Per-test scenarios are
+# driven entirely by environment variables read at the top (COMMENTS_JSON,
+# MOCK_GRAPHQL_RC, STATUS_FIELD_ID, READY_FOR_IMPL_OPTION_ID, DRY_RUN,
+# CALL_LOG), never by editing this script.
 
-            local already_resumed
-            already_resumed=$(echo "$comments" | jq -r \
-                --arg marker "$DECISION_BLOCKER_RESUME_MARKER" \
-                --arg since "$blocker_created_at" \
-                '"'"'[.[] | select(
-                     ((.body // "") | contains($marker)) and
-                     .created_at >= $since
-                   )] | length > 0'"'"')
-            [[ "$already_resumed" == "true" ]] && return 1
+RUNNER="$GLOBAL_TMP/runner.sh"
 
-            local resolved
-            resolved=$(echo "$comments" | jq -r \
-                --arg login "$DECISION_BLOCKER_PO_LOGIN" \
-                --arg since "$blocker_created_at" \
-                '"'"'[.[] | select(
-                     (.user.login // "") == $login and
-                     .created_at > $since and
-                     ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
-                   )] | length > 0'"'"')
-            [[ "$resolved" == "true" ]] || return 1
+cat > "$RUNNER" <<'RUNNER_HEADER'
+#!/usr/bin/env bash
+set -euo pipefail
 
-            echo "RESOLVED: #$issue_num"
-            if ! set_project_status_ready "$item_id" "$issue_num"; then
-                return 1
-            fi
-            post_comment "$issue_num" "## Recovery Comment
-$DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
-Action: status set to \"Ready for implementation\".
-Next executor: review the PO'"'"'s decision in the linked comment above before resuming."
-            return 0
-        }
-'
+REPO='owner/repo'
+PROJECT_ID='PROJECT_1'
+STATUS_FIELD_ID="${STATUS_FIELD_ID-FIELD_1}"
+READY_FOR_IMPL_OPTION_ID="${READY_FOR_IMPL_OPTION_ID-OPT_READY}"
+DRY_RUN="${DRY_RUN:-false}"
 
-# ─── Helper: run the function against a single-page mocked `gh` ───────────────
-# mock_set_status_rc (optional, default 0) simulates set_project_status_ready's
-# return code, to exercise the board-transition-failure / retry-safety path.
+post_comment() {
+    echo "POST_COMMENT: #$1" >> "$CALL_LOG"
+    echo "$2" | sed 's/^/  /' >> "$CALL_LOG"
+}
+
+# Dispatches on the mocked call shape used by production code:
+#   gh api --paginate "repos/.../comments?per_page=100"  -> comments fetch
+#   gh api graphql -f query=... ...                       -> board mutation
+gh() {
+    if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+        printf '%s' "$COMMENTS_JSON"
+        return 0
+    elif [[ "$1" == "api" && "$2" == "graphql" ]]; then
+        return "${MOCK_GRAPHQL_RC:-0}"
+    fi
+    echo "unexpected gh invocation: $*" >&2
+    return 1
+}
+RUNNER_HEADER
+
+{
+    printf '\n# ─── Extracted verbatim from %s ───\n' "$DISPATCHER_SCRIPT"
+    printf '%s\n' "$REAL_CONSTANTS"
+    printf '\n%s\n' "$REAL_SETTER_FN"
+    printf '\n%s\n' "$REAL_CHECK_FN"
+} >> "$RUNNER"
+
+cat >> "$RUNNER" <<'RUNNER_FOOTER'
+
+if check_and_resolve_decision_blocker_comment "${TEST_ISSUE_NUM:-42}" "${TEST_ITEM_ID:-ITEM_ID_123}"; then
+    echo 'FUNCTION_RETURNED: 0'
+else
+    echo 'FUNCTION_RETURNED: 1'
+fi
+RUNNER_FOOTER
+
+# ─── Helper: run the real function against a scenario ─────────────────────────
+# Positional: comments_json call_log [mock_graphql_rc] [status_field_id] [ready_option_id] [dry_run]
+# status_field_id="" simulates the "unresolved Status field/option IDs" failure path.
 
 run_resume_check() {
-    local comments_json="$1" call_log="$2" mock_set_status_rc="${3:-0}"
-    REPO='owner/repo' CALL_LOG="$call_log" COMMENTS_JSON="$comments_json" \
-        bash -c "
-        set -euo pipefail
-        REPO='owner/repo'
-        CALL_LOG='$call_log'
-        MOCK_SET_STATUS_RC='$mock_set_status_rc'
-        gh() { printf '%s' '$comments_json'; }
-        $FUNCTION_DEF
-        if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123'; then
-            echo 'FUNCTION_RETURNED: 0'
-        else
-            echo 'FUNCTION_RETURNED: 1'
-        fi
-    " 2>&1
+    local comments_json="$1" call_log="$2"
+    local mock_graphql_rc="${3:-0}"
+    local status_field_id="${4-FIELD_1}"
+    local ready_option_id="${5-OPT_READY}"
+    local dry_run="${6:-false}"
+
+    CALL_LOG="$call_log" \
+    COMMENTS_JSON="$comments_json" \
+    MOCK_GRAPHQL_RC="$mock_graphql_rc" \
+    STATUS_FIELD_ID="$status_field_id" \
+    READY_FOR_IMPL_OPTION_ID="$ready_option_id" \
+    DRY_RUN="$dry_run" \
+        bash "$RUNNER" 2>&1
 }
 
 # ─── Test 1: no decision blocker declared at all -> no resume ─────────────────
@@ -205,7 +226,7 @@ test_no_blocker_no_resume() {
     output=$(run_resume_check '[]' "$call_log")
 
     assert_contains "no blocker: function returns 1 (falls through)" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "no blocker: board not mutated" "$(cat "$call_log")" "SET_READY"
+    assert_not_contains "no blocker: nothing posted" "$(cat "$call_log")" "POST_COMMENT"
 }
 
 # ─── Test 2: positive case — decision + standalone /unblock line -> resume ────
@@ -228,8 +249,8 @@ test_positive_resume_on_unblock_line() {
     output=$(run_resume_check "$comments" "$call_log")
 
     assert_contains "positive: function returns 0" "$output" "FUNCTION_RETURNED: 0"
-    assert_contains "positive: recovery comment posted" "$(cat "$call_log")" "POST_COMMENT: #42"
-    assert_contains "positive: board set to Ready for implementation" "$(cat "$call_log")" "SET_READY: item=ITEM_ID_123 issue=#42"
+    assert_contains "positive: CLAIM comment posted" "$(cat "$call_log")" "Attempting to resolve the Type: decision blocker"
+    assert_contains "positive: CONFIRM comment posted" "$(cat "$call_log")" "Detected: PO comment resolving the Type: decision blocker"
 }
 
 # ─── Test 3: "unblocked" in ordinary prose, no standalone line -> no resume ───
@@ -253,7 +274,7 @@ test_negative_prose_word_does_not_trigger() {
     output=$(run_resume_check "$comments" "$call_log")
 
     assert_contains "negative (prose word): function returns 1" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "negative (prose word): board not mutated" "$(cat "$call_log")" "SET_READY"
+    assert_not_contains "negative (prose word): nothing posted" "$(cat "$call_log")" "POST_COMMENT"
 }
 
 # ─── Test 4: non-PO author posts a standalone /unblock line -> no resume ──────
@@ -276,7 +297,7 @@ test_negative_non_po_author_does_not_trigger() {
     output=$(run_resume_check "$comments" "$call_log")
 
     assert_contains "negative (non-PO): function returns 1" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "negative (non-PO): board not mutated" "$(cat "$call_log")" "SET_READY"
+    assert_not_contains "negative (non-PO): nothing posted" "$(cat "$call_log")" "POST_COMMENT"
 }
 
 # ─── Test 5: PO's /unblock comment predates the blocker declaration -> no resume ──
@@ -299,7 +320,7 @@ test_negative_comment_before_declaration_does_not_trigger() {
     output=$(run_resume_check "$comments" "$call_log")
 
     assert_contains "negative (predates declaration): function returns 1" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "negative (predates declaration): board not mutated" "$(cat "$call_log")" "SET_READY"
+    assert_not_contains "negative (predates declaration): nothing posted" "$(cat "$call_log")" "POST_COMMENT"
 }
 
 # ─── Test 6: decision blocker declared, no comment follows at all -> no resume ────
@@ -320,18 +341,18 @@ test_negative_no_followup_comment_does_not_trigger() {
     output=$(run_resume_check "$comments" "$call_log")
 
     assert_contains "negative (no follow-up): function returns 1" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "negative (no follow-up): board not mutated" "$(cat "$call_log")" "SET_READY"
+    assert_not_contains "negative (no follow-up): nothing posted" "$(cat "$call_log")" "POST_COMMENT"
 }
 
-# ─── Test 7: idempotency — blocker already resumed on a prior poll -> no re-trigger ──
+# ─── Test 7: idempotency — blocker already CONFIRMED-resumed -> no re-trigger ─
 # Regression for the review finding: a story pulled back into "In
 # implementation" after a successful resume must not be re-queued again on
 # the next poll just because the old declaration and old /unblock comment
 # are still in the thread.
 
-test_idempotent_already_resumed_does_not_retrigger() {
+test_idempotent_already_confirmed_does_not_retrigger() {
     if ! $JQ_AVAILABLE; then
-        skip_test "idempotency: already resumed -> no re-trigger"; return
+        skip_test "idempotency: already CONFIRMED -> no re-trigger"; return
     fi
     local tmpdir call_log output comments
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
@@ -348,15 +369,16 @@ test_idempotent_already_resumed_does_not_retrigger() {
     ]'
     output=$(run_resume_check "$comments" "$call_log")
 
-    assert_contains "idempotency: function returns 1 on second poll" "$output" "FUNCTION_RETURNED: 1"
-    assert_not_contains "idempotency: no duplicate recovery comment posted" "$(cat "$call_log")" "POST_COMMENT"
-    assert_not_contains "idempotency: board not mutated again" "$(cat "$call_log")" "SET_READY"
+    assert_contains "idempotency: function returns 1 on a later poll" "$output" "FUNCTION_RETURNED: 1"
+    assert_not_contains "idempotency: nothing posted again" "$(cat "$call_log")" "POST_COMMENT"
 }
 
 # ─── Test 8: pagination — declaration and resolving comment on separate pages ─
 # Simulates `gh api --paginate` emitting one JSON array per page (as it does
 # for a paginated array-typed REST response); the real code slurp-merges
-# them with `jq -s add` before parsing.
+# them with `jq -s add` before parsing. Overrides the mocked `gh` directly
+# (rather than using COMMENTS_JSON) since it needs to emit two separate JSON
+# documents on stdout.
 
 test_pagination_across_two_pages_still_detected() {
     if ! $JQ_AVAILABLE; then
@@ -367,8 +389,6 @@ test_pagination_across_two_pages_still_detected() {
     call_log="$tmpdir/calls.log"
     touch "$call_log"
 
-    # Page 1: 100 filler comments (older) ending with the blocker declaration.
-    # Page 2: the PO's later resolving comment.
     local page1 page2
     page1=$(python3 - <<'PY'
 import json
@@ -386,35 +406,85 @@ PY
 )
     page2='[{"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z","body":"Go with option B.\n/unblock"}]'
 
-    output=$(REPO='owner/repo' bash -c "
-        set -euo pipefail
-        REPO='owner/repo'
-        CALL_LOG='$call_log'
-        # gh --paginate emits each page as a separate JSON document on stdout.
-        gh() { printf '%s' '$page1'; printf '%s' '$page2'; }
-        $FUNCTION_DEF
-        if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123'; then
-            echo 'FUNCTION_RETURNED: 0'
-        else
-            echo 'FUNCTION_RETURNED: 1'
-        fi
-    " 2>&1)
+    cat > "$tmpdir/paginated_runner.sh" <<RUNNER_PAGINATED
+#!/usr/bin/env bash
+set -euo pipefail
+REPO='owner/repo'
+PROJECT_ID='PROJECT_1'
+STATUS_FIELD_ID='FIELD_1'
+READY_FOR_IMPL_OPTION_ID='OPT_READY'
+DRY_RUN=false
 
-    assert_contains "pagination: function returns 0 (both pages merged)" "$output" "FUNCTION_RETURNED: 0"
-    assert_contains "pagination: board set to Ready for implementation" "$(cat "$call_log")" "SET_READY: item=ITEM_ID_123 issue=#42"
+post_comment() {
+    echo "POST_COMMENT: #\$1" >> "\$CALL_LOG"
 }
 
-# ─── Test 9: board transition failure -> no recovery marker posted ────────────
-# Regression for the review finding: if set_project_status_ready() fails
-# (unresolved Status field/option IDs, or a failed GraphQL mutation), the
-# recovery comment carrying $DECISION_BLOCKER_RESUME_MARKER must NOT be
-# posted — otherwise the next poll would see the marker, take the
-# already_resumed branch, and never retry, permanently stranding the story
-# In implementation despite a valid /unblock.
+gh() {
+    if [[ "\$1" == "api" && "\$2" == "--paginate" ]]; then
+        printf '%s' '$page1'
+        printf '%s' '$page2'
+        return 0
+    elif [[ "\$1" == "api" && "\$2" == "graphql" ]]; then
+        return 0
+    fi
+    return 1
+}
 
-test_board_transition_failure_no_marker_posted() {
+$REAL_CONSTANTS
+
+$REAL_SETTER_FN
+
+$REAL_CHECK_FN
+
+if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123'; then
+    echo 'FUNCTION_RETURNED: 0'
+else
+    echo 'FUNCTION_RETURNED: 1'
+fi
+RUNNER_PAGINATED
+
+    output=$(CALL_LOG="$call_log" bash "$tmpdir/paginated_runner.sh" 2>&1)
+
+    assert_contains "pagination: function returns 0 (both pages merged)" "$output" "FUNCTION_RETURNED: 0"
+    assert_contains "pagination: CONFIRM comment posted" "$(cat "$call_log")" "POST_COMMENT: #42"
+}
+
+# ─── Test 9: board transition failure — unresolved Status field/option IDs ────
+# CLAIM is still posted (safe — nothing mutated), but no CONFIRM marker, so a
+# later poll with the same input can retry.
+
+test_board_transition_failure_missing_ids() {
     if ! $JQ_AVAILABLE; then
-        skip_test "board transition failure -> no marker posted"; return
+        skip_test "board transition failure: missing field/option IDs"; return
+    fi
+    local tmpdir call_log output comments
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log="$tmpdir/calls.log"
+    touch "$call_log"
+
+    comments='[
+      {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
+       "body":"## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO decides\nOwner: PO (@LauraMardones)"},
+      {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
+       "body":"Go with option B.\n/unblock"}
+    ]'
+    # status_field_id="" simulates get_status_option_id() failing to resolve
+    # the Status field on the project — the earliest return-1 path inside
+    # set_project_status_ready().
+    output=$(run_resume_check "$comments" "$call_log" 0 "" "")
+
+    assert_contains "missing IDs: function returns 1" "$output" "FUNCTION_RETURNED: 1"
+    assert_contains "missing IDs: CLAIM comment posted" "$(cat "$call_log")" "Attempting to resolve the Type: decision blocker"
+    assert_not_contains "missing IDs: no CONFIRM comment posted" "$(cat "$call_log")" "Detected: PO comment resolving the Type: decision blocker"
+}
+
+# ─── Test 10: board transition failure — GraphQL mutation call fails ──────────
+# Distinct failure path from Test 9: field/option IDs resolve fine, but the
+# `gh api graphql` mutation call itself returns non-zero.
+
+test_board_transition_failure_graphql_call_fails() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "board transition failure: GraphQL mutation fails"; return
     fi
     local tmpdir call_log output comments
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
@@ -429,85 +499,63 @@ test_board_transition_failure_no_marker_posted() {
     ]'
     output=$(run_resume_check "$comments" "$call_log" 1)
 
-    assert_contains "transition failure: function returns 1" "$output" "FUNCTION_RETURNED: 1"
-    assert_contains "transition failure: board update was attempted" "$(cat "$call_log")" "SET_READY_ATTEMPT"
-    assert_contains "transition failure: board update reported as failed" "$(cat "$call_log")" "SET_READY_FAILED"
-    assert_not_contains "transition failure: no recovery marker comment posted" "$(cat "$call_log")" "POST_COMMENT"
+    assert_contains "GraphQL failure: function returns 1" "$output" "FUNCTION_RETURNED: 1"
+    assert_contains "GraphQL failure: CLAIM comment posted" "$(cat "$call_log")" "Attempting to resolve the Type: decision blocker"
+    assert_not_contains "GraphQL failure: no CONFIRM comment posted" "$(cat "$call_log")" "Detected: PO comment resolving the Type: decision blocker"
 }
 
-# ─── Test 10: a failed transition is retried and can succeed on a later poll ──
-# Proves the failure path in Test 9 is recoverable, not a silent permanent
-# skip: with the exact same qualifying /unblock comment still in the thread
-# (nothing was recorded on the failed attempt), a later poll whose board
-# mutation succeeds still resumes the story normally.
+# ─── Test 11: a failed transition is retried and succeeds without duplicate CLAIM ──
+# Proves the failure path in Test 10 is recoverable: with the exact same
+# comments thread (the CLAIM from the failed attempt is now part of it,
+# nothing else changed), a later poll whose GraphQL call succeeds resumes
+# the story normally and does not post a second CLAIM comment.
 
-test_failed_transition_is_retried_and_can_succeed_later() {
+test_failed_transition_is_retried_without_duplicate_claim() {
     if ! $JQ_AVAILABLE; then
-        skip_test "failed transition retried -> succeeds on a later poll"; return
+        skip_test "failed transition retried -> succeeds without duplicate CLAIM"; return
     fi
-    local tmpdir call_log_attempt1 call_log_attempt2 comments output1 output2
+    local tmpdir call_log_attempt1 call_log_attempt2 comments_before_retry comments_after_claim output1 output2
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
     call_log_attempt1="$tmpdir/calls_1.log"
     call_log_attempt2="$tmpdir/calls_2.log"
     touch "$call_log_attempt1" "$call_log_attempt2"
 
-    comments='[
+    comments_before_retry='[
       {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
        "body":"## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO decides\nOwner: PO (@LauraMardones)"},
       {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
        "body":"Go with option B.\n/unblock"}
     ]'
 
-    # Poll 1: board mutation fails — nothing recorded (Test 9's scenario).
-    output1=$(run_resume_check "$comments" "$call_log_attempt1" 1)
-    assert_contains "retry: first poll fails, no marker recorded" "$output1" "FUNCTION_RETURNED: 1"
-    assert_not_contains "retry: first poll posted no comment" "$(cat "$call_log_attempt1")" "POST_COMMENT"
+    # Poll 1: GraphQL mutation fails. CLAIM gets posted, no CONFIRM.
+    output1=$(run_resume_check "$comments_before_retry" "$call_log_attempt1" 1)
+    assert_contains "retry: first poll fails" "$output1" "FUNCTION_RETURNED: 1"
+    assert_contains "retry: first poll posts CLAIM" "$(cat "$call_log_attempt1")" "Attempting to resolve the Type: decision blocker"
 
-    # Poll 2: same unchanged comments (nothing was recorded), mutation now
-    # succeeds -> the story is not stranded, it resumes normally.
-    output2=$(run_resume_check "$comments" "$call_log_attempt2" 0)
+    # Poll 2: the thread now includes the CLAIM comment from poll 1 (as it
+    # would on GitHub); the mutation succeeds this time.
+    comments_after_claim='[
+      {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
+       "body":"## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO decides\nOwner: PO (@LauraMardones)"},
+      {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
+       "body":"Go with option B.\n/unblock"},
+      {"user":{"login":"dispatcher-bot"},"created_at":"2026-08-11T09:05:00Z",
+       "body":"## Recovery Comment\nAttempting to resolve the Type: decision blocker (standalone `/unblock` line found); attempting the board transition to \"Ready for implementation\" now."}
+    ]'
+    output2=$(run_resume_check "$comments_after_claim" "$call_log_attempt2" 0)
+
     assert_contains "retry: second poll succeeds" "$output2" "FUNCTION_RETURNED: 0"
-    assert_contains "retry: second poll posts the recovery marker" "$(cat "$call_log_attempt2")" "POST_COMMENT: #42"
-    assert_contains "retry: second poll sets the board to Ready for implementation" "$(cat "$call_log_attempt2")" "SET_READY: item=ITEM_ID_123 issue=#42"
-}
-
-# ─── Test 11: drift guard — the tested copy above must match production ───────
-# The scenarios above exercise a copy of check_and_resolve_decision_blocker_comment()
-# embedded in this test file, not the live function in scripts/dispatcher-invoke.sh
-# directly (the script has no source-safe guard: it runs argument parsing and
-# real dispatch logic at top level as soon as it's loaded, so sourcing it here
-# would require mocking the entire pre-flight/execution pipeline). To keep the
-# copy from silently diverging from production, assert that production still
-# contains the exact load-bearing fragments the tests above rely on: paginated
-# fetch, the idempotency guard, the standalone-line regex, and PO authorship.
-
-test_production_function_matches_tested_logic() {
-    local script_dir real_fn
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    real_fn=$(sed -n '/^check_and_resolve_decision_blocker_comment() {/,/^}/p' \
-        "$script_dir/scripts/dispatcher-invoke.sh")
-
-    assert_contains "drift guard: production paginates the comments fetch" "$real_fn" \
-        'gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100"'
-    assert_contains "drift guard: production merges pages via jq slurp" "$real_fn" \
-        'jq -s'
-    assert_contains "drift guard: production has an idempotency (already_resumed) guard" "$real_fn" \
-        'already_resumed=$(echo "$comments" | jq -r'
-    assert_contains "drift guard: production matches a standalone /unblock line" "$real_fn" \
-        'test("^\\s*/unblock\\s*$")'
-    assert_contains "drift guard: production requires PO authorship" "$real_fn" \
-        '(.user.login // "") == $login'
-    assert_contains "drift guard: production only posts the marker after a confirmed transition" "$real_fn" \
-        'if ! set_project_status_ready "$item_id" "$issue_num"; then'
-
-    local real_setter
-    real_setter=$(sed -n '/^set_project_status_ready() {/,/^}/p' \
-        "$script_dir/scripts/dispatcher-invoke.sh")
-
-    assert_contains "drift guard: set_project_status_ready returns 1 on unresolved IDs" "$real_setter" \
-        'return 1'
-    assert_contains "drift guard: set_project_status_ready returns 0 on dry-run" "$real_setter" \
-        'return 0'
+    local post_comment_calls
+    post_comment_calls=$(grep -c '^POST_COMMENT: #42$' "$call_log_attempt2" || true)
+    if [[ "$post_comment_calls" -eq 1 ]]; then
+        echo "PASS: retry: second poll posts exactly one comment (no duplicate CLAIM)"
+        PASS=$(( PASS + 1 ))
+    else
+        echo "FAIL: retry: second poll posts exactly one comment (no duplicate CLAIM)"
+        echo "      Expected exactly 1 POST_COMMENT call, found: $post_comment_calls"
+        FAIL=$(( FAIL + 1 ))
+    fi
+    assert_contains "retry: second poll posts CONFIRM" "$(cat "$call_log_attempt2")" "Detected: PO comment resolving the Type: decision blocker"
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
@@ -520,11 +568,11 @@ run_all_tests() {
     test_negative_non_po_author_does_not_trigger
     test_negative_comment_before_declaration_does_not_trigger
     test_negative_no_followup_comment_does_not_trigger
-    test_idempotent_already_resumed_does_not_retrigger
+    test_idempotent_already_confirmed_does_not_retrigger
     test_pagination_across_two_pages_still_detected
-    test_board_transition_failure_no_marker_posted
-    test_failed_transition_is_retried_and_can_succeed_later
-    test_production_function_matches_tested_logic
+    test_board_transition_failure_missing_ids
+    test_board_transition_failure_graphql_call_fails
+    test_failed_transition_is_retried_without_duplicate_claim
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
     [[ $FAIL -eq 0 ]]

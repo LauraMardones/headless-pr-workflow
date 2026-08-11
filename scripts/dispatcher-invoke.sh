@@ -416,30 +416,53 @@ check_and_notify_decision_blocker() {
 #
 # Idempotency: once a decision blocker has been resumed, the original
 # declaration comment and the PO's /unblock comment both remain in the
-# thread. Without an "already resumed" check, the very next poll — while the
-# story is back in "In implementation" actively being worked — would match
-# the same pair again and re-post the recovery comment / re-set the board to
-# "Ready for implementation", repeatedly re-queuing an in-progress story. To
-# prevent that, a resolving comment is only honoured if no recovery comment
-# for *that* declaration (i.e. posted at/after its created_at) exists yet. A
-# later decision blocker re-declared on the same issue produces a newer
-# blocker_created_at, so it is unaffected by an earlier resume.
+# thread. Without an "already resumed" check, a later poll — while the
+# story is legitimately back in "In implementation" doing new work — would
+# match the same pair again and re-post the recovery comment / re-set the
+# board to "Ready for implementation", interrupting active work. A
+# resolving comment is only honoured if no CONFIRM marker for *that*
+# declaration (posted at/after its created_at) exists yet. A later decision
+# blocker re-declared on the same issue produces a newer blocker_created_at,
+# so it is unaffected by an earlier resume.
 #
-# The recovery comment carrying $DECISION_BLOCKER_RESUME_MARKER is what the
-# idempotency check above relies on, so it is only posted AFTER
-# set_project_status_ready() confirms the board transition actually
-# happened. If the transition fails (unresolved field/option IDs, or a
-# failed GraphQL call — see that function's return contract), no marker is
-# posted, so the qualifying /unblock comment is retried on the next poll
-# instead of being silently and permanently consumed by a failed mutation.
+# This is two non-atomic external writes (the board mutation and a GitHub
+# comment), so a single "post comment, then mutate" or "mutate, then post
+# comment" ordering always has a failure window where one write succeeds
+# and the other doesn't — reordering alone only moves which write is at
+# risk, it does not remove the risk. This uses a two-phase CLAIM/CONFIRM
+# marker pair instead:
+#   - CLAIM ($DECISION_BLOCKER_CLAIM_MARKER), posted BEFORE the mutation is
+#     attempted (skipped if a claim for this declaration already exists, so
+#     a retry does not spam duplicate claims). A claim failing to post is
+#     safe: nothing has been mutated yet, so the next poll just retries
+#     from the top with no side effects.
+#   - CONFIRM ($DECISION_BLOCKER_RESUME_MARKER, the pre-existing marker),
+#     posted only AFTER set_project_status_ready() confirms the mutation
+#     actually happened. Only CONFIRM gates "already_resumed" — a claim
+#     alone never suppresses a retry.
+# The mutation itself (updateProjectV2ItemFieldValue -> "Ready for
+# implementation") is safe to attempt repeatedly: this function is only
+# ever invoked for a story whose Status is currently "In implementation"
+# (the caller's IN_IMPL_ITEMS filter), so every attempt is transitioning
+# from that same starting state. If the mutation succeeds but the CONFIRM
+# post itself then fails, the story is genuinely "Ready for implementation"
+# and drops out of IN_IMPL_ITEMS on the next poll — this function is not
+# invoked for it again unless it is legitimately redispatched into "In
+# implementation", at which point a *newer* claim/declaration cycle is what
+# a human or executor would generate via new activity; this is a narrower,
+# documented residual gap (not eliminated by any comment-based idempotency
+# scheme alone, since GitHub gives no atomic multi-write transaction), not
+# a two-writes-can-both-fail scenario. See tests/test_dispatcher_invoke_resume.sh.
 #
 # Returns 0 when a qualifying resolving comment was found and the board
-# transition was confirmed (recovery comment posted). Returns 1 with no
-# side effects when there is no open decision blocker, the blocker was
-# already resumed, no qualifying resolving comment exists yet, or the board
-# transition failed (safe to retry on the next poll).
+# transition was confirmed (CONFIRM comment posted). Returns 1 with no
+# board mutation left un-retryable when there is no open decision blocker,
+# the blocker was already confirmed-resumed, no qualifying resolving
+# comment exists yet, or the board transition failed this attempt (safe to
+# retry on the next poll — no CONFIRM marker was posted).
 
 DECISION_BLOCKER_PO_LOGIN="LauraMardones"
+DECISION_BLOCKER_CLAIM_MARKER="Attempting to resolve the Type: decision blocker"
 DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
 
 check_and_resolve_decision_blocker_comment() {
@@ -476,15 +499,25 @@ check_and_resolve_decision_blocker_comment() {
 
     echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
 
-    # The $DECISION_BLOCKER_RESUME_MARKER comment is what the already_resumed
-    # check above relies on to avoid re-triggering, so it must NOT be posted
-    # unless the board transition actually happened (or was validly
-    # simulated under --dry-run). Posting it first — or unconditionally —
-    # would let a transient GraphQL failure or unresolved field/option ID
-    # permanently strand the story: every later poll would see the marker,
-    # take the already_resumed branch, and never retry the real transition.
+    local already_claimed
+    already_claimed=$(echo "$comments" | jq -r \
+        --arg marker "$DECISION_BLOCKER_CLAIM_MARKER" \
+        --arg since "$blocker_created_at" \
+        '[.[] | select(
+             ((.body // "") | contains($marker)) and
+             .created_at >= $since
+           )] | length > 0')
+    if [[ "$already_claimed" != "true" ]]; then
+        post_comment "$issue_num" "## Recovery Comment
+$DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting the board transition to \"Ready for implementation\" now."
+    fi
+
+    # The CONFIRM comment ($DECISION_BLOCKER_RESUME_MARKER) is what the
+    # already_resumed check above relies on, so it is only posted AFTER
+    # set_project_status_ready() confirms the mutation actually happened —
+    # see the return-contract comment above.
     if ! set_project_status_ready "$item_id" "$issue_num"; then
-        echo "Warning: #$issue_num — valid /unblock found but the board transition failed; not posting the recovery marker, will retry on the next poll." >&2
+        echo "Warning: #$issue_num — valid /unblock found but the board transition failed; not posting the CONFIRM marker, will retry on the next poll." >&2
         return 1
     fi
 
