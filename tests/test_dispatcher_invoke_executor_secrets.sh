@@ -87,6 +87,44 @@ else
     assert "EXECUTOR_ROUTING: no stale per-tier ANTHROPIC_API_KEY_* names remain" 0
 fi
 
+# ─── Static check 1b: REVIEW_EXECUTOR_ROUTING table content (issue #263) ─────
+# Lookup-table test, not a conditional-branch test, per the "data-driven, not
+# hardcoded" convention already used for EXECUTOR_ROUTING above.
+
+REVIEW_ROUTING_BLOCK=$(awk '/^declare -A REVIEW_EXECUTOR_ROUTING=\($/{p=1} p{print} p && /^\)$/{exit}' "$INVOKE_SCRIPT")
+
+echo ""
+echo "Checking REVIEW_EXECUTOR_ROUTING table (cross-provider review pairing)..."
+if [[ -z "$REVIEW_ROUTING_BLOCK" ]]; then
+    echo "FAIL: could not extract REVIEW_EXECUTOR_ROUTING from $INVOKE_SCRIPT (table renamed or removed?)"
+    exit 1
+fi
+for pair in \
+    'claude-code-haiku:codex' \
+    'claude-code-sonnet:codex' \
+    'claude-code-opus:codex' \
+    'codex:claude-code-opus'
+do
+    impl_label="${pair%%:*}"
+    review_label="${pair##*:}"
+    if echo "$REVIEW_ROUTING_BLOCK" | grep -qF "[\"$impl_label\"]=\"$review_label\""; then
+        assert "REVIEW_EXECUTOR_ROUTING: $impl_label implemented -> $review_label reviews" 0
+    else
+        assert "REVIEW_EXECUTOR_ROUTING: $impl_label implemented -> $review_label reviews" 1
+    fi
+done
+# No tier reviews itself — the whole point of cross-provider pairing.
+if echo "$REVIEW_ROUTING_BLOCK" | grep -qE '\["claude-code-(haiku|sonnet|opus)"\]="claude-code-(haiku|sonnet|opus)"'; then
+    assert "REVIEW_EXECUTOR_ROUTING: no Claude tier is paired to review itself" 1
+else
+    assert "REVIEW_EXECUTOR_ROUTING: no Claude tier is paired to review itself" 0
+fi
+if echo "$REVIEW_ROUTING_BLOCK" | grep -qF '["codex"]="codex"'; then
+    assert "REVIEW_EXECUTOR_ROUTING: codex is not paired to review itself" 1
+else
+    assert "REVIEW_EXECUTOR_ROUTING: codex is not paired to review itself" 0
+fi
+
 # ─── Static check 2: workflow YAML actually wires both secrets ────────────────
 # A shell-only test cannot catch this class of bug — the script's own logic
 # can be perfectly correct while the workflow simply never hands it the
@@ -269,6 +307,85 @@ echo ""
 echo "Checking codex still succeeds when ANTHROPIC_API_KEY is unset (secrets are decoupled)..."
 out=$(run_invoke "codex" "" "codex-key") && rc=0 || rc=$?
 assert "codex: unaffected by ANTHROPIC_API_KEY being unset" "$([[ $rc -eq 0 ]] && echo 0 || echo 1)"
+
+# ─── Behavioral check: review-pairing override reaches the right credential ──
+# Issue #263: invoke_executor_command()'s optional 3rd argument lets a caller
+# (Step E2 in the real script) invoke /review under a *different* executor
+# label than the story's own $EXECUTOR_LABEL. Proves the override actually
+# changes which secret/provider is used — not just that the label is accepted.
+
+run_invoke_with_override() {
+    # $1=story's own EXECUTOR_LABEL (the /implement label, sets global context)
+    # $2=override executor label passed as invoke_executor_command's 3rd arg
+    # $3=ANTHROPIC_API_KEY value or "" to unset
+    # $4=OPENAI_API_KEY_CODEX value or "" to unset
+    local story_label="$1" override_label="$2" anthropic_key="$3" codex_key="$4"
+    bash -c '
+        set -euo pipefail
+        source "'"$TABLES_AND_FUNC"'"
+
+        EXECUTOR_LABEL="'"$story_label"'"
+        DRY_RUN=false
+        AGENT_MAX_TURNS=5
+        AGENT_MAX_TOKENS=1024
+        AGENT_TOOL_TIMEOUT=30
+        AGENT_API_TIMEOUT=30
+        AGENT_MAX_WALLCLOCK_SECONDS=999999
+        DISPATCH_JOB_START_TS=$(date +%s)
+        ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
+        OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
+        COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
+
+        if [[ -n "'"$anthropic_key"'" ]]; then export ANTHROPIC_API_KEY="'"$anthropic_key"'"; else unset ANTHROPIC_API_KEY 2>/dev/null || true; fi
+        if [[ -n "'"$codex_key"'" ]]; then export OPENAI_API_KEY_CODEX="'"$codex_key"'"; else unset OPENAI_API_KEY_CODEX 2>/dev/null || true; fi
+        export PATH="'"$FAKE_BIN"':/usr/bin:/bin"
+        export MOCK_CALL_LOG="'"$CALL_LOG"'"
+
+        invoke_executor_command "review" "999" "'"$override_label"'"
+    ' 2>&1
+}
+
+echo ""
+echo "Checking /review under the cross-provider pairing override reaches the paired provider's credential, not the implementing story's..."
+
+: > "$CALL_LOG"
+out=$(run_invoke_with_override "claude-code-sonnet" "codex" "anthropic-key-unused-for-review" "codex-review-key") && rc=0 || rc=$?
+assert "story implemented by claude-code-sonnet, /review overridden to codex: succeeds" "$([[ $rc -eq 0 ]] && echo 0 || echo 1)"
+if grep -qF 'Authorization: Bearer codex-review-key' "$CALL_LOG"; then
+    assert "claude-code-sonnet implemented / codex reviews: OpenAI API received OPENAI_API_KEY_CODEX, not the story's Anthropic key" 0
+else
+    assert "claude-code-sonnet implemented / codex reviews: OpenAI API received OPENAI_API_KEY_CODEX, not the story's Anthropic key" 1
+fi
+if grep -qF 'anthropic-key-unused-for-review' "$CALL_LOG"; then
+    assert "claude-code-sonnet implemented / codex reviews: the implementing tier's Anthropic key was NOT used for review" 1
+else
+    assert "claude-code-sonnet implemented / codex reviews: the implementing tier's Anthropic key was NOT used for review" 0
+fi
+
+: > "$CALL_LOG"
+out=$(run_invoke_with_override "codex" "claude-code-opus" "opus-review-key" "codex-key-unused-for-review") && rc=0 || rc=$?
+assert "story implemented by codex, /review overridden to claude-code-opus: succeeds" "$([[ $rc -eq 0 ]] && echo 0 || echo 1)"
+if grep -qF 'x-api-key: opus-review-key' "$CALL_LOG"; then
+    assert "codex implemented / opus reviews: Anthropic API received ANTHROPIC_API_KEY, not the story's Codex key" 0
+else
+    assert "codex implemented / opus reviews: Anthropic API received ANTHROPIC_API_KEY, not the story's Codex key" 1
+fi
+if grep -qF 'codex-key-unused-for-review' "$CALL_LOG"; then
+    assert "codex implemented / opus reviews: the implementing tier's Codex key was NOT used for review" 1
+else
+    assert "codex implemented / opus reviews: the implementing tier's Codex key was NOT used for review" 0
+fi
+
+echo ""
+echo "Checking invoke_executor_command's default (no override) behavior is unaffected — /implement, /merge, /cleanup call sites and the manually-invoked /review command all still resolve via the story's own EXECUTOR_LABEL..."
+: > "$CALL_LOG"
+out=$(run_invoke "claude-code-opus" "default-behavior-key" "codex-key") && rc=0 || rc=$?
+assert "no override: invoke_executor_command still succeeds via the story's own EXECUTOR_LABEL" "$([[ $rc -eq 0 ]] && echo 0 || echo 1)"
+if grep -qF 'x-api-key: default-behavior-key' "$CALL_LOG"; then
+    assert "no override: the story's own ANTHROPIC_API_KEY is used, exactly as before issue #263" 0
+else
+    assert "no override: the story's own ANTHROPIC_API_KEY is used, exactly as before issue #263" 1
+fi
 
 echo ""
 echo "Results: $PASS pass, $FAIL fail"

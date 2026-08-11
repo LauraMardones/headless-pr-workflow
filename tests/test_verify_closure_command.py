@@ -5,6 +5,7 @@ import pytest
 
 from headless_pr_workflow.closure_verification import (
     CheckResult,
+    ClosureDeclined,
     ClosurePartialFailure,
     Comment,
     EvidenceRow,
@@ -296,7 +297,7 @@ def closure_github() -> Mock:
     client.comments.return_value = [
         Comment(
             "LauraMardones",
-            "Product confirmed for Feature #10.",
+            "yes",
             CONFIRMATION_TIME,
             "https://example.test/confirmation",
         )
@@ -330,7 +331,7 @@ def test_valid_epic_approval_rechecks_closed_features(closure_github: Mock) -> N
     closure_github.comments.return_value = [
         Comment(
             "LauraMardones",
-            "Product approved for Epic #10.",
+            "yes",
             CONFIRMATION_TIME,
             "confirmation",
         )
@@ -351,7 +352,7 @@ def test_valid_epic_approval_rechecks_closed_features(closure_github: Mock) -> N
         (
             Comment(
                 "LauraMardones",
-                "Product confirmed for Feature #10.",
+                "yes",
                 "2026-08-09T09:59:00Z",
                 "old",
             ),
@@ -360,7 +361,7 @@ def test_valid_epic_approval_rechecks_closed_features(closure_github: Mock) -> N
         (
             Comment(
                 "someone-else",
-                "Product confirmed for Feature #10.",
+                "yes",
                 CONFIRMATION_TIME,
                 "wrong-author",
             ),
@@ -369,16 +370,7 @@ def test_valid_epic_approval_rechecks_closed_features(closure_github: Mock) -> N
         (
             Comment(
                 "LauraMardones",
-                "Product confirmed for Feature #11.",
-                CONFIRMATION_TIME,
-                "wrong-target",
-            ),
-            "exactly one fresh",
-        ),
-        (
-            Comment(
-                "LauraMardones",
-                "Looks good! Product confirmed for Feature #10.",
+                "Looks good, yes let's close this.",
                 CONFIRMATION_TIME,
                 "ambiguous",
             ),
@@ -387,7 +379,7 @@ def test_valid_epic_approval_rechecks_closed_features(closure_github: Mock) -> N
         (
             Comment(
                 "LauraMardones",
-                "Product confirmed for Feature #10.",
+                "yes",
                 CONFIRMATION_TIME,
                 "edited",
                 edited=True,
@@ -407,10 +399,67 @@ def test_invalid_confirmation_blocks_without_mutation(
     closure_github.post_closing_evidence.assert_not_called()
 
 
+@pytest.mark.parametrize("body", ["yes", "Yes", "YES", "  yes  "])
+def test_case_insensitive_whole_comment_yes_confirms(
+    closure_github: Mock, body: str
+) -> None:
+    closure_github.comments.return_value = [
+        Comment("LauraMardones", body, CONFIRMATION_TIME, "confirmation")
+    ]
+
+    result = continue_closure("10", closure_github)
+
+    assert result.action == "CLOSED"
+
+
 def test_multiple_valid_confirmations_are_ambiguous(closure_github: Mock) -> None:
     closure_github.comments.return_value *= 2
     with pytest.raises(VerificationBlocked, match="exactly one fresh"):
         continue_closure("10", closure_github)
+
+
+@pytest.mark.parametrize("body", ["no", "No", "NO", "  no  "])
+def test_case_insensitive_whole_comment_no_declines_closure(
+    closure_github: Mock, body: str
+) -> None:
+    closure_github.comments.return_value = [
+        Comment("LauraMardones", body, CONFIRMATION_TIME, "decline")
+    ]
+
+    with pytest.raises(ClosureDeclined) as error:
+        continue_closure("10", closure_github)
+
+    assert error.value.confirmation.url == "decline"
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_no_embedded_in_prose_does_not_decline(closure_github: Mock) -> None:
+    closure_github.comments.return_value = [
+        Comment(
+            "LauraMardones",
+            "No, not yet — still reviewing.",
+            CONFIRMATION_TIME,
+            "not-a-decline",
+        )
+    ]
+
+    with pytest.raises(VerificationBlocked, match="exactly one fresh"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_mixed_yes_and_no_replies_are_ambiguous(closure_github: Mock) -> None:
+    closure_github.comments.return_value = [
+        Comment("LauraMardones", "yes", CONFIRMATION_TIME, "confirmation"),
+        Comment("LauraMardones", "no", "2026-08-09T10:02:00Z", "decline"),
+    ]
+
+    with pytest.raises(VerificationBlocked, match="exactly one fresh"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
 
 
 def test_stale_summary_sha_blocks(closure_github: Mock) -> None:
@@ -458,6 +507,58 @@ def test_confirmation_change_on_final_refresh_blocks(closure_github: Mock) -> No
     closure_github.close_issue.assert_not_called()
 
 
+def test_late_no_beside_original_yes_is_ambiguous_at_final_refresh(
+    closure_github: Mock,
+) -> None:
+    initial_comments = closure_github.comments.return_value
+    decline = Comment(
+        "LauraMardones", "no", "2026-08-09T10:02:00Z", "late-decline"
+    )
+    closure_github.comments.side_effect = [
+        initial_comments,
+        initial_comments + [decline],
+    ]
+
+    with pytest.raises(VerificationBlocked, match="confirmation changed"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_no_replacing_yes_at_final_refresh_declines(closure_github: Mock) -> None:
+    decline = Comment(
+        "LauraMardones", "no", "2026-08-09T10:02:00Z", "late-decline"
+    )
+    closure_github.comments.side_effect = [
+        closure_github.comments.return_value,
+        [decline],
+    ]
+
+    with pytest.raises(ClosureDeclined) as error:
+        continue_closure("10", closure_github)
+
+    assert error.value.confirmation.url == "late-decline"
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_multiple_no_replies_at_final_refresh_is_ambiguous(
+    closure_github: Mock,
+) -> None:
+    closure_github.comments.side_effect = [
+        closure_github.comments.return_value,
+        [
+            Comment("LauraMardones", "no", "2026-08-09T10:02:00Z", "decline-1"),
+            Comment("LauraMardones", "no", "2026-08-09T10:03:00Z", "decline-2"),
+        ],
+    ]
+
+    with pytest.raises(VerificationBlocked, match="confirmation changed"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
 def test_open_epic_child_blocks_before_mutation(closure_github: Mock) -> None:
     closure_github.issue.return_value = Issue(
         10, "Epic", "OPEN", frozenset({"type:epic"})
@@ -468,7 +569,7 @@ def test_open_epic_child_blocks_before_mutation(closure_github: Mock) -> None:
     closure_github.comments.return_value = [
         Comment(
             "LauraMardones",
-            "Product approved for Epic #10.",
+            "yes",
             CONFIRMATION_TIME,
             "confirmation",
         )

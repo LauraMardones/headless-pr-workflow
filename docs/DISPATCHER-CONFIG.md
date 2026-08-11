@@ -66,6 +66,23 @@ Each call drives a bounded tool-use loop against the resolved provider (`run_ant
 
 See [ADR-003](decisions/ADR-003-interim-executor-session-boundary.md) for why this loop runs inside the GitHub Actions job at all (an explicit, temporary exception to ADR-002, pending migration to owned infrastructure — #259) and why `AGENT_MAX_WALLCLOCK_SECONDS` specifically — not the per-turn caps alone — is what keeps a run from ever approaching GitHub Actions' 6-hour job ceiling.
 
+### Review-time provider resolution (issue #263)
+
+`invoke_executor_command()` normally resolves the provider/model/secret for a `/implement`, `/merge`, or `/cleanup` call from the story's own `executor:` label (`$EXECUTOR_LABEL`). Its Step E2 `/review` call is the one exception: the dispatcher passes a third argument that overrides which executor label is resolved, so `/review` runs under a different provider than `/implement` — enforcing the cross-provider adversarial-review split documented in [ADAPTERS.md](ADAPTERS.md#cross-provider-review-pairing).
+
+The review executor is looked up in the `REVIEW_EXECUTOR_ROUTING` table (`scripts/dispatcher-invoke.sh`, alongside `EXECUTOR_ROUTING`):
+
+| `/implement` executor label | `/review` executor label |
+|---|---|
+| `claude-code-haiku` | `codex` |
+| `claude-code-sonnet` | `codex` |
+| `claude-code-opus` | `codex` |
+| `codex` | `claude-code-opus` |
+
+This is computed fresh at review time from the story's existing `executor:` label — it is never written back to the issue as a label or field. The story's `executor:` label continues to mean "the `/implement` executor" only. `/review`'s token cost is attributed to the *reviewing* executor's budget counter (see Budget Check in the Invoke Loop, below), which may differ from the story's own `EXECUTOR_BUDGET_TYPE`.
+
+This resolution is specific to the dispatcher's own invocation path. The manually-invoked `/review` command (`.claude/commands/review.md`, run by a human or an interactive session) is unaffected — it does not read `REVIEW_EXECUTOR_ROUTING` and its reviewer choice is unchanged.
+
 Loop tuning is overridable via environment variables (defaults shown), primarily for tests:
 
 | Variable | Default | Meaning |
@@ -186,6 +203,14 @@ After each successful `/implement` invocation, the counter is incremented:
 ```
 
 If every available "Ready for implementation" story is skipped due to budget, `all_budget_blocked=true` is written to `$GITHUB_OUTPUT` (guarded: only when the env var is set). This output is consumed by the Slack pause notification step (Story C, issue #204).
+
+After each successful `/review` invocation, a second, independent increment attributes cost to the *reviewing* executor (issue #263) — which, per the cross-provider pairing above, is typically a different `<executor_type>` than the `/implement` increment logged just above it:
+
+```
+[BUDGET] Increment: <executor_type> +<tokens> after #<N> (review)
+```
+
+There is no pre-`/review` budget *check* (no `[BUDGET SKIP]` path for review) — only `/implement` gates a story from starting on daily cap. Once a story has begun, its `/review` step attributes cost but does not itself skip.
 
 Under `--dry-run`, budget check and increment calls are logged but not executed:
 

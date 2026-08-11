@@ -159,6 +159,9 @@ DRY_RUN="${DRY_RUN:-false}"
 post_comment() {
     echo "POST_COMMENT: #$1" >> "$CALL_LOG"
     echo "$2" | sed 's/^/  /' >> "$CALL_LOG"
+    if [[ "$2" == *"$DECISION_BLOCKER_RESUME_MARKER"* ]]; then
+        return "${MOCK_CONFIRM_RC:-0}"
+    fi
 }
 
 # Dispatches on the mocked call shape used by production code:
@@ -185,7 +188,7 @@ RUNNER_HEADER
 
 cat >> "$RUNNER" <<'RUNNER_FOOTER'
 
-if check_and_resolve_decision_blocker_comment "${TEST_ISSUE_NUM:-42}" "${TEST_ITEM_ID:-ITEM_ID_123}"; then
+if check_and_resolve_decision_blocker_comment "${TEST_ISSUE_NUM:-42}" "${TEST_ITEM_ID:-ITEM_ID_123}" "${TEST_PROJECT_UPDATED_AT:-2026-08-10T09:00:00Z}"; then
     echo 'FUNCTION_RETURNED: 0'
 else
     echo 'FUNCTION_RETURNED: 1'
@@ -209,6 +212,8 @@ run_resume_check() {
     STATUS_FIELD_ID="$status_field_id" \
     READY_FOR_IMPL_OPTION_ID="$ready_option_id" \
     DRY_RUN="$dry_run" \
+    TEST_PROJECT_UPDATED_AT="${TEST_PROJECT_UPDATED_AT:-2026-08-10T09:00:00Z}" \
+    MOCK_CONFIRM_RC="${MOCK_CONFIRM_RC:-0}" \
         bash "$RUNNER" 2>&1
 }
 
@@ -436,7 +441,7 @@ $REAL_SETTER_FN
 
 $REAL_CHECK_FN
 
-if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123'; then
+if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123' '2026-08-10T09:00:00Z'; then
     echo 'FUNCTION_RETURNED: 0'
 else
     echo 'FUNCTION_RETURNED: 1'
@@ -540,7 +545,7 @@ test_failed_transition_is_retried_without_duplicate_claim() {
       {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
        "body":"Go with option B.\n/unblock"},
       {"user":{"login":"dispatcher-bot"},"created_at":"2026-08-11T09:05:00Z",
-       "body":"## Recovery Comment\nAttempting to resolve the Type: decision blocker (standalone `/unblock` line found); attempting the board transition to \"Ready for implementation\" now."}
+       "body":"## Recovery Comment\nAttempting to resolve the Type: decision blocker (standalone `/unblock` line found); attempting the board transition to \"Ready for implementation\" now.\nProject item version before resume: 2026-08-10T09:00:00Z"}
     ]'
     output2=$(run_resume_check "$comments_after_claim" "$call_log_attempt2" 0)
 
@@ -558,6 +563,50 @@ test_failed_transition_is_retried_without_duplicate_claim() {
     assert_contains "retry: second poll posts CONFIRM" "$(cat "$call_log_attempt2")" "Detected: PO comment resolving the Type: decision blocker"
 }
 
+
+# ─── Test 12: successful mutation + failed CONFIRM stays consumed after redispatch ──
+# The version recorded by CLAIM is the pre-mutation ProjectV2 item version.
+# A successful Ready transition followed by redispatch changes that version,
+# proving the old /unblock was consumed even when CONFIRM could not be posted.
+
+test_confirm_failure_does_not_requeue_after_redispatch() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "CONFIRM failure after success does not requeue after redispatch"; return
+    fi
+    local tmpdir call_log output comments
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log="$tmpdir/calls.log"
+    touch "$call_log"
+
+    comments='[
+      {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
+       "body":"## Blocked Declaration\nType: decision\nDeclared by: executor"},
+      {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
+       "body":"Go with option B.\n/unblock"},
+      {"user":{"login":"dispatcher-bot"},"created_at":"2026-08-11T09:05:00Z",
+       "body":"## Recovery Comment\nAttempting to resolve the Type: decision blocker.\nProject item version before resume: 2026-08-10T09:00:00Z"}
+    ]'
+
+    # Poll 1 is represented by the same declaration/unblock without the CLAIM:
+    # the board mutation succeeds, then the CONFIRM write fails.
+    local first_log first_output initial_comments
+    first_log="$tmpdir/first.log"
+    touch "$first_log"
+    initial_comments=$(echo "$comments" | jq '.[0:2]')
+    MOCK_CONFIRM_RC=1 first_output=$(run_resume_check "$initial_comments" "$first_log" 0)
+    assert_contains "CONFIRM failure: mutation succeeded but function reports incomplete marker" "$first_output" "FUNCTION_RETURNED: 1"
+    assert_contains "CONFIRM failure: CLAIM was posted first" "$(cat "$first_log")" "Project item version before resume: 2026-08-10T09:00:00Z"
+
+    # Poll 2 follows the successful Ready transition and redispatch. The changed
+    # ProjectV2 item version proves the prior CLAIM was consumed.
+    TEST_PROJECT_UPDATED_AT='2026-08-11T09:10:00Z' \
+        output=$(run_resume_check "$comments" "$call_log" 0)
+
+    assert_contains "CONFIRM failure/redispatch: old unblock is not consumed again" "$output" "FUNCTION_RETURNED: 1"
+    assert_contains "CONFIRM failure/redispatch: changed version recognized" "$output" "prior resume claim already changed the project item"
+    assert_not_contains "CONFIRM failure/redispatch: no comment posted" "$(cat "$call_log")" "POST_COMMENT"
+}
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 run_all_tests() {
@@ -573,6 +622,7 @@ run_all_tests() {
     test_board_transition_failure_missing_ids
     test_board_transition_failure_graphql_call_fails
     test_failed_transition_is_retried_without_duplicate_claim
+    test_confirm_failure_does_not_requeue_after_redispatch
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
     [[ $FAIL -eq 0 ]]

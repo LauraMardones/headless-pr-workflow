@@ -13,6 +13,7 @@
 #             issue #254 (direct Anthropic/OpenAI API invocation — no CLI, no install step)
 #             issue #262 (comment-triggered resume for decision blockers, alongside the
 #                         existing time-based stale-recovery loop — see Step 4 below)
+#             issue #263 (cross-provider /review pairing — no new executor: label)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -45,6 +46,20 @@
 # Per-tier daily token *budgets* remain separate (see EXECUTOR_BUDGET_TYPE
 # below and dispatcher-budget.sh) — that mechanism is independent of which
 # secret authenticates the call.
+#
+# ─── Cross-provider review pairing (issue #263) ───────────────────────────────
+#
+# The table above (and the `executor:` label on a story) governs /implement
+# only. /review is paired to a *different* provider automatically, per the
+# REVIEW_EXECUTOR_ROUTING table below:
+#
+# | /implement executor:        | /review executor       |
+# |------------------------------|-------------------------|
+# | claude-code-haiku/-sonnet/-opus (any Claude tier) | codex |
+# | codex                         | claude-code-opus        |
+#
+# This is computed at review time from the story's existing `executor:`
+# label — no new label value is introduced or persisted on the issue.
 #
 # ─── Executor invocation mechanism (issue #254) ───────────────────────────────
 #
@@ -162,6 +177,24 @@ declare -A EXECUTOR_BUDGET_TYPE=(
     ["claude-code-sonnet"]="sonnet"
     ["claude-code-opus"]="opus"
     ["codex"]="codex"
+)
+
+# ─── Review-pairing table (data-driven, issue #263) ───────────────────────────
+# Maps the /implement executor label suffix to the /review executor label
+# suffix, enforcing the cross-provider adversarial-review split documented in
+# docs/ADAPTERS.md's Executor Roles table: any Claude tier that implements is
+# reviewed by Codex, and Codex is reviewed by Claude Opus (the "deep code
+# review, complex reasoning" tier). Computed at review time from the story's
+# existing `executor:` label — no new label value is introduced or persisted,
+# and the story's `executor:` label continues to govern /implement only.
+# OSS invariant: this is a lookup table, not a conditional branch on executor
+# name — add a row here (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
+# EXECUTOR_MODEL/EXECUTOR_BUDGET_TYPE) when adding a new executor tier.
+declare -A REVIEW_EXECUTOR_ROUTING=(
+    ["claude-code-haiku"]="codex"
+    ["claude-code-sonnet"]="codex"
+    ["claude-code-opus"]="codex"
+    ["codex"]="claude-code-opus"
 )
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -414,45 +447,14 @@ check_and_notify_decision_blocker() {
 # issues #247/#249/#250/#251) — "detected on next poll" must hold regardless
 # of thread length.
 #
-# Idempotency: once a decision blocker has been resumed, the original
-# declaration comment and the PO's /unblock comment both remain in the
-# thread. Without an "already resumed" check, a later poll — while the
-# story is legitimately back in "In implementation" doing new work — would
-# match the same pair again and re-post the recovery comment / re-set the
-# board to "Ready for implementation", interrupting active work. A
-# resolving comment is only honoured if no CONFIRM marker for *that*
-# declaration (posted at/after its created_at) exists yet. A later decision
-# blocker re-declared on the same issue produces a newer blocker_created_at,
-# so it is unaffected by an earlier resume.
-#
-# This is two non-atomic external writes (the board mutation and a GitHub
-# comment), so a single "post comment, then mutate" or "mutate, then post
-# comment" ordering always has a failure window where one write succeeds
-# and the other doesn't — reordering alone only moves which write is at
-# risk, it does not remove the risk. This uses a two-phase CLAIM/CONFIRM
-# marker pair instead:
-#   - CLAIM ($DECISION_BLOCKER_CLAIM_MARKER), posted BEFORE the mutation is
-#     attempted (skipped if a claim for this declaration already exists, so
-#     a retry does not spam duplicate claims). A claim failing to post is
-#     safe: nothing has been mutated yet, so the next poll just retries
-#     from the top with no side effects.
-#   - CONFIRM ($DECISION_BLOCKER_RESUME_MARKER, the pre-existing marker),
-#     posted only AFTER set_project_status_ready() confirms the mutation
-#     actually happened. Only CONFIRM gates "already_resumed" — a claim
-#     alone never suppresses a retry.
-# The mutation itself (updateProjectV2ItemFieldValue -> "Ready for
-# implementation") is safe to attempt repeatedly: this function is only
-# ever invoked for a story whose Status is currently "In implementation"
-# (the caller's IN_IMPL_ITEMS filter), so every attempt is transitioning
-# from that same starting state. If the mutation succeeds but the CONFIRM
-# post itself then fails, the story is genuinely "Ready for implementation"
-# and drops out of IN_IMPL_ITEMS on the next poll — this function is not
-# invoked for it again unless it is legitimately redispatched into "In
-# implementation", at which point a *newer* claim/declaration cycle is what
-# a human or executor would generate via new activity; this is a narrower,
-# documented residual gap (not eliminated by any comment-based idempotency
-# scheme alone, since GitHub gives no atomic multi-write transaction), not
-# a two-writes-can-both-fail scenario. See tests/test_dispatcher_invoke_resume.sh.
+# Idempotency and retry safety: the CLAIM records the ProjectV2 item's
+# updatedAt value before the Ready mutation. If the mutation fails, that value
+# is unchanged and a later poll retries without posting another CLAIM. If the
+# mutation succeeds, the item version changes; any subsequent redispatch changes
+# it again. Thus a later In-implementation scan can tell that the old /unblock
+# was already consumed even when posting the CONFIRM comment failed. A CONFIRM
+# marker remains the normal happy-path fast check. A newly declared blocker has
+# a later declaration timestamp and starts a fresh claim cycle.
 #
 # Returns 0 when a qualifying resolving comment was found and the board
 # transition was confirmed (CONFIRM comment posted). Returns 1 with no
@@ -466,7 +468,7 @@ DECISION_BLOCKER_CLAIM_MARKER="Attempting to resolve the Type: decision blocker"
 DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
 
 check_and_resolve_decision_blocker_comment() {
-    local issue_num="$1" item_id="$2"
+    local issue_num="$1" item_id="$2" project_item_updated_at="$3"
     local comments
     comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add')
 
@@ -499,17 +501,30 @@ check_and_resolve_decision_blocker_comment() {
 
     echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
 
-    local already_claimed
-    already_claimed=$(echo "$comments" | jq -r \
+    local claim_project_version
+    claim_project_version=$(echo "$comments" | jq -r \
         --arg marker "$DECISION_BLOCKER_CLAIM_MARKER" \
         --arg since "$blocker_created_at" \
         '[.[] | select(
              ((.body // "") | contains($marker)) and
              .created_at >= $since
-           )] | length > 0')
-    if [[ "$already_claimed" != "true" ]]; then
+           )] | last | (.body // "")
+         | capture("Project item version before resume: (?<version>[^\\n]+)").version // empty')
+
+    # The claim records the ProjectV2 item's version before the mutation. A
+    # failed mutation leaves that version unchanged and is safe to retry. A
+    # successful mutation changes it; any later redispatch changes it again.
+    # Therefore a bare CLAIM plus a different current version proves that the
+    # old /unblock was already consumed even when the CONFIRM comment failed.
+    if [[ -n "$claim_project_version" && "$project_item_updated_at" != "$claim_project_version" ]]; then
+        echo "RESOLVED: #$issue_num — prior resume claim already changed the project item; not re-consuming the old /unblock"
+        return 1
+    fi
+
+    if [[ -z "$claim_project_version" ]]; then
         post_comment "$issue_num" "## Recovery Comment
-$DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting the board transition to \"Ready for implementation\" now."
+$DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting the board transition to \"Ready for implementation\" now.
+Project item version before resume: $project_item_updated_at"
     fi
 
     # The CONFIRM comment ($DECISION_BLOCKER_RESUME_MARKER) is what the
@@ -526,7 +541,10 @@ $DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting 
 $DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
 Action: status set to \"Ready for implementation\".
 Next executor: review the PO's decision in the linked comment above before resuming."
-    post_comment "$issue_num" "$recovery_comment"
+    if ! post_comment "$issue_num" "$recovery_comment"; then
+        echo "Warning: #$issue_num — board transition succeeded but the CONFIRM comment failed; the versioned CLAIM will prevent the old /unblock from being consumed again after redispatch." >&2
+        return 1
+    fi
     return 0
 }
 
@@ -1001,21 +1019,30 @@ run_openai_agent() {
 # as the task prompt — the same instructions a manually-run command follows —
 # substitutes $ARGUMENTS, and drives a bounded tool-use loop against that
 # provider's API (run_anthropic_agent / run_openai_agent).
+#
+# The optional third argument (issue #263) lets a caller invoke a command
+# under a *different* executor label than the story's own $EXECUTOR_LABEL —
+# used by Step E2 to run /review under the cross-provider review-pairing
+# result instead of the /implement label. It defaults to $EXECUTOR_LABEL, so
+# every other call site (implement/merge/cleanup) is unaffected.
 
 invoke_executor_command() {
     local slash_command="$1"
     local target_arg="$2"
+    local executor_label="${3:-$EXECUTOR_LABEL}"
 
-    local api_key_value="${!EXECUTOR_SECRET:-}"
-    if [[ -z "$api_key_value" ]]; then
-        echo "Error: Secret '$EXECUTOR_SECRET' is not set in the environment." >&2
+    local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
+    local executor_secret="${routing_value##*:}"
+    local api_key_value="${!executor_secret:-}"
+    if [[ -z "$executor_secret" || -z "$api_key_value" ]]; then
+        echo "Error: Secret '$executor_secret' is not set in the environment." >&2
         return 1
     fi
 
-    local provider="${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}"
-    local model="${EXECUTOR_MODEL[$EXECUTOR_LABEL]:-}"
+    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
+    local model="${EXECUTOR_MODEL[$executor_label]:-}"
     if [[ -z "$provider" || -z "$model" ]]; then
-        echo "Error: No provider/model entry for executor '$EXECUTOR_LABEL' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
+        echo "Error: No provider/model entry for executor '$executor_label' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
         return 1
     fi
 
@@ -1104,6 +1131,7 @@ fetch_board_data() {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id
+                        updatedAt
                         content { ... on Issue { number title body updatedAt } }
                         fieldValues(first: 20) {
                           nodes {
@@ -1136,6 +1164,7 @@ fetch_board_data() {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id
+                        updatedAt
                         content { ... on Issue { number title body updatedAt } }
                         fieldValues(first: 20) {
                           nodes {
@@ -1310,7 +1339,8 @@ IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
          ] | length > 0)
       )
     | { id: .id, number: .content.number, title: .content.title,
-        body: (.content.body // ""), updatedAt: .content.updatedAt }
+        body: (.content.body // ""), updatedAt: .content.updatedAt,
+        projectUpdatedAt: .updatedAt }
 ]')
 
 IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
@@ -1377,13 +1407,14 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
     issue_num=$(echo "$item" | jq -r '.number')
     issue_title=$(echo "$item" | jq -r '.title')
     updated_at=$(echo "$item" | jq -r '.updatedAt')
+    project_updated_at=$(echo "$item" | jq -r '.projectUpdatedAt')
 
     # ── Comment-triggered resume for decision blockers (issue #262) ──────────
     # Runs before the time-based staleness check below: a PO's resolving
     # comment must resume the story immediately rather than wait out
     # STALE_THRESHOLD. Once resumed, this story is no longer "In
     # implementation", so the staleness check below is skipped for it.
-    if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id"; then
+    if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id" "$project_updated_at"; then
         RESUME_COUNT=$(( RESUME_COUNT + 1 ))
         continue
     fi
@@ -1638,6 +1669,20 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
 fi
 
 # ─── Step E2: /review ─────────────────────────────────────────────────────────
+# Review pairing (issue #263): /review always runs under a different provider
+# than whichever executor performed /implement, per REVIEW_EXECUTOR_ROUTING —
+# no new `executor:` label is read or stored; the pairing is computed here,
+# at review time, from the story's existing $EXECUTOR_LABEL.
+
+LAST_ACTION="review-executor pairing for #$ISSUE_NUMBER"
+REVIEW_EXECUTOR_LABEL="${REVIEW_EXECUTOR_ROUTING[$EXECUTOR_LABEL]:-}"
+if [[ -z "$REVIEW_EXECUTOR_LABEL" ]]; then
+    echo "Error: No review-pairing entry for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING." >&2
+    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+    DISPATCH_HANDLED=true
+    exit 1
+fi
+REVIEW_EXECUTOR_TYPE="${EXECUTOR_ROUTING[$REVIEW_EXECUTOR_LABEL]%%:*}"
 
 LAST_ACTION="invoking /review for #$ISSUE_NUMBER"
 echo ""
@@ -1650,14 +1695,30 @@ if [[ -z "$PR_NUMBER" ]]; then
     exit 1
 fi
 echo "Linked PR: #$PR_NUMBER"
+echo "Review executor: $REVIEW_EXECUTOR_TYPE (paired cross-provider from executor:$EXECUTOR_LABEL)"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
-if ! invoke_executor_command "review" "$PR_NUMBER"; then
+if ! invoke_executor_command "review" "$PR_NUMBER" "$REVIEW_EXECUTOR_LABEL"; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
     DISPATCH_HANDLED=true
     exit 1
 fi
 echo "✓ /review completed for PR #$PR_NUMBER"
+
+# Budget increment after successful /review (issue #263): attributed to the
+# reviewing executor's budget type, which may differ from the story's
+# /implement BUDGET_TYPE above — e.g. a Codex-implemented story reviewed by
+# Opus increments Opus's counter, not Codex's.
+REVIEW_BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$REVIEW_EXECUTOR_LABEL]:-}"
+if [[ -n "$REVIEW_BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would call: dispatcher-budget.sh increment $REVIEW_BUDGET_TYPE $ESTIMATED_TOKENS"
+    else
+        echo "[BUDGET] Increment: $REVIEW_BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER (review)"
+        bash "$BUDGET_SCRIPT" increment "$REVIEW_BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
+            echo "Warning: Budget increment failed for $REVIEW_BUDGET_TYPE; continuing." >&2
+    fi
+fi
 
 # ─── Step E3: /merge ──────────────────────────────────────────────────────────
 
