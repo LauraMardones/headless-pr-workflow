@@ -12,6 +12,13 @@
 #   6. Budget script absent: gracefully skips budget check without error
 #   7. GITHUB_OUTPUT not set: all_budget_blocked guard suppresses write
 #
+# Issue #263 additions — /review budget attribution to the cross-provider
+# review executor (may differ from the story's own /implement BUDGET_TYPE):
+#   12. Increment path: /review's increment lands on the reviewing executor's
+#       counter, distinct from and in addition to the /implement increment
+#   13. Review-side budget script absent: gracefully skipped, no error
+#   14. Review-side dry-run: increment logged but not executed
+#
 # Usage: bash tests/test_dispatcher_invoke_budget.sh
 # Requires: bash 4+
 
@@ -486,6 +493,120 @@ test_all_ready_exhausted_via_exclusion() {
         "$output" "loop-exhausted"
 }
 
+# ─── Test 12: /review budget increment attributed to the reviewing executor ────
+# Issue #263: /review's cost must land on the *reviewing* executor's budget
+# counter, not the implementing executor's — including the cross-provider
+# case (a Codex-implemented story reviewed by Opus increments Opus's counter,
+# not Codex's).
+
+test_review_budget_increment_attributed_to_reviewer() {
+    local tmpdir
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+
+    local call_log
+    call_log=$(setup_mock_budget "$tmpdir" 0)   # budget available
+
+    local output
+    output=$(bash -c "
+        set -euo pipefail
+        BUDGET_SCRIPT='$tmpdir/dispatcher-budget.sh'
+        ESTIMATED_TOKENS=75000
+        ISSUE_NUMBER=263
+        DRY_RUN=false
+
+        # Story implemented by codex (BUDGET_TYPE=codex); /review is paired
+        # cross-provider to claude-code-opus (REVIEW_BUDGET_TYPE=opus) per
+        # REVIEW_EXECUTOR_ROUTING. The two increments must hit different
+        # counters.
+        BUDGET_TYPE='codex'
+        REVIEW_BUDGET_TYPE='opus'
+
+        echo \"[BUDGET] Increment: \$BUDGET_TYPE +\$ESTIMATED_TOKENS after #\$ISSUE_NUMBER\"
+        bash \"\$BUDGET_SCRIPT\" increment \"\$BUDGET_TYPE\" \"\$ESTIMATED_TOKENS\" || true
+
+        if [[ -n \"\$REVIEW_BUDGET_TYPE\" && -f \"\$BUDGET_SCRIPT\" ]]; then
+            echo \"[BUDGET] Increment: \$REVIEW_BUDGET_TYPE +\$ESTIMATED_TOKENS after #\$ISSUE_NUMBER (review)\"
+            bash \"\$BUDGET_SCRIPT\" increment \"\$REVIEW_BUDGET_TYPE\" \"\$ESTIMATED_TOKENS\" || true
+        fi
+    " 2>&1)
+
+    assert_contains "review-attribution: /implement increment logs the implementing executor's type (codex)" \
+        "$output" "[BUDGET] Increment: codex +75000 after #263"
+    assert_contains "review-attribution: /review increment logs the reviewing executor's type (opus), tagged (review)" \
+        "$output" "[BUDGET] Increment: opus +75000 after #263 (review)"
+    assert_contains "review-attribution: dispatcher-budget.sh increment called with codex (implement)" \
+        "$(cat "$call_log")" "increment codex 75000"
+    assert_contains "review-attribution: dispatcher-budget.sh increment called with opus (review)" \
+        "$(cat "$call_log")" "increment opus 75000"
+    # The reviewing executor's counter must not be conflated with the
+    # implementing executor's — exactly two increment calls, one per type.
+    local increment_count
+    increment_count=$(grep -c '^increment ' "$call_log" || true)
+    if [[ "$increment_count" == "2" ]]; then
+        echo "PASS: review-attribution: exactly one increment per executor type (implement + review, not merged)"
+        PASS=$(( PASS + 1 ))
+    else
+        echo "FAIL: review-attribution: exactly one increment per executor type (implement + review, not merged)"
+        echo "      expected 2 increment calls, got: $increment_count"
+        FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+# ─── Test 13: /review budget increment skipped gracefully when unattributed ───
+# Mirrors Test 7 (implement-side): if REVIEW_BUDGET_TYPE resolves empty (should
+# not happen given REVIEW_EXECUTOR_ROUTING covers all four tiers, but the
+# guard mirrors the implement-side pattern) or the budget script is absent,
+# the /review increment is skipped without error.
+
+test_review_budget_increment_skipped_when_absent() {
+    local output
+    output=$(bash -c "
+        set -euo pipefail
+        BUDGET_SCRIPT='/nonexistent/dispatcher-budget.sh'
+        REVIEW_BUDGET_TYPE='opus'
+        DRY_RUN=false
+
+        if [[ -n \"\$REVIEW_BUDGET_TYPE\" && -f \"\$BUDGET_SCRIPT\" ]]; then
+            bash \"\$BUDGET_SCRIPT\" increment \"\$REVIEW_BUDGET_TYPE\" 75000
+        fi
+        echo 'no-error'
+    " 2>&1)
+
+    assert_contains "review-attribution absent script: no error" "$output" "no-error"
+    assert_not_contains "review-attribution absent script: no [BUDGET] increment logged" \
+        "$output" "[BUDGET] Increment"
+}
+
+# ─── Test 14: /review budget increment dry-run — logged but not executed ──────
+
+test_review_budget_dry_run_logs_not_executes() {
+    local tmpdir
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+
+    local call_log
+    call_log=$(setup_mock_budget "$tmpdir" 0)
+
+    local output
+    output=$(bash -c "
+        set -euo pipefail
+        BUDGET_SCRIPT='$tmpdir/dispatcher-budget.sh'
+        REVIEW_BUDGET_TYPE='opus'
+        ESTIMATED_TOKENS=75000
+        ISSUE_NUMBER=263
+        DRY_RUN=true
+
+        if [[ -n \"\$REVIEW_BUDGET_TYPE\" && -f \"\$BUDGET_SCRIPT\" ]]; then
+            if \$DRY_RUN; then
+                echo \"[DRY RUN] Would call: dispatcher-budget.sh increment \$REVIEW_BUDGET_TYPE \$ESTIMATED_TOKENS\"
+            fi
+        fi
+    " 2>&1)
+
+    assert_contains "review-attribution dry-run: increment log line present" "$output" \
+        "[DRY RUN] Would call: dispatcher-budget.sh increment opus 75000"
+    assert_not_contains "review-attribution dry-run: budget script not actually called" \
+        "$(cat "$call_log" 2>/dev/null || true)" "increment"
+}
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
@@ -502,6 +623,9 @@ run_all_tests() {
     test_budget_config_error_hard_fails
     test_estimate_called_with_size_label
     test_all_ready_exhausted_via_exclusion
+    test_review_budget_increment_attributed_to_reviewer
+    test_review_budget_increment_skipped_when_absent
+    test_review_budget_dry_run_logs_not_executes
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed"
     [[ $FAIL -eq 0 ]]
