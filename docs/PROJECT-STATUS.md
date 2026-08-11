@@ -282,6 +282,7 @@ All fields are required. The **"Unblocked when"** field must state a specific, t
 Decision blockers require immediate PO involvement:
 
 - Post the declaration comment and **@mention the PO** in the same comment.
+- The declaration comment must also state the exact resume instruction, so the PO is never expected to already know an undocumented convention: "To resume: reply on this issue with your decision, including a line that is exactly `/unblock`."
 - Only the PO may resolve a decision blocker.
 - The executor must not attempt to unblock a decision blocker unilaterally.
 
@@ -295,8 +296,8 @@ Decision blockers require immediate PO involvement:
 
 When a blocker is resolved:
 
-1. The owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration.
-2. The story status returns to **Refined** (if hard dependencies remain) or **Ready for implementation** (if all dependencies are resolved).
+1. **Decision blockers:** the PO replies with their decision in a comment that includes a standalone line — trimmed of surrounding whitespace — that is exactly `/unblock`. The word "unblock"/"unblocked" appearing in ordinary prose does not count; only a full line equal to `/unblock` qualifies. The dispatcher detects this automatically on its next poll and returns the story to **Ready for implementation** — no manual board-status change is required.
+2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration, and the story status is moved back manually to **Refined** (if hard dependencies remain) or **Ready for implementation** (if all dependencies are resolved).
 3. The executor label is reapplied as appropriate.
 
 ### Cascading blocked rules
