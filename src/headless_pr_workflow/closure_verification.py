@@ -32,6 +32,16 @@ class ClosurePartialFailure(RuntimeError):
     """Raised after close succeeds but its durable evidence cannot be posted."""
 
 
+class ClosureDeclined(ValueError):
+    """Raised when a fresh, scoped PO reply of exactly "no" declines closure."""
+
+    def __init__(self, confirmation: "Comment") -> None:
+        self.confirmation = confirmation
+        super().__init__(
+            f"closure declined by {confirmation.author} at {confirmation.created_at}"
+        )
+
+
 @dataclass(frozen=True)
 class Issue:
     number: int
@@ -302,10 +312,13 @@ def verify_closure(
     )
 
 
-def _confirmation_text(target_type: str, number: int) -> str:
-    noun = "Feature" if target_type == "type:feature" else "Epic"
-    verb = "confirmed" if target_type == "type:feature" else "approved"
-    return f"Product {verb} for {noun} #{number}."
+def _matches_reply(comment: Comment, author: str, after: str, word: str) -> bool:
+    return (
+        comment.author == author
+        and not comment.edited
+        and comment.created_at > after
+        and comment.body.strip().lower() == word
+    )
 
 
 def _closing_marker(number: int, main_sha: str) -> str:
@@ -368,16 +381,20 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
             "technical summary is stale; rerun technical verification"
         )
 
-    expected = _confirmation_text(target_type, number)
+    comments = tuple(github.comments(number))
     confirmations = tuple(
         comment
-        for comment in github.comments(number)
-        if comment.author == "LauraMardones"
-        and not comment.edited
-        and comment.created_at > summary.created_at
-        and comment.body.strip() == expected
+        for comment in comments
+        if _matches_reply(comment, "LauraMardones", summary.created_at, "yes")
     )
-    if len(confirmations) != 1:
+    declines = tuple(
+        comment
+        for comment in comments
+        if _matches_reply(comment, "LauraMardones", summary.created_at, "no")
+    )
+    if len(declines) == 1 and not confirmations:
+        raise ClosureDeclined(declines[0])
+    if len(confirmations) != 1 or declines:
         raise VerificationBlocked(
             "exactly one fresh, unedited, target-specific PO confirmation is required"
         )
@@ -422,10 +439,7 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
     refreshed_confirmations = tuple(
         comment
         for comment in github.comments(number)
-        if comment.author == "LauraMardones"
-        and not comment.edited
-        and comment.created_at > summary.created_at
-        and comment.body.strip() == expected
+        if _matches_reply(comment, "LauraMardones", summary.created_at, "yes")
     )
     if refreshed_confirmations != (confirmation,):
         raise VerificationBlocked("PO confirmation changed before closure")
