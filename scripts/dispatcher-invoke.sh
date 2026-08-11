@@ -2,14 +2,17 @@
 # scripts/dispatcher-invoke.sh
 #
 # Dispatcher pre-flight gate and execution loop — executor routing, WIP check,
-# stale detection, file-overlap check, conflict blocker, and full story-cycle
-# invocation (/implement → /review → /merge → /cleanup) with board status
-# transitions. After each story completes or is blocked, the loop finds the
-# next "Ready for implementation" story and repeats the full pre-flight + cycle.
+# stale detection, comment-triggered decision-blocker resume, file-overlap
+# check, conflict blocker, and full story-cycle invocation (/implement →
+# /review → /merge → /cleanup) with board status transitions. After each
+# story completes or is blocked, the loop finds the next "Ready for
+# implementation" story and repeats the full pre-flight + cycle.
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
 #             issue #254 (direct Anthropic/OpenAI API invocation — no CLI, no install step)
+#             issue #262 (comment-triggered resume for decision blockers, alongside the
+#                         existing time-based stale-recovery loop — see Step 4 below)
 #             issue #263 (cross-provider /review pairing — no new executor: label)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
@@ -420,6 +423,129 @@ check_and_notify_decision_blocker() {
                --arg bt "decision" \
                --arg uw "$unblocked_when" \
                '{story_title: $st, issue_url: $iu, blocker_type: $bt, unblocked_when: $uw}')"
+}
+
+# ─── Utility: comment-triggered resume for decision blockers (issue #262) ────
+# Epic #160 Success Criterion #7: "Dispatcher resumes automatically after PO
+# posts a GitHub comment resolving a decision blocker (detected on next
+# poll)." This is additive to, not a replacement for, the time-based
+# stale-recovery loop below (Step 4) — it fires immediately once a
+# qualifying PO comment appears, without waiting for STALE_THRESHOLD, and
+# stale-recovery keeps covering stories that silently stall with no blocker
+# declared at all, or where the PO's comment is missed for any reason.
+#
+# Resolving-comment rule (docs/PROJECT-STATUS.md, Decision blockers): a
+# comment authored by the PO ($DECISION_BLOCKER_PO_LOGIN), posted strictly
+# after the most recent "## Blocked Declaration (Type: decision)" comment,
+# containing a standalone line that trims to exactly "/unblock". A substring
+# match of the word "unblock"/"unblocked" inside ordinary prose does NOT
+# qualify — only a full line equal to "/unblock" resumes the story.
+#
+# Comments are fetched with --paginate so a declaration or resolving comment
+# past the first 100 comments on a long-lived issue is not silently missed
+# (the same pagination-blind-spot class of bug fixed for board queries in
+# issues #247/#249/#250/#251) — "detected on next poll" must hold regardless
+# of thread length.
+#
+# Idempotency and retry safety: the CLAIM records the ProjectV2 item's
+# updatedAt value before the Ready mutation. If the mutation fails, that value
+# is unchanged and a later poll retries without posting another CLAIM. If the
+# mutation succeeds, the item version changes; any subsequent redispatch changes
+# it again. Thus a later In-implementation scan can tell that the old /unblock
+# was already consumed even when posting the CONFIRM comment failed. A CONFIRM
+# marker remains the normal happy-path fast check. A newly declared blocker has
+# a later declaration timestamp and starts a fresh claim cycle.
+#
+# Returns 0 when a qualifying resolving comment was found and the board
+# transition was confirmed (CONFIRM comment posted). Returns 1 with no
+# board mutation left un-retryable when there is no open decision blocker,
+# the blocker was already confirmed-resumed, no qualifying resolving
+# comment exists yet, or the board transition failed this attempt (safe to
+# retry on the next poll — no CONFIRM marker was posted).
+
+DECISION_BLOCKER_PO_LOGIN="LauraMardones"
+DECISION_BLOCKER_CLAIM_MARKER="Attempting to resolve the Type: decision blocker"
+DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
+
+check_and_resolve_decision_blocker_comment() {
+    local issue_num="$1" item_id="$2" project_item_updated_at="$3"
+    local comments
+    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add')
+
+    local blocker_created_at
+    blocker_created_at=$(echo "$comments" | jq -r '
+        [.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
+        | last | .created_at // empty')
+    [[ -z "$blocker_created_at" ]] && return 1
+
+    local already_resumed
+    already_resumed=$(echo "$comments" | jq -r \
+        --arg marker "$DECISION_BLOCKER_RESUME_MARKER" \
+        --arg since "$blocker_created_at" \
+        '[.[] | select(
+             ((.body // "") | contains($marker)) and
+             .created_at >= $since
+           )] | length > 0')
+    [[ "$already_resumed" == "true" ]] && return 1
+
+    local resolved
+    resolved=$(echo "$comments" | jq -r \
+        --arg login "$DECISION_BLOCKER_PO_LOGIN" \
+        --arg since "$blocker_created_at" \
+        '[.[] | select(
+             (.user.login // "") == $login and
+             .created_at > $since and
+             ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
+           )] | length > 0')
+    [[ "$resolved" == "true" ]] || return 1
+
+    echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
+
+    local claim_project_version
+    claim_project_version=$(echo "$comments" | jq -r \
+        --arg marker "$DECISION_BLOCKER_CLAIM_MARKER" \
+        --arg since "$blocker_created_at" \
+        '[.[] | select(
+             ((.body // "") | contains($marker)) and
+             .created_at >= $since
+           )] | last | (.body // "")
+         | capture("Project item version before resume: (?<version>[^\\n]+)").version // empty')
+
+    # The claim records the ProjectV2 item's version before the mutation. A
+    # failed mutation leaves that version unchanged and is safe to retry. A
+    # successful mutation changes it; any later redispatch changes it again.
+    # Therefore a bare CLAIM plus a different current version proves that the
+    # old /unblock was already consumed even when the CONFIRM comment failed.
+    if [[ -n "$claim_project_version" && "$project_item_updated_at" != "$claim_project_version" ]]; then
+        echo "RESOLVED: #$issue_num — prior resume claim already changed the project item; not re-consuming the old /unblock"
+        return 1
+    fi
+
+    if [[ -z "$claim_project_version" ]]; then
+        post_comment "$issue_num" "## Recovery Comment
+$DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting the board transition to \"Ready for implementation\" now.
+Project item version before resume: $project_item_updated_at"
+    fi
+
+    # The CONFIRM comment ($DECISION_BLOCKER_RESUME_MARKER) is what the
+    # already_resumed check above relies on, so it is only posted AFTER
+    # set_project_status_ready() confirms the mutation actually happened —
+    # see the return-contract comment above.
+    if ! set_project_status_ready "$item_id" "$issue_num"; then
+        echo "Warning: #$issue_num — valid /unblock found but the board transition failed; not posting the CONFIRM marker, will retry on the next poll." >&2
+        return 1
+    fi
+
+    local recovery_comment
+    recovery_comment="## Recovery Comment
+$DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
+Action: status set to \"Ready for implementation\".
+Next executor: review the PO's decision in the linked comment above before resuming."
+    if ! post_comment "$issue_num" "$recovery_comment"; then
+        echo "Warning: #$issue_num — board transition succeeded but the CONFIRM comment failed; the versioned CLAIM will prevent the old /unblock from being consumed again after redispatch." >&2
+        return 1
+    fi
+    return 0
 }
 
 # ─── Utility: notify Slack on feature/epic closure after a story completes ───
@@ -1005,6 +1131,7 @@ fetch_board_data() {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id
+                        updatedAt
                         content { ... on Issue { number title body updatedAt } }
                         fieldValues(first: 20) {
                           nodes {
@@ -1037,6 +1164,7 @@ fetch_board_data() {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id
+                        updatedAt
                         content { ... on Issue { number title body updatedAt } }
                         fieldValues(first: 20) {
                           nodes {
@@ -1211,30 +1339,47 @@ IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
          ] | length > 0)
       )
     | { id: .id, number: .content.number, title: .content.title,
-        body: (.content.body // ""), updatedAt: .content.updatedAt }
+        body: (.content.body // ""), updatedAt: .content.updatedAt,
+        projectUpdatedAt: .updatedAt }
 ]')
 
 IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
 echo "Stories in \"In implementation\": $IN_IMPL_COUNT"
 
-# ─── Step 4: Stale detection and recovery ─────────────────────────────────────
+# ─── Step 4: Comment-triggered resume, then stale detection and recovery ──────
 # Per docs/PROJECT-STATUS.md Recovery Protocol:
 #   Stale = In implementation + no activity >2h + no handoff note (both required)
+# Per docs/PROJECT-STATUS.md Decision blockers / Resolution (issue #262):
+#   A decision blocker resumes immediately once the PO posts a standalone
+#   `/unblock` line after the blocker declaration — see
+#   check_and_resolve_decision_blocker_comment() above, run first in the loop
+#   below so it is not gated on STALE_THRESHOLD.
 
 READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
 
+# Return contract (issue #262 review): 0 means the board transition is
+# confirmed done (or, under --dry-run, confirmed simulated) — safe for a
+# caller to treat as "the story is really moving to Ready for
+# implementation". 1 means the mutation did NOT happen (unresolved
+# field/option IDs, or a failed GraphQL call) — a caller must NOT record
+# any "this is resolved/consumed" state on a 1, or a transient/config
+# failure would be indistinguishable from success and could permanently
+# strand a story. Callers that only want best-effort board sync with no
+# such downstream state (e.g. the stale-recovery loop below) should guard
+# the call with `|| true` so a warning here does not abort the script
+# under `set -euo pipefail`.
 set_project_status_ready() {
     local item_id="$1"
     local issue_num="$2"
     if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
         echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
-        return
+        return 1
     fi
     if $DRY_RUN; then
         echo "[DRY RUN] Would set #$issue_num to \"Ready for implementation\" on project board"
-        return
+        return 0
     fi
-    gh api graphql -f query='
+    if gh api graphql -f query='
     mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
       updateProjectV2ItemFieldValue(input: {
         projectId: $projectId
@@ -1246,18 +1391,33 @@ set_project_status_ready() {
     ' -f projectId="$PROJECT_ID" \
       -f itemId="$item_id" \
       -f fieldId="$STATUS_FIELD_ID" \
-      -f optionId="$READY_FOR_IMPL_OPTION_ID" >/dev/null \
-    || echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
+      -f optionId="$READY_FOR_IMPL_OPTION_ID" >/dev/null; then
+        return 0
+    fi
+    echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
+    return 1
 }
 
 LAST_ACTION="stale story detection"
 STALE_COUNT=0
+RESUME_COUNT=0
 for ((i=0; i < IN_IMPL_COUNT; i++)); do
     item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
     item_id=$(echo "$item" | jq -r '.id')
     issue_num=$(echo "$item" | jq -r '.number')
     issue_title=$(echo "$item" | jq -r '.title')
     updated_at=$(echo "$item" | jq -r '.updatedAt')
+    project_updated_at=$(echo "$item" | jq -r '.projectUpdatedAt')
+
+    # ── Comment-triggered resume for decision blockers (issue #262) ──────────
+    # Runs before the time-based staleness check below: a PO's resolving
+    # comment must resume the story immediately rather than wait out
+    # STALE_THRESHOLD. Once resumed, this story is no longer "In
+    # implementation", so the staleness check below is skipped for it.
+    if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id" "$project_updated_at"; then
+        RESUME_COUNT=$(( RESUME_COUNT + 1 ))
+        continue
+    fi
 
     # Baseline: issue updatedAt (covers issue comments, label changes, etc.)
     last_ts=$(iso_to_ts "$updated_at")
@@ -1320,15 +1480,16 @@ Branch: $branch — existing commits intact.
 Next executor: review branch state before pulling."
 
     post_comment "$issue_num" "$recovery_comment"
-    set_project_status_ready "$item_id" "$issue_num"
+    set_project_status_ready "$item_id" "$issue_num" || true
 
     STALE_COUNT=$(( STALE_COUNT + 1 ))
 done
 
-# Recalculate active (non-stale) WIP count after recovery rollbacks
+# Recalculate active (non-stale) WIP count after recovery rollbacks and
+# comment-triggered resumes (issue #262)
 # Re-query the board to get updated state
-if [[ $STALE_COUNT -gt 0 && $DRY_RUN == false ]]; then
-    echo "Re-fetching board after stale recovery..."
+if [[ $(( STALE_COUNT + RESUME_COUNT )) -gt 0 && $DRY_RUN == false ]]; then
+    echo "Re-fetching board after stale recovery / comment-triggered resume..."
     BOARD_DATA=$(fetch_board_data)
 
     IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
