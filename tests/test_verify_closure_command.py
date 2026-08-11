@@ -507,7 +507,9 @@ def test_confirmation_change_on_final_refresh_blocks(closure_github: Mock) -> No
     closure_github.close_issue.assert_not_called()
 
 
-def test_fresh_decline_on_final_refresh_blocks_close(closure_github: Mock) -> None:
+def test_late_no_beside_original_yes_is_ambiguous_at_final_refresh(
+    closure_github: Mock,
+) -> None:
     initial_comments = closure_github.comments.return_value
     decline = Comment(
         "LauraMardones", "no", "2026-08-09T10:02:00Z", "late-decline"
@@ -517,10 +519,42 @@ def test_fresh_decline_on_final_refresh_blocks_close(closure_github: Mock) -> No
         initial_comments + [decline],
     ]
 
+    with pytest.raises(VerificationBlocked, match="confirmation changed"):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_no_replacing_yes_at_final_refresh_declines(closure_github: Mock) -> None:
+    decline = Comment(
+        "LauraMardones", "no", "2026-08-09T10:02:00Z", "late-decline"
+    )
+    closure_github.comments.side_effect = [
+        closure_github.comments.return_value,
+        [decline],
+    ]
+
     with pytest.raises(ClosureDeclined) as error:
         continue_closure("10", closure_github)
 
     assert error.value.confirmation.url == "late-decline"
+    closure_github.close_issue.assert_not_called()
+    closure_github.post_closing_evidence.assert_not_called()
+
+
+def test_multiple_no_replies_at_final_refresh_is_ambiguous(
+    closure_github: Mock,
+) -> None:
+    closure_github.comments.side_effect = [
+        closure_github.comments.return_value,
+        [
+            Comment("LauraMardones", "no", "2026-08-09T10:02:00Z", "decline-1"),
+            Comment("LauraMardones", "no", "2026-08-09T10:03:00Z", "decline-2"),
+        ],
+    ]
+
+    with pytest.raises(VerificationBlocked, match="confirmation changed"):
+        continue_closure("10", closure_github)
     closure_github.close_issue.assert_not_called()
     closure_github.post_closing_evidence.assert_not_called()
 

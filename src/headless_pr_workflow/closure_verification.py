@@ -447,9 +447,9 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
         for comment in refreshed_comments
         if _matches_reply(comment, "LauraMardones", summary.created_at, "no")
     )
-    if refreshed_declines:
-        raise ClosureDeclined(max(refreshed_declines, key=lambda item: item.created_at))
-    if refreshed_confirmations != (confirmation,):
+    if len(refreshed_declines) == 1 and not refreshed_confirmations:
+        raise ClosureDeclined(refreshed_declines[0])
+    if refreshed_confirmations != (confirmation,) or refreshed_declines:
         raise VerificationBlocked("PO confirmation changed before closure")
     if tuple(github.closing_evidence_urls(marker)) != evidence_urls:
         raise VerificationBlocked("closing evidence changed before closure")
