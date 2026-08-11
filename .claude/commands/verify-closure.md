@@ -197,13 +197,14 @@ none
 <risk, or "none">
 
 ### Next action
-PO product confirmation is required. Is this what you wanted?
+Reply with exactly "yes" to confirm and close, or "no" to send it back.
 ```
 
 After posting, return only a concise human-readable result containing the issue
-URL, full verified SHA, `PASS`, the new comment URL, and that PO product
-confirmation is required. Produce no JSON. Stop without detecting confirmation
-or performing a close or lifecycle-state mutation.
+URL, full verified SHA, `PASS`, the new comment URL, and the exact reply
+required ("yes" to confirm and close, "no" to send it back). Produce no JSON.
+Stop without detecting confirmation or performing a close or lifecycle-state
+mutation.
 
 ## Continuation after PO confirmation
 
@@ -226,19 +227,25 @@ order, using fresh GitHub responses rather than chat context or cached objects.
    verified SHA. If it differs, stop with: rerun technical verification. Never
    carry an earlier PO confirmation onto a replacement summary.
 
-### B. Require exact, fresh PO confirmation
+### B. Require exact, fresh PO confirmation or decline
 
-The only authorized PO is `LauraMardones`. Accept exactly one unedited comment,
-created strictly after the selected technical summary, whose trimmed body is
-exactly:
+The only authorized PO is `LauraMardones`. A qualifying reply is exactly one
+unedited comment, created strictly after the selected technical summary, whose
+trimmed body case-insensitively equals the whole word below (no target number
+or sentence needed — the fresh, on-issue, unedited scoping already binds the
+reply to this target):
 
-- Feature: `Product confirmed for Feature #$ARGUMENTS.`
-- Epic: `Product approved for Epic #$ARGUMENTS.`
+- `yes` confirms closure. Continue to section C.
+- `no` declines closure. Report a `DECLINED` outcome (target, technical
+  summary URL, the declining comment's author/timestamp/URL) and stop without
+  mutating anything or requiring further gates.
 
-Reject missing or multiple matches, another author, an edited comment, a
-comment at or before the summary, generic approval, a wrong number/type,
-reactions, issue-body text, and out-of-band messages. Report the exact required
-sentence as the next action; do not mutate anything.
+Missing or multiple matches (of either word, or one of each), another author,
+an edited comment, a comment at or before the summary, `yes`/`no` embedded in a
+longer sentence, reactions, issue-body text, and out-of-band messages satisfy
+neither match and block with the generic missing-confirmation blocker. Report
+the exact required replies ("yes" to confirm, "no" to decline) as the next
+action; do not mutate anything.
 
 ### C. Refresh every mutation-sensitive gate
 
