@@ -38,6 +38,8 @@ Required behavior:
    - stop if any active story declares overlapping files
    - report any WIP limit failure or file overlap as a conflict blocker using the Blocked Status Protocol
 8. If you discover blocked prerequisites, unclear acceptance criteria, scope drift, unresolved dependency decisions, WIP limit violations, or file ownership conflicts:
+   - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
+   - only if no documented answer exists, declare the decision blocker with the protocol's required `Checked:` line naming what was searched
    - stop
    - report WIP limit violations and file ownership conflicts through the Blocked Status Protocol
    - report other blockers clearly

@@ -51,6 +51,8 @@ Fetch the issue from GitHub. Check its labels for exactly one of:
 - `type:task` → follow `.claude/commands/refine-task.md`
 - `type:bug` → follow `.claude/commands/refine-bug.md`
 
+Before adding any Open Question that requires PO input, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating the question to the PO.
+
 ## Step 3 — If no type label is set
 
 Inspect the issue title for a recognized prefix:
