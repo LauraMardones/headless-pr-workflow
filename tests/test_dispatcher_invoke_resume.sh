@@ -16,7 +16,10 @@
 # Idempotency: a blocker already resumed (a $DECISION_BLOCKER_RESUME_MARKER
 # recovery comment already posted at/after the declaration) is not
 # re-triggered on a later poll while the story is actively back in
-# progress.
+# progress. The recovery marker is only posted after set_project_status_ready()
+# confirms the board transition actually happened, so a failed or
+# unresolved-ID mutation is retried on the next poll rather than silently
+# and permanently skipped.
 #
 # Scenarios covered:
 #   1. Regression: no decision blocker declared at all -> no resume (falls
@@ -38,6 +41,12 @@
 #   8. Pagination: declaration + resolving comment split across two pages
 #      of the comments endpoint -> still detected (gh api --paginate output
 #      merged via `jq -s add`)
+#   9. Board transition failure: set_project_status_ready() fails -> no
+#      recovery marker posted (so the next poll is not permanently skipped)
+#  10. Retry: a failed transition (scenario 9) succeeds on a later poll once
+#      the mutation itself succeeds, proving the failure is recoverable
+#  11. Drift guard: the tested copy's load-bearing fragments are still
+#      present in the production functions
 #
 # Usage: bash tests/test_dispatcher_invoke_resume.sh
 # Requires: bash 4+, jq (skips gracefully if jq not available)
@@ -103,8 +112,17 @@ FUNCTION_DEF='
             echo "$2" | sed "s/^/  /" >> "$CALL_LOG"
         }
 
+        # Mock honours MOCK_SET_STATUS_RC (default 0 = success) so tests can
+        # simulate the board transition failing (unresolved field/option IDs,
+        # or a failed GraphQL call in the real implementation).
         set_project_status_ready() {
-            echo "SET_READY: item=$1 issue=#$2" >> "$CALL_LOG"
+            echo "SET_READY_ATTEMPT: item=$1 issue=#$2" >> "$CALL_LOG"
+            if [[ "${MOCK_SET_STATUS_RC:-0}" -eq 0 ]]; then
+                echo "SET_READY: item=$1 issue=#$2" >> "$CALL_LOG"
+                return 0
+            fi
+            echo "SET_READY_FAILED: item=$1 issue=#$2" >> "$CALL_LOG"
+            return 1
         }
 
         check_and_resolve_decision_blocker_comment() {
@@ -140,24 +158,29 @@ FUNCTION_DEF='
             [[ "$resolved" == "true" ]] || return 1
 
             echo "RESOLVED: #$issue_num"
+            if ! set_project_status_ready "$item_id" "$issue_num"; then
+                return 1
+            fi
             post_comment "$issue_num" "## Recovery Comment
 $DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
 Action: status set to \"Ready for implementation\".
 Next executor: review the PO'"'"'s decision in the linked comment above before resuming."
-            set_project_status_ready "$item_id" "$issue_num"
             return 0
         }
 '
 
 # ─── Helper: run the function against a single-page mocked `gh` ───────────────
+# mock_set_status_rc (optional, default 0) simulates set_project_status_ready's
+# return code, to exercise the board-transition-failure / retry-safety path.
 
 run_resume_check() {
-    local comments_json="$1" call_log="$2"
+    local comments_json="$1" call_log="$2" mock_set_status_rc="${3:-0}"
     REPO='owner/repo' CALL_LOG="$call_log" COMMENTS_JSON="$comments_json" \
         bash -c "
         set -euo pipefail
         REPO='owner/repo'
         CALL_LOG='$call_log'
+        MOCK_SET_STATUS_RC='$mock_set_status_rc'
         gh() { printf '%s' '$comments_json'; }
         $FUNCTION_DEF
         if check_and_resolve_decision_blocker_comment '42' 'ITEM_ID_123'; then
@@ -381,7 +404,74 @@ PY
     assert_contains "pagination: board set to Ready for implementation" "$(cat "$call_log")" "SET_READY: item=ITEM_ID_123 issue=#42"
 }
 
-# ─── Test 9: drift guard — the tested copy above must match production ────────
+# ─── Test 9: board transition failure -> no recovery marker posted ────────────
+# Regression for the review finding: if set_project_status_ready() fails
+# (unresolved Status field/option IDs, or a failed GraphQL mutation), the
+# recovery comment carrying $DECISION_BLOCKER_RESUME_MARKER must NOT be
+# posted — otherwise the next poll would see the marker, take the
+# already_resumed branch, and never retry, permanently stranding the story
+# In implementation despite a valid /unblock.
+
+test_board_transition_failure_no_marker_posted() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "board transition failure -> no marker posted"; return
+    fi
+    local tmpdir call_log output comments
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log="$tmpdir/calls.log"
+    touch "$call_log"
+
+    comments='[
+      {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
+       "body":"## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO decides\nOwner: PO (@LauraMardones)"},
+      {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
+       "body":"Go with option B.\n/unblock"}
+    ]'
+    output=$(run_resume_check "$comments" "$call_log" 1)
+
+    assert_contains "transition failure: function returns 1" "$output" "FUNCTION_RETURNED: 1"
+    assert_contains "transition failure: board update was attempted" "$(cat "$call_log")" "SET_READY_ATTEMPT"
+    assert_contains "transition failure: board update reported as failed" "$(cat "$call_log")" "SET_READY_FAILED"
+    assert_not_contains "transition failure: no recovery marker comment posted" "$(cat "$call_log")" "POST_COMMENT"
+}
+
+# ─── Test 10: a failed transition is retried and can succeed on a later poll ──
+# Proves the failure path in Test 9 is recoverable, not a silent permanent
+# skip: with the exact same qualifying /unblock comment still in the thread
+# (nothing was recorded on the failed attempt), a later poll whose board
+# mutation succeeds still resumes the story normally.
+
+test_failed_transition_is_retried_and_can_succeed_later() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "failed transition retried -> succeeds on a later poll"; return
+    fi
+    local tmpdir call_log_attempt1 call_log_attempt2 comments output1 output2
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log_attempt1="$tmpdir/calls_1.log"
+    call_log_attempt2="$tmpdir/calls_2.log"
+    touch "$call_log_attempt1" "$call_log_attempt2"
+
+    comments='[
+      {"user":{"login":"claude-executor"},"created_at":"2026-08-10T10:00:00Z",
+       "body":"## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO decides\nOwner: PO (@LauraMardones)"},
+      {"user":{"login":"LauraMardones"},"created_at":"2026-08-11T09:00:00Z",
+       "body":"Go with option B.\n/unblock"}
+    ]'
+
+    # Poll 1: board mutation fails — nothing recorded (Test 9's scenario).
+    output1=$(run_resume_check "$comments" "$call_log_attempt1" 1)
+    assert_contains "retry: first poll fails, no marker recorded" "$output1" "FUNCTION_RETURNED: 1"
+    assert_not_contains "retry: first poll posted no comment" "$(cat "$call_log_attempt1")" "POST_COMMENT"
+
+    # Poll 2: same unchanged comments (nothing was recorded), mutation now
+    # succeeds -> the story is not stranded, it resumes normally.
+    output2=$(run_resume_check "$comments" "$call_log_attempt2" 0)
+    assert_contains "retry: second poll succeeds" "$output2" "FUNCTION_RETURNED: 0"
+    assert_contains "retry: second poll posts the recovery marker" "$(cat "$call_log_attempt2")" "POST_COMMENT: #42"
+    assert_contains "retry: second poll sets the board to Ready for implementation" "$(cat "$call_log_attempt2")" "SET_READY: item=ITEM_ID_123 issue=#42"
+}
+
+# ─── Test 11: drift guard — the tested copy above must match production ───────
 # The scenarios above exercise a copy of check_and_resolve_decision_blocker_comment()
 # embedded in this test file, not the live function in scripts/dispatcher-invoke.sh
 # directly (the script has no source-safe guard: it runs argument parsing and
@@ -407,6 +497,17 @@ test_production_function_matches_tested_logic() {
         'test("^\\s*/unblock\\s*$")'
     assert_contains "drift guard: production requires PO authorship" "$real_fn" \
         '(.user.login // "") == $login'
+    assert_contains "drift guard: production only posts the marker after a confirmed transition" "$real_fn" \
+        'if ! set_project_status_ready "$item_id" "$issue_num"; then'
+
+    local real_setter
+    real_setter=$(sed -n '/^set_project_status_ready() {/,/^}/p' \
+        "$script_dir/scripts/dispatcher-invoke.sh")
+
+    assert_contains "drift guard: set_project_status_ready returns 1 on unresolved IDs" "$real_setter" \
+        'return 1'
+    assert_contains "drift guard: set_project_status_ready returns 0 on dry-run" "$real_setter" \
+        'return 0'
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
@@ -421,6 +522,8 @@ run_all_tests() {
     test_negative_no_followup_comment_does_not_trigger
     test_idempotent_already_resumed_does_not_retrigger
     test_pagination_across_two_pages_still_detected
+    test_board_transition_failure_no_marker_posted
+    test_failed_transition_is_retried_and_can_succeed_later
     test_production_function_matches_tested_logic
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"

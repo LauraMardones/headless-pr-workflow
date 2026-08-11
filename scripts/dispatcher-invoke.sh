@@ -425,11 +425,19 @@ check_and_notify_decision_blocker() {
 # later decision blocker re-declared on the same issue produces a newer
 # blocker_created_at, so it is unaffected by an earlier resume.
 #
-# Returns 0 and mutates the board (posts a recovery comment, sets Status to
-# "Ready for implementation") when a qualifying, not-yet-consumed comment is
-# found. Returns 1 with no side effects when there is no open decision
-# blocker, the blocker was already resumed, or no qualifying resolving
-# comment exists yet.
+# The recovery comment carrying $DECISION_BLOCKER_RESUME_MARKER is what the
+# idempotency check above relies on, so it is only posted AFTER
+# set_project_status_ready() confirms the board transition actually
+# happened. If the transition fails (unresolved field/option IDs, or a
+# failed GraphQL call — see that function's return contract), no marker is
+# posted, so the qualifying /unblock comment is retried on the next poll
+# instead of being silently and permanently consumed by a failed mutation.
+#
+# Returns 0 when a qualifying resolving comment was found and the board
+# transition was confirmed (recovery comment posted). Returns 1 with no
+# side effects when there is no open decision blocker, the blocker was
+# already resumed, no qualifying resolving comment exists yet, or the board
+# transition failed (safe to retry on the next poll).
 
 DECISION_BLOCKER_PO_LOGIN="LauraMardones"
 DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
@@ -467,13 +475,25 @@ check_and_resolve_decision_blocker_comment() {
     [[ "$resolved" == "true" ]] || return 1
 
     echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
+
+    # The $DECISION_BLOCKER_RESUME_MARKER comment is what the already_resumed
+    # check above relies on to avoid re-triggering, so it must NOT be posted
+    # unless the board transition actually happened (or was validly
+    # simulated under --dry-run). Posting it first — or unconditionally —
+    # would let a transient GraphQL failure or unresolved field/option ID
+    # permanently strand the story: every later poll would see the marker,
+    # take the already_resumed branch, and never retry the real transition.
+    if ! set_project_status_ready "$item_id" "$issue_num"; then
+        echo "Warning: #$issue_num — valid /unblock found but the board transition failed; not posting the recovery marker, will retry on the next poll." >&2
+        return 1
+    fi
+
     local recovery_comment
     recovery_comment="## Recovery Comment
 $DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
 Action: status set to \"Ready for implementation\".
 Next executor: review the PO's decision in the linked comment above before resuming."
     post_comment "$issue_num" "$recovery_comment"
-    set_project_status_ready "$item_id" "$issue_num"
     return 0
 }
 
@@ -1274,18 +1294,29 @@ echo "Stories in \"In implementation\": $IN_IMPL_COUNT"
 
 READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
 
+# Return contract (issue #262 review): 0 means the board transition is
+# confirmed done (or, under --dry-run, confirmed simulated) — safe for a
+# caller to treat as "the story is really moving to Ready for
+# implementation". 1 means the mutation did NOT happen (unresolved
+# field/option IDs, or a failed GraphQL call) — a caller must NOT record
+# any "this is resolved/consumed" state on a 1, or a transient/config
+# failure would be indistinguishable from success and could permanently
+# strand a story. Callers that only want best-effort board sync with no
+# such downstream state (e.g. the stale-recovery loop below) should guard
+# the call with `|| true` so a warning here does not abort the script
+# under `set -euo pipefail`.
 set_project_status_ready() {
     local item_id="$1"
     local issue_num="$2"
     if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
         echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
-        return
+        return 1
     fi
     if $DRY_RUN; then
         echo "[DRY RUN] Would set #$issue_num to \"Ready for implementation\" on project board"
-        return
+        return 0
     fi
-    gh api graphql -f query='
+    if gh api graphql -f query='
     mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
       updateProjectV2ItemFieldValue(input: {
         projectId: $projectId
@@ -1297,8 +1328,11 @@ set_project_status_ready() {
     ' -f projectId="$PROJECT_ID" \
       -f itemId="$item_id" \
       -f fieldId="$STATUS_FIELD_ID" \
-      -f optionId="$READY_FOR_IMPL_OPTION_ID" >/dev/null \
-    || echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
+      -f optionId="$READY_FOR_IMPL_OPTION_ID" >/dev/null; then
+        return 0
+    fi
+    echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
+    return 1
 }
 
 LAST_ACTION="stale story detection"
@@ -1382,7 +1416,7 @@ Branch: $branch — existing commits intact.
 Next executor: review branch state before pulling."
 
     post_comment "$issue_num" "$recovery_comment"
-    set_project_status_ready "$item_id" "$issue_num"
+    set_project_status_ready "$item_id" "$issue_num" || true
 
     STALE_COUNT=$(( STALE_COUNT + 1 ))
 done
