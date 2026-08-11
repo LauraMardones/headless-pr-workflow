@@ -408,23 +408,52 @@ check_and_notify_decision_blocker() {
 # match of the word "unblock"/"unblocked" inside ordinary prose does NOT
 # qualify — only a full line equal to "/unblock" resumes the story.
 #
+# Comments are fetched with --paginate so a declaration or resolving comment
+# past the first 100 comments on a long-lived issue is not silently missed
+# (the same pagination-blind-spot class of bug fixed for board queries in
+# issues #247/#249/#250/#251) — "detected on next poll" must hold regardless
+# of thread length.
+#
+# Idempotency: once a decision blocker has been resumed, the original
+# declaration comment and the PO's /unblock comment both remain in the
+# thread. Without an "already resumed" check, the very next poll — while the
+# story is back in "In implementation" actively being worked — would match
+# the same pair again and re-post the recovery comment / re-set the board to
+# "Ready for implementation", repeatedly re-queuing an in-progress story. To
+# prevent that, a resolving comment is only honoured if no recovery comment
+# for *that* declaration (i.e. posted at/after its created_at) exists yet. A
+# later decision blocker re-declared on the same issue produces a newer
+# blocker_created_at, so it is unaffected by an earlier resume.
+#
 # Returns 0 and mutates the board (posts a recovery comment, sets Status to
-# "Ready for implementation") when a qualifying comment is found. Returns 1
-# with no side effects when there is no open decision blocker, or no
-# qualifying resolving comment yet.
+# "Ready for implementation") when a qualifying, not-yet-consumed comment is
+# found. Returns 1 with no side effects when there is no open decision
+# blocker, the blocker was already resumed, or no qualifying resolving
+# comment exists yet.
 
 DECISION_BLOCKER_PO_LOGIN="LauraMardones"
+DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
 
 check_and_resolve_decision_blocker_comment() {
     local issue_num="$1" item_id="$2"
     local comments
-    comments=$(gh api "repos/$REPO/issues/$issue_num/comments?per_page=100")
+    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add')
 
     local blocker_created_at
     blocker_created_at=$(echo "$comments" | jq -r '
         [.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
         | last | .created_at // empty')
     [[ -z "$blocker_created_at" ]] && return 1
+
+    local already_resumed
+    already_resumed=$(echo "$comments" | jq -r \
+        --arg marker "$DECISION_BLOCKER_RESUME_MARKER" \
+        --arg since "$blocker_created_at" \
+        '[.[] | select(
+             ((.body // "") | contains($marker)) and
+             .created_at >= $since
+           )] | length > 0')
+    [[ "$already_resumed" == "true" ]] && return 1
 
     local resolved
     resolved=$(echo "$comments" | jq -r \
@@ -440,7 +469,7 @@ check_and_resolve_decision_blocker_comment() {
     echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
     local recovery_comment
     recovery_comment="## Recovery Comment
-Detected: PO comment resolving the Type: decision blocker (standalone \`/unblock\` line found).
+$DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
 Action: status set to \"Ready for implementation\".
 Next executor: review the PO's decision in the linked comment above before resuming."
     post_comment "$issue_num" "$recovery_comment"

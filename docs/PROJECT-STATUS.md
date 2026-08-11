@@ -273,16 +273,16 @@ Blocks: #<issue-number> — <story title>
 Unblocked when: <specific, testable condition — not a general description>
 Owner: <who is responsible for resolving this blocker>
 State of in-progress work: <branch name and summary of work completed so far, or "none">
+Resume instruction: <required when Type is decision: "To resume: reply on this issue with your decision, including a line that is exactly `/unblock`." — write "n/a" for all other blocker types>
 ```
 
-All fields are required. The **"Unblocked when"** field must state a specific, testable condition — not a vague description like "when the dependency is done".
+All fields are required. The **"Unblocked when"** field must state a specific, testable condition — not a vague description like "when the dependency is done". The **"Resume instruction"** field is what makes the `/unblock` convention discoverable at the point the PO is asked to respond — never omit it from a `Type: decision` declaration.
 
 ### Decision blockers
 
 Decision blockers require immediate PO involvement:
 
-- Post the declaration comment and **@mention the PO** in the same comment.
-- The declaration comment must also state the exact resume instruction, so the PO is never expected to already know an undocumented convention: "To resume: reply on this issue with your decision, including a line that is exactly `/unblock`."
+- Post the declaration comment — including the **Resume instruction** field above, filled in verbatim — and **@mention the PO** in the same comment.
 - Only the PO may resolve a decision blocker.
 - The executor must not attempt to unblock a decision blocker unilaterally.
 
