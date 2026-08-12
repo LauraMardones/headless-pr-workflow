@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-08-12
-**Supersedes:** ADR-003 (interim embedded API loop), ADR-004 (subscription-authenticated CLI sessions, proposed)
+**Supersedes:** ADR-003 (interim embedded API loop)
 **Related:** ADR-001, ADR-002
 **Amends scope of:** #259
 **Epic:** #160
@@ -71,7 +71,6 @@ Each dispatcher cycle, scan items in Refined status, evaluate their `## Dependen
 ## Consequences
 
 - ADR-003's loop and its turn/wallclock bounds are retired, replaced by native CLI controls.
-- ADR-004 is fully folded in; its open ToS question is resolved in Context, not left open.
 - `scripts/dispatcher-invoke.sh` needs a CLI-invocation adapter, capacity-blocker handling, and takeover-based resume logic.
 - `scripts/dispatcher-poll.sh` needs Refined-dependency scanning and auto-promotion logic, and (once Part 3 lands) needs to run as a persistent/tight-loop process rather than a cron-triggered script.
 - `scripts/dispatcher-budget.sh` needs rolling-window counters, the threshold-routing override, and the size-based preemptive check.
@@ -94,4 +93,4 @@ Each dispatcher cycle, scan items in Refined status, evaluate their `## Dependen
 
 ## References
 
-ADR-001 (Option B reinstated), ADR-002, ADR-003 (superseded), ADR-004 (superseded) · #259, #160, #270, #263 · `docs/PROJECT-STATUS.md`, `docs/TAKEOVER-RULES.md`, `docs/WORKTREE-MODEL.md`, `docs/DISPATCHER-CONFIG.md` · `anthropics/claude-code-action` · `openai/codex-action`, openai/codex issue #2543
+ADR-001 (Option B reinstated), ADR-002, ADR-003 (superseded) · #259, #160, #270, #263 · `docs/PROJECT-STATUS.md`, `docs/TAKEOVER-RULES.md`, `docs/WORKTREE-MODEL.md`, `docs/DISPATCHER-CONFIG.md` · `anthropics/claude-code-action` · `openai/codex-action`, openai/codex issue #2543
