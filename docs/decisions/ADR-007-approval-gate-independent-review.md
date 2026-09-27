@@ -13,7 +13,7 @@
 The approval gate is satisfied when **a reviewer independent of the implementer found no blockers on the exact current head SHA**. Any one of the following counts, checked by script and failing closed:
 
 1. **Clean Codex review (default for Claude-implemented PRs):** a PR comment by `chatgpt-codex-connector[bot]` answering an `@codex review` request (ADR-006) and stating no major issues were found, whose reviewed-commit identifier is a prefix of the current head SHA and of no other commit on the PR, posted after the current head became the PR head, and not followed by a newer Codex review with findings. A 👍 reaction never counts, because it names no commit. It never counts for a PR implemented by Codex (story labelled `executor:codex`); those follow the pairing in `docs/ADAPTERS.md` → Cross-Provider Review Pairing and need path 2 or 3.
-2. **SHA-bound separate-session review:** today's solo-maintainer override evidence, without its "no independent approver available" precondition.
+2. **SHA-bound separate-session review:** today's solo-maintainer override evidence, without its "no independent approver available" precondition, extended to name the reviewing provider. The recognizer rejects it when that provider is the one that implemented the PR (per the story's `executor:` label), so the pairing in `docs/ADAPTERS.md` holds on this path too.
 3. **Formal GitHub approval**, when present.
 
 Single-maintainer operation is no longer an exception. All other merge gates are unchanged.
