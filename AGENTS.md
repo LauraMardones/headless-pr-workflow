@@ -96,6 +96,9 @@ reproduction case or failing input. Report only P0/P1 issues; do not comment on
 style, naming, or formatting. If you find no P0/P1 issues, say so explicitly
 and name the head commit you reviewed.
 
+When fixing a review finding that a deterministic test could have caught, add
+that test in the same fix.
+
 ## Intent
 
 The goal is to avoid wasted retries caused by sandbox restrictions. The GitHub plugin handles all GitHub API needs; local execution handles repo file operations only when the checkout is confirmed current.
