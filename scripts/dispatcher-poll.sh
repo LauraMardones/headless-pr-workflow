@@ -65,9 +65,10 @@
 #   D6  Refinement notification state persists across ephemeral GitHub-hosted
 #       runners only through the workflow's actions/cache restore/save steps
 #       (interim mechanism until #259 moves the dispatcher to persistent
-#       infrastructure). If the snapshot is missing, evicted, or corrupt, the
-#       poll warns and starts from empty state, so each issue currently in
-#       "Ready for refinement" may be notified once more.
+#       infrastructure). If the snapshot is missing or evicted the poll starts
+#       from empty state; if it is unreadable or malformed it also warns. Either
+#       way each issue currently in "Ready for refinement" may be notified once
+#       more.
 #   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
 #       independently. Acceptable at current scale; future refactor can share
 #       the query result.
