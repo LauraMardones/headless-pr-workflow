@@ -281,3 +281,27 @@ def test_pre_merge_blocks_unavailable_required_check_data_under_required_policy(
     assert summary.hard_gate_passed is False
     assert "Required status check data is unavailable from branch protection: Not Found." in summary.blocking_reasons
     assert summary.to_dict()["required_check_summary"]["required_check_status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "status_checks",
+    [
+        (),
+        (build_check(name="lint", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+    ],
+)
+def test_pre_merge_blocks_unconfigured_required_checks_under_required_policy(monkeypatch, tmp_path, status_checks):
+    _write_required_policy(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=status_checks),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=(), status="not_configured"),
+    )
+
+    assert summary.hard_gate_passed is False
+    assert (
+        "Repository policy requires status checks for main, but GitHub reports none configured. "
+        "Source: docs/MERGE-POLICY.md#main-required-check-policy."
+    ) in summary.blocking_reasons
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_required_unconfigured"

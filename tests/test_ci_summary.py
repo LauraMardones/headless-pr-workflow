@@ -121,3 +121,22 @@ def test_ci_summary_reports_policy_absent_required_checks():
     assert summary.required_checks_satisfied is True
     assert summary.required_checks.to_dict()["source"] == "docs/MERGE-POLICY.md#main-required-check-policy"
     assert "Required status checks are absent by explicit repository policy. Source: docs/MERGE-POLICY.md#main-required-check-policy." in summary.messages
+
+
+def test_ci_summary_reports_policy_required_unconfigured_as_unsatisfied():
+    summary = summarize_ci(
+        scenario_empty_status_rollup(head_sha="head123"),
+        required_checks=RequiredStatusChecks(
+            names=(),
+            status="policy_required_unconfigured",
+            source="docs/MERGE-POLICY.md#main-required-check-policy",
+            message="Repository policy requires status checks for main, but GitHub reports none configured.",
+        ),
+    )
+
+    assert summary.required_check_status == "policy_required_unconfigured"
+    assert summary.required_checks_satisfied is False
+    assert (
+        "Repository policy requires status checks for main, but GitHub reports none configured. "
+        "Source: docs/MERGE-POLICY.md#main-required-check-policy."
+    ) in summary.messages

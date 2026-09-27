@@ -4,6 +4,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 from headless_pr_workflow.github import RequiredStatusChecks
 from headless_pr_workflow.required_check_policy import apply_required_check_policy, load_required_check_policy
 
@@ -96,6 +98,20 @@ def test_policy_required_status_checks_does_not_fabricate_absence_when_unavailab
         required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
 
     assert required is original
+
+
+@pytest.mark.parametrize("status", ["not_configured", "configured"])
+def test_policy_required_status_checks_flags_github_reporting_no_required_checks(status):
+    """A 'required' policy must not accept GitHub reporting zero required checks as merge-ready."""
+    with temp_repo_root() as repo_root:
+        write_policy(repo_root, ci_workflows="present_required", required_status_checks="required")
+        original = RequiredStatusChecks(names=(), status=status)
+
+        required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
+
+    assert required.status == "policy_required_unconfigured"
+    assert required.names == ()
+    assert required.source == "docs/MERGE-POLICY.md#main-required-check-policy"
 
 
 def test_policy_does_not_mask_reported_failing_pending_or_unknown_checks():

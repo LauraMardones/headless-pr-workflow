@@ -101,6 +101,8 @@ def _required_check_status(
         return "unavailable", None
     if required_checks.status == "policy_absent":
         return "policy_absent", True
+    if required_checks.status == "policy_required_unconfigured":
+        return "policy_required_unconfigured", False
     if not required_checks.names:
         return "not_configured", None
     if missing_required:
@@ -131,6 +133,9 @@ def _messages(
     elif required_check_status == "policy_absent":
         detail = f" Source: {required_checks.source}." if required_checks.source else ""
         messages.append(f"Required status checks are absent by explicit repository policy.{detail}")
+    elif required_check_status == "policy_required_unconfigured":
+        detail = f" Source: {required_checks.source}." if required_checks.source else ""
+        messages.append(f"{required_checks.message}{detail}")
     elif required_check_status == "unavailable":
         detail = f": {required_checks.message.rstrip('.')}" if required_checks.message else ""
         messages.append(f"Required status check data is unavailable from branch protection{detail}.")
