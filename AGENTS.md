@@ -65,6 +65,30 @@ Quick reference for constraints specific to the Codex Windows sandbox. Each entr
 | pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` redirects temp root automatically (fix from #135). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
 | `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. See [GitHub Operations](#github-operations). |
 
+## Review Guidelines
+
+This section applies to automated pull request reviewers, such as Codex Cloud
+automatic review, that can comment on a PR but do not run the full `/review`
+workflow in `.claude/commands/review.md` (board transitions, formal approval,
+session summary).
+
+Review the PR's current head commit for:
+
+- Correctness: logic errors, wrong conditions, off-by-one errors, unhandled
+  error paths, broken exit codes.
+- Workflow-policy safety: anything that would let a PR merge without the gates
+  in `docs/MERGE-POLICY.md` — approval bound to the reviewed head SHA, green
+  required checks, no unresolved review threads, a fresh refresh before merge.
+- Tests: behavior changes without a deterministic test that would fail on the
+  bug.
+- Consistency: a change to workflow behavior that contradicts `docs/*.md` or an
+  accepted ADR in `docs/decisions/` without updating it.
+
+For every finding, state the file and line, the concrete consequence, and a
+reproduction case or failing input. Report only P0/P1 issues; do not comment on
+style, naming, or formatting. If you find no P0/P1 issues, say so explicitly
+and name the head commit you reviewed.
+
 ## Intent
 
 The goal is to avoid wasted retries caused by sandbox restrictions. The GitHub plugin handles all GitHub API needs; local execution handles repo file operations only when the checkout is confirmed current.
