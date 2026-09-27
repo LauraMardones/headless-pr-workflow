@@ -196,7 +196,7 @@ The sync command derives an expected status from observable repository facts. Ea
 
 **Detected status:** `In implementation`
 
-**Branch naming convention:** the prefix `*/` matches any prefix followed by `/issue-<number>-`. Exact prefix list: `codex/`, `claude/`, `feature/`, `fix/`. Additional prefixes may be supported; the rule matches if the branch name contains `issue-<number>-` after the first `/`.
+**Branch naming convention:** canonical names follow `<agent>/issue-<number>-<short-slug>` as defined in [WORKTREE-MODEL.md](../WORKTREE-MODEL.md#naming), with `<agent>` one of `claude`, `codex`, or `human`. The rule matches any prefix: it triggers if the branch name contains `issue-<number>-` after the first `/`. The legacy `<prefix>/implement-<number>-*` pattern is also matched so older branches are still detected.
 
 **Notes:** Branch existence is checked against the remote (origin). Local-only branches are not sufficient to trigger this rule.
 

@@ -28,7 +28,7 @@ Required behavior:
    - confirm GitHub API access by fetching the issue or repo metadata
    - stop and report if any pre-flight check fails
 3. Fetch and pull the latest `main` before creating a new branch or PR.
-4. Use a dedicated branch for this story only.
+4. Use a dedicated branch for this story only, named `<agent>/issue-<number>-<short-slug>` per `docs/WORKTREE-MODEL.md`. If the session was assigned a branch name it cannot change, use it and state the conforming name in the PR body.
 5. Keep the work strictly within the issue scope and acceptance criteria.
 6. If the issue is dependency-heavy, verify that hard dependencies are complete before implementation starts.
 7. Run the WIP pre-flight check defined in `docs/PROJECT-STATUS.md` before pulling the story:
