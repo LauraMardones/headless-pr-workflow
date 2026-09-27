@@ -58,7 +58,7 @@ The AI's judgment is probabilistic; everything around it is not:
 - **When:** every new head, by platform trigger.
 - **What:** exactly that head; Codex names the reviewed commit.
 - **Findings:** inline review threads. The existing unresolved-thread gate blocks merge until each is fixed or explicitly resolved. No text parsing is needed for findings.
-- **Clean result:** recognized only by a script, fail-closed. How a clean result counts toward the approval gate is an open question (below); until it is decided, the existing approval rules in `docs/MERGE-POLICY.md` apply unchanged.
+- **Clean result:** recognized only by a script, fail-closed (see Part 5).
 
 ### 3. Findings that can become tests become tests
 
@@ -70,12 +70,25 @@ No Raspberry Pi or other PO-owned host, no subscription-authenticated CLIs on su
 
 ADR-005 Part 1 (native CLI invocation instead of the embedded API loop) and Part 5 (dependency-based auto-promotion out of Refined) are not decided here and remain candidates, to be re-refined against this ADR.
 
+### 5. Solo maintenance is the default; the approval gate means independent review, not a second person
+
+This repository, and the PO's future repositories, will normally have one human with write access. The approval gate therefore no longer expects a formal GitHub approval from someone other than the PR owner, and single-maintainer operation is no longer an exception.
+
+The invariant the gate protects is unchanged: **a reviewer independent of the implementer found no blockers on the exact current head SHA.** The gate is satisfied by any one of these, checked by script and failing closed:
+
+1. **Clean Codex review (default path):** a PR conversation comment by `chatgpt-codex-connector[bot]` stating that no major issues were found, whose reviewed-commit identifier is a prefix of the current head SHA, posted after that head was pushed, and not followed by a newer Codex review with findings. Anything that does not match this shape exactly does not count.
+2. **SHA-bound separate-session review:** the review summary path that `docs/MERGE-POLICY.md` today calls the solo-maintainer override, kept as a fallback when Codex is unavailable, without its "no independent approver available" precondition and "exception" framing.
+3. **Formal GitHub approval:** still accepted when present.
+
+All other merge gates — required checks, no unresolved review threads, mergeability, non-draft, and a fresh head-SHA refresh immediately before merge — are unchanged. A Codex finding is an unresolved thread, so it blocks under the existing thread gate regardless of which approval path is used.
+
+`docs/MERGE-POLICY.md`, `review_policy.py` and the pre-merge and merge-gate summaries are to be changed to match in a follow-up implementation, not in this ADR.
+
 ---
 
 ## Open Questions
 
-1. **Approval path for a clean Codex review.** Codex never submits a formal approval, and its clean result is a conversation comment, which the solo-maintainer override rules do not accept as evidence. The PO must decide whether a clean Codex review on the current head may satisfy the approval gate on its own, and if so, the exact deterministic recognition rule.
-2. **How implementation sessions are started.** Candidates are Claude Code cloud sessions started by a schedule or by the existing GitHub Actions dispatcher. Not evaluated yet.
+1. **How implementation sessions are started.** Candidates are Claude Code cloud sessions started by a schedule or by the existing GitHub Actions dispatcher. Not evaluated yet.
 
 ---
 
@@ -84,7 +97,8 @@ ADR-005 Part 1 (native CLI invocation instead of the embedded API loop) and Part
 - `AGENTS.md` → Review Guidelines (merged in #285) is load-bearing: it is the automated reviewer's rubric.
 - PR #278 (ADR-005) should be closed unmerged, or reduced to Parts 1 and 5, once this ADR is accepted.
 - These issues need re-scoping against this ADR before implementation: #277, #279, #280, #281, #282, #283, #259.
-- The review-quality evidence is thin (one test PR). Accepting this ADR does not remove the need for deterministic tests on merge-critical logic.
+- The review-quality evidence is thin (one test PR). With Part 5, a clean Codex review alone can clear the approval gate, so deterministic tests on merge-critical logic carry more weight, not less.
+- The solo-maintainer override section of `docs/MERGE-POLICY.md` is rewritten as the separate-session review path (Part 5.2).
 
 ---
 
