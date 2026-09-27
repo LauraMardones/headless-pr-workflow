@@ -20,4 +20,5 @@ For Claude-implemented PRs, the cross-provider review is Codex Cloud review, req
 
 - Findings are inline review threads, so the existing unresolved-thread merge gate blocks on them without new logic.
 - How a clean result satisfies the approval gate is decided in ADR-007.
+- The dispatcher's paired `/review` invocation for Claude-implemented stories (`scripts/dispatcher-invoke.sh`, documented as canonical in `docs/ADAPTERS.md` → Cross-Provider Review Pairing) is retired in follow-up work; until then it would review the same head a second time. The paired Claude Opus review of Codex-implemented stories is unaffected.
 - Review quality rests on one trial. Revisit if Codex misses a defect that reaches `main`, its findings are repeatedly wrong, its cost limits throughput, or OpenAI changes how it is triggered or how it reports results.
