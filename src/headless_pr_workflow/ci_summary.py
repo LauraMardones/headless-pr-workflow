@@ -173,4 +173,4 @@ def _index_checks(status_checks: tuple[CheckSummary, ...]) -> dict[str, CheckSum
 
 
 def _check_name(check: CheckSummary) -> str:
-    return (check.name or "").strip() or check.workflow or "unnamed-check"
+    return check.name or check.workflow or "unnamed-check"

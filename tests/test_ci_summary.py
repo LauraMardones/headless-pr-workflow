@@ -138,17 +138,3 @@ def test_ci_summary_treats_rerun_that_passed_as_passing():
     assert summary.required_check_status == "satisfied"
     assert summary.required_checks_satisfied is True
 
-
-def test_ci_summary_matches_check_names_with_surrounding_whitespace():
-    summary = summarize_ci(
-        scenario_current_approval(
-            head_sha="head123",
-            status_checks=(
-                build_check(name=" unit ", bucket="success", status="COMPLETED", conclusion="SUCCESS"),
-            ),
-        ),
-        required_checks=RequiredStatusChecks(names=("unit",), status="configured"),
-    )
-
-    assert summary.required_check_status == "satisfied"
-    assert summary.check_buckets["missing"] == ()
