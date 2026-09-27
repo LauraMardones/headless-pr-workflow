@@ -65,6 +65,13 @@ Quick reference for constraints specific to the Codex Windows sandbox. Each entr
 | pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` redirects temp root automatically (fix from #135). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
 | `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. See [GitHub Operations](#github-operations). |
 
+## Branch Naming
+
+Name every branch `<agent>/issue-<number>-<short-slug>`, or
+`<agent>/<kind>-<short-slug>` when there is no issue, as defined in
+[docs/WORKTREE-MODEL.md](docs/WORKTREE-MODEL.md#naming). The name must say what
+the branch is for; no random suffixes.
+
 ## Review Guidelines
 
 This section applies to automated pull request reviewers, such as Codex Cloud
