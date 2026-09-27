@@ -14,7 +14,7 @@ How a clean result is reported depends on the trigger. An automatic review (on P
 
 ## Decision
 
-For Claude-implemented PRs, the cross-provider review is Codex Cloud review, requested explicitly: after every push, the implementing session comments `@codex review` on the PR. Codex automatic review is turned off for the repository, so each head is reviewed exactly once and every result names its commit. `AGENTS.md` → Review Guidelines is the rubric. No runner or dispatcher step is used for this review.
+For Claude-implemented PRs, the cross-provider review is Codex Cloud review, requested explicitly: when the PR is marked ready, and after each round of fixes for Codex findings, the implementing session comments `@codex review` on the PR. Codex automatic review is turned off for the repository, so each head is reviewed exactly once and every result names its commit. `AGENTS.md` → Review Guidelines is the rubric. No runner or dispatcher step is used for this review.
 
 ## Consequences
 
