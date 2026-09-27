@@ -32,7 +32,8 @@ DRY_RUN_LINE = (
     "approval=solo-maintainer, threads=none, mergeable=yes, head=b607aa9"
 )
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-PASSING_POLICY_VALUES = {"absent", "present_non_required"}
+VALID_REQUIRED_STATUS_CHECKS = {"absent", "required"}
+PASSING_POLICY_VALUES = {"absent", "present_non_required", "present_required"}
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tu
         return "fail(missing-base-policy)", None
     required = entry.get("required_status_checks")
     workflows = entry.get("ci_workflows")
-    if required != "absent" or workflows not in PASSING_POLICY_VALUES:
+    if required not in VALID_REQUIRED_STATUS_CHECKS or workflows not in PASSING_POLICY_VALUES:
         return "fail(inconsistent-policy)", None
 
     workflow_dir = repo_root / ".github" / "workflows"
@@ -113,7 +114,7 @@ def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tu
     )
     if workflows == "absent" and workflow_files:
         return "fail(workflows-present)", None
-    if workflows == "present_non_required" and not workflow_files:
+    if workflows in {"present_non_required", "present_required"} and not workflow_files:
         return "fail(workflows-missing)", None
     return f"pass({workflows})", workflows
 

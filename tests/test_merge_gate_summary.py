@@ -243,6 +243,31 @@ def test_policy_rejects_workflow_mismatch(module, tmp_path):
     assert module._policy_for_branch("main", repo_root=tmp_path) == ("fail(workflows-present)", None)
 
 
+def test_policy_accepts_required_status_checks_with_workflows_present(module, tmp_path):
+    policy = tmp_path / "docs" / "required-check-policy.json"
+    policy.parent.mkdir()
+    policy.write_text(
+        '{"schema":"headless-pr-workflow.required-check-policy.v1",'
+        '"branches":{"main":{"required_status_checks":"required","ci_workflows":"present_required"}}}',
+        encoding="utf-8",
+    )
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "tests.yml").write_text("name: tests", encoding="utf-8")
+    assert module._policy_for_branch("main", repo_root=tmp_path) == ("pass(present_required)", "present_required")
+
+
+def test_policy_required_status_checks_without_workflow_files_is_missing(module, tmp_path):
+    policy = tmp_path / "docs" / "required-check-policy.json"
+    policy.parent.mkdir()
+    policy.write_text(
+        '{"schema":"headless-pr-workflow.required-check-policy.v1",'
+        '"branches":{"main":{"required_status_checks":"required","ci_workflows":"present_required"}}}',
+        encoding="utf-8",
+    )
+    assert module._policy_for_branch("main", repo_root=tmp_path) == ("fail(workflows-missing)", None)
+
+
 def test_thread_fetch_failure_is_non_passing(monkeypatch, module, capsys):
     arrange_live(monkeypatch, module)
     monkeypatch.setattr(
@@ -255,6 +280,7 @@ def test_thread_fetch_failure_is_non_passing(monkeypatch, module, capsys):
 
 
 def test_pr_fetch_failure_is_usage_error(monkeypatch, module, capsys):
+    monkeypatch.setattr(module, "_resolve_base_repository", lambda repo: repo or "owner/base")
     monkeypatch.setattr(
         module,
         "fetch_pr_context",

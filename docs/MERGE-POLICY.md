@@ -17,12 +17,20 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 
 ## Main Required-Check Policy
 
-### Workflow state values
+### `required_status_checks` values
+
+| Value | Meaning |
+|---|---|
+| `absent` | GitHub branch protection does not configure any required status checks for the branch. |
+| `required` | GitHub branch protection configures one or more required status checks for the branch. Tooling defers entirely to GitHub's live required-check status; the absent-by-policy bypass described below does not apply. |
+
+### `ci_workflows` values
 
 | Value | Meaning |
 |---|---|
 | `absent` | No GitHub Actions workflow files exist in `.github/workflows`. |
 | `present_non_required` | Workflow files exist in `.github/workflows` but none are configured as required status checks for the branch. |
+| `present_required` | Workflow files exist in `.github/workflows` and at least one is configured as a required status check for the branch. |
 
 ### Required-check gate
 
@@ -35,6 +43,8 @@ For `main` in this repository, required status checks are absent by policy while
 When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report the required-check gate as passing because required checks are absent by explicit repository policy. Unavailable branch-protection data is not enough by itself; failing, pending, unknown, missing, or configured required checks must still block merge readiness.
 
 Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not affect the required-check gate. Only the presence or absence of *configured required status checks* determines whether the gate passes.
+
+When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see `docs/PROJECT-STATUS.md` issue #290 "PO Instructions"), the absent-by-policy bypass never applies for that branch, regardless of `ci_workflows`. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` report GitHub's live required-check status unmodified: a required check that has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
 
 ## Solo-Maintainer Bootstrap Override
 
