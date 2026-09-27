@@ -10,9 +10,9 @@
 # Requirements: bash, curl, jq
 #
 # Prototype divergences from contract (see PR description):
-#   D1  Branch naming (Rule 4): contract expects <prefix>/issue-<N>-* but this repo uses
-#       <prefix>/implement-<N>-* (e.g. claude/implement-152-DHWi7). Prototype matches
-#       both patterns. Production must resolve the canonical branch naming convention.
+#   D1  Branch naming (Rule 4): the canonical pattern is <agent>/issue-<N>-<slug>
+#       (docs/WORKTREE-MODEL.md). <prefix>/implement-<N>-* (e.g. claude/implement-152-DHWi7)
+#       is a legacy pattern, still matched so older branches are detected.
 #   D2  Live mutation: prototype detects and reports transitions but does not write to
 #       GitHub Projects status fields. All runs behave like --dry-run for the mutation
 #       step. The mutation path is stubbed with a TODO comment.
@@ -196,7 +196,7 @@ for ((i=0; i<N; i++)); do
     [[ -z "$DETECTED" && -n "$PR_NUM" && "$PR_DRAFT" == "false" ]] && DETECTED="In review"
 
     # Rule 4: In implementation — branch matching naming convention exists, no ready PR
-    # D1: also matches /implement-<N>- used in this repo alongside contract's /issue-<N>-
+    # D1: also matches legacy /implement-<N>- branches alongside canonical /issue-<N>-
     if [[ -z "$DETECTED" ]]; then
         BRANCH=$(echo "$ALL_BRANCHES" | jq -r --argjson n "$NUM" '
             map(select(.name | test("/(issue|implement)-\($n)[-]"; "i"))) |
