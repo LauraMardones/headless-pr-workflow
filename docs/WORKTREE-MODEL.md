@@ -12,11 +12,23 @@ Worktrees and branches are temporary execution contexts. They help assistants an
 
 ## Naming
 
-Recommended branch pattern:
+Required branch pattern:
 
 ```text
-hpw/<issue-or-pr>-<short-slug>
+<agent>/issue-<number>-<short-slug>   # work tied to an issue
+<agent>/<kind>-<short-slug>           # work with no issue (kind: docs, fix, chore, test, spike)
 ```
+
+- `<agent>` is who created the branch: `claude`, `codex`, or `human`.
+- `<short-slug>` is 2–6 lowercase, hyphen-separated English words that say what
+  the branch changes, so a reader can tell its purpose from the name alone.
+- No random or session-generated suffixes. If the name is already taken on the
+  remote, append `-2`, `-3`, and so on.
+- The `issue-<number>-` form is what `project-status-sync` uses to detect work
+  in progress; keep it exact.
+- When an assistant session is assigned a branch name it cannot change, it
+  follows the assigned name and states the intended conforming name in the PR
+  body.
 
 Recommended worktree pattern:
 
@@ -27,7 +39,8 @@ Recommended worktree pattern:
 Examples:
 
 ```text
-hpw/123-sha-bound-approval
+claude/issue-123-sha-bound-approval
+codex/docs-review-guidelines
 ../wt/example-repo/123-codex-20260421-0915
 ../wt/example-repo/123-claude-review-20260421-1010
 ```
