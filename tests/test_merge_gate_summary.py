@@ -268,6 +268,63 @@ def test_policy_required_status_checks_without_workflow_files_is_missing(module,
     assert module._policy_for_branch("main", repo_root=tmp_path) == ("fail(workflows-missing)", None)
 
 
+@pytest.mark.parametrize(
+    ("required", "workflows"),
+    [
+        ("required", "present_non_required"),
+        ("absent", "present_required"),
+    ],
+)
+def test_policy_rejects_unpaired_required_values(module, tmp_path, required, workflows):
+    policy = tmp_path / "docs" / "required-check-policy.json"
+    policy.parent.mkdir()
+    policy.write_text(
+        '{"schema":"headless-pr-workflow.required-check-policy.v1",'
+        f'"branches":{{"main":{{"required_status_checks":"{required}","ci_workflows":"{workflows}"}}}}}}',
+        encoding="utf-8",
+    )
+    workflow_dir = tmp_path / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "tests.yml").write_text("name: tests", encoding="utf-8")
+    assert module._policy_for_branch("main", repo_root=tmp_path) == ("fail(inconsistent-policy)", None)
+
+
+REQUIRED_POLICY = ("pass(present_required)", "present_required")
+
+
+def test_required_policy_blocks_unavailable_required_checks_with_empty_rollup(monkeypatch, module, capsys):
+    arrange_live(monkeypatch, module, context=replace(passing_context(), status_checks=()), policy=REQUIRED_POLICY)
+    assert module.main(["--pr", "12"]) == 1
+    assert "checks=fail(required-unavailable)" in capsys.readouterr().out
+
+
+def test_required_policy_blocks_unavailable_required_checks_with_passing_rollup(module):
+    context = SimpleNamespace(status_checks=(SimpleNamespace(bucket="success", name="lint"),))
+    required = RequiredStatusChecks(names=(), status="unavailable")
+    assert module._checks_value(context, required, "present_required") == "fail(required-unavailable)"
+
+
+def test_required_policy_blocks_when_github_reports_no_required_checks(module):
+    context = SimpleNamespace(status_checks=(SimpleNamespace(bucket="success", name="lint"),))
+    required = RequiredStatusChecks(names=(), status="not_configured")
+    assert module._checks_value(context, required, "present_required") == "fail(required-unconfigured)"
+
+
+@pytest.mark.parametrize(
+    ("checks", "expected"),
+    [
+        ((), "fail(missing-required)"),
+        ((SimpleNamespace(bucket="pending", name="pytest"),), "fail(pending)"),
+        ((SimpleNamespace(bucket="failure", name="pytest"),), "fail(failing)"),
+        ((SimpleNamespace(bucket="success", name="pytest"),), "pass"),
+    ],
+)
+def test_required_policy_defers_to_configured_required_checks(module, checks, expected):
+    context = SimpleNamespace(status_checks=checks)
+    required = RequiredStatusChecks(names=("pytest",), status="configured")
+    assert module._checks_value(context, required, "present_required") == expected
+
+
 def test_thread_fetch_failure_is_non_passing(monkeypatch, module, capsys):
     arrange_live(monkeypatch, module)
     monkeypatch.setattr(

@@ -3,9 +3,9 @@
 # so it can be re-expressed for a non-GitHub CI system. See issue #290.
 #
 # This workflow runs on every PR but is not yet a required status check. See
-# docs/PROJECT-STATUS.md issue #290 "PO Instructions" for the manual step that
-# marks the `tests / pytest` check as required in branch protection once it has
-# run green at least once.
+# the "PO Instructions" in issue #290 for the manual step that marks the
+# `pytest` check as required in branch protection once it has run green at
+# least once.
 
 name: tests
 

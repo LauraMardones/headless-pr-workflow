@@ -44,7 +44,9 @@ When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report t
 
 Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not affect the required-check gate. Only the presence or absence of *configured required status checks* determines whether the gate passes.
 
-When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see `docs/PROJECT-STATUS.md` issue #290 "PO Instructions"), the absent-by-policy bypass never applies for that branch, regardless of `ci_workflows`. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` report GitHub's live required-check status unmodified: a required check that has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
+When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see the "PO Instructions" in issue #290), the absent-by-policy bypass never applies for that branch. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` report GitHub's live required-check status unmodified: a required check that has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
+
+`required_status_checks: "required"` must be paired with `ci_workflows: "present_required"`, and `present_required` is valid only with `required`; any other pairing is `fail(inconsistent-policy)`. Under a `required` policy the gate fails closed when it cannot confirm the configured checks: `scripts/merge-gate-summary` reports `checks=fail(required-unavailable)` when branch-protection required-check data is unavailable, `checks=fail(required-unconfigured)` when GitHub reports no required checks for the branch, and never reports `absent-ok` for an empty status-check rollup.
 
 ## Solo-Maintainer Bootstrap Override
 
