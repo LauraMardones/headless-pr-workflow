@@ -114,6 +114,39 @@ def test_policy_required_status_checks_flags_github_reporting_no_required_checks
     assert required.source == "docs/MERGE-POLICY.md#main-required-check-policy"
 
 
+@pytest.mark.parametrize(
+    ("required_status_checks", "ci_workflows"),
+    [
+        ("absent", "present_required"),
+        ("required", "present_non_required"),
+        ("required", "absent"),
+        ("", "present_non_required"),
+        ("absent", "unknown"),
+    ],
+)
+@pytest.mark.parametrize("status", ["not_configured", "unavailable"])
+def test_policy_flags_inconsistent_policy_when_consulted(required_status_checks, ci_workflows, status):
+    """Mismatched or unknown policy values fail closed, matching merge-gate-summary's inconsistent-policy."""
+    with temp_repo_root() as repo_root:
+        write_policy(repo_root, ci_workflows=ci_workflows, required_status_checks=required_status_checks)
+        original = RequiredStatusChecks(names=(), status=status)
+
+        required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
+
+    assert required.status == "policy_inconsistent"
+    assert required.names == ()
+
+
+def test_policy_does_not_consult_policy_when_github_reports_configured_names():
+    with temp_repo_root() as repo_root:
+        write_policy(repo_root, ci_workflows="present_required", required_status_checks="absent")
+        original = RequiredStatusChecks(names=("pytest",), status="configured")
+
+        required = apply_required_check_policy(original, branch="main", status_checks=(), repo_root=repo_root)
+
+    assert required is original
+
+
 def test_policy_does_not_mask_reported_failing_pending_or_unknown_checks():
     with temp_repo_root() as repo_root:
         write_policy(repo_root)

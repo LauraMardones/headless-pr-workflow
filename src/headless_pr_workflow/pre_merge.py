@@ -265,7 +265,7 @@ def _status_check_message(
 def _status_check_blockers(ci: CiSummary) -> list[str]:
     if ci.required_check_status == "unavailable":
         return list(ci.messages)
-    if ci.required_check_status == "policy_required_unconfigured":
+    if ci.required_check_status in ("policy_required_unconfigured", "policy_inconsistent"):
         detail = f" Source: {ci.required_checks.source}." if ci.required_checks.source else ""
         return [f"{ci.required_checks.message}{detail}"]
     if not ci.status_checks and ci.required_checks.names:

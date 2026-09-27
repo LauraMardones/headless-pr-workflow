@@ -46,10 +46,11 @@ Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not
 
 When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see the "PO Instructions" in issue #290), the absent-by-policy bypass never applies for that branch. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` defer to GitHub's live required-check status: a required check that is failing, pending, or has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
 
-`required_status_checks: "required"` must be paired with `ci_workflows: "present_required"`, and `present_required` is valid only with `required`; any other pairing is `fail(inconsistent-policy)`. Under a `required` policy the gate fails closed when it cannot confirm the configured checks:
+`required_status_checks: "required"` must be paired with `ci_workflows: "present_required"`, and `present_required` is valid only with `required`. Any other pairing, or an unknown value in either field, is an inconsistent policy and fails closed. Under a `required` policy the gate also fails closed when it cannot confirm the configured checks:
 
 | GitHub reports | `hpw ci-summary` / `hpw pre-merge` | `scripts/merge-gate-summary` |
 |---|---|---|
+| Inconsistent policy entry for the branch | `required_check_status: policy_inconsistent`, blocking, unless GitHub reports named required checks (those stay authoritative) | `policy=fail(inconsistent-policy)` in every case |
 | Required-check data unavailable | `required_check_status: unavailable`, blocking | `checks=fail(required-unavailable)` |
 | No required checks configured for the branch | `required_check_status: policy_required_unconfigured`, blocking | `checks=fail(required-unconfigured)` |
 | Configured required checks, empty status-check rollup | `required_check_status: missing`, blocking | `checks=fail(missing-required)` |

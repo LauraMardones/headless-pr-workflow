@@ -234,12 +234,12 @@ def test_pre_merge_blocks_unknown_reported_checks_even_when_policy_absent():
     assert summary.hard_gate_passed is False
 
 
-def _write_required_policy(repo_root):
+def _write_required_policy(repo_root, required="required", workflows="present_required"):
     policy = repo_root / "docs" / "required-check-policy.json"
     policy.parent.mkdir()
     policy.write_text(
         '{"schema":"headless-pr-workflow.required-check-policy.v1",'
-        '"branches":{"main":{"required_status_checks":"required","ci_workflows":"present_required",'
+        f'"branches":{{"main":{{"required_status_checks":"{required}","ci_workflows":"{workflows}",'
         '"source":"docs/MERGE-POLICY.md#main-required-check-policy"}}}',
         encoding="utf-8",
     )
@@ -305,3 +305,36 @@ def test_pre_merge_blocks_unconfigured_required_checks_under_required_policy(mon
         "Source: docs/MERGE-POLICY.md#main-required-check-policy."
     ) in summary.blocking_reasons
     assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_required_unconfigured"
+
+
+@pytest.mark.parametrize(
+    ("required", "workflows"),
+    [
+        ("absent", "present_required"),
+        ("required", "present_non_required"),
+        ("required", "absent"),
+        ("mandatory", "present_required"),
+    ],
+)
+@pytest.mark.parametrize(
+    "required_checks",
+    [
+        RequiredStatusChecks(names=(), status="not_configured"),
+        RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
+    ],
+)
+def test_pre_merge_blocks_inconsistent_required_check_policy(monkeypatch, tmp_path, required, workflows, required_checks):
+    _write_required_policy(tmp_path, required=required, workflows=workflows)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=()),
+        expected_base_ref_name="main",
+        required_checks=required_checks,
+    )
+
+    assert summary.hard_gate_passed is False
+    assert (
+        f"Repository policy for main is inconsistent: required_status_checks={required!r}, "
+        f"ci_workflows={workflows!r}. Source: docs/MERGE-POLICY.md#main-required-check-policy."
+    ) in summary.blocking_reasons
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_inconsistent"
