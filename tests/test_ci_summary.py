@@ -121,3 +121,34 @@ def test_ci_summary_reports_policy_absent_required_checks():
     assert summary.required_checks_satisfied is True
     assert summary.required_checks.to_dict()["source"] == "docs/MERGE-POLICY.md#main-required-check-policy"
     assert "Required status checks are absent by explicit repository policy. Source: docs/MERGE-POLICY.md#main-required-check-policy." in summary.messages
+
+
+def test_ci_summary_treats_rerun_that_passed_as_passing():
+    summary = summarize_ci(
+        scenario_current_approval(
+            head_sha="head123",
+            status_checks=(
+                build_check(name="unit", bucket="failure", status="COMPLETED", conclusion="FAILURE"),
+                build_check(name="unit", bucket="success", status="COMPLETED", conclusion="SUCCESS"),
+            ),
+        ),
+        required_checks=RequiredStatusChecks(names=("unit",), status="configured"),
+    )
+
+    assert summary.required_check_status == "satisfied"
+    assert summary.required_checks_satisfied is True
+
+
+def test_ci_summary_matches_check_names_with_surrounding_whitespace():
+    summary = summarize_ci(
+        scenario_current_approval(
+            head_sha="head123",
+            status_checks=(
+                build_check(name=" unit ", bucket="success", status="COMPLETED", conclusion="SUCCESS"),
+            ),
+        ),
+        required_checks=RequiredStatusChecks(names=("unit",), status="configured"),
+    )
+
+    assert summary.required_check_status == "satisfied"
+    assert summary.check_buckets["missing"] == ()

@@ -11,6 +11,9 @@ from .required_check_policy import apply_required_check_policy
 
 CHECK_STATES: tuple[str, ...] = ("passing", "failing", "pending", "skipped", "missing", "unknown")
 
+# Order used to pick one result when GitHub reports several runs of the same check.
+_RUN_RANK: dict[str, int] = {"failing": 0, "unknown": 1, "pending": 2, "skipped": 3, "passing": 4}
+
 
 @dataclass(frozen=True)
 class CiSummary:
@@ -53,7 +56,7 @@ def summarize_ci(context: PullRequestContext, *, required_checks: RequiredStatus
         status_checks=context.status_checks,
     )
     buckets = {state: [] for state in CHECK_STATES}
-    observed_checks = {_check_name(check): check for check in context.status_checks}
+    observed_checks = _index_checks(context.status_checks)
 
     for check in context.status_checks:
         buckets[_classification(check)].append(_check_name(check))
@@ -153,5 +156,21 @@ def _classification(check: CheckSummary) -> str:
     return "unknown"
 
 
+def _index_checks(status_checks: tuple[CheckSummary, ...]) -> dict[str, CheckSummary]:
+    """Index checks by name.
+
+    When a check is re-run on the same head SHA, GitHub reports every run. Keep
+    the best result per name so that a flaky run which passed on retry does not
+    block the merge.
+    """
+    indexed: dict[str, CheckSummary] = {}
+    for check in status_checks:
+        name = _check_name(check)
+        current = indexed.get(name)
+        if current is None or _RUN_RANK[_classification(check)] > _RUN_RANK[_classification(current)]:
+            indexed[name] = check
+    return indexed
+
+
 def _check_name(check: CheckSummary) -> str:
-    return check.name or check.workflow or "unnamed-check"
+    return (check.name or "").strip() or check.workflow or "unnamed-check"
