@@ -1,9 +1,10 @@
-# ADR-010: The Project Board Is a Projection, Not a Trigger
+# ADR-010: The Project Board Shows Current State; It Never Triggers Work
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-28
 **Related:** ADR-008, ADR-009, ADR-002, `docs/PROJECT-STATUS.md`
 **Amends:** ADR-002's dispatch trigger ("polls the board … acts on items in Ready for refinement or Ready for implementation"); the Fact vs Intent model in `docs/PROJECT-STATUS.md`
+**Effective when:** the orchestrator derives next actions from facts and is the board's only writer. Until then, the current dispatcher and status rules apply.
 
 ## Context
 
@@ -18,20 +19,21 @@ Under ADR-009 the orchestrator decides what happens next, so authorization must 
 
 ## Decision
 
-1. **Next actions are derived from GitHub facts, never from board status.** Examples:
+1. **The board shows facts.** Every status describes the current state of the work. Intent-signal statuses are removed or renamed to describe state. From the board the PO can read which implementation issues are at which stage, and how much remains of each Feature and Epic.
+2. **The board never triggers work.** Next actions are derived from GitHub facts, never from board status. Examples:
    - Refined: a refinement record exists with no open decision blocker.
    - Ready to implement: refined, and every hard dependency is closed.
    - Mergeable: the merge gates in `docs/MERGE-POLICY.md` and ADR-007 pass on the current head.
    - Blocked: an open Blocked Declaration with no resolution.
-2. **One writer.** Only the orchestrator writes board status. On each run it rewrites the status from facts and overwrites any drift, including manual moves.
-3. **Every status is a fact.** Intent-signal statuses are removed or renamed to describe state.
+3. **One writer.** Only the orchestrator writes board status. On each run it rewrites the status from facts and overwrites any drift, including manual moves.
 4. **Scheduling is deterministic.** The choice of the next action uses hard dependencies, priority, per-stage queue limits (the refinement buffer, and WIP 2 for implementation), and file overlap. It is computed by a script, not a model. Models run only inside the sessions the orchestrator starts.
 
 ## Consequences
 
 - The `.claude/commands/*.md` contracts stop moving board cards as part of their work. They record facts (comments, PRs, labels) instead.
 - `docs/PROJECT-STATUS.md` rewrites its Fact vs Intent section, its transition table, and the Recovery Protocol, which today rolls status back.
-- `scripts/project-status-sync.sh` (prototype #152), which already derives status from repository facts, is the starting point for the projection.
-- #256, #258, #283 and #257 assume the board is a trigger. They are re-refined against this ADR before implementation. #256 is likely obsolete.
+- `scripts/project-status-sync.sh` (prototype #152), which already derives status from repository facts, is the starting point.
+- #258 and #283 assume the board is a trigger and are re-refined against this ADR before implementation.
 - Queue limits and ordering rules are working rules. They belong in `docs/PROJECT-STATUS.md`, not in this ADR.
-- Revisit if the fact derivation needs a stored status to stay correct. That would mean some state is not observable in GitHub, and it must be recorded as a fact rather than read from the board.
+- Because the board only displays facts, a dedicated dashboard can replace it later without changing any workflow rule.
+- Revisit if deriving a status needs stored state to stay correct. That would mean some state is not observable in GitHub, and it must be recorded as a fact rather than read from the board.
