@@ -17,12 +17,20 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 
 ## Main Required-Check Policy
 
-### Workflow state values
+### `required_status_checks` values
+
+| Value | Meaning |
+|---|---|
+| `absent` | GitHub branch protection does not configure any required status checks for the branch. |
+| `required` | GitHub branch protection configures one or more required status checks for the branch. Tooling defers entirely to GitHub's live required-check status; the absent-by-policy bypass described below does not apply. |
+
+### `ci_workflows` values
 
 | Value | Meaning |
 |---|---|
 | `absent` | No GitHub Actions workflow files exist in `.github/workflows`. |
 | `present_non_required` | Workflow files exist in `.github/workflows` but none are configured as required status checks for the branch. |
+| `present_required` | Workflow files exist in `.github/workflows` and at least one is configured as a required status check for the branch. |
 
 ### Required-check gate
 
@@ -35,6 +43,19 @@ For `main` in this repository, required status checks are absent by policy while
 When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report the required-check gate as passing because required checks are absent by explicit repository policy. Unavailable branch-protection data is not enough by itself; failing, pending, unknown, missing, or configured required checks must still block merge readiness.
 
 Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not affect the required-check gate. Only the presence or absence of *configured required status checks* determines whether the gate passes.
+
+When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see the "PO Instructions" in issue #290), the absent-by-policy bypass never applies for that branch. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` defer to GitHub's live required-check status: a required check that is failing, pending, or has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
+
+`required_status_checks: "required"` must be paired with `ci_workflows: "present_required"`, and `present_required` is valid only with `required`. Any other pairing, or an unknown value in either field, is an inconsistent policy and fails closed. Under a `required` policy the gate also fails closed when it cannot confirm the configured checks:
+
+| GitHub reports | `hpw ci-summary` / `hpw pre-merge` | `scripts/merge-gate-summary` |
+|---|---|---|
+| Inconsistent policy entry for the branch | `required_check_status: policy_inconsistent`, blocking, unless GitHub reports named required checks (those stay authoritative) | `policy=fail(inconsistent-policy)` in every case |
+| Required-check data unavailable | `required_check_status: unavailable`, blocking | `checks=fail(required-unavailable)` |
+| No required checks configured for the branch | `required_check_status: policy_required_unconfigured`, blocking | `checks=fail(required-unconfigured)` |
+| Configured required checks, empty status-check rollup | `required_check_status: missing`, blocking | `checks=fail(missing-required)` |
+
+A `required` policy never yields `policy_absent` or `absent-ok`. Because of the "no required checks configured" row, `docs/required-check-policy.json` must be switched to `required` only after branch protection actually requires the check; switching it earlier blocks every PR targeting that branch.
 
 ## Solo-Maintainer Bootstrap Override
 

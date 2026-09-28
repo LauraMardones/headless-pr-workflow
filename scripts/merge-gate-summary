@@ -32,7 +32,11 @@ DRY_RUN_LINE = (
     "approval=solo-maintainer, threads=none, mergeable=yes, head=b607aa9"
 )
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-PASSING_POLICY_VALUES = {"absent", "present_non_required"}
+VALID_REQUIRED_STATUS_CHECKS = {"absent", "required"}
+PASSING_POLICY_VALUES = {"absent", "present_non_required", "present_required"}
+# Only policies that declare no required checks may treat an empty rollup as absent-ok.
+ABSENT_OK_POLICY_VALUES = {"absent", "present_non_required"}
+REQUIRED_POLICY_VALUE = "present_required"
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,9 @@ def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tu
         return "fail(missing-base-policy)", None
     required = entry.get("required_status_checks")
     workflows = entry.get("ci_workflows")
-    if required != "absent" or workflows not in PASSING_POLICY_VALUES:
+    if required not in VALID_REQUIRED_STATUS_CHECKS or workflows not in PASSING_POLICY_VALUES:
+        return "fail(inconsistent-policy)", None
+    if (required == "required") != (workflows == REQUIRED_POLICY_VALUE):
         return "fail(inconsistent-policy)", None
 
     workflow_dir = repo_root / ".github" / "workflows"
@@ -113,7 +119,7 @@ def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tu
     )
     if workflows == "absent" and workflow_files:
         return "fail(workflows-present)", None
-    if workflows == "present_non_required" and not workflow_files:
+    if workflows in {"present_non_required", REQUIRED_POLICY_VALUE} and not workflow_files:
         return "fail(workflows-missing)", None
     return f"pass({workflows})", workflows
 
@@ -129,14 +135,18 @@ def _checks_value(context, required_checks, policy_kind: str | None) -> str:
 
     reported_names = {check.name for check in context.status_checks if check.name}
     if required_checks.status != "unavailable":
+        if policy_kind == REQUIRED_POLICY_VALUE and not required_checks.names:
+            return "fail(required-unconfigured)"
         if any(name not in reported_names for name in required_checks.names):
             return "fail(missing-required)"
+    elif policy_kind == REQUIRED_POLICY_VALUE:
+        return "fail(required-unavailable)"
     elif policy_kind is None:
         return "warn(unavailable)"
 
     if context.status_checks:
         return "pass"
-    if policy_kind in PASSING_POLICY_VALUES:
+    if policy_kind in ABSENT_OK_POLICY_VALUES:
         return "absent-ok"
     return "fail(missing-required)"
 
