@@ -188,6 +188,38 @@ To enable this notification, ensure `SLACK_WEBHOOK_URL` is configured as a repos
 
 ---
 
+## Executable Issue Types in the Invoke Loop
+
+Only Stories, Tasks, and Bugs are executable units for `/implement`. Before executor-label routing, `scripts/dispatcher-invoke.sh` classifies every candidate taken from **Ready for implementation** (issue #256):
+
+| Type metadata | Result |
+|---|---|
+| Exactly one `type:story`, `type:task`, or `type:bug` label | Executable |
+| No `type:` label, native GitHub issue type `Story`, `Task`, or `Bug` | Executable (the native type is only a fallback) |
+| `type:epic`, `type:feature`, any other `type:` label, more than one `type:` label, another native type, or no type at all | Non-executable |
+
+Type is never inferred from the title or from an `executor:` label. A non-executable candidate is not treated as fatal. The dispatcher:
+
+- writes one warning to stderr naming the issue and its detected, missing, or unsupported type
+- excludes the item from reselection for the rest of the run
+- continues to the next ready item:
+
+```
+Warning: #<N> is not an executable Story, Task, or Bug (detected type: type:epic); skipping it for this run and continuing selection.
+```
+
+If no executable item remains, the run exits `0` and invokes no executor. Non-executable skips are tracked separately from budget skips, so they never cause `all_budget_blocked=true`. `--dry-run` makes the same skip decisions without any executor invocation or GitHub mutation.
+
+This skip applies only to the item's type. A Story, Task, or Bug with a missing or unrecognised `executor:` label is still a fatal configuration error (non-zero exit), and the error lists the supported labels:
+
+```
+       Add one of: executor:claude-code-haiku, executor:claude-code-opus, executor:claude-code-sonnet, executor:codex
+```
+
+`scripts/dispatcher-poll.sh` is unchanged. Its `ready_for_implementation` list and count report every item in that board status, executable or not, and the invoke step applies the type guard.
+
+---
+
 ## Budget Check in the Invoke Loop
 
 Budget enforcement is wired into `scripts/dispatcher-invoke.sh` (Story #203). Before each `/implement` invocation, the dispatcher calls `dispatcher-budget.sh check <executor_type>`. If the daily cap is reached, the story is skipped and the loop continues to the next available story:
