@@ -1,10 +1,10 @@
-# ADR-009: Refinement Is Orchestrator Work and Makes No Product Decisions
+# ADR-009: Refinement Is Tech Lead Work and Makes No Product Decisions
 
 **Status:** Accepted
 **Date:** 2026-09-28
 **Related:** ADR-008, ADR-010, Epic #160, `docs/REFINEMENT-PIPELINE.md`
 **Amends:** Epic #160 decision "Refinement execution model" (2026-06-03), its non-goal "Headless automatic Epic or Feature refinement", and the Epic/Feature refinement touchpoint
-**Effective when:** the orchestrator can start refinement sessions (#289) and the `/refine*` commands are rewritten. Until then, refinement is run by hand under the rules below.
+**Effective when:** the Tech Lead can start refinement sessions (#289) and the `/refine*` commands are rewritten. Until then, refinement is run by hand under the rules below.
 
 ## Context
 
@@ -14,7 +14,9 @@ With product design moved into the spec (ADR-008), what remains of refinement is
 
 ## Decision
 
-1. **Who.** The orchestrator starts every refinement after a spec merges (ADR-008), with no PO action. This covers Epic to Features, and Features to Stories, Tasks and Bugs.
+The **Tech Lead** is the orchestrator role in `docs/ROLES.md`, renamed. It has two parts: a scheduler, which is a script that chooses the next action (ADR-010), and refinement sessions, which do the tech-lead thinking with a model.
+
+1. **Who.** The Tech Lead starts every refinement after a spec merges (ADR-008), with no PO action. This covers Epic to Features, and Features to Stories, Tasks and Bugs.
 2. **What refinement may do.** It sets labels, milestone and dependencies, runs the decision pre-check, slices the work, writes acceptance criteria, and makes the choices the spec delegates to the tech lead.
 3. **Acceptance criteria on three levels, each traced to its parent.**
    - Epic criteria (`E1`, `E2`, …) are outcomes and are written by the PO in the spec.
@@ -24,6 +26,7 @@ With product design moved into the spec (ADR-008), what remains of refinement is
 4. **What refinement may not do.** It makes no product decisions. A gap, a contradiction, a conflict with an existing decision, or an Epic criterion that cannot be covered without a product choice is a design defect. Refinement declares a decision blocker for it and does not fill the gap itself.
 5. **Answering blockers.** A PO answer that changes scope goes into a spec PR (ADR-008). An answer that clarifies without changing scope is recorded under the issue's `## Decisions`, as today.
 6. **Timing.** Epic-to-Feature breakdown happens at once. Feature-to-Story breakdown is just-in-time against the "Ready for implementation" buffer of 3–5 in `docs/REFINEMENT-PIPELINE.md`, so that usage findings from the Product Validator can still reach later stories.
+7. **Re-refinement after a scope change.** Each refined issue records the spec commit it was refined against. When a new spec PR merges, the Tech Lead compares the spec with that commit and re-refines the affected Features and Stories before any of them is implemented further.
 
 ## Consequences
 

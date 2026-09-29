@@ -49,9 +49,9 @@ Solo-maintainer example:
 - Treat the reviewer summary as a substitute only for formal approval.
 - Still require a fresh GitHub refresh, a matching current head SHA, and passing merge gates before merging.
 
-## Orchestrator
+## Tech Lead
 
-The orchestrator coordinates state across issues, PRs, sessions, assistants, and loops.
+The Tech Lead (formerly called the orchestrator) coordinates state across issues, PRs, sessions, assistants, and loops. It has two parts: a scheduler script that chooses the next action, and refinement sessions that break work down (ADR-009, ADR-010).
 
 Responsibilities:
 

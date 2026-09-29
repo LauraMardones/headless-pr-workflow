@@ -4,7 +4,7 @@
 **Date:** 2026-09-28
 **Related:** ADR-008, ADR-009, ADR-002, `docs/PROJECT-STATUS.md`
 **Amends:** ADR-002's dispatch trigger ("polls the board … acts on items in Ready for refinement or Ready for implementation"); the Fact vs Intent model in `docs/PROJECT-STATUS.md`
-**Effective when:** the orchestrator derives next actions from facts and is the board's only writer. Until then, the current dispatcher and status rules apply.
+**Effective when:** the Tech Lead derives next actions from facts and is the board's only writer. Until then, the current dispatcher and status rules apply.
 
 ## Context
 
@@ -15,7 +15,7 @@
 - Stale recovery rolled Epic #160 back to "Ready for implementation" three times.
 - #257: notifications repeat because state is not remembered between runs.
 
-Under ADR-009 the orchestrator decides what happens next, so authorization must come from somewhere other than the board.
+Under ADR-009 the Tech Lead decides what happens next, so authorization must come from somewhere other than the board.
 
 ## Decision
 
@@ -25,8 +25,8 @@ Under ADR-009 the orchestrator decides what happens next, so authorization must 
    - Ready to implement: refined, and every hard dependency is closed.
    - Mergeable: the merge gates in `docs/MERGE-POLICY.md` and ADR-007 pass on the current head.
    - Blocked: an open Blocked Declaration with no resolution.
-3. **One writer.** Only the orchestrator writes board status. On each run it rewrites the status from facts and overwrites any drift, including manual moves.
-4. **Scheduling is deterministic.** The choice of the next action uses hard dependencies, priority, per-stage queue limits (the refinement buffer, and WIP 2 for implementation), and file overlap. It is computed by a script, not a model. Models run only inside the sessions the orchestrator starts.
+3. **One writer.** Only the Tech Lead's scheduler writes board status. On each run it rewrites the status from facts and overwrites any drift, including manual moves.
+4. **Scheduling is deterministic.** The choice of the next action uses hard dependencies, priority, per-stage queue limits (the refinement buffer, and WIP 2 for implementation), and file overlap. It is computed by a script, not a model. Models run only inside the sessions the Tech Lead starts.
 
 ## Consequences
 

@@ -15,10 +15,11 @@ ADR-009 makes refinement non-product work. That rule is only checkable if the ap
 
 1. **Location.** An Epic's design is `specs/<epic-number>-<slug>/spec.md`, optionally with `plan.md`, merged to `main` through a PR. The design phase stops at spec and plan; breaking the Epic down is refinement (ADR-009), so no `tasks.md` is committed.
 2. **Readiness.** A spec PR is merged only when the spec meets the Definition of Ready in `specs/README.md`, including Epic-level acceptance criteria and no open questions.
-3. **Start signal.** Merging a spec PR is the only signal that starts work on an Epic. The approved scope is the spec at that merge commit.
-4. **Scope changes.** Any change to scope is a new spec PR. Nothing else may change scope, including an Epic issue edit or an answer on a decision blocker.
-5. **Approval.** Spec PRs are decision documents and are approved as ADR-011 describes.
-6. **The Epic issue is an index.** It links to the spec and shows progress. The orchestrator creates and maintains it, and it is never the source of scope.
+3. **Epic issue first.** The design session creates the Epic issue before it writes the spec, with status "In design". The spec folder and the spec PR use its number, and the spec PR refers to it with `Refs #<number>`, never with a closing keyword (`Closes`, `Fixes`, `Resolves`), which would close the Epic on merge.
+4. **Start signal.** Merging a spec PR is the only signal that starts work on an Epic. The approved scope is the spec at that merge commit.
+5. **Scope changes.** Any change to scope is a new spec PR. Nothing else may change scope, including an Epic issue edit or an answer on a decision blocker.
+6. **Approval.** Spec PRs are decision documents and are approved as ADR-011 describes.
+7. **The Epic issue is an index.** After the spec merges, the Tech Lead maintains it: it links to the spec and shows progress, and it is never the source of scope.
 
 ## Consequences
 

@@ -2,6 +2,8 @@
 
 Each Epic's design lives here as `specs/<epic-number>-<slug>/spec.md`, optionally with `plan.md` (ADR-008). The PO writes it with an LLM in the design phase. Merging the spec PR approves the design (ADR-011) and starts work on the Epic. Refinement breaks it down (ADR-009), so no `tasks.md` is committed.
 
+The design session creates the Epic issue first, so the spec folder and the spec PR can use its number. The spec PR refers to the Epic with `Refs #<number>`, never `Closes`, `Fixes` or `Resolves`, which would close the Epic on merge (ADR-008).
+
 Start from [`_template/spec.md`](_template/spec.md).
 
 ## Definition of Ready for Refinement
