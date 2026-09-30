@@ -108,6 +108,7 @@ The goal is to avoid wasted retries caused by sandbox restrictions. The GitHub p
 
 ## Workflow Commands
 
+To specify an Epic with the PO: Follow `.claude/commands/spec.md` with no argument, a quoted working title, or the Epic issue number; it opens a spec PR that only the PO merges.
 To refine an issue: Follow `.claude/commands/refine.md` with the issue number.
 To implement an issue: Follow `.claude/commands/implement.md` with the issue number.
 To review a PR: Follow `.claude/commands/review.md` with the PR number.
