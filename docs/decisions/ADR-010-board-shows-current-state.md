@@ -21,7 +21,7 @@ Under ADR-009 the Tech Lead decides what happens next, so authorization must com
 
 1. **The board shows facts.** Every status describes the current state of the work. Intent-signal statuses are removed or renamed to describe state. From the board the PO can read which implementation issues are at which stage, and how much remains of each Feature and Epic.
 2. **The board never triggers work.** Next actions are derived from GitHub facts, never from board status. Examples:
-   - In specification: an open Epic issue whose spec folder is not yet on `main`.
+   - In specification: an Epic whose specification, or a scope change to it, is not yet approved. The exact fact, including how Epics created before ADR-008 are shown, is defined in `docs/PROJECT-STATUS.md` when this ADR is implemented.
    - Refined: a refinement record exists with no open decision blocker.
    - Ready to implement: refined, and every hard dependency is closed.
    - Mergeable: the merge gates in `docs/MERGE-POLICY.md` and ADR-007 pass on the current head.

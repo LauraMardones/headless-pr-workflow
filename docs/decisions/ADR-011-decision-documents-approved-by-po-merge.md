@@ -17,7 +17,7 @@ ADR-007's approval gate requires an independent reviewer for code. That fits dec
 2. **Approval.** For such a PR, the PO's merge is the approval. An independent review under ADR-007 is not required. A reviewer such as Codex may still comment, and its findings are input for the PO, not a gate.
 3. **Status on main.** An ADR is merged with `Status: Accepted`. An ADR that is not accepted is not merged. `Proposed` exists only on unmerged branches.
 4. **Other gates still apply.** Required checks, resolved blocking threads and a fresh refresh before merge are unchanged.
-5. **Only the PO merges decision documents.** The PO merges a decision-document PR personally in GitHub. No agent merges one, even when asked in chat, and `/merge` refuses. An approval given only in chat is not recorded anywhere durable, and GitHub cannot tell an agent's merge from the PO's.
+5. **Only the PO merges decision documents.** The PO personally merges, in GitHub, every PR that changes an Epic spec or an ADR, including a PR that also changes other files. No agent merges one, even when asked in chat, and `/merge` refuses. An approval given only in chat is not recorded anywhere durable, and GitHub cannot tell an agent's merge from the PO's.
 
 ## Consequences
 
