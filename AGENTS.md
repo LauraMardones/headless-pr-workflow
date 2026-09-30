@@ -90,6 +90,9 @@ Review the PR's current head commit for:
   bug.
 - Consistency: a change to workflow behavior that contradicts `docs/*.md` or an
   accepted ADR in `docs/decisions/` without updating it.
+- Acceptance criteria: when the PR is linked to an issue, every acceptance
+  criterion in that issue is met by the change and, where it is testable,
+  covered by a test. An unmet or untested criterion is a P1 finding.
 
 For every finding, state the file and line, the concrete consequence, and a
 reproduction case or failing input. Report only P0/P1 issues; do not comment on

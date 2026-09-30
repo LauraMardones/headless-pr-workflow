@@ -35,6 +35,7 @@ Required behavior:
    - correctness
    - safety and failure modes
    - missing or weak deterministic tests
+   - acceptance criteria of the linked issue that the change does not meet, or that are testable but not covered by a test
    - unresolved blockers
    - review/implementation separation
    - whether any new commit has made earlier approval stale

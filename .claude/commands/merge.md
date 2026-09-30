@@ -17,6 +17,9 @@ Follow:
 Workflow status goal:
 - If merge succeeds and all remaining Definition of Done criteria are satisfied: "In merge" -> "Done"
 
+Decision documents (ADR-011):
+- If the PR changes any Epic spec (`specs/<epic-number>-<slug>/`) or any ADR (`docs/decisions/ADR-*.md`), do not merge, even if asked to in chat and even if it also changes other files. Stop and report that the PO merges such PRs personally in GitHub.
+
 Required behavior:
 1. Do a fresh GitHub refresh immediately before merging.
 2. Verify:
