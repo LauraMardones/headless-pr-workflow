@@ -20,7 +20,9 @@ Out:
 ## Acceptance Criteria
 
 - **E1:** <An outcome the PO can verify at Epic closure.>
+  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
 - **E2:** <…>
+  - **Verified by:** <…>
 
 ## Decisions
 

@@ -12,7 +12,7 @@ A spec PR is merged only when every item below holds. The aim is that refinement
 
 - [ ] **Goal and problem** state what changes for whom, and why now.
 - [ ] **Scope** lists what is in and what is out.
-- [ ] **Epic acceptance criteria** have ids (`E1`, `E2`, …). Each is an outcome the PO can verify at Epic closure, not an implementation step.
+- [ ] **Epic acceptance criteria** have ids (`E1`, `E2`, …). Each is an outcome the PO can verify at Epic closure, not an implementation step, and states **Verified by:** how the PO checks it.
 - [ ] **Decisions** record every product choice made during specification, with the rejected alternatives.
 - [ ] **Checked against** names the ADRs, `docs/*.md` and parent-issue decisions the specification was checked against, and states any conflict found, resolved or intentionally superseded (a supersession comes with its own ADR PR).
 - [ ] **Delegated to the tech lead** lists what refinement may decide on its own, such as slicing, technical approach and ordering. Everything not listed and not already decided is a product question.
