@@ -1,4 +1,4 @@
-# ADR-008: Epic Design Lives as a Spec in the Repository; Its Merge Is the Start Signal
+# ADR-008: An Epic's Specification Lives as a Spec in the Repository; Its Merge Is the Start Signal
 
 **Status:** Accepted
 **Date:** 2026-09-28
@@ -7,15 +7,15 @@
 
 ## Context
 
-Product thinking for an Epic happens in a design phase, where the PO reasons through the Epic with an LLM (SpecKit-style). Today the result lands in the Epic issue body, which agents also rewrite during refinement: #160's body carries five agent "passes" in which PO decisions and agent bookkeeping are interleaved. Nothing shows which scope the PO approved, or when, and an issue edit is not an approval, so a separate signal (a board status or label) is needed to start work.
+Product thinking for an Epic happens in a specification phase, which covers the SDLC's planning, analysis and design. The PO reasons through the Epic with the Analyst, an LLM session run with `/spec` (SpecKit-style). Today the result lands in the Epic issue body, which agents also rewrite during refinement: #160's body carries five agent "passes" in which PO decisions and agent bookkeeping are interleaved. Nothing shows which scope the PO approved, or when, and an issue edit is not an approval, so a separate signal (a board status or label) is needed to start work.
 
-ADR-009 makes refinement non-product work. That rule is only checkable if the approved design is a fixed, versioned artifact.
+ADR-009 makes refinement non-product work. That rule is only checkable if the approved specification is a fixed, versioned artifact.
 
 ## Decision
 
-1. **Location.** An Epic's design is `specs/<epic-number>-<slug>/spec.md`, optionally with `plan.md`, merged to `main` through a PR. The design phase stops at spec and plan; breaking the Epic down is refinement (ADR-009), so no `tasks.md` is committed.
+1. **Location.** An Epic's specification is `specs/<epic-number>-<slug>/spec.md`, optionally with `plan.md`, merged to `main` through a PR. `spec.md` holds the analysis (what and why) and `plan.md` the design (how). The specification phase stops there; breaking the Epic down is refinement (ADR-009), so no `tasks.md` is committed.
 2. **Readiness.** A spec PR is merged only when the spec meets the Definition of Ready in `specs/README.md`, including Epic-level acceptance criteria and no open questions.
-3. **Epic issue first.** The design session creates the Epic issue before it writes the spec, with status "In design". The spec folder and the spec PR use its number, and the spec PR refers to it with `Refs #<number>`, never with a closing keyword (`Closes`, `Fixes`, `Resolves`), which would close the Epic on merge.
+3. **Epic issue first.** The spec session creates the Epic issue once the PO decides to pursue the idea and before any spec file is written, with status "In specification". An idea abandoned after that point is closed as not planned. The spec folder and the spec PR use its number, and the spec PR refers to it with `Refs #<number>`, never with a closing keyword (`Closes`, `Fixes`, `Resolves`), which would close the Epic on merge.
 4. **Start signal.** Merging a spec PR is the only signal that starts work on an Epic. The approved scope is the spec at that merge commit.
 5. **Scope changes.** Any change to scope is a new spec PR. Nothing else may change scope, including an Epic issue edit or an answer on a decision blocker.
 6. **Approval.** Spec PRs are decision documents and are approved as ADR-011 describes.

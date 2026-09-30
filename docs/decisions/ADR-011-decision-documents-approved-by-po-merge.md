@@ -9,7 +9,7 @@
 
 There is no documented way to approve an ADR. ADR-006 and ADR-007 were merged with `Status: Proposed`, and #160 warns that an executor may read that as undecided. ADR-008 adds specs, which are product decisions of the same kind.
 
-ADR-007's approval gate requires an independent reviewer for code. That fits decision documents badly. The decision is the PO's to make, not a reviewer's. GitHub also does not let the PO approve a PR opened under the PO's own account, which is how design sessions open spec PRs.
+ADR-007's approval gate requires an independent reviewer for code. That fits decision documents badly. The decision is the PO's to make, not a reviewer's. GitHub also does not let the PO approve a PR opened under the PO's own account, which is how spec sessions open spec PRs.
 
 ## Decision
 
