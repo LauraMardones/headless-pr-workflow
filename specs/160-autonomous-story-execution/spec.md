@@ -11,13 +11,38 @@ Today every step has a command, but the PO still starts each one by hand and rel
 
 ## Scope
 
-In:
+In, delivered:
 
-- <…>
+- A dispatcher that starts implementation for ready stories without the PO, within a WIP limit of two parallel stories with no file overlap.
+- Slack notifications for decision blockers, closure confirmation requests, Red flow health, a reached budget cap and dispatcher errors.
+- One Slack notification when an item becomes ready for refinement. It stays in use until the new Epic makes refinement start without the PO.
+- Daily budget caps per executor type, and a pause switch (`DISPATCHER_ENABLED`).
+- Automatic resume after the PO answers a decision blocker, and a check against documented decisions before a blocker is raised.
+- The test suite runs in CI on every PR as a required check.
+- The dispatcher skips items that are not stories.
+
+In, remaining:
+
+- Review without the PO: one Codex review of finished work, and an approval gate satisfied by independent review on the current head (ADR-006, ADR-007).
+- Merge and cleanup without the PO and without a model call.
+- A decision, recorded in an ADR, on how implementation and refinement sessions are started (#289).
+- Notifications that need PO action are not lost when a delivery fails.
+- A decision blocker can be decided from the notification: it states the question, the options and a recommendation.
+- One end-to-end proof in this repository, from a ready story to cleanup.
 
 Out:
 
-- <…>
+- Everything before a story is ready to implement. It moved to Epic #<new Epic number>: the spec merge as start signal (ADR-008), refinement by the Tech Lead and the rewritten `/refine*` commands (ADR-009), the scheduler and board status derived from facts (ADR-010), and issues #258 and #283.
+- Removing decision blockers, closure confirmations or Red flow-health alerts as human touchpoints.
+- Replacing the manually invoked command contracts (`/implement`, `/review`, `/merge`, `/cleanup`).
+- Real-time dashboards or custom UIs.
+- A Slack bot or two-way Slack interaction.
+- Dispatch latency under five minutes.
+- Open-source model integration.
+- An owned or persistent runner host, and rolling-window budget accounting with failover (ADR-005, not adopted).
+- A second human approver.
+- A Codex review of every push.
+- Approval through a Codex review for PRs with no linked story.
 
 ## Acceptance Criteria
 
