@@ -20,6 +20,12 @@ Workflow status goal:
 Decision documents (ADR-011):
 - If the PR changes any Epic spec (`specs/<epic-number>-<slug>/`) or any ADR (`docs/decisions/ADR-*.md`), do not merge, even if asked to in chat and even if it also changes other files. Stop and report that the PO merges such PRs personally in GitHub.
 
+GraphQL pre-flight (before any other step and before any GitHub mutation, including status writes):
+- Run `gh api graphql -f query='{ viewer { login } }'`.
+- If `gh` is missing or the command exits non-zero, stop. Make no GitHub mutation: no merge, no status write, and no PR comment.
+- Report that merging requires GraphQL-capable `gh` (2.50 or later) to run the merge gate, the observed failure (`gh` not found or HTTP 403), and that GitHub Actions or a local session provides it.
+- Do not fall back to the GitHub plugin/MCP integration or REST for the merge gate.
+
 Required behavior:
 1. Do a fresh GitHub refresh immediately before merging.
 2. Verify:

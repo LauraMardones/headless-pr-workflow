@@ -25,6 +25,7 @@ Important:
 Workflow status goals:
 - If blockers are found: "In review" -> "In implementation"
 - If no blockers remain for the current head SHA: "In review" -> "In merge"
+- Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In merge"`).
 
 Required behavior:
 1. Refresh PR state from GitHub before reviewing.
@@ -45,15 +46,16 @@ Required behavior:
    - record findings on GitHub in the correct PR review surfaces
    - use "Request changes" when available
    - clearly describe the blockers
-   - set the story status to "In implementation"
+   - set the story status to "In implementation" (best-effort, as described under Workflow status goals)
    - state that the next action is implementation
    - before resolving an older review thread, refresh it, confirm it belongs to the verified PR, and resolve it only if the finding is superseded; never resolve a still-actionable thread
+   - if a superseded thread cannot be resolved because `gh` or GraphQL is unavailable, leave the thread open and list it in the Session Summary with `--deviation`; never treat it as resolved
 7. If no blockers remain:
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
    - if GitHub allows formal approval, approve the PR
    - if GitHub blocks formal approval because the authenticated account owns the PR, use the solo-maintainer override path exactly as documented in docs/MERGE-POLICY.md
    - ensure the approval evidence is recorded against the current head SHA
-   - set the story status to "In merge"
+   - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 
