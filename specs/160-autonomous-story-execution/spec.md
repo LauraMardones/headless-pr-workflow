@@ -18,13 +18,14 @@ In, delivered:
 - One Slack notification when an item becomes ready for refinement. It stays in use until the new Epic makes refinement start without the PO.
 - Daily budget caps per executor type, and a pause switch (`DISPATCHER_ENABLED`).
 - Automatic resume after the PO answers a decision blocker, and a check against documented decisions before a blocker is raised.
-- The test suite runs in CI on every PR as a required check.
+- The test suite runs in CI on every PR.
 - The dispatcher skips items that are not stories.
 
 In, remaining:
 
 - Review without the PO: one Codex review of finished work, and an approval gate satisfied by independent review on the current head (ADR-006, ADR-007).
 - Merge and cleanup without the PO and without a model call.
+- The test check is required for merge. Today it runs but does not block: `docs/required-check-policy.json` still declares required checks absent.
 - A decision, recorded in an ADR, on how implementation and refinement sessions are started (#289).
 - All autonomous model work runs on the PO's existing subscriptions. No metered API usage remains.
 - A usage limit the PO sets, including a reserve of the PO's subscription allowance for the PO's own use. The PO can change it without a code change.
@@ -115,17 +116,88 @@ Out:
 **Chosen:** The ten earlier non-goals stay out of scope, as listed under Scope → Out. One is reworded: "rolling-window budget accounting" is no longer excluded, because the reserve on the five-hour limit needs it; failover to another provider stays excluded.
 **Rejected:** Bring any of them into this Epic — the PO wants none of them from #160.
 
+### Trigger model — 2026-06-02
+
+**Chosen:** Self-starting: work starts without the PO issuing a run command. The board status stays the trigger only until Epic #306 replaces it (ADR-010). Reconfirmed by the PO on 2026-10-01.
+**Rejected:** Manual kickstart per session — it still needs PO attention for every story cycle.
+
+### Dispatch trigger mechanism — 2026-06-02
+
+**Chosen:** Scheduled polling every five minutes. What the poll reads changes with Epic #306. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** Project-event webhook — GitHub project webhooks are less reliable and harder to debug, and five minutes of latency is acceptable.
+
+### Runner — 2026-06-02
+
+**Chosen:** GitHub Actions runs the dispatcher (ADR-002). Where sessions run is decided by #289. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** An external runner for the dispatcher — it needs infrastructure the PO would have to host.
+
+### Notification channel — 2026-06-02
+
+**Chosen:** Slack incoming webhook. The PO answers with a GitHub comment, which is the durable record and the signal the dispatcher acts on. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** Slack bot — it adds OAuth and infrastructure without removing a PO step.
+
+### Pause mechanism — 2026-06-02
+
+**Chosen:** The repository variable `DISPATCHER_ENABLED` (`true`/`false`), checked at the start of every run. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** A board label — less reliable as a control surface. A Slack command — it needs a Slack bot.
+
+### Escalations must be decidable from the notification and must not be lost — 2026-09-27
+
+**Chosen:** A decision blocker states the question, the options and a recommendation, and a notification that needs PO action is retried when delivery fails. The response channel stays a GitHub comment. Which Feature holds which story is left to refinement. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** A separate Feature for this work — a structural choice that now belongs to the Tech Lead.
+
+### Codex reviews only finished work — 2026-09-27
+
+**Chosen:** One Codex review request when a Claude-implemented PR is marked ready, plus one per round of fixes for Codex findings, with Codex automatic review off. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** A review request after every push — it spends the Codex allowance on unfinished work.
+
+### PRs with no linked story cannot clear the gate through a Codex review — 2026-09-27
+
+**Chosen:** The approval gate reads who implemented a PR from the linked story's `executor:` label. Without a linked story, a clean Codex review does not count, and the PR needs a separate-session review or a formal approval. Reconfirmed by the PO on 2026-10-01.
+**Rejected:** Reading the implementer from commit trailers — weaker, text-based evidence. A policy-only exclusion with no tested gate rule.
+
+### ADR-005 is not adopted — 2026-09-27
+
+**Chosen:** No owned or persistent runner host, and no failover to another provider. Reconfirmed by the PO on 2026-10-01. Two parts of ADR-005 return in another form through decisions above: sessions run on the subscription ("No metered API usage"), and the five-hour window is accounted for ("A reserve of the subscription allowance, set by the PO").
+**Rejected:** ADR-005's owned Raspberry Pi host with subscription login on it and rolling-window failover — infrastructure the PO would own and maintain.
+
 ## Checked Against
 
-- <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
+- ADR-001 (runner integration) — no conflict; superseded by ADR-002.
+- ADR-002 (GitHub Actions runner) — no conflict for the dispatcher and the five-minute poll. Conflict: it has the dispatcher invoke executors through API calls, against "No metered API usage". Resolved by the ADR that #289 produces, which amends ADR-002 in its own ADR PR. Its dispatch trigger is amended by ADR-010, which takes effect with Epic #306.
+- ADR-003 (interim executor session boundary) — conflict: the embedded API loop, against "No metered API usage". ADR-003 is interim and waits for #259, which was closed as not planned. Resolved by the ADR that #289 produces, which supersedes ADR-003 in its own ADR PR.
+- ADR-006 (Codex Cloud review) — no conflict for Claude-implemented PRs. Conflict: it leaves the Claude Opus review of Codex-implemented stories on the dispatcher's API path. Resolved by the ADR that #289 produces, which must cover how that review is started. The ADR still says `Status: Proposed` on `main`; ADR-011 item 3 requires `Accepted`, and the change is part of the approval-gate work.
+- ADR-007 (approval gate means independent review) — no conflict. Same status note as ADR-006.
+- ADR-008 (Epic spec in the repository) — no conflict. This spec is the specification of #160. Using the spec merge as start signal is implemented by Epic #306.
+- ADR-009 (refinement is Tech Lead work) — it amends #160's decision "Refinement execution model" (2026-06-03), its non-goal "Headless automatic Epic or Feature refinement" and its refinement touchpoint. None of the three is carried into this spec; the topic moved to Epic #306. Its widening of #289 to refinement sessions is kept.
+- ADR-010 (the board shows current state) — conflict: the delivered dispatcher is triggered by board status. Resolved by the ADR's own "Effective when" clause: #160 keeps the current trigger until Epic #306 implements ADR-010. #258 and #283 moved to #306. The two #160 decisions on the Epic's board status (2026-09-27) are not carried.
+- ADR-011 (decision documents approved by the PO's merge) — no conflict. This spec PR is a decision document.
+- `docs/PROJECT-STATUS.md` → OSS Compatibility Invariants, and `docs/ADAPTERS.md` → Executor Routing — no conflict. "Capacity Is Abstracted For Metered And Unmetered Executors" agrees with specifying the usage limit as an outcome.
+- `docs/PROJECT-STATUS.md` → Blocked Status Protocol and WIP Pre-Flight Check — no conflict.
+- `docs/ADAPTERS.md` → Cross-Provider Review Pairing — the same conflict as under ADR-006, with the same resolution.
+- `docs/MERGE-POLICY.md` and `docs/required-check-policy.json` — no conflict. Required checks are still declared absent for `main`; making the test check required is remaining scope.
+- `docs/DISPATCHER-CONFIG.md` — it describes the daily token caps per executor type and the API-key secrets. Both are replaced by decisions in this spec, and the document is updated when that work is implemented.
+- #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
+- #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
+- #160 success criterion on OSS compatibility invariants — left out; see Decisions.
+- Epic #64 decisions (WIP limit of two with no file overlap; only the PO resolves decision blockers) — no conflict.
 
 ## Delegated to the Tech Lead
 
-- <Choices refinement may make on its own, e.g. slicing, technical approach, ordering.>
+- Slicing into Features and stories, including whether the existing Features (#267, #268, #269, #270, #288) and their issues are kept, regrouped or closed.
+- Ordering, including shared-file ordering.
+- The technical approach for each scope item.
+- The unit and granularity of the usage limit, after #289.
+- Where the usage limit and the reserve are configured, provided the PO can change them without a code change.
+- Executor and model choice per issue.
+
+Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
 ## Dependencies
 
-- <Other Epics or external work this depends on, or "None".>
+- Epic #64 (status model, command contracts) — complete.
+- External: the PO's Claude and ChatGPT subscriptions, Codex Cloud review, GitHub Actions and the Slack incoming webhook.
+- Epic #306 depends on #289 from this Epic. #160 does not depend on #306.
 
 ## Open Questions
 
