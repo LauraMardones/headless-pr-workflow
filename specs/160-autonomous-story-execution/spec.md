@@ -26,10 +26,25 @@ Out:
 
 ## Decisions
 
-### <Decision title>
+### Split the Epic where a story becomes ready to implement — 2026-10-01
 
-**Chosen:** <…>
-**Rejected:** <alternative> — <why>
+**Chosen:** #160 keeps the dispatcher foundation and the story cycle: a story that is ready to implement is delivered without the PO. Everything before that point moves to a new Epic, specified in its own `/spec` session: the spec merge as start signal (ADR-008), refinement by the Tech Lead (ADR-009), and scheduling and board status derived from facts (ADR-010). #258 and #283 move with it. Until the new Epic delivers, the current dispatcher and status rules apply, as each of those ADRs states. The PO accepts that refinement stays manual until then, and that the end-to-end proof for #160 starts at a ready story.
+**Rejected:** Keep everything in #160 — the Epic would close only when the full chain from spec merge to cleanup runs, which puts closure much further out and makes the spec about twice as large.
+
+### Goal of #160 after the split — 2026-10-01
+
+**Chosen:** A story that is refined and has no open hard dependency is implemented, reviewed, merged and cleaned up without the PO, apart from decision blockers, closure confirmations and Red flow-health alerts, and within the usage limits.
+**Rejected:** "From spec merge to delivered Epic without the PO" — that is the combined goal of #160 and the new Epic, and it is not reachable by #160 alone after the split.
+
+### Spike #289 stays in #160 — 2026-10-01
+
+**Chosen:** #289 (how sessions are started) stays in #160, with the scope ADR-009 gave it: it covers refinement sessions as well as implementation sessions. The new Epic depends on its result.
+**Rejected:** Move #289 to the new Epic — the story cycle in #160 needs its answer first.
+
+### The spec covers the whole Epic — 2026-10-01
+
+**Chosen:** The spec covers delivered and remaining work, so that Epic closure verifies everything #160 promised.
+**Rejected:** Cover only the remaining work — the delivered first wave would then never be checked against an Epic criterion.
 
 ## Checked Against
 
