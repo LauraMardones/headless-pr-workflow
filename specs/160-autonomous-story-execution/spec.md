@@ -28,11 +28,11 @@ In, remaining:
 - A decision, recorded in an ADR, on how implementation and refinement sessions are started (#289).
 - Notifications that need PO action are not lost when a delivery fails.
 - A decision blocker can be decided from the notification: it states the question, the options and a recommendation.
-- One end-to-end proof in this repository, from a ready story to cleanup.
+- An end-to-end proof in this repository: three consecutive stories, each from ready to cleanup.
 
 Out:
 
-- Everything before a story is ready to implement. It moved to Epic #<new Epic number>: the spec merge as start signal (ADR-008), refinement by the Tech Lead and the rewritten `/refine*` commands (ADR-009), the scheduler and board status derived from facts (ADR-010), and issues #258 and #283.
+- Everything before a story is ready to implement. It moved to Epic #306: the spec merge as start signal (ADR-008), refinement by the Tech Lead and the rewritten `/refine*` commands (ADR-009), the scheduler and board status derived from facts (ADR-010), and issues #258 and #283.
 - Removing decision blockers, closure confirmations or Red flow-health alerts as human touchpoints.
 - Replacing the manually invoked command contracts (`/implement`, `/review`, `/merge`, `/cleanup`).
 - Real-time dashboards or custom UIs.
@@ -55,7 +55,7 @@ Out:
 
 ### Split the Epic where a story becomes ready to implement — 2026-10-01
 
-**Chosen:** #160 keeps the dispatcher foundation and the story cycle: a story that is ready to implement is delivered without the PO. Everything before that point moves to a new Epic, specified in its own `/spec` session: the spec merge as start signal (ADR-008), refinement by the Tech Lead (ADR-009), and scheduling and board status derived from facts (ADR-010). #258 and #283 move with it. Until the new Epic delivers, the current dispatcher and status rules apply, as each of those ADRs states. The PO accepts that refinement stays manual until then, and that the end-to-end proof for #160 starts at a ready story.
+**Chosen:** #160 keeps the dispatcher foundation and the story cycle: a story that is ready to implement is delivered without the PO. Everything before that point moves to Epic #306, specified in its own `/spec` session: the spec merge as start signal (ADR-008), refinement by the Tech Lead (ADR-009), and scheduling and board status derived from facts (ADR-010). #258 and #283 move with it. Until the new Epic delivers, the current dispatcher and status rules apply, as each of those ADRs states. The PO accepts that refinement stays manual until then, and that the end-to-end proof for #160 starts at a ready story.
 **Rejected:** Keep everything in #160 — the Epic would close only when the full chain from spec merge to cleanup runs, which puts closure much further out and makes the spec about twice as large.
 
 ### Goal of #160 after the split — 2026-10-01
@@ -72,6 +72,11 @@ Out:
 
 **Chosen:** The spec covers delivered and remaining work, so that Epic closure verifies everything #160 promised.
 **Rejected:** Cover only the remaining work — the delivered first wave would then never be checked against an Epic criterion.
+
+### The end-to-end proof is three consecutive stories — 2026-10-01
+
+**Chosen:** The Epic closes on three consecutive stories that each go from ready to cleanup with no PO action.
+**Rejected:** One story — a single run can succeed by luck.
 
 ## Checked Against
 
