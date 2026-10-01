@@ -24,6 +24,17 @@ the finding is superseded. For formal reviews and solo-maintainer overrides,
 record evidence against the verified current head SHA. For merges, refresh the
 head SHA and every required gate immediately before the merge mutation.
 
+Four steps need the `gh` CLI (2.50 or later) authenticated with GraphQL access:
+board status writes, `scripts/ac-summary.sh`, review-thread resolution, and
+`scripts/merge-gate-summary`. GitHub Actions and a local session provide this; a
+Claude Code cloud session does not, and the Codex sandbox may not. The symptom
+is HTTP 403 "GraphQL is not available from Claude Code sessions" or
+`gh: command not found`. Board writes are best-effort: when the capability is
+missing they are skipped with a note in the Session Summary, and `/implement`
+and `/review` still finish their real work. The merge gate is never skipped, so
+`/merge` requires the capability and stops before any GitHub mutation without
+it.
+
 ## Stale Checkout Handling
 
 The sandbox workspace may be initialized from an older checkout and `git fetch` may be blocked. At the start of each session:
@@ -63,7 +74,7 @@ Quick reference for constraints specific to the Codex Windows sandbox. Each entr
 | `.git/` directory operations blocked | `git switch`, `git fetch` fail with lock or permission errors | Use `mcp__github__*` tools for all branch and commit operations. See [Stale Checkout Handling](#stale-checkout-handling). |
 | Default Python version lacks pytest | `python -m pytest` → `No module named pytest` | Use `py -3.12 -m pytest`. Run `py -0p` to list available Python versions. |
 | pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` redirects temp root automatically (fix from #135). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
-| `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. See [GitHub Operations](#github-operations). |
+| `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. Board status writes are skipped with a note, and `/merge` cannot run there because the merge gate needs GraphQL-capable `gh`. See [GitHub Operations](#github-operations). |
 
 ## Branch Naming
 
