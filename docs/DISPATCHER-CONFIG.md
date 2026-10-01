@@ -129,6 +129,28 @@ The dispatcher workflow passes this secret to the shell environment automaticall
 
 For local development, copy `.env.example` to `.env` and set your webhook URL there. `.env` is listed in `.gitignore` and must not be committed.
 
+### Ready for refinement notification state
+
+`scripts/dispatcher-poll.sh` sends one `ready_for_refinement` notification per issue for each **continuous stay** in **Ready for refinement** (issue #257). Its de-duplication state is one issue number per line in `.dispatcher-state/<owner>/<repo>/notified-refinement` (override the directory with `DISPATCHER_STATE_DIR`). It holds issue numbers only: no credentials, message text, or webhook responses.
+
+Lifecycle, applied on every poll except `--dry-run`:
+
+- **Delivery:** an issue is recorded only after `slack-notify.sh` exits `0`, which logs `[POLL] Notified: ...` on stderr.
+- **Retry:** a failed delivery logs `[POLL] Warning: slack-notify.sh failed for #N; will retry next cycle`, stays unrecorded, and is retried on the next poll. The poll still exits `0`.
+- **Exit and re-entry:** recorded issues that are no longer in **Ready for refinement** are dropped, so an issue that leaves and later returns notifies once more.
+- **Missing, unreadable, or malformed state:** a missing file (a first run or a cache miss) starts from empty state silently. An unreadable or malformed file logs a `[POLL] Warning:` and starts from empty state. A failed write logs a warning. None of these abort the poll or change its stdout JSON.
+- **`--dry-run`:** reads the state, logs `[DRY RUN] Would notify: ...`, sends no Slack notification, and never writes the state.
+
+GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` with `actions/cache`:
+
+1. **Restore refinement notification state** runs before **Run dispatcher poll**. Its `dispatcher-state-` prefix restores the most recently saved snapshot.
+2. **Save refinement notification state** runs right after a successful poll on every enabled run, whether or not an issue is ready for implementation. Cache entries are immutable, so each run saves under a unique `dispatcher-state-<run_id>-<run_attempt>` key.
+3. A workflow-level `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) serializes scheduled and manual runs, so no two runs read the same snapshot and race to write it. GitHub keeps at most one pending run per group; a newer pending run replaces an older pending one, and in-progress runs are never cancelled.
+
+**Residual risk:** if the cache is evicted (GitHub removes entries unused for 7 days, or the oldest entries past the repository's size limit) or a save fails, the next poll starts from empty state. Each issue still in **Ready for refinement** can then be notified once more.
+
+**Interim mechanism:** this cache exists only because the dispatcher runs on ephemeral GitHub-hosted runners. #259 moves the dispatcher to persistent infrastructure, where local disk supersedes the cache steps. That migration must keep the continuous-stay, exit/re-entry, delivery-only recording, and retry semantics above, and must revalidate #257's acceptance criteria before the cache steps are removed.
+
 ---
 
 ## GitHub Authentication Token
