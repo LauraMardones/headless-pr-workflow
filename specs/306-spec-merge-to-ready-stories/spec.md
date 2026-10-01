@@ -5,7 +5,9 @@
 
 ## Goal
 
-<What changes, for whom, and why now. A few sentences.>
+After the PO merges a spec PR, the Epic is broken into Features and stories, and stories become ready to implement, with no PO action apart from decision blockers. The Tech Lead's scheduler derives every next action in the chain, and the board status, from GitHub facts. The board no longer starts any work.
+
+Today the PO starts every refinement by hand, the refine commands ask the PO product questions mid-session, and moving a board card is enough to start work. ADR-008 to ADR-010 decided the change on 2026-09-28, but apart from #258 and #283 no issue tracks it, so those ADRs are accepted and not in effect.
 
 ## Scope
 
