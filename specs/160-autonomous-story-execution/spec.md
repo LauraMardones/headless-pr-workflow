@@ -41,7 +41,7 @@ Out:
 - A Slack bot or two-way Slack interaction.
 - Dispatch latency under five minutes.
 - Open-source model integration.
-- An owned or persistent runner host, and rolling-window budget accounting with failover (ADR-005, not adopted).
+- An owned or persistent runner host, and failover to another provider when a limit is reached (ADR-005, not adopted).
 - A second human approver.
 - A Codex review of every push.
 - Approval through a Codex review for PRs with no linked story.
@@ -102,8 +102,18 @@ Out:
 
 ### A reserve of the subscription allowance, set by the PO — 2026-10-01
 
-**Chosen:** Autonomous work leaves a reserve of the five-hour and weekly subscription allowance for the PO's own use. No new autonomous session starts when less than the reserve remains. The PO can change the reserve easily, without a code change.
+**Chosen:** Autonomous work leaves a reserve of the five-hour and weekly subscription allowance for the PO's own use. No new autonomous session starts when less than the reserve remains. The starting values are 10% of the five-hour limit and 20% of the weekly limit. The PO can change them easily, without a code change.
 **Rejected:** "The dispatcher does not consume the PO's chat allowance" (the earlier criterion) — Claude chat and Claude Code share one allowance, so it cannot hold once sessions run on the subscription. A reserve fixed in code — the PO wants to adjust it.
+
+### Open-source model compatibility is not an Epic criterion — 2026-10-01
+
+**Chosen:** The earlier criterion "all OSS compatibility invariants from Epic #64 are preserved" is left out of the spec. The invariants stay working rules in `docs/PROJECT-STATUS.md` and `docs/ADAPTERS.md`, and review checks PRs against those documents.
+**Rejected:** Keep it as an Epic criterion — the PO could not verify it at closure.
+
+### Out of scope, reconfirmed — 2026-10-01
+
+**Chosen:** The ten earlier non-goals stay out of scope, as listed under Scope → Out. One is reworded: "rolling-window budget accounting" is no longer excluded, because the reserve on the five-hour limit needs it; failover to another provider stays excluded.
+**Rejected:** Bring any of them into this Epic — the PO wants none of them from #160.
 
 ## Checked Against
 
