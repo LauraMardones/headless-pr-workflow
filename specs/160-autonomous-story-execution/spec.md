@@ -15,7 +15,7 @@ In, delivered:
 
 - A dispatcher that starts implementation for ready stories without the PO, within a WIP limit of two parallel stories with no file overlap.
 - Slack notifications for decision blockers, closure confirmation requests, Red flow health, a reached budget cap and dispatcher errors.
-- One Slack notification when an item becomes ready for refinement. It stays in use until the new Epic makes refinement start without the PO.
+- One Slack notification when an item becomes ready for refinement. It stays in use until Epic #306 makes refinement start without the PO.
 - Daily budget caps per executor type, and a pause switch (`DISPATCHER_ENABLED`).
 - Automatic resume after the PO answers a decision blocker, and a check against documented decisions before a blocker is raised.
 - The test suite runs in CI on every PR.
@@ -58,7 +58,7 @@ Out:
 - **E4:** The PO can decide a decision blocker from the notification alone, answer with a GitHub comment, and the work resumes without any further PO action.
   - **Verified by:** a provoked blocker whose notification states the question, options and recommendation, answered by one comment, after which the story continues on the next poll.
 - **E5:** Autonomous work stays within limits: at most two stories in implementation with no file overlap; a usage limit the PO sets, which pauses work and notifies the PO; a reserve of the PO's five-hour and weekly subscription allowance below which no new session starts; and a switch that stops new work. The PO can change the usage limit and the reserve without a code change.
-  - **Verified by:** setting `DISPATCHER_ENABLED=false` and seeing no session start on the next poll; setting the usage limit below current usage and receiving the pause notification; and changing the reserve in the repository settings and seeing a session start refused below the new value.
+  - **Verified by:** setting `DISPATCHER_ENABLED=false` and seeing no session start on the next poll; setting the usage limit below current usage and receiving the pause notification; and changing the reserve without a code change and seeing a session start refused below the new value.
 - **E6:** Autonomous sessions start without the PO and run on the PO's existing subscriptions. No autonomous work uses a metered API, and a session that hits a provider limit pauses cleanly.
   - **Verified by:** the ADR from #289 is on `main` with `Status: Accepted`; the three proof stories from E1 were started by its mechanism; and the API-key secrets are removed from the repository, with no API usage on the provider billing pages for the proof period.
 - **E7:** Merge and cleanup use no model.
@@ -78,7 +78,7 @@ Out:
 
 ### Spike #289 stays in #160 — 2026-10-01
 
-**Chosen:** #289 (how sessions are started) stays in #160, with the scope ADR-009 gave it: it covers refinement sessions as well as implementation sessions. The new Epic depends on its result.
+**Chosen:** #289 (how sessions are started) stays in #160, with the scope ADR-009 gave it: it covers refinement sessions as well as implementation sessions. Epic #306 depends on its result.
 **Rejected:** Move #289 to the new Epic — the story cycle in #160 needs its answer first.
 
 ### The spec covers the whole Epic — 2026-10-01
