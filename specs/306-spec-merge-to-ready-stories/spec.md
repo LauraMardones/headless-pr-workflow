@@ -38,6 +38,26 @@ Out:
 **Chosen:** Milestone 6 — Autonomous Execution, the milestone of #160, which this Epic was split from.
 **Rejected:** M7 Pre-Delivery Intake — it is about what happens before delivery items exist. A new milestone — not needed.
 
+### Epics without a merged spec get no new refinement — 2026-10-02
+
+**Chosen:** The Tech Lead refines nothing under an Epic that has no merged spec. This applies to the Epics created before ADR-008 (#173, #236, #272). Stories already refined under those Epics can still be implemented. To continue such an Epic, the PO runs `/spec <number>` for it.
+**Rejected:** Refine old Epics from their issue body — the issue body would become a source of scope again, which ADR-008 rules out. Stop all work under old Epics, including refined stories — it would halt #236's refined stories until its spec is written.
+
+### Epic closure against the spec is part of this Epic — 2026-10-02
+
+**Chosen:** `/verify-closure` checks an Epic against its spec's Epic criteria (ADR-009), and that change is delivered by #306.
+**Rejected:** Leave it to Epic #272 — #306 would deliver traced criteria that nothing checks at closure.
+
+### A usage finding that affects scope or a criterion is a decision blocker — 2026-10-02
+
+**Chosen:** When refinement meets a usage finding that affects scope or an acceptance criterion, it raises a decision blocker for the PO. An answer that changes scope goes into a spec PR. A finding that affects neither is noted and refinement continues.
+**Rejected:** Refinement incorporates the finding itself — it would let refinement change what was specified, against ADR-009. Leave usage findings out of #306 — findings would reach no story unless the PO wrote a spec PR unprompted.
+
+### Refinement can still be started by hand — 2026-10-02
+
+**Chosen:** The `/refine*` commands stay invocable by hand, for example when the scheduler is paused. A manual run follows the same tech-lead rules and makes no product decisions.
+**Rejected:** Only the Tech Lead starts refinement — the PO would have no fallback when the scheduler or session start is down.
+
 ## Checked Against
 
 - <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
