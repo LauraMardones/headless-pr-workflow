@@ -23,7 +23,7 @@ In:
 - The Epic issue as index: the Tech Lead keeps it linked to the spec and showing progress.
 - No refinement under an Epic with no merged spec. Stories already refined under such an Epic can still be implemented.
 - A usage finding that affects scope or an acceptance criterion becomes a decision blocker. Any other finding is noted.
-- `/verify-closure` checks an Epic against its spec's Epic criteria.
+- `/verify-closure` checks an Epic against its spec's Epic criteria. For the checks only the PO can perform, it gives the PO the exact steps and what to expect.
 - The `/refine*` commands stay invocable by hand, under the same rules.
 - `docs/PROJECT-STATUS.md` (fact and intent, transitions, recovery) and `docs/REFINEMENT-PIPELINE.md` (pipeline shape, escalation triggers) are brought in line.
 - #258 and #283 are re-refined against ADR-010.
@@ -44,10 +44,24 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <An outcome the PO can verify at Epic closure.>
-  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
-- **E2:** <…>
-  - **Verified by:** <…>
+The proof Epic is the first Epic whose spec merges after this Epic's work is in place. "Closure evidence" is the evidence comment that `/verify-closure` posts for #306. It also gives the PO step-by-step instructions for the three checks the PO performs by hand (E3, E5, E7).
+
+- **E1:** After a spec PR merges, the Epic's Features exist and 3–5 stories are ready to implement with no PO action, when no decision blocker arises. Nothing is refined under an Epic with no merged spec.
+  - **Verified by:** closure evidence showing that the proof Epic's issue timelines contain no PO comment or command between the spec merge and the stories being ready, and that an Epic without a merged spec had no refinement activity in the same period, with the scheduler naming the missing spec as the reason.
+- **E2:** Every Feature criterion and every story criterion names the parent criterion it serves, and every Epic criterion is covered.
+  - **Verified by:** closure evidence with the coverage check's output for the proof Epic, showing no uncovered Epic criterion and no criterion without a parent. The PO follows one chain from a story criterion up to an Epic criterion.
+- **E3:** Refinement makes no product decision. What the spec does not settle reaches the PO as a decision blocker, and refinement resumes after the PO's answer.
+  - **Verified by:** the PO posts a usage finding that contradicts a criterion of a story not yet refined. The next refinement raises a decision blocker and leaves the criterion unchanged, and it continues after the PO's `/unblock` comment.
+- **E4:** A story becomes ready to implement only when it is refined and every hard dependency is closed. The ready buffer holds 3–5 stories while unrefined work remains.
+  - **Verified by:** closure evidence from the proof Epic showing a refined story becoming ready on the next scheduler run after its last hard dependency closed, and a buffer that never exceeded five and was refilled when it dropped below three.
+- **E5:** Moving a board card starts no work, and the board is corrected. The pause switch stops new refinement.
+  - **Verified by:** the PO drags an unrefined item to the ready status; no session starts and the next scheduler run restores the status. Closure evidence shows a scheduler run with `DISPATCHER_ENABLED=false` that started no refinement session.
+- **E6:** The board and the Epic issue show the current state: the stage of each implementation issue, and how much of each Feature and Epic remains.
+  - **Verified by:** closure evidence comparing the board status of the proof Epic's issues with the GitHub facts, with no difference. The proof Epic's issue links to its spec and shows progress.
+- **E7:** After a scope-change spec PR merges, the affected Features and stories are re-refined before any of them is implemented further.
+  - **Verified by:** the PO merges one scope-change spec PR on the proof Epic. The affected issues then show a refinement record naming the new spec commit, and none of them started implementation in between.
+- **E8:** Epic closure is checked against the spec's Epic criteria.
+  - **Verified by:** closure evidence for #306 that lists every criterion of this spec with its evidence.
 
 ## Decisions
 
@@ -80,6 +94,21 @@ Out:
 
 **Chosen:** The `/refine*` commands stay invocable by hand, for example when the scheduler is paused. A manual run follows the same tech-lead rules and makes no product decisions.
 **Rejected:** Only the Tech Lead starts refinement — the PO would have no fallback when the scheduler or session start is down.
+
+### The proof Epic is not named in advance — 2026-10-08
+
+**Chosen:** The criteria are verified on the first Epic whose spec merges after this Epic's work is in place.
+**Rejected:** Name #236 or #272 now — closure of #306 would depend on the PO writing that particular spec. A small purpose-made test Epic — it proves the chain on artificial scope and leaves throwaway issues.
+
+### Closure verification guides the PO through the hands-on checks — 2026-10-08
+
+**Chosen:** `/verify-closure` gives the PO step-by-step instructions for every check the PO performs by hand, including what to post and what to expect.
+**Rejected:** Leave the PO to work the steps out from the **Verified by:** lines — the PO asked to be prompted.
+
+### Eight Epic criteria, three of them checked by hand — 2026-10-08
+
+**Chosen:** Eight criteria. The PO acts by hand for three (E3, E5, E7) and reads evidence for the rest. "No refinement without a spec" is part of E1, and the pause switch is part of E5. "The scheduler uses no model" and "refinement respects the usage limit and the reserve" stay in scope and are not Epic criteria: the first is an ADR-010 rule checked in review, and #160's E5 verifies the limits for every session.
+**Rejected:** Ten criteria with five hands-on checks — too much for the PO to verify at closure.
 
 ## Checked Against
 
