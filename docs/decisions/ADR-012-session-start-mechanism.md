@@ -126,4 +126,27 @@ Read from the documentation on 2026-10-08. None of it has been observed yet; the
 
 ## Trial record
 
-Not started. It starts when the PO has read the quotes above, the setup steps on #289 are done and the PO states that the five-day time box begins.
+Time box: five working days from 2026-10-08 16:35 UTC (PO comment on #289), ending 2026-10-15. The PO read the quotes above and released both candidates for trial in the same comment. `CLAUDE_CODE_OAUTH_TOKEN` exists as a repository secret since 2026-10-08 16:32 UTC.
+
+### Reading the allowance (criterion 3, E5): a script can
+
+Observed 2026-10-08, Claude Code 2.1.293, on the PO's machine, signed in with the subscription and with no API key in the environment (`apiKeySource: "none"` in the session's init message).
+
+A non-interactive run, `claude -p "<prompt>" --output-format stream-json --verbose`, emits one `rate_limit_event` line. Its `rate_limit_info` held:
+
+- `unifiedWindows.five_hour.utilization` 0.19 and `unifiedWindows.seven_day.utilization` 0.29, each with a `resetsAt` time in Unix seconds;
+- `status: "allowed"`;
+- `overageStatus: "rejected"` with `overageDisabledReason: "org_level_disabled"`, which matches the PO's confirmation that usage credits are off.
+
+So the remaining allowance is one minus the utilization, readable with `jq`. Limits of this finding:
+
+- Reading costs one model request. The probe used one Sonnet turn; a cheaper model and a shorter prompt have not been tried.
+- The SDK reference documents `rate_limit_event` with `status`, `resetsAt` and `utilization` ([typescript](https://code.claude.com/docs/en/agent-sdk/typescript)). `unifiedWindows`, which carries both windows at once, is not in that reference and may change without notice.
+- Not yet observed on a GitHub-hosted runner with the OAuth token (candidate B) or inside a cloud session (candidate A).
+- Sending `/usage` as the prompt did not work from Git Bash, which rewrote it to a file path. It has not been tried from another shell.
+
+The probe output is not in the repository. It contains nothing secret, but the acceptance criteria ask for linked evidence, and a local run has no link; the candidate B run on Actions is to supply one.
+
+### Sessions
+
+None started on either candidate yet.
