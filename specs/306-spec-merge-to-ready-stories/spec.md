@@ -13,11 +13,34 @@ Today the PO starts every refinement by hand, the refine commands ask the PO pro
 
 In:
 
-- <…>
+- Start signal: the Tech Lead notices a merged spec PR, for a new spec or a scope change, and starts the Epic-to-Feature breakdown with no PO action.
+- Rewritten `/refine*` commands: a tech-lead role that reads the spec at a known commit, makes no product decisions, raises a decision blocker for a specification defect instead of asking the PO, records the spec commit it refined against, and moves no board card.
+- Traced acceptance criteria: Feature criteria name the Epic criteria they serve, and story criteria name their Feature criteria. A script checks that every Epic criterion is covered and that no criterion lacks a parent.
+- Just-in-time story refinement: the Tech Lead keeps 3–5 stories ready to implement and refines no further ahead.
+- Re-refinement after a scope change: affected Features and stories are re-refined before any of them is implemented further.
+- The scheduler: a script, with no model, chooses the next action from hard dependencies, priority, queue limits, the WIP limit of two and file overlap. It replaces the board trigger in the dispatcher, including for starting implementation.
+- The board shows facts: only the scheduler writes status, it overwrites manual moves, and the intent statuses are removed or renamed. `/implement`, `/review`, `/merge` and `/cleanup` stop moving cards.
+- The Epic issue as index: the Tech Lead keeps it linked to the spec and showing progress.
+- No refinement under an Epic with no merged spec. Stories already refined under such an Epic can still be implemented.
+- A usage finding that affects scope or an acceptance criterion becomes a decision blocker. Any other finding is noted.
+- `/verify-closure` checks an Epic against its spec's Epic criteria.
+- The `/refine*` commands stay invocable by hand, under the same rules.
+- `docs/PROJECT-STATUS.md` (fact and intent, transitions, recovery) and `docs/REFINEMENT-PIPELINE.md` (pipeline shape, escalation triggers) are brought in line.
+- #258 and #283 are re-refined against ADR-010.
+- The "ready for refinement" Slack notification is retired.
+- Refinement sessions respect the usage limit, the reserve and the pause switch from #160.
+- An end-to-end proof from a spec merge to ready stories.
 
 Out:
 
-- <…>
+- The cycle from a ready story to cleanup, which is #160. Only its trigger and its status display change here.
+- How sessions are started (#289 in #160).
+- The `/spec` command and the specification phase itself (#302 under #173).
+- Writing the specs for #173, #236 and #272.
+- Product decisions in refinement, and removing decision blockers as a human touchpoint.
+- Changing the values of the ready buffer (3–5) or the WIP limit (two).
+- A dashboard that replaces the board.
+- Pre-delivery intake (#236).
 
 ## Acceptance Criteria
 
