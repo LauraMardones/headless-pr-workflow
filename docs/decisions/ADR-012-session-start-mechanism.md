@@ -145,8 +145,27 @@ So the remaining allowance is one minus the utilization, readable with `jq`. Lim
 - Not yet observed on a GitHub-hosted runner with the OAuth token (candidate B) or inside a cloud session (candidate A).
 - Sending `/usage` as the prompt did not work from Git Bash, which rewrote it to a file path. It has not been tried from another shell.
 
-The probe output is not in the repository. It contains nothing secret, but the acceptance criteria ask for linked evidence, and a local run has no link; the candidate B run on Actions is to supply one.
+The local probe output is not in the repository and has no link. The candidate B run below shows the same event on a GitHub-hosted runner.
 
-### Sessions
+### Candidate B: minimal session on a GitHub-hosted runner
 
-None started on either candidate yet.
+A throwaway workflow on branch `claude/spike-session-start-trial-b` (not for merge) installs Claude Code with `npm`, runs one `claude -p` turn with `CLAUDE_CODE_OAUTH_TOKEN` and no API key, and calls GitHub GraphQL through `gh`. It is triggered by a push to that branch; a schedule or `workflow_dispatch` trigger needs the file on `main`, so the five-minute poll itself is not exercised here.
+
+| Run | Result |
+|---|---|
+| [37811036581](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/37811036581) | Session failed: `401 OAuth access token is invalid`. `gh` GraphQL worked. |
+| [37811243108](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/37811243108) | Same 401. The stored secret has the expected `sk-ant-oat` prefix but contains one whitespace character (length 109). |
+| [37811391159](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/37811391159) | With the whitespace stripped in the job (length 108): session succeeded, `apiKeySource: "none"`, one Haiku turn. `rate_limit_event` reported five-hour utilization 0.21 and weekly 0.29, with `overageStatus: "rejected"`. `gh` 2.102.0 answered a GraphQL query for PR #309's review threads with the job's `GITHUB_TOKEN`. |
+
+Findings so far for candidate B, all from the last run:
+
+- **Criterion 2 (runs on the subscription): pass** for a minimal session. No API key was passed to the job.
+- **Criterion 3 (allowance readable): pass.** The same event as on the PO's machine, at the cost of one Haiku turn.
+- **Criterion 7 (`gh` with GraphQL): pass** for a repository query with `GITHUB_TOKEN`. Projects v2 writes need `PROJECT_TOKEN`, as the dispatcher already uses; not re-tested.
+- **Setup note (criterion 6):** a token pasted with a trailing space or line break is stored as given and fails with a 401 that does not name the cause. The secret should be saved again without the whitespace, or the job must strip it.
+
+Allowance before and after, as the sessions reported it: five-hour 0.19 (local probe, Sonnet) then 0.21 (this run, Haiku); weekly 0.29 both times. The PO's other use in between is not known, so the difference is not the cost of the probes.
+
+### Full sessions on real work
+
+None started on either candidate yet. They need the two small trial tasks, which wait for the PO.
