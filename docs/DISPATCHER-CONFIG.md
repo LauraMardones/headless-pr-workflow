@@ -273,3 +273,95 @@ These are conservative estimates (Option A, decided 2026-06-07). Values can be r
 Counter files are date-scoped: each file stores the UTC date alongside the cumulative usage. When a new UTC day begins, the counter file's date no longer matches `TODAY`, so `dispatcher-budget.sh check` treats usage as 0 (full budget available). The workflow's cache key (`budget-YYYY-MM-DD-{executor_type}`) also changes on a new UTC day, ensuring a fresh cache entry is created automatically.
 
 No manual reset, cron job, or scheduled cleanup is required.
+
+---
+
+## Subscription allowance and reserve
+
+Before every model session start (`/implement`, `/review`, `/merge` and `/cleanup`), the dispatcher runs `scripts/dispatcher-allowance.sh` (issue #317, ADR-012). The script reads how much of the PO's five-hour and weekly Claude subscription allowance is left. A session starts only when **both** windows are at or above the reserve the PO has set. When the allowance cannot be read, nothing starts.
+
+### Reserve variables
+
+Set these as repository variables under **Settings → Secrets and variables → Actions → Variables**:
+
+`https://github.com/<owner>/<repo>/settings/variables/actions`
+
+| Variable | Valid values | Default |
+|---|---|---|
+| `RESERVE_FIVE_HOUR_PERCENT` | whole number `0`–`100` | `10` |
+| `RESERVE_WEEKLY_PERCENT` | whole number `0`–`100` | `20` |
+
+- The reserve is the share of each window, in percent, that autonomous work must leave untouched. Remaining share = (1 − `utilization`) × 100. A start needs remaining ≥ reserve in both windows; equality is a start.
+- An unset or empty variable uses the default. GitHub passes an unset `vars.X` as an empty string.
+- Any other value (`abc`, `-1`, `101`, `10%`, `7.5`) is an `[ALLOWANCE ERROR]` that names the variable and the value. No probe runs.
+- A change applies on the next poll that finds work. No code change is needed. A hold written under the old values is ignored.
+
+### Subscription token — `CLAUDE_CODE_OAUTH_TOKEN`
+
+The probe signs in with the repository secret `CLAUDE_CODE_OAUTH_TOKEN`, an OAuth token for the PO's subscription created with `claude setup-token`.
+
+- Save the secret with nothing before or after the token. The script removes every space, tab, carriage return and line feed before use, but a token with stray characters inside it is rejected with `401 OAuth access token is invalid`, which does not name the cause.
+- The current token was created on 2026-10-08 and lasts one year. Renew it before 2027-10-08 by running `claude setup-token` again and replacing the secret.
+- The script and the dispatcher log only the token's presence and its length after whitespace removal, never its value.
+
+### The probe
+
+One Claude Code turn on Haiku, with no tools, a fixed short prompt, and the repository's instructions left out (it runs from an empty temporary directory):
+
+```
+claude -p "Reply with the single word OK." --model haiku --tools "" --strict-mcp-config \
+  --no-session-persistence --output-format stream-json --verbose
+```
+
+- `--bare` is never used: bare mode ignores the OAuth token (ADR-012 → Candidate B).
+- `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed from the probe's environment. If the init message does not report `apiKeySource: "none"`, the result is an error, so the probe can never bill a metered key.
+- The probe times out after 120 seconds (override with `ALLOWANCE_PROBE_TIMEOUT`).
+- The script reads `rate_limit_info.unifiedWindows.five_hour` and `.seven_day` (`utilization`, `resetsAt`) and `rate_limit_info.overageStatus` from the `rate_limit_event` line. Anthropic does not document `unifiedWindows`.
+
+### Pinned Claude Code version
+
+`.github/workflows/dispatcher.yml` installs Claude Code in the "Install Claude Code" step, only when the poll found work:
+
+```
+npm install -g @anthropic-ai/claude-code@2.1.296
+```
+
+The pin keeps the undocumented event shape stable. To change the version, edit that step, then run the dispatcher once with `workflow_dispatch` and check that the `[RESERVE]` line still shows both windows. `tests/test_dispatcher_workflow_allowance.py` checks that the version here matches the workflow.
+
+### Outcomes and log lines
+
+| Exit | Decision | Log line (stderr of the script) | Dispatcher behavior |
+|---|---|---|---|
+| `0` | `start` | `[RESERVE] five-hour 79% left (reserve 10%), weekly 71% left (reserve 20%) — start` | The session starts. |
+| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`, `/merge` or `/cleanup`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. |
+| `2` | `error` | `[ALLOWANCE ERROR] <reason> — starting nothing` | No session. The job fails, without a `dispatcher_error` Slack message. After `/implement`, the story gets the same comment with the reason. |
+
+A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
+
+A refusal partway through a cycle leaves the story at its current step. Nothing restarts it automatically until #316; the PO can run the step by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+
+The script prints exactly one JSON object on stdout in every exit path:
+
+```json
+{
+  "decision": "start | refuse | error",
+  "source": "probe | hold | none",
+  "reason": "string; empty on start",
+  "five_hour": { "utilization": 0.21, "remaining_percent": 79, "reserve_percent": 10, "resets_at": "2026-10-10T15:00:00Z" },
+  "weekly":    { "utilization": 0.29, "remaining_percent": 71, "reserve_percent": 20, "resets_at": "2026-10-14T08:00:00Z" },
+  "api_key_source": "none",
+  "overage_status": "rejected"
+}
+```
+
+Values that were not read are `null`. `remaining_percent` is rounded down for display (and shown as `0` when utilization is above 1); the decision uses the unrounded value.
+
+### The hold
+
+A refusal from a probe writes `.dispatcher-allowance/hold.json` (override with `ALLOWANCE_STATE_DIR`) with `until` set to the latest reset time among the windows below the reserve, and the two reserve values in force. Until that time, and while both reserve values are unchanged, the script refuses with `source: "hold"` and does not run Claude Code. The remaining share only goes up at a reset, so no chance to start is lost. A missing, unreadable or malformed hold file means the script probes; it never means a start without a probe.
+
+The hold lives in the same `actions/cache` entry as the budget counters, whose key changes every UTC day. A hold therefore lasts at most until the next UTC day; after that, one probe re-creates it.
+
+### A repeated `[ALLOWANCE ERROR]`
+
+An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumented `rate_limit_event` shape has changed, or the token has expired. Each such run fails visibly in Actions (and in GitHub's failed-run email) but sends no Slack message. The remedy is to set `DISPATCHER_ENABLED=false`, read the reason in the log, and either renew the token or revisit ADR-012.

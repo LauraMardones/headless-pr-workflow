@@ -16,6 +16,9 @@
 #             issue #263 (cross-provider /review pairing — no new executor: label)
 #             issue #256 (non-executable ready items — Epic, Feature, missing or
 #                         unsupported type — are skipped with a warning, not fatal)
+#             issue #317 (subscription allowance check before each session start:
+#                         scripts/dispatcher-allowance.sh, called at the top of
+#                         invoke_executor_command(); see docs/DISPATCHER-CONFIG.md)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -273,6 +276,7 @@ WIP_LIMIT=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
+ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
 
 # ─── Executor agent loop tuning (issue #254 / ADR-003) — overridable for tests ─
@@ -1024,6 +1028,81 @@ run_openai_agent() {
     return 1
 }
 
+# ─── Utility: subscription allowance check before a session start (#317) ────
+# Runs scripts/dispatcher-allowance.sh (ADR-012) and acts on its decision:
+#   exit 0 (start)  — return 0; the session starts as before.
+#   exit 1 (refuse) — before /implement: log [RESERVE SKIP], put the story back
+#                     to "Ready for implementation" (E1 already moved it), exit 0.
+#                     Before /review, /merge or /cleanup: one comment on the
+#                     story naming the step, the window, the share left, the
+#                     reserve and the reset time; exit 0. Resuming is #316.
+#   exit 2 (error)  — log [ALLOWANCE ERROR] and fail the job without a
+#                     dispatcher_error Slack message; after /implement, the
+#                     story gets the same comment with the reason.
+# Every non-start path sets DISPATCH_HANDLED=true and exits the script.
+
+allowance_comment() {
+    local step="$1" decision_json="$2"
+    jq -r --arg step "$step" --arg issue "$ISSUE_NUMBER" '
+        def line($name; $w): "- \($name): \($w.remaining_percent)% left, reserve \($w.reserve_percent)%, resets \($w.resets_at // "unknown")";
+        . as $d
+        | [ ["five-hour window", .five_hour], ["weekly window", .weekly] ]
+            | map(select(.[1].remaining_percent != null)) as $read
+        | ($read | map(select(.[1].remaining_percent < .[1].reserve_percent))) as $below
+        | (if $d.decision == "refuse"
+           then "/\($step) was not started for #\($issue): the subscription allowance is below the reserve the PO set."
+           else "/\($step) was not started for #\($issue): the subscription allowance could not be read, so nothing starts."
+           end) as $head
+        | ( if $d.decision == "refuse" and ($below | length) > 0 then $below
+            elif $d.decision == "refuse" then []
+            else $read end
+            | map(line(.[0]; .[1])) ) as $lines
+        | ["## Subscription allowance check", "", $head, ""]
+          + (if ($lines | length) > 0 then $lines + [""] else [] end)
+          + ["Reason: \($d.reason)", "",
+             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
+        | join("\n")' <<< "$decision_json"
+}
+
+check_subscription_allowance() {
+    local step="$1"
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check subscription allowance before /$step"
+        return 0
+    fi
+
+    local decision_json rc=0
+    decision_json=$(bash "$ALLOWANCE_SCRIPT") || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+
+    if ! jq -e 'type == "object" and (.decision | type) == "string"' <<< "$decision_json" >/dev/null 2>&1; then
+        decision_json=$(jq -n --argjson rc "$rc" '{decision: "error", reason: "allowance check exited \($rc) without a decision", five_hour: {}, weekly: {}}')
+        rc=2
+    fi
+
+    LAST_ACTION="allowance check before /$step for #$ISSUE_NUMBER"
+    if [[ $rc -eq 1 ]]; then
+        if [[ "$step" == "implement" ]]; then
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
+            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+        else
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /$step not started; commenting on the story"
+            post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+        fi
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+
+    echo "[ALLOWANCE ERROR] #$ISSUE_NUMBER: /$step not started: $(jq -r '.reason' <<< "$decision_json")" >&2
+    if [[ "$step" == "implement" ]]; then
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+    else
+        post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+    fi
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
 # ─── Utility: invoke an executor command via a direct provider API call ──────
 # Issue #254: no CLI binary, no install step. Resolves provider/model from the
 # data-driven tables above, loads the corresponding .claude/commands/*.md file
@@ -1041,6 +1120,8 @@ invoke_executor_command() {
     local slash_command="$1"
     local target_arg="$2"
     local executor_label="${3:-$EXECUTOR_LABEL}"
+
+    check_subscription_allowance "$slash_command"
 
     local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
     local executor_secret="${routing_value##*:}"
