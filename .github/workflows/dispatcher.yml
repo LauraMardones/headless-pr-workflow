@@ -62,10 +62,20 @@ jobs:
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
         uses: actions/cache/restore@v4
         with:
-          path: .dispatcher-budget
+          path: |
+            .dispatcher-budget
+            .dispatcher-allowance
           key: budget-${{ env.TODAY }}-${{ github.run_id }}
           restore-keys: |
             budget-${{ env.TODAY }}-
+
+      # Issue #317: the subscription allowance check (scripts/dispatcher-allowance.sh)
+      # runs one Claude Code turn before each session start. Pinned so the
+      # undocumented rate_limit_event shape changes only on a deliberate bump;
+      # see docs/DISPATCHER-CONFIG.md → "Subscription allowance and reserve".
+      - name: Install Claude Code
+        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
 
       - name: Run dispatcher invoke
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
@@ -77,6 +87,9 @@ jobs:
           BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
+          RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
         run: |
           bash scripts/dispatcher-invoke.sh \
             --repo "${{ github.repository }}" \
@@ -86,7 +99,9 @@ jobs:
         if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
         uses: actions/cache/save@v4
         with:
-          path: .dispatcher-budget
+          path: |
+            .dispatcher-budget
+            .dispatcher-allowance
           key: budget-${{ env.TODAY }}-${{ github.run_id }}
 
       - name: Notify budget cap reached
