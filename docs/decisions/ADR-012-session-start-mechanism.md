@@ -1,6 +1,6 @@
 # ADR-012: How Model Sessions Are Started Without the PO
 
-**Status:** Proposed (draft: provider-terms check done, trial not started, no decision yet)
+**Status:** Proposed (draft: trial recorded, decision proposed, follow-up stories not yet opened)
 **Date:** 2026-10-08
 **Related:** #289 (spike), #160 (E5, E6), #306, #308, #304, ADR-006, ADR-009, ADR-010
 **Supersedes:** ADR-003 (when a mechanism is chosen; the ADR-003 status line changes in the same PR)
@@ -20,19 +20,30 @@ The spike checks the provider's terms before any trial session is started, becau
 
 ## Decision
 
-**Not yet made.** This draft records only the provider-terms check, which had to come first.
+**Proposed, for the PO to accept or change.** The trial is recorded under [Trial record](#trial-record) and [Findings per criterion](#findings-per-criterion).
 
-Terms check result (2026-10-08): **neither candidate is excluded.** Anthropic's own documentation describes both as supported uses of a Pro or Max subscription. The reading, the quotes it rests on and the remaining risk are in [Provider terms check](#provider-terms-check). The PO reads the quotes before any trial session starts.
+Model sessions are started by the GitHub Actions dispatcher, which runs Claude Code on the runner signed in with the PO's subscription token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). No API key is used. This is candidate B, and it applies to all three kinds of session:
 
-The decision is written after the trial. If no script can read the remaining five-hour and weekly allowance, no mechanism is chosen and the question goes to the PO as a decision blocker (#289 acceptance criteria).
+- **Implementation:** the dispatcher starts `/implement` for the next ready story.
+- **Refinement:** the Tech Lead's scheduler (ADR-009) starts refinement sessions the same way.
+- **Review of a Codex-implemented story:** the dispatcher starts `/review` the same way, replacing the API call ADR-006 left in place.
+
+Before it starts any session, the dispatcher reads the five-hour and weekly allowance from a one-turn Claude Code run and starts nothing when either is below the PO's reserve.
+
+Candidate A (cloud sessions started by a routine) is not chosen. It worked for implementation, but GitHub GraphQL is blocked there by design, so `/merge`'s merge gate cannot run.
+
+Provider terms (2026-10-08): both candidates are allowed; see [Provider terms check](#provider-terms-check). No pay-per-use billing is involved: the PO confirmed on #289 on 2026-10-08 that usage credits are off and the API console balance is zero with auto-reload off, and every session that reported its allowance showed `overageStatus: "rejected"`.
 
 ## Consequences
 
-To be written with the decision. Already known from the documentation, before any trial:
-
-- Candidate A cannot run `scripts/merge-gate-summary`, `scripts/ac-summary.sh` or board writes as they are. The cloud GitHub proxy rejects GraphQL even when the session supplies its own token, so installing an authenticated `gh` in a setup script does not help. Choosing A means those scripts must read GitHub through REST.
-- A routine's schedule cannot run more often than once an hour. Keeping ADR-002's five-minute poll with candidate A means the dispatcher fires the routine through its API trigger, which adds one routine-scoped token as a repository secret. That token starts runs; it is not an API key and carries no billing.
-- Routines are a research preview, so candidate A's behavior and limits may change.
+- `scripts/merge-gate-summary` keeps using `gh` with GraphQL. The Actions runner provides it; no script change is needed for `/merge`.
+- The embedded API loop in `scripts/dispatcher-invoke.sh` and the API-key secrets are removed in the follow-up work under #308. ADR-003 is superseded then.
+- ADR-002's runner choice and five-minute poll stand. Its "the dispatcher invokes executors via API calls" and "executor sessions run outside GitHub Actions" are replaced: the session runs inside the Actions job, on the subscription.
+- A session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet and is the first thing the follow-up work must prove.
+- The session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today.
+- The allowance reading depends on a field (`unifiedWindows`) that Anthropic does not document. If it disappears, the dispatcher must stop starting sessions, not start them unchecked.
+- "Ordinary, individual usage" is the limit Anthropic sets on subscription use and it has no number. One session at a time keeps to a fair reading of it.
+- Revisit if Anthropic changes the terms or the token, if GraphQL becomes available in cloud sessions, or if the allowance can no longer be read.
 
 ## Provider terms check
 
@@ -166,6 +177,33 @@ Findings so far for candidate B, all from the last run:
 
 Allowance before and after, as the sessions reported it: five-hour 0.19 (local probe, Sonnet) then 0.21 (this run, Haiku); weekly 0.29 both times. The PO's other use in between is not known, so the difference is not the cost of the probes.
 
-### Full sessions on real work
+### Full sessions on real work (2026-10-10)
 
-None started on either candidate yet. They need the two small trial tasks, which wait for the PO.
+Both sessions ran `/implement` on a small task written for the trial, on Sonnet, with a WIP exception from the PO ([#289 comment](https://github.com/LauraMardones/headless-pr-workflow/issues/289#issuecomment-6064792151)). The PO created the routine and committed the workflow file, because the desktop app does not let an agent session create an unattended agent. That is setup; neither session needed a PO action after it.
+
+| | Candidate A: routine, cloud session | Candidate B: Actions runner, OAuth token |
+|---|---|---|
+| Task and PR | #310, PR #312 | #311, PR #313 |
+| Evidence | [session](https://claude.ai/code/session_01AESqLg4wUKr9oreJmRbdY9), [Session Summary](https://github.com/LauraMardones/headless-pr-workflow/pull/312#issuecomment-6096394547) | [run 38043641593](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/38043641593), [Session Summary](https://github.com/LauraMardones/headless-pr-workflow/pull/313#issuecomment-6096398127) |
+| Branch | `claude/issue-310-adr-index` | `claude/issue-311-adr-header-test` |
+| Result | One file changed as scoped, CI `pytest` green, Session Summary posted, PR ready for review | Same |
+| Could not do | `scripts/ac-summary.sh` and board writes (GraphQL 403); `pytest` had to be installed first | Nothing failed. It skipped the board write although `gh` with GraphQL was available |
+| Allowance | Not read from inside the session; the PO reads it on the usage page | Read by the job: five-hour 0.05 before, 0.07 after; weekly 0.02 before and after |
+
+Cost. The two sessions ran at the same time, so the 0.02 rise in the five-hour window is their sum plus two Haiku probe turns, not the cost of either one. The PO's usage page before both: session 4%, week 2%, campaign credit US$20 of US$100 left, usage credits 0 EUR. The values after, and so the split between campaign credit and plan allowance for candidate A, are still to be recorded. Session B reported 11 turns in 45 seconds.
+
+## Findings per criterion
+
+| # | Criterion | A: routine, cloud session | B: Actions runner, OAuth token |
+|---|---|---|---|
+| 1 | Starts without the PO | **Pass.** Started by the routine. A schedule cannot run more often than hourly; the five-minute poll would have to fire the routine's API trigger (not tried). | **Pass** for an Actions event. The trial used a push trigger; the dispatcher's existing cron is the same kind of event (not re-tried with the token). |
+| 2 | Runs on the subscription | **Pass**, but cloud sessions draw the campaign credit first until 2026-11-05, so the cost seen now is not the steady-state cost. | **Pass.** `apiKeySource: "none"`; no API key in the job. |
+| 3 | Reserve can be enforced | **Partial.** Reading the allowance from inside the session was not tried. A job outside it can read it first, which needs candidate B's token anyway. | **Pass.** The job read both windows and started the session only above the reserve (10% and 20%). |
+| 4 | Branch naming | **Pass** when the prompt names the branch. | **Pass.** |
+| 5 | Pauses cleanly at a limit | **Not observed.** Documented: further runs are rejected until the window resets. | **Not observed.** Documented: requests are blocked until the reset; a `claude -p` run ends with error `rate_limit`. Work already pushed stays on the branch. |
+| 6 | Simple for the PO | One routine per kind of work, set up in a web form; connectors must be removed by hand; research preview. | One secret, one workflow. A token saved with stray whitespace fails with an unexplained 401. The token lasts one year. |
+| 7 | `gh` with GraphQL | **Fail.** 403 by design; `scripts/merge-gate-summary` cannot run. | **Pass.** |
+| 8 | All three session kinds | Implementation tried. Refinement and review not tried. `/merge` cannot run here (criterion 7). | Implementation tried. Refinement and review not tried; nothing found that would prevent them. |
+| 9 | Isolation and safety | Isolated VM; GitHub credentials stay outside the session. | Fresh runner per job, but the session holds `PROJECT_TOKEN`, which can merge. Only the instructions and branch protection stop it. |
+
+Not established within the time box so far: behavior at a real usage limit (criterion 5), a refinement session, and the review of a Codex-implemented story.
