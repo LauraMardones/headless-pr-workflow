@@ -1,0 +1,75 @@
+# THROWAWAY — AC22 proof run for issue #317 / PR #321. Removed in the next commit.
+#
+# Runs scripts/dispatcher-allowance.sh alone, with the real subscription token,
+# on a GitHub-hosted runner (the AC22 alternative to a full dispatcher run).
+# It does not need DISPATCHER_ENABLED and starts no story session. It also:
+#   - lists "Ready for implementation" board items (read-only), to show
+#     whether AC22's "no Ready story" condition holds;
+#   - passes ANTHROPIC_API_KEY into the job, as the real invoke step does, to
+#     show that the probe strips it (apiKeySource "none");
+#   - prints only the probe's usage, apiKeySource and rate_limit_info, never
+#     the token or the full stream.
+
+name: Allowance proof (#317, throwaway)
+
+on:
+  push:
+    branches: [ccr-65eaa483-al4hq2]
+    paths: [.github/workflows/allowance-proof-317.yml]
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ready for implementation items on the board (read-only)
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f query='
+            query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                projectsV2(first: 1) { nodes { items(first: 100) { nodes {
+                  content { ... on Issue { number title state } }
+                  fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                } } } }
+              }
+            }' | jq -r '
+              [.data.repository.projectsV2.nodes[0].items.nodes[]
+               | select(.fieldValueByName.name == "Ready for implementation" or .fieldValueByName.name == "Ready")
+               | select(.content.state == "OPEN")
+               | "#\(.content.number) \(.content.title)"]
+              | if length == 0 then "READY_FOR_IMPLEMENTATION: none"
+                else "READY_FOR_IMPLEMENTATION (\(length)):\n" + join("\n") end'
+
+      - name: Install Claude Code (same pin as dispatcher.yml)
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
+
+      - name: Run dispatcher-allowance.sh with the subscription token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
+          RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
+        run: |
+          echo "ANTHROPIC_API_KEY present in the job: $([[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo yes || echo no)"
+          # Wrapper on CLAUDE_BIN keeps a copy of the stream so the probe's
+          # usage can be reported from this same single probe.
+          cat > "$RUNNER_TEMP/claude-tee" <<'EOF'
+          #!/usr/bin/env bash
+          set -o pipefail
+          claude "$@" | tee "$RUNNER_TEMP/probe-stream.jsonl"
+          EOF
+          chmod +x "$RUNNER_TEMP/claude-tee"
+          rc=0
+          CLAUDE_BIN="$RUNNER_TEMP/claude-tee" ALLOWANCE_STATE_DIR="$RUNNER_TEMP/allowance" \
+            bash scripts/dispatcher-allowance.sh > "$RUNNER_TEMP/decision.json" || rc=$?
+          echo "dispatcher-allowance.sh exit code: $rc"
+          echo "decision JSON:"; cat "$RUNNER_TEMP/decision.json"
+          echo "probe evidence (selected fields only):"
+          jq -cR 'fromjson? // empty
+            | if .type == "system" and .subtype == "init" then {init: {apiKeySource, model}}
+              elif .type == "rate_limit_event" then {rate_limit_info}
+              elif .type == "result" then {result: {subtype, is_error, num_turns, duration_ms, total_cost_usd, usage, modelUsage}}
+              else empty end' "$RUNNER_TEMP/probe-stream.jsonl"
