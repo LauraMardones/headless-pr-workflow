@@ -1,6 +1,6 @@
 # ADR-003: Interim Executor Session Boundary — Embedded Loop, Pending Runner Migration
 
-**Status:** Accepted (interim — see Conditions for Revisiting)
+**Status:** Superseded by ADR-012
 **Date:** 2026-08-10
 **Issue:** #254 — Bug: dispatcher invokes executors via a locally-installed CLI that doesn't exist on the GitHub Actions runner
 **PR:** #255 — fix: invoke executors via direct Anthropic/OpenAI API calls, not a CLI

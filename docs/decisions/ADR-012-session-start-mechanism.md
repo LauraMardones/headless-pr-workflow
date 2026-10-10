@@ -1,11 +1,11 @@
 # ADR-012: How Model Sessions Are Started Without the PO
 
-**Status:** Proposed (draft: trial recorded, decision proposed, follow-up stories not yet opened)
-**Date:** 2026-10-08
+**Status:** Accepted
+**Date:** 2026-10-10
 **Related:** #289 (spike), #160 (E5, E6), #306, #308, #304, ADR-006, ADR-009, ADR-010
-**Supersedes:** ADR-003 (when a mechanism is chosen; the ADR-003 status line changes in the same PR)
-**Amends:** ADR-002's "the dispatcher invokes executors via API calls" (when a mechanism is chosen; the ADR-002 status line changes in the same PR)
-**Effective when:** to be written with the decision; it names the follow-up stories under #308 and #306.
+**Supersedes:** ADR-003
+**Amends:** ADR-002's "the dispatcher invokes executors via API calls, not embedded sessions" and "executor sessions run outside GitHub Actions"
+**Effective when:** #314 (implementation sessions) and #317 (allowance and reserve) are merged. #315 (review of Codex-implemented stories), #316 (pause and resume at a usage limit), #318 (`gh` with GraphQL for `/merge`) and #319 (refinement sessions, Epic #306) complete it. Until #314 lands, the dispatcher's current API loop is what the code does; it must not be used with a metered key (spec #160).
 
 ## Context
 
@@ -20,7 +20,7 @@ The spike checks the provider's terms before any trial session is started, becau
 
 ## Decision
 
-**Proposed, for the PO to accept or change.** The trial is recorded under [Trial record](#trial-record) and [Findings per criterion](#findings-per-criterion).
+Accepted by the PO on 2026-10-10 after the trial; the merge of this ADR is the approval (ADR-011). The trial is recorded under [Trial record](#trial-record) and [Findings per criterion](#findings-per-criterion).
 
 Model sessions are started by the GitHub Actions dispatcher, which runs Claude Code on the runner signed in with the PO's subscription token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). No API key is used. This is candidate B, and it applies to all three kinds of session:
 
@@ -37,9 +37,9 @@ Provider terms (2026-10-08): both candidates are allowed; see [Provider terms ch
 ## Consequences
 
 - `scripts/merge-gate-summary` keeps using `gh` with GraphQL. The Actions runner provides it; no script change is needed for `/merge`.
-- The embedded API loop in `scripts/dispatcher-invoke.sh` and the API-key secrets are removed in the follow-up work under #308. ADR-003 is superseded then.
+- The embedded API loop in `scripts/dispatcher-invoke.sh` and the API-key secrets are removed in the follow-up work under #308 (#314, #315).
 - ADR-002's runner choice and five-minute poll stand. Its "the dispatcher invokes executors via API calls" and "executor sessions run outside GitHub Actions" are replaced: the session runs inside the Actions job, on the subscription.
-- A session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet and is the first thing the follow-up work must prove.
+- A session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet; #316 must prove it.
 - The session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today.
 - The allowance reading depends on a field (`unifiedWindows`) that Anthropic does not document. If it disappears, the dispatcher must stop starting sessions, not start them unchecked.
 - "Ordinary, individual usage" is the limit Anthropic sets on subscription use and it has no number. One session at a time keeps to a fair reading of it.
@@ -122,9 +122,9 @@ The third-party restriction does not apply: the PO is the purchaser, runs the un
 
 The Usage Policy (effective September 15, 2025, <https://www.anthropic.com/legal/aup>) adds no restriction on unattended coding sessions; it says agentic use must comply with the policy like any other use.
 
-## Documented behavior to confirm in the trial
+## Documented behavior before the trial
 
-Read from the documentation on 2026-10-08. None of it has been observed yet; the trial replaces each line with a finding and linked evidence.
+Read from the documentation on 2026-10-08. This table is what was known before the trial. What the trial observed is under [Findings per criterion](#findings-per-criterion); where the two differ, the findings count.
 
 | Criterion | What the documentation says | Source |
 |---|---|---|
@@ -153,7 +153,7 @@ So the remaining allowance is one minus the utilization, readable with `jq`. Lim
 
 - Reading costs one model request. The probe used one Sonnet turn; a cheaper model and a shorter prompt have not been tried.
 - The SDK reference documents `rate_limit_event` with `status`, `resetsAt` and `utilization` ([typescript](https://code.claude.com/docs/en/agent-sdk/typescript)). `unifiedWindows`, which carries both windows at once, is not in that reference and may change without notice.
-- Not yet observed on a GitHub-hosted runner with the OAuth token (candidate B) or inside a cloud session (candidate A).
+- The same event was later seen on a GitHub-hosted runner with the OAuth token (candidate B, below). Reading it from inside a cloud session (candidate A) was not tried.
 - Sending `/usage` as the prompt did not work from Git Bash, which rewrote it to a file path. It has not been tried from another shell.
 
 The local probe output is not in the repository and has no link. The candidate B run below shows the same event on a GitHub-hosted runner.
@@ -179,7 +179,7 @@ Allowance before and after, as the sessions reported it: five-hour 0.19 (local p
 
 ### Full sessions on real work (2026-10-10)
 
-Both sessions ran `/implement` on a small task written for the trial, on Sonnet, with a WIP exception from the PO ([#289 comment](https://github.com/LauraMardones/headless-pr-workflow/issues/289#issuecomment-6064792151)). The PO created the routine and committed the workflow file, because the desktop app does not let an agent session create an unattended agent. That is setup; neither session needed a PO action after it.
+Both sessions ran `/implement` on a small task written for the trial, on Sonnet, with a WIP exception from the PO ([#289 comment](https://github.com/LauraMardones/headless-pr-workflow/issues/289#issuecomment-6064792151)). The PO created the routine and committed the workflow file, because the desktop app does not let an agent session create an unattended agent. That is setup; neither session needed a PO action after it. The PO confirmed that the routine started from its schedule, not from "Run now".
 
 | | Candidate A: routine, cloud session | Candidate B: Actions runner, OAuth token |
 |---|---|---|
@@ -206,4 +206,4 @@ Cost. The two sessions ran at the same time, so the 0.02 rise in the five-hour w
 | 8 | All three session kinds | Implementation tried. Refinement and review not tried. `/merge` cannot run here (criterion 7). | Implementation tried. Refinement and review not tried; nothing found that would prevent them. |
 | 9 | Isolation and safety | Isolated VM; GitHub credentials stay outside the session. | Fresh runner per job, but the session holds `PROJECT_TOKEN`, which can merge. Only the instructions and branch protection stop it. |
 
-Not established within the time box so far: behavior at a real usage limit (criterion 5), a refinement session, and the review of a Codex-implemented story.
+Not established, by PO decision of 2026-10-10 not to spend more allowance on the trial: behavior at a real usage limit (criterion 5, now #316), a refinement session (#319) and the review of a Codex-implemented story (#315). Criteria 5 and 8 stay open until those stories land.
