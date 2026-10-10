@@ -175,6 +175,14 @@ echo -n "200"
 EOF
 chmod +x "$FAKE_BIN/curl"
 
+# Allowance check stub (issue #317): always "start", so this test exercises
+# selection only. The check itself is covered by tests/test_dispatcher_allowance*.py.
+cat > "$FAKE_BIN/allowance-start.sh" << 'EOF'
+#!/usr/bin/env bash
+echo '{"decision":"start","source":"probe","reason":""}'
+EOF
+chmod +x "$FAKE_BIN/allowance-start.sh"
+
 # ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 # new_env — fresh mock dir; echoes its path
@@ -222,7 +230,7 @@ run_dispatcher() {
     env -i HOME="$HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
         MOCK_DIR="$d" GH_TOKEN="fake-token" GITHUB_OUTPUT="$d/github_output" \
         ANTHROPIC_API_KEY="fake-anthropic" OPENAI_API_KEY_CODEX="fake-openai" \
-        BUDGET_COUNTER_DIR="$d/budget" \
+        BUDGET_COUNTER_DIR="$d/budget" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
         BUDGET_DAILY_HAIKU="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_SONNET="${BUDGET_DAILY:-10000000}" \
         BUDGET_DAILY_OPUS="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_CODEX="${BUDGET_DAILY:-10000000}" \
         AGENT_MAX_TURNS=3 AGENT_MAX_WALLCLOCK_SECONDS=600 \

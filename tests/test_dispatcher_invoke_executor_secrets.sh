@@ -178,6 +178,9 @@ TABLES_AND_FUNC="$GLOBAL_TMP/extracted.sh"
     awk '/^run_anthropic_agent\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     awk '/^run_openai_agent\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     awk '/^invoke_executor_command\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
+    # The subscription allowance check (issue #317) is covered by
+    # tests/test_dispatcher_allowance*.py; this test isolates the API path.
+    echo 'check_subscription_allowance() { :; }'
 } > "$TABLES_AND_FUNC"
 
 if ! grep -q "^invoke_executor_command() {" "$TABLES_AND_FUNC"; then
