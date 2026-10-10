@@ -8,7 +8,7 @@ import pytest
 DECISIONS_DIR = Path(__file__).resolve().parent.parent / "docs" / "decisions"
 ADR_FILES = sorted(DECISIONS_DIR.glob("ADR-*.md"))
 
-HEADING_RE = re.compile(r"^# ADR-(\d+): \S")
+HEADING_RE = re.compile(r"^# ADR-(\d{3}): \S")
 NAME_RE = re.compile(r"^ADR-(\d+)")
 
 
@@ -18,7 +18,7 @@ def check_heading(name: str, text: str) -> str | None:
     if not match:
         return "first line is not '# ADR-NNN: <title>'"
     file_number = NAME_RE.match(name).group(1)
-    if int(match.group(1)) != int(file_number):
+    if match.group(1) != file_number:
         return f"heading number {match.group(1)} != file name number {file_number}"
     return None
 
@@ -65,6 +65,8 @@ def test_sample_good_passes():
         "ADR-042: Title\n",
         "# ADR-042 Title\n",
         "# ADR-043: Title\n",
+        "# ADR-42: Title\n",
+        "# ADR-0042: Title\n",
         "",
         "\n# ADR-042: Title\n",
     ],
