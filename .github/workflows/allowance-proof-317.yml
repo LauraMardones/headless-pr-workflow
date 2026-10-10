@@ -1,0 +1,119 @@
+# THROWAWAY — AC22 proof run for issue #317 / PR #321 (second run). Removed in the next commit.
+#
+# Review on a46a167 asked for an exhaustive, paginated read showing that no
+# "Ready for implementation" story existed when the standalone-script
+# alternative was used. This job establishes that condition and runs the
+# probe in the same job:
+#   1. reads every project linked to the repository and every item of each,
+#      with cursor pagination; fails if the items read differ from totalCount;
+#   2. runs scripts/dispatcher-allowance.sh only if no item has status
+#      "Ready for implementation" (or its "Ready" alias, as the dispatcher
+#      accepts); otherwise it stops without probing.
+# DISPATCHER_ENABLED is not read or changed; no story session starts.
+# Prints only the probe's usage, apiKeySource and rate_limit_info, never the
+# token or the full stream.
+
+name: Allowance proof (#317, throwaway)
+
+on:
+  push:
+    branches: [ccr-65eaa483-al4hq2]
+    paths: [.github/workflows/allowance-proof-317.yml]
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exhaustive board read (all projects, all items, paginated)
+        id: board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%/*}"; name="${GITHUB_REPOSITORY#*/}"
+          echo "Board read at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          projects=$(gh api graphql -f owner="$owner" -f name="$name" -f query='
+            query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                projectsV2(first: 100) { totalCount pageInfo { hasNextPage } nodes { id number title } }
+              }
+            }')
+          [[ $(jq -r '.data.repository.projectsV2.pageInfo.hasNextPage' <<< "$projects") == "false" ]] \
+            || { echo "FAIL: more than 100 projects"; exit 1; }
+          echo "Projects linked to the repository: $(jq '.data.repository.projectsV2.totalCount' <<< "$projects")"
+          : > "$RUNNER_TEMP/ready.txt"
+          while read -r pid pnum; do
+            cursor=""; read_count=0; pages=0; total=""
+            while :; do
+              args=(-f id="$pid" -f query='
+                query($id: ID!, $after: String) {
+                  node(id: $id) { ... on ProjectV2 {
+                    items(first: 100, after: $after) {
+                      totalCount
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        type
+                        content { ... on Issue { number title state } ... on PullRequest { number title state } ... on DraftIssue { title } }
+                        fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                      }
+                    }
+                  } }
+                }')
+              [[ -n "$cursor" ]] && args+=(-f after="$cursor")
+              page=$(gh api graphql "${args[@]}")
+              pages=$((pages + 1))
+              total=$(jq '.data.node.items.totalCount' <<< "$page")
+              read_count=$((read_count + $(jq '.data.node.items.nodes | length' <<< "$page")))
+              jq -r --arg p "$pnum" '.data.node.items.nodes[]
+                | select(.fieldValueByName.name == "Ready for implementation" or .fieldValueByName.name == "Ready")
+                | "project \($p): \(.type) #\(.content.number // "-") [\(.content.state // "-")] \(.content.title) — status \(.fieldValueByName.name)"' \
+                <<< "$page" >> "$RUNNER_TEMP/ready.txt"
+              [[ $(jq -r '.data.node.items.pageInfo.hasNextPage' <<< "$page") == "true" ]] || break
+              cursor=$(jq -r '.data.node.items.pageInfo.endCursor' <<< "$page")
+            done
+            echo "Project $pnum: totalCount=$total, items read=$read_count, pages=$pages"
+            [[ "$read_count" == "$total" ]] || { echo "FAIL: project $pnum read $read_count of $total items"; exit 1; }
+          done < <(jq -r '.data.repository.projectsV2.nodes[] | "\(.id) \(.number)"' <<< "$projects")
+          n=$(wc -l < "$RUNNER_TEMP/ready.txt")
+          if [[ "$n" -eq 0 ]]; then
+            echo "READY_FOR_IMPLEMENTATION: none (exhaustive)"
+            echo "none=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "READY_FOR_IMPLEMENTATION ($n):"; cat "$RUNNER_TEMP/ready.txt"
+            echo "none=false" >> "$GITHUB_OUTPUT"
+            echo "Precondition for the standalone-script route does not hold; not probing."
+          fi
+
+      - name: Install Claude Code (same pin as dispatcher.yml)
+        if: steps.board.outputs.none == 'true'
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
+
+      - name: Run dispatcher-allowance.sh with the subscription token
+        if: steps.board.outputs.none == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
+          RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
+        run: |
+          echo "Probe started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "ANTHROPIC_API_KEY present in the job: $([[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo yes || echo no)"
+          cat > "$RUNNER_TEMP/claude-tee" <<'EOF'
+          #!/usr/bin/env bash
+          set -o pipefail
+          claude "$@" | tee "$RUNNER_TEMP/probe-stream.jsonl"
+          EOF
+          chmod +x "$RUNNER_TEMP/claude-tee"
+          rc=0
+          CLAUDE_BIN="$RUNNER_TEMP/claude-tee" ALLOWANCE_STATE_DIR="$RUNNER_TEMP/allowance" \
+            bash scripts/dispatcher-allowance.sh > "$RUNNER_TEMP/decision.json" || rc=$?
+          echo "dispatcher-allowance.sh exit code: $rc"
+          echo "decision JSON:"; cat "$RUNNER_TEMP/decision.json"
+          echo "probe evidence (selected fields only):"
+          jq -cR 'fromjson? // empty
+            | if .type == "system" and .subtype == "init" then {init: {apiKeySource, model}}
+              elif .type == "rate_limit_event" then {rate_limit_info}
+              elif .type == "result" then {result: {subtype, is_error, num_turns, duration_ms, total_cost_usd, usage}}
+              else empty end' "$RUNNER_TEMP/probe-stream.jsonl"
