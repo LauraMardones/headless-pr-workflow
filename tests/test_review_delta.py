@@ -103,6 +103,22 @@ def test_review_delta_uses_latest_accepted_separate_session_review_as_baseline()
     assert baseline.source == "separate-session-review"
 
 
+def test_review_delta_ignores_separate_session_review_without_a_reviewer_provider():
+    old_head = "old-head"
+    context = build_pr_context(
+        head_ref_oid="new-head",
+        latest_reviews=(
+            build_review(
+                state="COMMENTED",
+                commit_oid=old_head,
+                body=separate_session_review_body(head_sha=old_head, reviewer_provider=None),
+            ),
+        ),
+    )
+
+    assert select_review_delta_baseline(context) is None
+
+
 def test_review_delta_json_contract_exposes_stable_fields():
     summary = summarize_review_delta(scenario_current_approval(head_sha="head"))
 

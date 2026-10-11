@@ -484,7 +484,7 @@ def test_json_output_github_truth_keys():
 def test_json_output_approval_fields():
     context = scenario_current_approval(head_sha="head123")
     approval = make_workflow_status(context).to_dict()["approval"]
-    for key in ("approval_status", "latest_review_sha", "latest_approval_sha", "separate_session_review",
+    for key in ("approval_status", "latest_review_sha", "latest_approval_sha", "codex_review", "separate_session_review",
                 "approval_source", "satisfied_by", "blocking_reasons", "hard_gate_passed"):
         assert key in approval, f"Missing approval key: {key}"
     assert approval["approval_status"] == "current"

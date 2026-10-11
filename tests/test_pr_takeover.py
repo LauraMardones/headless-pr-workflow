@@ -329,7 +329,7 @@ def test_json_output_approval_fields():
     output = make_takeover(context).to_dict()
     approval = output["approval"]
     for key in ("approval_status", "latest_review_sha", "latest_approval_sha",
-                "separate_session_review", "approval_source", "satisfied_by",
+                "codex_review", "separate_session_review", "approval_source", "satisfied_by",
                 "blocking_reasons", "hard_gate_passed"):
         assert key in approval, f"Missing approval key: {key}"
     assert approval["approval_status"] == "current"

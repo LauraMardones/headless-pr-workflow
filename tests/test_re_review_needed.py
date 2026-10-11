@@ -130,6 +130,8 @@ def test_re_review_needed_json_contract_includes_stable_fields():
     assert payload["latest_approval_sha"] == "head"
     assert payload["approval_status"] == "current"
     assert payload["separate_session_review"]["status"] == "missing"
+    assert payload["codex_review"]["status"] == "not-applicable"
+    assert "solo_override" not in payload
     assert payload["approval_source"] == "formal"
     assert payload["satisfied_by"] == "formal-approval"
     assert payload["re_review_needed"] is False
