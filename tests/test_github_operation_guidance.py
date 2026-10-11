@@ -40,6 +40,30 @@ def test_review_guidance_preserves_current_head_and_thread_safety() -> None:
     assert "never resolve a still-actionable thread" in text
 
 
+def test_review_generates_and_verifies_separate_session_evidence() -> None:
+    text = command_text("review.md")
+
+    generate = text.index("hpw review-evidence-text <head-sha> --reviewer-provider <claude|codex>")
+    template = text.index("copy this template verbatim, changing only `<head-sha>` and `<claude|codex>`", generate)
+    check = text.index("hpw approval-check $ARGUMENTS --repo LauraMardones/headless-pr-workflow", template)
+
+    assert generate < template < check
+    assert "post its exact output" in text
+    assert "full 40-character head SHA" in text
+    assert "never compose or paraphrase these sentences" in text
+    assert "as its own block at the top of the review body, above the Session Summary" in text
+    assert "never rely on a `Deviation:` line as the only place that carries it" in text
+    assert "confirm it prints `separate-session review: accepted`" in text
+    assert "post one corrected review on the same head SHA and run the check again" in text
+    assert "do not claim the PR is ready to merge" in text
+    assert 'leave the story in "In review"' in text
+    assert "name the rejected evidence in `--blockers`" in text
+    assert "do not use `--next merge`" in text
+    assert "only the review evidence needs redoing, not the code" in text
+    assert "if `hpw approval-check` cannot be run in the session, say so with `--deviation`" in text
+    assert "the verbatim-template rule still applies" in text
+
+
 def test_merge_fallback_requires_fresh_gates() -> None:
     text = command_text("merge.md")
 

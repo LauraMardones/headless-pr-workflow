@@ -122,7 +122,7 @@ Review session responsibilities:
 
 - Refresh GitHub state before reviewing so the exact current head SHA is known.
 - Record blockers on GitHub, or record a no-blockers review summary for that SHA.
-- For a no-blockers result, use the separate-session review summary required by `MERGE-POLICY.md`, including the `Reviewer provider:` line, or a formal approval when GitHub allows it.
+- For a no-blockers result, use the separate-session review summary required by `MERGE-POLICY.md`, including the `Reviewer provider:` line, or a formal approval when GitHub allows it. Generate the summary text with `hpw review-evidence-text`; do not compose it.
 
 Merge-owner responsibilities:
 

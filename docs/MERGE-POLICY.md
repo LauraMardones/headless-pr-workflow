@@ -105,8 +105,11 @@ A separate-session review counts only when all conditions are true:
 
 - Review was performed in a separate session from the session that implemented the reviewed head SHA.
 - The review is recorded on GitHub against the current head SHA as a PR review submission summary (state `COMMENTED`).
-- The review summary states that no blockers remain for that exact head SHA: it includes `solo-maintainer override accepted`, `no blockers remain for <head-sha>`, and that the review is the approval to rely on for the current head SHA.
-- The review summary names the reviewing provider on its own line: `Reviewer provider: claude` or `Reviewer provider: codex`.
+- The review summary states that no blockers remain for that exact head SHA. Automation requires all three of these phrases, matched without regard to case:
+  - `solo-maintainer override accepted`
+  - `no blockers remain for <head-sha>`, with the full 40-character head SHA
+  - `approval to rely on for the current head SHA`
+- The review summary names the reviewing provider on its own line: `Reviewer provider: claude` or `Reviewer provider: codex`. Automation requires this line too.
 - The reviewing provider is not the provider that implemented the PR, per the `executor:` label of any linked story (`executor:claude-code-*` is `claude`, `executor:codex` is `codex`). With no linked story, or a linked story with no `executor:` label, there is nothing to compare and a stated valid provider is enough.
 
 Path 2 fails closed when no reviewing provider is stated or the value is not `claude` or `codex`, when the stated provider matches the implementing provider, when the summary was recorded on an earlier head (stale), or when the linked stories could not be read completely.
@@ -117,7 +120,7 @@ The expected GitHub evidence surface is the PR review submission summary attache
 
 When a review session determines that no blockers remain, the reviewer should mark the PR Ready for review before issuing the final review summary.
 
-Required PR review summary template:
+Required PR review summary template. Use it verbatim, changing only `<head-sha>` and `<claude|codex>`; do not compose or paraphrase the sentences, because a summary missing any required phrase is rejected. `hpw review-evidence-text <head-sha> --reviewer-provider <claude|codex>` prints this text for a full head SHA, and `hpw approval-check` confirms after posting that the summary was accepted. Put the summary as its own block at the top of the review body, above the Session Summary.
 
 ```text
 Reviewed head SHA `<head-sha>`.

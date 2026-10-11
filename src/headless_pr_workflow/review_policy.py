@@ -15,14 +15,23 @@ from typing import Any
 from .github import LinkedIssue, PullRequestContext, ReviewSummary, TimelineEvent
 
 
+# Required phrases of a separate-session review summary (ADR-007 path 2). The
+# recognizer and `separate_session_review_text` both use these constants, so
+# the generated text always matches. Matching is case-insensitive.
 SEPARATE_SESSION_REVIEW_MARKER = "solo-maintainer override accepted"
+NO_BLOCKERS_PHRASE = "No blockers remain for {head_sha}"
+APPROVAL_TO_RELY_ON_PHRASE = "approval to rely on for the current head SHA"
+REVIEWER_PROVIDER_LABEL = "Reviewer provider:"
 REVIEWER_PROVIDERS = ("claude", "codex")
 EXECUTOR_LABEL_PREFIX = "executor:"
 CLAUDE_EXECUTOR_LABEL_PREFIX = "executor:claude-code-"
 CODEX_EXECUTOR_LABEL = "executor:codex"
 CODEX_BOT_LOGIN = "chatgpt-codex-connector"
 
-_REVIEWER_PROVIDER_LINE = re.compile(r"^[ \t]*Reviewer provider:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_REVIEWER_PROVIDER_LINE = re.compile(
+    rf"^[ \t]*{re.escape(REVIEWER_PROVIDER_LABEL)}[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+_FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 _CODEX_CLEAN_START = re.compile(r"^Codex Review:\s*Didn['’]t find any major issues\.")
 _CODEX_REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*[ \t]*`([0-9a-fA-F]{7,40})`")
 _CODEX_USAGE_LIMIT_START = "You have reached your Codex usage limits."
@@ -314,6 +323,31 @@ def is_accepted_separate_session_review(review: ReviewSummary, *, head_sha: str)
     return _has_required_phrases(review, head_sha=head_sha) and reviewer_provider(review.body) is not None
 
 
+def separate_session_review_text(head_sha: str | None, reviewer_provider: str | None) -> str:
+    """Return the separate-session review summary to post for a head SHA.
+
+    The text is built from the phrase constants the recognizer checks, so a
+    `COMMENTED` review on `head_sha` with this body always has the required
+    phrases and a valid reviewing-provider line. Raises `ValueError` unless
+    `head_sha` is a full 40-character hexadecimal SHA and `reviewer_provider`
+    is one of `REVIEWER_PROVIDERS`.
+    """
+
+    if not head_sha or not _FULL_SHA.fullmatch(head_sha):
+        raise ValueError("head SHA must be a full 40-character hexadecimal commit SHA")
+    if reviewer_provider not in REVIEWER_PROVIDERS:
+        raise ValueError(f"reviewer provider must be one of: {', '.join(REVIEWER_PROVIDERS)}")
+
+    head_sha = head_sha.lower()
+    return (
+        f"Reviewed head SHA `{head_sha}`.\n\n"
+        f"{NO_BLOCKERS_PHRASE.format(head_sha=head_sha)}.\n\n"
+        f"{SEPARATE_SESSION_REVIEW_MARKER}.\n\n"
+        f"{REVIEWER_PROVIDER_LABEL} {reviewer_provider}\n\n"
+        f"This solo-maintainer override is the {APPROVAL_TO_RELY_ON_PHRASE}.\n"
+    )
+
+
 def reviewer_provider(body: str | None) -> str | None:
     """Return the stated reviewing provider, or None when it is absent, invalid or contradictory."""
 
@@ -389,8 +423,8 @@ def _has_required_phrases(review: ReviewSummary, *, head_sha: str) -> bool:
     body = (review.body or "").lower()
     return (
         SEPARATE_SESSION_REVIEW_MARKER in body
-        and f"no blockers remain for {head_sha.lower()}" in body
-        and "approval to rely on for the current head sha" in body
+        and NO_BLOCKERS_PHRASE.format(head_sha=head_sha).lower() in body
+        and APPROVAL_TO_RELY_ON_PHRASE.lower() in body
     )
 
 
