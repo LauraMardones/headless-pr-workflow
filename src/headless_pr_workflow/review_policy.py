@@ -32,7 +32,9 @@ CODEX_BOT_LOGIN = "chatgpt-codex-connector"
 # only as such a comment, by `/implement` or by the bookkeeping job, and never
 # written into an issue, a PR description or any other comment.
 CODEX_REVIEW_TRIGGER_PHRASE = "@codex review"
-CODEX_EVENT_KINDS = ("clean", "findings", "usage-limit", "unknown")
+# `status` is the progress comment Codex keeps up to date on a PR. It is not a
+# reply to a request, so the bookkeeping job ignores it.
+CODEX_EVENT_KINDS = ("clean", "findings", "usage-limit", "status", "unknown")
 
 _REVIEWER_PROVIDER_LINE = re.compile(
     rf"^[ \t]*{re.escape(REVIEWER_PROVIDER_LABEL)}[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE
@@ -41,6 +43,7 @@ _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 _CODEX_CLEAN_START = re.compile(r"^Codex Review:\s*Didn['’]t find any major issues\.")
 _CODEX_REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*[ \t]*`([0-9a-fA-F]{7,40})`")
 _CODEX_USAGE_LIMIT_START = "You have reached your Codex usage limits."
+_CODEX_STATUS_START = "<!-- codex-pull-request-review-summary -->"
 _CODEX_FINDINGS_START = "### 💡 Codex Review"
 
 
@@ -485,12 +488,15 @@ def classify_codex_event(event: TimelineEvent) -> str | None:
 
     Returns None for an event that is not a comment or review by the Codex
     bot. A clean result and a usage-limit reply are PR conversation comments;
-    findings are a PR review submission. Anything else by the bot is `unknown`.
+    findings are a PR review submission. Codex's own progress comment is
+    `status`. Anything else by the bot is `unknown`.
     """
 
     if not _is_codex_bot(event):
         return None
     if event.kind == "comment":
+        if (event.body or "").strip().startswith(_CODEX_STATUS_START):
+            return "status"
         return _codex_comment_kind(event.body)
     if event.kind == "review":
         return _codex_review_kind(event.body)

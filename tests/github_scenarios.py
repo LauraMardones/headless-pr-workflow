@@ -411,6 +411,17 @@ def codex_pr_298_findings_body(prefix: str = PR_298_COMMITS[0][:10]) -> str:
     )
 
 
+def codex_status_body(commit: str = "ae24ec5", *, status: str = "\U0001f504 **Running** since 2026-10-11T14:48:57Z") -> str:
+    """The progress comment Codex keeps up to date, as on PR #327 (issuecomment-6109911085)."""
+
+    return (
+        "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n"
+        "This comment shows the latest Codex review activity on this pull request.\n\n"
+        "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
+        f"| \U0001f4dd **Code Review** | {status} | `{commit}` | Manual request |\n\n\n\n{_codex_about_footer()}"
+    )
+
+
 # A Codex task reply, as on PR #297 (issuecomment-5857960089): not a review result.
 CODEX_TASK_REPLY_BODY = (
     "### Summary\n\n"

@@ -116,6 +116,7 @@ For a Claude-implemented story (`executor:claude-code-*`), the review is request
 | Situation on the current head | Action |
 |---|---|
 | Clean Codex review accepted by the approval gate, required checks green | Post the Session Summary (`Next: merge`); move the story `In review` → `In merge`. |
+| Clean, but a reviewer requested changes | Nothing. The approval gate does not pass, and that reviewer owns the next step. |
 | Clean, a required check still running | Nothing; the scheduled run looks again. |
 | Clean, a required check failed | Post the Session Summary naming the check (`Next: implementation`); move `In review` → `In implementation`. |
 | Codex review with findings | Post the Session Summary linking the review (`Next: implementation`); move `In review` → `In implementation`. |
@@ -126,6 +127,7 @@ For a Claude-implemented story (`executor:claude-code-*`), the review is request
 
 Rules:
 
+- **Progress comment.** Codex keeps one "Codex Review Summary" comment up to date on the PR. It is not a reply: a request stays pending while it says a review is running.
 - **Bounds.** Two repository variables set the bounds, so the PO changes them without a code change: `CODEX_REVIEW_RETRY_HOURS` (back-off, default `5`, the Codex usage window) and `CODEX_REVIEW_MAX_REQUESTS` (requests the job posts per head, default `3`).
 - **Blockers** use the Declaration format in `PROJECT-STATUS.md` and are posted on the story. The board has no `Blocked` option, so the story stays in `In review`. No Slack notification is sent for them.
 - **Session Summary.** The job posts the exact output of `scripts/session-summary.sh --command review` as a PR comment. Its `Deviation:` line says the bookkeeping job produced it without a model session.

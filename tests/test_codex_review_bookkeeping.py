@@ -57,6 +57,7 @@ from tests.github_scenarios import (
     codex_findings_review,
     codex_pr_287_clean_body,
     codex_pr_298_findings_review,
+    codex_status_body,
     commit_event,
     conversation_comment,
     force_push_event,
@@ -175,6 +176,30 @@ def test_classifier_recognizes_the_real_codex_payloads():
     assert classify_codex_event(codex_comment(CODEX_TASK_REPLY_BODY)) == "unknown"
 
 
+def test_classifier_recognizes_the_codex_progress_comment():
+    running = codex_comment(codex_status_body())
+    completed = codex_comment(codex_status_body(status="\u2705 **Completed** 2026-10-11T14:15:10Z"))
+
+    assert classify_codex_event(running) == "status"
+    assert classify_codex_event(completed) == "status"
+    # Only the bot's own comment counts, and it never counts as a clean result.
+    assert classify_codex_event(conversation_comment(codex_status_body(), created_at=TWO_HOURS_AGO)) is None
+    assert evaluate_codex_review(pr(request(), running)).status == "invalid"
+
+
+def test_progress_comment_is_not_a_reply_so_the_request_stays_pending():
+    # Codex posts the progress comment seconds after the first request and edits it afterwards.
+    status = codex_comment(codex_status_body(HEAD_SHA[:7]), url=UNKNOWN_URL)
+    waiting = decision_for(pr(request(TWO_HOURS_AGO), status))
+    overdue = decision_for(pr(request(SIX_HOURS_AGO), status))
+    answered = decision_for(pr(request(), status, codex_pr_298_findings_review(HEAD_SHA)))
+
+    assert (waiting.action, waiting.codex_result) == (ACTION_NONE, "pending")
+    assert (overdue.action, overdue.codex_result) == (ACTION_REQUEST_REVIEW, "pending")
+    assert (answered.action, answered.codex_result) == (ACTION_MOVE_IN_IMPLEMENTATION, "findings")
+    assert decision_for(pr(request(), status, codex_comment())).action == ACTION_MOVE_IN_MERGE
+
+
 def test_classifier_ignores_other_authors_and_fails_closed_on_unknown_reviews():
     human = conversation_comment(codex_clean_body(), created_at=TWO_HOURS_AGO)
     impostor = codex_comment(codex_clean_body(), author_type="User")
@@ -271,6 +296,21 @@ def test_clean_result_after_findings_on_the_same_head_moves_to_in_merge():
     decision = decision_for(pr(request(), codex_findings_review(HEAD_SHA), request(), codex_comment()))
 
     assert decision.action == ACTION_MOVE_IN_MERGE
+
+
+def test_requested_changes_block_the_move_to_in_merge_despite_a_clean_codex_result():
+    for checks in ("success", "failure"):
+        context = pr(request(), codex_comment(), checks=checks, review_decision="CHANGES_REQUESTED")
+        decision = decision_for(context)
+
+        assert evaluate_codex_review(context).status == "accepted"
+        assert (decision.action, decision.codex_result) == (ACTION_NONE, "clean")
+        assert "CHANGES_REQUESTED" in decision.reason
+        assert decision.marker is None
+
+    github = FakeGitHub(pr(request(), codex_comment(), review_decision="CHANGES_REQUESTED"))
+    assert run_bookkeeping(PR, github=github, now=NOW).applied == NOT_NEEDED
+    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
 
 
 # --- AC5: findings ------------------------------------------------------------

@@ -35,6 +35,7 @@ from .review_policy import (
     codex_reviewed_commit,
     evaluate_codex_review,
     is_codex_review_request,
+    summarize_review_policy,
 )
 
 
@@ -345,6 +346,16 @@ def decide(
         return result(ACTION_REQUEST_REVIEW, codex_result, codex_url, why)
 
     if codex_result == "clean":
+        # A clean Codex result is not enough: the whole approval gate must pass. A reviewer's
+        # "changes requested" overrides it (docs/MERGE-POLICY.md), and that reviewer owns the next step.
+        policy = summarize_review_policy(context)
+        if not policy.hard_gate_passed:
+            return result(
+                ACTION_NONE,
+                codex_result,
+                codex_url,
+                f"Codex found no major issues, but the approval gate does not pass: {policy.blocking_reason}",
+            )
         return _clean_decision(context, ci, result, codex_url)
 
     if codex_result == "findings":
@@ -604,7 +615,8 @@ def _codex_result(
             latest_request_index, latest_request = index, event
             continue
         kind = classify_codex_event(event)
-        if kind is None or _names_older_commit(event, kind, head_sha):
+        # Codex's progress comment is not a reply: a request stays pending while it says "Running".
+        if kind is None or kind == "status" or _names_older_commit(event, kind, head_sha):
             continue
         latest_index, latest = index, event
 
