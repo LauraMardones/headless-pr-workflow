@@ -20,7 +20,7 @@ Important:
 - Review only the current head SHA.
 - Use GitHub as source of truth.
 - If no blockers remain, use formal approval when GitHub allows it.
-- If GitHub blocks approval because the authenticated account owns the PR, follow the documented solo-maintainer override path exactly.
+- If GitHub blocks approval because the authenticated account owns the PR, record the separate-session review summary documented in docs/MERGE-POLICY.md exactly, including the `Reviewer provider:` line.
 
 Workflow status goals:
 - If blockers are found: "In review" -> "In implementation"
@@ -53,7 +53,21 @@ Required behavior:
 7. If no blockers remain:
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
    - if GitHub allows formal approval, approve the PR
-   - if GitHub blocks formal approval because the authenticated account owns the PR, use the solo-maintainer override path exactly as documented in docs/MERGE-POLICY.md
+   - if GitHub blocks formal approval because the authenticated account owns the PR, submit a `COMMENT` review whose body is the separate-session review summary from docs/MERGE-POLICY.md (Path 2), exactly:
+
+     ```text
+     Reviewed head SHA `<head-sha>`.
+
+     No blockers remain for <head-sha>.
+
+     solo-maintainer override accepted.
+
+     Reviewer provider: <claude|codex>
+
+     This solo-maintainer override is the approval to rely on for the current head SHA.
+     ```
+
+   - set `Reviewer provider:` to the provider running this review session (`claude` for Claude Code, `codex` for Codex); the approval gate rejects the summary when that provider is the one that implemented the PR, per the linked story's `executor:` label, so do not record it in that case and report that a different provider must review
    - ensure the approval evidence is recorded against the current head SHA
    - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
@@ -65,9 +79,9 @@ Do not rely on chat-only feedback as workflow-authoritative if it is not also re
 
 ## Required GitHub Output — Must Not Be Skipped
 
-**Formal PR review posted on the current head SHA** using the available GitHub operation fallback. If formal self-approval is unavailable, record the documented solo-maintainer override against that same verified SHA.
+**Formal PR review posted on the current head SHA** using the available GitHub operation fallback. If formal self-approval is unavailable, record the documented separate-session review summary against that same verified SHA.
 
 - If blockers remain: submit with event `REQUEST_CHANGES`.
-- If no blockers remain: submit with event `APPROVE`, or leave a solo-maintainer override summary if GitHub blocks self-approval.
+- If no blockers remain: submit with event `APPROVE`, or leave a separate-session review summary with its `Reviewer provider:` line if GitHub blocks self-approval.
 
 The Session Summary block is **unconditionally required**. Generate it with `scripts/session-summary.sh --command review --pr $ARGUMENTS --head <reviewed-sha> --checks <checks> --blockers <blockers> --next <implementation|merge>` and post the exact stdout with the formal review. Use `--next implementation` when blockers require another implementation cycle and `--next merge` when none remain. Supply every required argument; use explicit values such as `--blockers none`. Use repeatable `--deviation <text>` flags for deviations, residual risks, or decisions. Do not add any recap section or freeform PR-body/AC repetition after the generated block.

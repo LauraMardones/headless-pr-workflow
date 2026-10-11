@@ -1,6 +1,6 @@
 # ADR-006: Codex Cloud Review as the Cross-Provider Reviewer
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-27
 **Related:** #263 (cross-provider review pairing), ADR-007
 

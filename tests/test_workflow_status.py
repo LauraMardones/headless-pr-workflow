@@ -35,7 +35,7 @@ from tests.github_scenarios import (
     scenario_merged_pr,
     scenario_mergeable_unknown,
     scenario_pending_checks,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
     with_context,
 )
@@ -279,11 +279,11 @@ def test_posture_merge_validation_no_required_checks():
     assert summary.workflow_posture.status == "merge_validation_required"
 
 
-def test_posture_merge_validation_solo_override():
-    context = scenario_solo_override(head_sha="head123")
+def test_posture_merge_validation_separate_session_review():
+    context = scenario_separate_session_review(head_sha="head123")
     summary = make_workflow_status(context)
     assert summary.workflow_posture.status == "merge_validation_required"
-    assert summary.approval.approval_source == "solo-maintainer-override"
+    assert summary.approval.approval_source == "separate-session-review"
 
 
 # Workflow posture: merged
@@ -307,28 +307,28 @@ def test_posture_merged_terminal_state_suppresses_merge_blockers():
 # Effective approval status for solo-maintainer override (issue #79)
 # ---------------------------------------------------------------------------
 
-def test_solo_override_json_effective_status_satisfied():
-    context = scenario_solo_override(head_sha="head123")
+def test_separate_session_review_json_effective_status_satisfied():
+    context = scenario_separate_session_review(head_sha="head123")
     output = make_workflow_status(context).to_dict()
     approval = output["approval"]
     assert approval["effective_status"] == "satisfied"
-    assert approval["effective_source"] == "solo-maintainer-override"
+    assert approval["effective_source"] == "separate-session-review"
 
 
-def test_solo_override_json_preserves_formal_approval_status():
-    context = scenario_solo_override(head_sha="head123")
+def test_separate_session_review_json_preserves_formal_approval_status():
+    context = scenario_separate_session_review(head_sha="head123")
     output = make_workflow_status(context).to_dict()
     approval = output["approval"]
     assert approval["approval_status"] == "missing"
 
 
-def test_solo_override_json_preserves_existing_fields():
-    context = scenario_solo_override(head_sha="head123")
+def test_separate_session_review_json_preserves_existing_fields():
+    context = scenario_separate_session_review(head_sha="head123")
     output = make_workflow_status(context).to_dict()
     approval = output["approval"]
-    assert approval["solo_override"]["status"] == "accepted"
-    assert approval["approval_source"] == "solo-maintainer-override"
-    assert approval["satisfied_by"] == "solo-maintainer-override"
+    assert approval["separate_session_review"]["status"] == "accepted"
+    assert approval["approval_source"] == "separate-session-review"
+    assert approval["satisfied_by"] == "separate-session-review"
     assert approval["hard_gate_passed"] is True
 
 
@@ -484,7 +484,7 @@ def test_json_output_github_truth_keys():
 def test_json_output_approval_fields():
     context = scenario_current_approval(head_sha="head123")
     approval = make_workflow_status(context).to_dict()["approval"]
-    for key in ("approval_status", "latest_review_sha", "latest_approval_sha", "solo_override",
+    for key in ("approval_status", "latest_review_sha", "latest_approval_sha", "codex_review", "separate_session_review",
                 "approval_source", "satisfied_by", "blocking_reasons", "hard_gate_passed"):
         assert key in approval, f"Missing approval key: {key}"
     assert approval["approval_status"] == "current"
@@ -958,8 +958,8 @@ def test_cli_workflow_status_human_shows_dirty_warning(capsys):
 # CLI tests: solo-maintainer override approval label (issue #79)
 # ---------------------------------------------------------------------------
 
-def test_cli_workflow_status_human_solo_override_shows_satisfied(capsys):
-    context = scenario_solo_override(head_sha="head123")
+def test_cli_workflow_status_human_separate_session_review_shows_satisfied(capsys):
+    context = scenario_separate_session_review(head_sha="head123")
     required_checks = RequiredStatusChecks(names=(), status="not_configured")
     local_state = make_clean_local_state()
 
@@ -975,13 +975,13 @@ def test_cli_workflow_status_human_solo_override_shows_satisfied(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     lines = out.splitlines()
-    assert "approval status: satisfied (solo-maintainer override)" in lines
+    assert "approval status: satisfied (separate-session review)" in lines
     assert "formal approval status: missing" in lines
     assert "approval status: missing" not in lines
 
 
-def test_cli_workflow_status_human_solo_override_preserves_override_facts(capsys):
-    context = scenario_solo_override(head_sha="head123")
+def test_cli_workflow_status_human_separate_session_review_preserves_override_facts(capsys):
+    context = scenario_separate_session_review(head_sha="head123")
     required_checks = RequiredStatusChecks(names=(), status="not_configured")
     local_state = make_clean_local_state()
 
@@ -996,9 +996,9 @@ def test_cli_workflow_status_human_solo_override_preserves_override_facts(capsys
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "solo-maintainer override: accepted" in out
-    assert "approval source: solo-maintainer-override" in out
-    assert "satisfied by: solo-maintainer-override" in out
+    assert "separate-session review: accepted" in out
+    assert "approval source: separate-session-review" in out
+    assert "satisfied by: separate-session-review" in out
 
 
 def test_cli_workflow_status_human_formal_approval_unchanged(capsys):
@@ -1021,8 +1021,8 @@ def test_cli_workflow_status_human_formal_approval_unchanged(capsys):
     assert "formal approval status:" not in out
 
 
-def test_cli_workflow_status_json_solo_override_effective_fields(capsys):
-    context = scenario_solo_override(head_sha="head123")
+def test_cli_workflow_status_json_separate_session_review_effective_fields(capsys):
+    context = scenario_separate_session_review(head_sha="head123")
     required_checks = RequiredStatusChecks(names=(), status="not_configured")
     local_state = make_clean_local_state()
 
@@ -1039,9 +1039,9 @@ def test_cli_workflow_status_json_solo_override_effective_fields(capsys):
     output = json.loads(capsys.readouterr().out)
     approval = output["approval"]
     assert approval["effective_status"] == "satisfied"
-    assert approval["effective_source"] == "solo-maintainer-override"
+    assert approval["effective_source"] == "separate-session-review"
     assert approval["approval_status"] == "missing"
-    assert approval["solo_override"]["status"] == "accepted"
-    assert approval["approval_source"] == "solo-maintainer-override"
-    assert approval["satisfied_by"] == "solo-maintainer-override"
+    assert approval["separate_session_review"]["status"] == "accepted"
+    assert approval["approval_source"] == "separate-session-review"
+    assert approval["satisfied_by"] == "separate-session-review"
     assert approval["hard_gate_passed"] is True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ PR_CONTEXT_FIELDS: tuple[str, ...] = (
     "baseRefOid",
     "changedFiles",
     "closed",
+    "commits",
     "createdAt",
     "deletions",
     "headRefName",
@@ -39,6 +41,62 @@ PR_CONTEXT_FIELDS: tuple[str, ...] = (
     "updatedAt",
     "url",
 )
+
+
+REVIEW_EVIDENCE_KEY = "reviewEvidence"
+REVIEW_EVIDENCE_NOT_FETCHED = "PR comments, commits, timeline and linked issues were not fetched"
+REVIEW_EVIDENCE_PAGE_LIMIT = 50
+REVIEW_EVIDENCE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      closingIssuesReferences(first: 50) {
+        pageInfo { hasNextPage }
+        nodes {
+          number
+          repository { nameWithOwner }
+          labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
+        }
+      }
+      timelineItems(
+        first: 100
+        after: $cursor
+        itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, ISSUE_COMMENT, PULL_REQUEST_REVIEW]
+      ) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          __typename
+          ... on PullRequestCommit { commit { oid } }
+          ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } }
+          ... on IssueComment {
+            url
+            body
+            createdAt
+            author { __typename login }
+            editor { __typename login }
+          }
+          ... on PullRequestReview {
+            url
+            body
+            state
+            submittedAt
+            author { __typename login }
+            commit { oid }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+PR_URL_PATTERN = re.compile(r"^https://[^/]+/([^/]+)/([^/]+)/pull/(\d+)/?$")
+TIMELINE_KINDS = {
+    "PullRequestCommit": "commit",
+    "HeadRefForcePushedEvent": "force-push",
+    "IssueComment": "comment",
+    "PullRequestReview": "review",
+}
 
 
 class GHCommandError(RuntimeError):
@@ -81,6 +139,40 @@ class ReviewSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class TimelineEvent:
+    """One PR timeline item, in the order GitHub lists it.
+
+    `kind` is `commit`, `force-push`, `comment` (PR conversation comment) or
+    `review` (PR review submission).
+    """
+
+    kind: str
+    oid: str | None = None
+    before_oid: str | None = None
+    author: str | None = None
+    author_type: str | None = None
+    editor: str | None = None
+    editor_type: str | None = None
+    body: str | None = None
+    state: str | None = None
+    created_at: str | None = None
+    url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LinkedIssue:
+    number: int
+    repository: str | None
+    labels: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"number": self.number, "repository": self.repository, "labels": list(self.labels)}
 
 
 @dataclass(frozen=True)
@@ -163,6 +255,16 @@ class PullRequestContext:
     review_requests: tuple[str, ...]
     status_checks: tuple[CheckSummary, ...]
     raw: dict[str, Any]
+    timeline: tuple[TimelineEvent, ...] = ()
+    commit_oids: tuple[str, ...] = ()
+    linked_issues: tuple[LinkedIssue, ...] = ()
+    # Not None when comments, commits, the timeline or the linked issues could not
+    # be read completely. Evidence that depends on them must then fail closed.
+    review_evidence_error: str | None = REVIEW_EVIDENCE_NOT_FETCHED
+
+    @property
+    def conversation_comments(self) -> tuple[TimelineEvent, ...]:
+        return tuple(event for event in self.timeline if event.kind == "comment")
 
     @property
     def latest_approval_sha(self) -> str | None:
@@ -204,6 +306,11 @@ class PullRequestContext:
             "review_requests": list(self.review_requests),
             "status_checks": [check.to_dict() for check in self.status_checks],
             "check_counts": self.check_counts,
+            "conversation_comments": [comment.to_dict() for comment in self.conversation_comments],
+            "commit_oids": list(self.commit_oids),
+            "timeline": [event.to_dict() for event in self.timeline],
+            "linked_issues": [issue.to_dict() for issue in self.linked_issues],
+            "review_evidence_error": self.review_evidence_error,
         }
         if include_raw:
             payload["raw"] = self.raw
@@ -233,10 +340,86 @@ def fetch_pr_context(target: str | None = None, *, repo: str | None = None) -> P
     except json.JSONDecodeError as error:
         raise GHCommandError(command, result.returncode, f"GitHub CLI returned invalid JSON: {error.msg}", error="gh-invalid-json") from error
 
+    if isinstance(raw, dict):
+        raw[REVIEW_EVIDENCE_KEY] = fetch_review_evidence(raw)
+
     try:
         return parse_pr_context(raw)
     except (KeyError, TypeError, ValueError) as error:
         raise GHCommandError(command, result.returncode, f"GitHub PR payload could not be parsed: {error}", error="gh-parse-failed") from error
+
+
+def fetch_review_evidence(raw: dict[str, Any]) -> dict[str, Any]:
+    """Fetch the timeline and linked issues that review-evidence recognizers need.
+
+    Never raises: a failed or partial read is reported as `error`, so evidence
+    that depends on these inputs fails closed while a formal approval, which
+    does not need them, can still be evaluated.
+    """
+
+    match = PR_URL_PATTERN.match(str(raw.get("url") or ""))
+    if match is None:
+        return {"error": "PR URL could not be parsed, so the PR timeline and linked issues were not read"}
+    owner, name, number = match.group(1), match.group(2), match.group(3)
+
+    timeline_nodes: list[Any] = []
+    closing_issues: Any = None
+    cursor: str | None = None
+
+    for _ in range(REVIEW_EVIDENCE_PAGE_LIMIT):
+        command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={REVIEW_EVIDENCE_QUERY}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={number}",
+        ]
+        if cursor:
+            command.extend(["-f", f"cursor={cursor}"])
+
+        try:
+            result = subprocess.run(command, capture_output=True, encoding="utf-8", check=False, env=_gh_env())
+        except FileNotFoundError:
+            return {"error": "GitHub CLI executable not found, so the PR timeline and linked issues were not read"}
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip().splitlines()
+            suffix = f": {detail[-1]}" if detail else ""
+            return {"error": f"GitHub GraphQL request for the PR timeline and linked issues failed{suffix}"}
+
+        payload = _json_or_none(result.stdout or "")
+        pull_request = _nested_get(payload or {}, "data", "repository", "pullRequest")
+        if not isinstance(pull_request, dict) or (payload or {}).get("errors"):
+            return {"error": "GitHub GraphQL response for the PR timeline and linked issues could not be parsed"}
+        if pull_request.get("headRefOid") != raw.get("headRefOid"):
+            return {"error": "PR head changed while the PR timeline was being read"}
+
+        timeline = pull_request.get("timelineItems")
+        nodes = timeline.get("nodes") if isinstance(timeline, dict) else None
+        has_next_page = _nested_get(timeline or {}, "pageInfo", "hasNextPage")
+        if not isinstance(nodes, list) or not isinstance(has_next_page, bool):
+            return {"error": "GitHub GraphQL response for the PR timeline could not be parsed"}
+        timeline_nodes.extend(nodes)
+        if closing_issues is None:
+            closing_issues = pull_request.get("closingIssuesReferences")
+
+        if not has_next_page:
+            return {
+                "error": None,
+                "repository": f"{owner}/{name}",
+                "timelineItems": timeline_nodes,
+                "closingIssuesReferences": closing_issues,
+            }
+        cursor = _nested_get(timeline, "pageInfo", "endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            return {"error": "PR timeline pagination could not be followed to the end"}
+
+    return {"error": "PR timeline is longer than the page limit and was not read completely"}
 
 
 def fetch_repo_default_branch(repo: str | None = None) -> str:
@@ -324,6 +507,9 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
     status_checks = tuple(CheckSummary.from_raw(check) for check in _status_nodes(raw.get("statusCheckRollup")))
 
     head_repository_owner = _login(raw.get("headRepositoryOwner"))
+    head_ref_oid = raw.get("headRefOid") or ""
+    timeline, linked_issues, review_evidence_error = _parse_review_evidence(raw.get(REVIEW_EVIDENCE_KEY))
+    commit_oids = _commit_oids(raw.get("commits"), timeline, head_ref_oid)
 
     return PullRequestContext(
         number=int(raw["number"]),
@@ -333,7 +519,7 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
         base_ref_name=raw.get("baseRefName") or "",
         base_ref_oid=raw.get("baseRefOid"),
         head_ref_name=raw.get("headRefName") or "",
-        head_ref_oid=raw.get("headRefOid") or "",
+        head_ref_oid=head_ref_oid,
         head_repository=_repository_name(raw.get("headRepository"), owner=head_repository_owner),
         head_repository_owner=head_repository_owner,
         is_cross_repository=bool(raw.get("isCrossRepository")),
@@ -349,7 +535,108 @@ def parse_pr_context(raw: dict[str, Any]) -> PullRequestContext:
         review_requests=tuple(_review_request_name(request) for request in raw.get("reviewRequests") or () if _review_request_name(request)),
         status_checks=status_checks,
         raw=raw,
+        timeline=timeline,
+        commit_oids=commit_oids,
+        linked_issues=linked_issues,
+        review_evidence_error=review_evidence_error,
     )
+
+
+def _parse_review_evidence(evidence: Any) -> tuple[tuple[TimelineEvent, ...], tuple[LinkedIssue, ...], str | None]:
+    if not isinstance(evidence, dict):
+        return (), (), REVIEW_EVIDENCE_NOT_FETCHED
+    error = evidence.get("error")
+    if error:
+        return (), (), str(error)
+
+    nodes = evidence.get("timelineItems")
+    if not isinstance(nodes, list):
+        return (), (), "PR timeline is missing from the fetched review evidence"
+    timeline: list[TimelineEvent] = []
+    for node in nodes:
+        event = _timeline_event(node)
+        if event is None:
+            return (), (), "PR timeline contains an item that could not be parsed"
+        timeline.append(event)
+
+    closing = evidence.get("closingIssuesReferences")
+    issue_nodes = closing.get("nodes") if isinstance(closing, dict) else None
+    if not isinstance(issue_nodes, list):
+        return (), (), "linked issues are missing from the fetched review evidence"
+    if _nested_get(closing, "pageInfo", "hasNextPage") is not False:
+        return (), (), "linked issues could not be read completely"
+
+    repository = evidence.get("repository")
+    linked_issues: list[LinkedIssue] = []
+    for node in issue_nodes:
+        labels = node.get("labels") if isinstance(node, dict) else None
+        label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
+        if not isinstance(node, dict) or not isinstance(node.get("number"), int) or not isinstance(label_nodes, list):
+            return (), (), "a linked issue could not be parsed"
+        if _nested_get(labels, "pageInfo", "hasNextPage") is not False:
+            return (), (), f"labels of linked issue #{node['number']} could not be read completely"
+        issue_repository = _nested_get(node, "repository", "nameWithOwner")
+        if repository and issue_repository and issue_repository.lower() != str(repository).lower():
+            continue
+        linked_issues.append(
+            LinkedIssue(
+                number=node["number"],
+                repository=issue_repository,
+                labels=tuple(_label_name(label) for label in label_nodes if _label_name(label)),
+            )
+        )
+
+    return tuple(timeline), tuple(linked_issues), None
+
+
+def _timeline_event(node: Any) -> TimelineEvent | None:
+    if not isinstance(node, dict):
+        return None
+    kind = TIMELINE_KINDS.get(str(node.get("__typename")))
+    if kind == "commit":
+        oid = _nested_get(node, "commit", "oid")
+        return TimelineEvent(kind=kind, oid=oid) if isinstance(oid, str) and oid else None
+    if kind == "force-push":
+        return TimelineEvent(
+            kind=kind,
+            oid=_nested_get(node, "afterCommit", "oid"),
+            before_oid=_nested_get(node, "beforeCommit", "oid"),
+            created_at=node.get("createdAt"),
+        )
+    if kind == "comment":
+        return TimelineEvent(
+            kind=kind,
+            author=_login(node.get("author")),
+            author_type=_nested_get(node, "author", "__typename"),
+            editor=_login(node.get("editor")),
+            editor_type=_nested_get(node, "editor", "__typename"),
+            body=node.get("body"),
+            created_at=node.get("createdAt"),
+            url=node.get("url"),
+        )
+    if kind == "review":
+        return TimelineEvent(
+            kind=kind,
+            oid=_nested_get(node, "commit", "oid"),
+            author=_login(node.get("author")),
+            author_type=_nested_get(node, "author", "__typename"),
+            body=node.get("body"),
+            state=node.get("state"),
+            created_at=node.get("submittedAt"),
+            url=node.get("url"),
+        )
+    return None
+
+
+def _commit_oids(raw_commits: Any, timeline: tuple[TimelineEvent, ...], head_ref_oid: str) -> tuple[str, ...]:
+    oids: list[Any] = []
+    if isinstance(raw_commits, list):
+        oids.extend(commit.get("oid") for commit in raw_commits if isinstance(commit, dict))
+    for event in timeline:
+        if event.kind in {"commit", "force-push"}:
+            oids.extend((event.before_oid, event.oid))
+    oids.append(head_ref_oid)
+    return tuple(dict.fromkeys(oid for oid in oids if isinstance(oid, str) and oid))
 
 
 def _normalize_reviews(raw: dict[str, Any]) -> tuple[ReviewSummary, ...]:

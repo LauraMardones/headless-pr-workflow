@@ -24,7 +24,7 @@ from tests.github_scenarios import (
     scenario_failing_checks,
     scenario_mergeable_unknown,
     scenario_pending_checks,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
     with_context,
 )
@@ -157,7 +157,7 @@ def test_next_action_review_comment_only():
     assert summary.next_action.action_class == "review"
 
 
-def test_next_action_review_stale_solo_override():
+def test_next_action_review_stale_separate_session_review():
     context = scenario_stale_approval(head_sha="new-head", approval_sha="old-head")
     summary = make_takeover(context)
     assert summary.next_action.action_class == "review"
@@ -184,11 +184,11 @@ def test_next_action_merge_no_required_checks():
     assert summary.next_action.action_class == "merge"
 
 
-def test_next_action_merge_current_solo_override():
-    context = scenario_solo_override(head_sha="head123")
+def test_next_action_merge_current_separate_session_review():
+    context = scenario_separate_session_review(head_sha="head123")
     summary = make_takeover(context)
     assert summary.next_action.action_class == "merge"
-    assert summary.approval.approval_source == "solo-maintainer-override"
+    assert summary.approval.approval_source == "separate-session-review"
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ def test_stale_approval_not_treated_as_merge_ready():
     assert summary.merge_readiness.hard_gate_passed is False
 
 
-def test_stale_solo_override_surfaced_explicitly():
+def test_stale_separate_session_review_surfaced_explicitly():
     context = scenario_stale_approval(head_sha="new-head", approval_sha="old-head")
     summary = make_takeover(context)
     output = summary.to_dict()
@@ -329,7 +329,7 @@ def test_json_output_approval_fields():
     output = make_takeover(context).to_dict()
     approval = output["approval"]
     for key in ("approval_status", "latest_review_sha", "latest_approval_sha",
-                "solo_override", "approval_source", "satisfied_by",
+                "codex_review", "separate_session_review", "approval_source", "satisfied_by",
                 "blocking_reasons", "hard_gate_passed"):
         assert key in approval, f"Missing approval key: {key}"
     assert approval["approval_status"] == "current"

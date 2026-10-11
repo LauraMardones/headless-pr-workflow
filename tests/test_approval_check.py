@@ -4,12 +4,13 @@ from headless_pr_workflow.github.pr_context import parse_pr_context
 from tests.github_scenarios import (
     build_pr_context,
     build_review,
+    complete_review_evidence,
     scenario_changes_requested,
     scenario_comment_only_review,
     scenario_current_approval,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
-    solo_override_body,
+    separate_session_review_body,
 )
 
 
@@ -17,7 +18,7 @@ def test_approval_check_passes_for_current_formal_approval():
     summary = summarize_approval_check(scenario_current_approval(head_sha="head"))
 
     assert summary.approval_status == "current"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.approval_source == "formal"
     assert summary.satisfied_by == "formal-approval"
     assert summary.hard_gate_passed is True
@@ -29,7 +30,7 @@ def test_approval_check_fails_for_stale_formal_approval():
     summary = summarize_approval_check(scenario_stale_approval(head_sha="new-head", approval_sha="old-head"))
 
     assert summary.approval_status == "stale"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.hard_gate_passed is False
     assert summary.blocking_reason == "formal approval is stale for the current PR head SHA"
     assert summary.blocking_reasons == ("formal approval is stale for the current PR head SHA",)
@@ -39,9 +40,9 @@ def test_approval_check_fails_for_missing_approval():
     summary = summarize_approval_check(build_pr_context(head_ref_oid="head"))
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "no formal approval or accepted solo-maintainer override exists for the current PR head SHA"
+    assert summary.blocking_reason == "no formal approval, clean Codex review or accepted separate-session review exists for the current PR head SHA"
 
 
 def test_approval_check_rejects_unknown_head_sha():
@@ -64,18 +65,18 @@ def test_approval_check_fails_for_comment_only_review_without_override():
     summary = summarize_approval_check(scenario_comment_only_review(head_sha="head"))
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "comment-only review exists without formal approval or an accepted solo-maintainer override"
+    assert summary.blocking_reason == "comment-only review exists without formal approval, a clean Codex review or an accepted separate-session review"
 
 
 def test_approval_check_passes_for_valid_solo_maintainer_override():
-    summary = summarize_approval_check(scenario_solo_override(head_sha="head"))
+    summary = summarize_approval_check(scenario_separate_session_review(head_sha="head"))
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "accepted"
-    assert summary.approval_source == "solo-maintainer-override"
-    assert summary.satisfied_by == "solo-maintainer-override"
+    assert summary.separate_session_review.status == "accepted"
+    assert summary.approval_source == "separate-session-review"
+    assert summary.satisfied_by == "separate-session-review"
     assert summary.hard_gate_passed is True
     assert summary.blocking_reason is None
 
@@ -86,7 +87,7 @@ def test_approval_check_keeps_valid_override_when_newer_comment_is_not_an_overri
         build_pr_context(
             head_ref_oid=head_sha,
             latest_reviews=(
-                build_review(state="COMMENTED", commit_oid=head_sha, body=solo_override_body(head_sha=head_sha)),
+                build_review(state="COMMENTED", commit_oid=head_sha, body=separate_session_review_body(head_sha=head_sha)),
                 build_review(
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:05:00Z",
@@ -97,8 +98,8 @@ def test_approval_check_keeps_valid_override_when_newer_comment_is_not_an_overri
         )
     )
 
-    assert summary.solo_override.status == "accepted"
-    assert summary.satisfied_by == "solo-maintainer-override"
+    assert summary.separate_session_review.status == "accepted"
+    assert summary.satisfied_by == "separate-session-review"
     assert summary.hard_gate_passed is True
 
 
@@ -108,7 +109,7 @@ def test_approval_check_rejects_older_override_after_newer_same_head_revocation(
         build_pr_context(
             head_ref_oid=head_sha,
             latest_reviews=(
-                build_review(state="COMMENTED", commit_oid=head_sha, body=solo_override_body(head_sha=head_sha)),
+                build_review(state="COMMENTED", commit_oid=head_sha, body=separate_session_review_body(head_sha=head_sha)),
                 build_review(
                     state="COMMENTED",
                     submitted_at="2026-04-21T10:05:00Z",
@@ -120,9 +121,9 @@ def test_approval_check_rejects_older_override_after_newer_same_head_revocation(
     )
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "invalid"
+    assert summary.separate_session_review.status == "invalid"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "current-head review comment does not contain an accepted solo-maintainer override"
+    assert summary.blocking_reason == "current-head review comment does not contain the required separate-session review phrases"
 
 
 def test_approval_check_ignores_old_override_review_on_previous_head():
@@ -133,16 +134,16 @@ def test_approval_check_ignores_old_override_review_on_previous_head():
                 build_review(
                     state="COMMENTED",
                     commit_oid="old-head",
-                    body=solo_override_body(head_sha="old-head"),
+                    body=separate_session_review_body(head_sha="old-head"),
                 ),
             ),
         )
     )
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "stale"
+    assert summary.separate_session_review.status == "stale"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "solo-maintainer override was recorded on a previous PR head SHA"
+    assert summary.blocking_reason == "separate-session review was recorded on a previous PR head SHA"
 
 
 def test_approval_check_uses_reviews_surface_for_current_formal_approval():
@@ -152,6 +153,7 @@ def test_approval_check_uses_reviews_surface_for_current_formal_approval():
                 "baseRefName": "main",
                 "headRefName": "feature",
                 "headRefOid": "head",
+                "reviewEvidence": complete_review_evidence(),
                 "latestReviews": [
                     {
                         "author": {"login": "reviewer"},
@@ -190,6 +192,7 @@ def test_approval_check_reports_comment_only_review_from_reviews_surface():
                 "baseRefName": "main",
                 "headRefName": "feature",
                 "headRefOid": "head",
+                "reviewEvidence": complete_review_evidence(),
                 "number": 28,
                 "reviews": [
                     {
@@ -208,18 +211,19 @@ def test_approval_check_reports_comment_only_review_from_reviews_surface():
     )
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "comment-only review exists without formal approval or an accepted solo-maintainer override"
+    assert summary.blocking_reason == "comment-only review exists without formal approval, a clean Codex review or an accepted separate-session review"
 
 
-def test_approval_check_accepts_solo_override_from_reviews_surface():
+def test_approval_check_accepts_separate_session_review_from_reviews_surface():
     summary = summarize_approval_check(
         parse_pr_context(
             {
                 "baseRefName": "main",
                 "headRefName": "feature",
                 "headRefOid": "head",
+                "reviewEvidence": complete_review_evidence(),
                 "number": 29,
                 "reviews": [
                     {
@@ -227,7 +231,7 @@ def test_approval_check_accepts_solo_override_from_reviews_surface():
                         "state": "COMMENTED",
                         "submittedAt": "2026-04-21T10:00:00Z",
                         "commit": {"oid": "head"},
-                        "body": solo_override_body(head_sha="head"),
+                        "body": separate_session_review_body(head_sha="head"),
                     }
                 ],
                 "state": "OPEN",
@@ -238,8 +242,8 @@ def test_approval_check_accepts_solo_override_from_reviews_surface():
     )
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "accepted"
-    assert summary.approval_source == "solo-maintainer-override"
+    assert summary.separate_session_review.status == "accepted"
+    assert summary.approval_source == "separate-session-review"
     assert summary.hard_gate_passed is True
 
 
@@ -250,6 +254,7 @@ def test_approval_check_accepts_complementary_current_head_override_across_revie
                 "baseRefName": "main",
                 "headRefName": "feature",
                 "headRefOid": "head",
+                "reviewEvidence": complete_review_evidence(),
                 "latestReviews": [
                     {
                         "author": {"login": "maintainer"},
@@ -265,7 +270,7 @@ def test_approval_check_accepts_complementary_current_head_override_across_revie
                         "state": "COMMENTED",
                         "submittedAt": "2026-04-21T10:00:00Z",
                         "commit": {"oid": ""},
-                        "body": solo_override_body(head_sha="head"),
+                        "body": separate_session_review_body(head_sha="head"),
                     }
                 ],
                 "state": "OPEN",
@@ -275,8 +280,8 @@ def test_approval_check_accepts_complementary_current_head_override_across_revie
         )
     )
 
-    assert summary.solo_override.status == "accepted"
-    assert summary.approval_source == "solo-maintainer-override"
+    assert summary.separate_session_review.status == "accepted"
+    assert summary.approval_source == "separate-session-review"
     assert summary.hard_gate_passed is True
 
 
@@ -287,6 +292,7 @@ def test_approval_check_treats_untimestamped_revocation_as_newer_than_older_over
                 "baseRefName": "main",
                 "headRefName": "feature",
                 "headRefOid": "head",
+                "reviewEvidence": complete_review_evidence(),
                 "number": 31,
                 "reviews": [
                     {
@@ -294,7 +300,7 @@ def test_approval_check_treats_untimestamped_revocation_as_newer_than_older_over
                         "state": "COMMENTED",
                         "submittedAt": "2026-04-21T10:00:00Z",
                         "commit": {"oid": "head"},
-                        "body": solo_override_body(head_sha="head"),
+                        "body": separate_session_review_body(head_sha="head"),
                     },
                     {
                         "author": {"login": "maintainer"},
@@ -311,6 +317,6 @@ def test_approval_check_treats_untimestamped_revocation_as_newer_than_older_over
     )
 
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "invalid"
+    assert summary.separate_session_review.status == "invalid"
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "current-head review comment does not contain an accepted solo-maintainer override"
+    assert summary.blocking_reason == "current-head review comment does not contain the required separate-session review phrases"

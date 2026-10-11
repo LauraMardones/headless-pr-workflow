@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from .github import PullRequestContext
 from .review_policy import (
-    SOLO_OVERRIDE_MARKER,
+    SEPARATE_SESSION_REVIEW_MARKER,
+    CodexReviewSummary,
     ReviewPolicySummary,
-    SoloMaintainerOverrideSummary,
+    SeparateSessionReviewSummary,
     summarize_review_policy,
 )
 

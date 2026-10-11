@@ -29,7 +29,7 @@ from headless_pr_workflow.github import (
 
 DRY_RUN_LINE = (
     "Merge gate: policy=pass(present_non_required), checks=absent-ok, "
-    "approval=solo-maintainer, threads=none, mergeable=yes, head=b607aa9"
+    "approval=separate-session, threads=none, mergeable=yes, head=b607aa9"
 )
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VALID_REQUIRED_STATUS_CHECKS = {"absent", "required"}
@@ -53,7 +53,7 @@ class GateResult:
         return (
             self.policy.startswith("pass(")
             and self.checks in {"pass", "absent-ok"}
-            and self.approval in {"formal", "solo-maintainer"}
+            and self.approval in {"formal", "codex-review", "separate-session"}
             and self.threads == "none"
             and self.mergeable == "yes"
             and bool(re.fullmatch(r"[0-9a-fA-F]{7}", self.head))
@@ -159,8 +159,10 @@ def _approval_value(context) -> str:
         return "fail(missing-or-blocked)"
     if approval.approval_source == "formal":
         return "formal"
-    if approval.approval_source == "solo-maintainer-override":
-        return "solo-maintainer"
+    if approval.approval_source == "codex-review":
+        return "codex-review"
+    if approval.approval_source == "separate-session-review":
+        return "separate-session"
     return "warn(unknown-source)"
 
 

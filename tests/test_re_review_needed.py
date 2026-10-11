@@ -6,9 +6,9 @@ from tests.github_scenarios import (
     scenario_changes_requested,
     scenario_comment_only_review,
     scenario_current_approval,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
-    solo_override_body,
+    separate_session_review_body,
 )
 
 
@@ -28,16 +28,16 @@ def test_re_review_needed_passes_for_current_formal_approval():
     assert summary.blocking_reasons == ()
 
 
-def test_re_review_needed_passes_for_current_accepted_solo_override():
-    summary = summarize_re_review_needed(scenario_solo_override(head_sha="head"))
+def test_re_review_needed_passes_for_current_accepted_separate_session_review():
+    summary = summarize_re_review_needed(scenario_separate_session_review(head_sha="head"))
 
     assert summary.latest_review_sha == "head"
     assert summary.latest_review_state == "COMMENTED"
     assert summary.latest_approval_sha is None
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "accepted"
-    assert summary.approval_source == "solo-maintainer-override"
-    assert summary.satisfied_by == "solo-maintainer-override"
+    assert summary.separate_session_review.status == "accepted"
+    assert summary.approval_source == "separate-session-review"
+    assert summary.satisfied_by == "separate-session-review"
     assert summary.re_review_needed is False
     assert summary.hard_gate_passed is True
 
@@ -53,7 +53,7 @@ def test_re_review_needed_fails_for_stale_formal_approval():
     assert summary.blocking_reason == "formal approval is stale for the current PR head SHA"
 
 
-def test_re_review_needed_fails_for_stale_solo_override():
+def test_re_review_needed_fails_for_stale_separate_session_review():
     summary = summarize_re_review_needed(
         build_pr_context(
             head_ref_oid="new-head",
@@ -61,16 +61,16 @@ def test_re_review_needed_fails_for_stale_solo_override():
                 build_review(
                     state="COMMENTED",
                     commit_oid="old-head",
-                    body=solo_override_body(head_sha="old-head"),
+                    body=separate_session_review_body(head_sha="old-head"),
                 ),
             ),
         )
     )
 
-    assert summary.solo_override.status == "stale"
+    assert summary.separate_session_review.status == "stale"
     assert summary.re_review_needed is True
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "solo-maintainer override was recorded on a previous PR head SHA"
+    assert summary.blocking_reason == "separate-session review was recorded on a previous PR head SHA"
 
 
 def test_re_review_needed_fails_for_missing_review_evidence():
@@ -79,10 +79,10 @@ def test_re_review_needed_fails_for_missing_review_evidence():
     assert summary.latest_review_sha is None
     assert summary.latest_approval_sha is None
     assert summary.approval_status == "missing"
-    assert summary.solo_override.status == "missing"
+    assert summary.separate_session_review.status == "missing"
     assert summary.re_review_needed is True
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "no formal approval or accepted solo-maintainer override exists for the current PR head SHA"
+    assert summary.blocking_reason == "no formal approval, clean Codex review or accepted separate-session review exists for the current PR head SHA"
 
 
 def test_re_review_needed_fails_for_comment_only_review_without_override():
@@ -92,7 +92,7 @@ def test_re_review_needed_fails_for_comment_only_review_without_override():
     assert summary.approval_status == "missing"
     assert summary.re_review_needed is True
     assert summary.hard_gate_passed is False
-    assert summary.blocking_reason == "comment-only review exists without formal approval or an accepted solo-maintainer override"
+    assert summary.blocking_reason == "comment-only review exists without formal approval, a clean Codex review or an accepted separate-session review"
 
 
 def test_re_review_needed_fails_for_changes_requested():
@@ -129,7 +129,9 @@ def test_re_review_needed_json_contract_includes_stable_fields():
     assert payload["latest_review_author"] == "reviewer"
     assert payload["latest_approval_sha"] == "head"
     assert payload["approval_status"] == "current"
-    assert payload["solo_override"]["status"] == "missing"
+    assert payload["separate_session_review"]["status"] == "missing"
+    assert payload["codex_review"]["status"] == "not-applicable"
+    assert "solo_override" not in payload
     assert payload["approval_source"] == "formal"
     assert payload["satisfied_by"] == "formal-approval"
     assert payload["re_review_needed"] is False

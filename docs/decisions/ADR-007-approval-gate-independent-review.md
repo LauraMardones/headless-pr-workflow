@@ -1,6 +1,6 @@
 # ADR-007: Approval Gate Means Independent Review; Solo Maintenance Is the Default
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-27
 **Related:** ADR-006, `docs/MERGE-POLICY.md`
 

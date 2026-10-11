@@ -20,7 +20,7 @@ workflow that requested it.
 
 For review-thread resolution, refresh the pull request and thread first, confirm
 that the thread belongs to the verified pull request, and resolve it only when
-the finding is superseded. For formal reviews and solo-maintainer overrides,
+the finding is superseded. For formal reviews and separate-session reviews,
 record evidence against the verified current head SHA. For merges, refresh the
 head SHA and every required gate immediately before the merge mutation.
 
@@ -95,7 +95,7 @@ Review the PR's current head commit for:
 - Correctness: logic errors, wrong conditions, off-by-one errors, unhandled
   error paths, broken exit codes.
 - Workflow-policy safety: anything that would let a PR merge without the gates
-  in `docs/MERGE-POLICY.md` — approval bound to the reviewed head SHA, green
+  in `docs/MERGE-POLICY.md` — approval gate satisfied for the reviewed head SHA, green
   required checks, no unresolved review threads, a fresh refresh before merge.
 - Tests: behavior changes without a deterministic test that would fail on the
   bug.

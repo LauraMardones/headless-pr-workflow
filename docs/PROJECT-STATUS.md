@@ -118,7 +118,7 @@ All transitions and their triggering events are listed below. Transitions not li
 | Ready for implementation | In implementation | An executor pulls the item and begins work (branch created, draft PR opened) |
 | In implementation | In review | Executor submits PR for review (PR marked ready for review) |
 | In implementation | Blocked | A blocking condition is declared while implementation is underway |
-| In review | Ready to merge | Reviewer approves the PR and all required checks pass |
+| In review | Ready to merge | The approval gate is satisfied (ADR-007) and all required checks pass |
 | In review | Needs rework | Reviewer requests changes; PR is returned to the implementer |
 | In review | Blocked | A blocking condition surfaces during review |
 | Needs rework | In implementation | Executor picks up the rework on the existing branch |
@@ -131,7 +131,7 @@ All transitions and their triggering events are listed below. Transitions not li
 
 ### Notes on specific transitions
 
-**In review → Ready to merge**: Both conditions must be true simultaneously — at least one approval from a reviewer who is not the implementer, and all required CI checks passing.
+**In review → Ready to merge**: Both conditions must be true simultaneously — the approval gate is satisfied (ADR-007) for the current PR head SHA, and all required CI checks are passing. `docs/MERGE-POLICY.md` → Approval Gate: Independent Review lists the evidence that satisfies the gate.
 
 **Ready to merge → In review**: If a new commit is pushed to the PR after approval (for example, to address a last-minute issue), the approval is stale. The item returns to In review and must be re-reviewed.
 

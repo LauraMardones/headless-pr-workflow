@@ -37,9 +37,12 @@ Required behavior:
    - unresolved blockers
    - draft state
 3. Actively check GitHub review evidence in the correct PR review surfaces, not only issue comments or a narrow approval summary view.
-4. For approval, accept either:
-   - a formal GitHub approval on the current head SHA, or
-   - a valid solo-maintainer override recorded on the current head SHA according to docs/MERGE-POLICY.md
+4. For approval, accept only evidence that the approval gate reports as accepted for the current head SHA, according to docs/MERGE-POLICY.md (Approval Gate: Independent Review):
+   - a formal GitHub approval (`approval=formal`), or
+   - a clean Codex review (`approval=codex-review`), or
+   - a separate-session review naming a reviewing provider other than the implementer (`approval=separate-session`)
+
+   Never judge a Codex comment or a review summary by reading it yourself: if `scripts/merge-gate-summary` reports `approval=fail(...)`, the evidence was rejected and the PR must not be merged.
 5. Merge only if the relied-on approval source still applies to the current PR head SHA and all merge gates pass.
    - immediately before deciding, run `python3 scripts/merge-gate-summary --pr $ARGUMENTS --repo LauraMardones/headless-pr-workflow` against the freshly refreshed evidence
    - preserve its exact single `Merge gate:` stdout line as merge evidence

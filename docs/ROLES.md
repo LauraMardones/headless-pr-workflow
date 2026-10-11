@@ -27,10 +27,11 @@ Responsibilities:
 - Approve only the specific head SHA reviewed.
 - Re-review if implementation commits change the head SHA after approval.
 
-Solo-maintainer example:
+Independent review evidence (`MERGE-POLICY.md` → Approval Gate: Independent Review):
 
-- If no independent GitHub approver exists, record a GitHub review summary for the current head SHA stating that no blockers remain, formal approval is unavailable, and the solo-maintainer override is the approval to rely on for that SHA.
-- Do not treat the override as permission to skip CI, unresolved blocker cleanup, or the Ready for review transition.
+- A reviewer is independent when it is not the provider or session that implemented the head SHA. A clean Codex review counts for a Claude-implemented story; a separate review session counts when it names its provider and that provider did not implement the PR.
+- A separate review session records a GitHub review summary for the current head SHA stating that no blockers remain, naming the reviewing provider on a `Reviewer provider:` line, and stating that the review is the approval to rely on for that SHA. Use a formal approval instead when GitHub allows it.
+- Do not treat approval evidence as permission to skip CI, unresolved blocker cleanup, or the Ready for review transition.
 
 ## Merge Owner
 
@@ -44,9 +45,9 @@ Responsibilities:
 - Merge only through GitHub or a GitHub-backed command.
 - Perform or trigger post-merge sync and cleanup.
 
-Solo-maintainer example:
+Approval evidence:
 
-- Treat the reviewer summary as a substitute only for formal approval.
+- Rely on a clean Codex review, a separate-session review summary or a formal approval only when the approval gate reports it as accepted for the current head SHA.
 - Still require a fresh GitHub refresh, a matching current head SHA, and passing merge gates before merging.
 
 ## Analyst
@@ -121,10 +122,10 @@ Review session responsibilities:
 
 - Refresh GitHub state before reviewing so the exact current head SHA is known.
 - Record blockers on GitHub, or record a no-blockers review summary for that SHA.
-- When formal approval is unavailable, use the solo-maintainer override language required by `MERGE-POLICY.md`.
+- For a no-blockers result, use the separate-session review summary required by `MERGE-POLICY.md`, including the `Reviewer provider:` line, or a formal approval when GitHub allows it.
 
 Merge-owner responsibilities:
 
 - Refresh GitHub again immediately before merge.
 - Confirm the reviewed SHA still matches the current PR head SHA.
-- Run fresh merge gates such as `pre-merge`; the solo-maintainer override does not bypass checks or stale-state protection.
+- Run fresh merge gates such as `pre-merge`; approval evidence does not bypass checks or stale-state protection.

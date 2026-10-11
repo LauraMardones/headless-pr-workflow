@@ -3,8 +3,30 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from headless_pr_workflow.approval_check import SOLO_OVERRIDE_MARKER
-from headless_pr_workflow.github.pr_context import CheckSummary, PullRequestContext, ReviewSummary
+from headless_pr_workflow.approval_check import SEPARATE_SESSION_REVIEW_MARKER
+from headless_pr_workflow.github.pr_context import (
+    CheckSummary,
+    LinkedIssue,
+    PullRequestContext,
+    ReviewSummary,
+    TimelineEvent,
+)
+
+
+CODEX_BOT = "chatgpt-codex-connector"
+HEAD_SHA = "8e771923416dbcc1820f2dd359a262e8b0fc4a9d"
+OLD_SHA = "a56a59201772551b814c656020cdbaef98b08bb0"
+PR_298_COMMITS = (
+    "ab667c97d9bec69cd3c444fc8f4a1c3cdbffc864",
+    "1823d34d30e18e32b8cab3519a1be75737fa873e",
+    OLD_SHA,
+    HEAD_SHA,
+)
+# Real Codex reply formats (PR #298, PR #287, issue #288), recorded 2026-09-27.
+CODEX_USAGE_LIMIT_BODY = (
+    "You have reached your Codex usage limits. You can see your limits in the "
+    "[Codex usage dashboard](https://chatgpt.com/codex/settings/usage)."
+)
 
 
 def build_review(
@@ -70,7 +92,14 @@ def build_pr_context(
     review_requests: tuple[str, ...] = (),
     status_checks: tuple[CheckSummary, ...] = (),
     raw: dict[str, Any] | None = None,
+    timeline: tuple[TimelineEvent, ...] = (),
+    commit_oids: tuple[str, ...] | None = None,
+    linked_issues: tuple[LinkedIssue, ...] = (),
+    review_evidence_error: str | None = None,
 ) -> PullRequestContext:
+    if commit_oids is None:
+        timeline_oids = [oid for event in timeline if event.kind in {"commit", "force-push"} for oid in (event.before_oid, event.oid)]
+        commit_oids = tuple(dict.fromkeys(oid for oid in (*timeline_oids, head_ref_oid) if oid))
     return PullRequestContext(
         number=number,
         title=title,
@@ -95,6 +124,10 @@ def build_pr_context(
         review_requests=review_requests,
         status_checks=status_checks,
         raw={} if raw is None else raw,
+        timeline=timeline,
+        commit_oids=commit_oids,
+        linked_issues=linked_issues,
+        review_evidence_error=review_evidence_error,
     )
 
 
@@ -140,12 +173,119 @@ def scenario_comment_only_review(
     )
 
 
-def scenario_solo_override(*, head_sha: str = "head123", **overrides: Any) -> PullRequestContext:
-    body = solo_override_body(head_sha=head_sha)
+def scenario_separate_session_review(
+    *,
+    head_sha: str = "head123",
+    reviewer_provider: str | None = "codex",
+    **overrides: Any,
+) -> PullRequestContext:
+    body = separate_session_review_body(head_sha=head_sha, reviewer_provider=reviewer_provider)
     return build_pr_context(
         head_ref_oid=head_sha,
         latest_reviews=(build_review(state="COMMENTED", commit_oid=head_sha, body=body),),
         raw={"reviews": [{"body": body, "commit": {"oid": head_sha}}]},
+        **overrides,
+    )
+
+
+def linked_story(*labels: str, number: int = 290) -> LinkedIssue:
+    return LinkedIssue(number=number, repository="owner/repo", labels=("type:story", *labels))
+
+
+def commit_event(oid: str) -> TimelineEvent:
+    return TimelineEvent(kind="commit", oid=oid)
+
+
+def force_push_event(*, before: str, after: str) -> TimelineEvent:
+    return TimelineEvent(kind="force-push", oid=after, before_oid=before, created_at="2026-09-28T10:00:00Z")
+
+
+def codex_clean_body(prefix: str = HEAD_SHA[:10], *, closing: str = "You're on a roll.") -> str:
+    return (
+        f"Codex Review: Didn't find any major issues. {closing}\n\n"
+        f"**Reviewed commit:** `{prefix}`\n\n"
+        "<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n"
+        "[Your team has set up Codex to review pull requests in this repo]"
+        "(https://chatgpt.com/codex/settings/general).\n</details>"
+    )
+
+
+def codex_findings_body(prefix: str) -> str:
+    return (
+        "### \U0001f4a1 Codex Review\n\n"
+        "Here are some automated review suggestions for this pull request.\n\n"
+        f"**Reviewed commit:** `{prefix}`\n\n"
+        "<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n</details>"
+    )
+
+
+def codex_comment(
+    body: str | None = None,
+    *,
+    author: str = CODEX_BOT,
+    author_type: str = "Bot",
+    editor: str | None = None,
+    editor_type: str | None = None,
+    url: str = "https://github.com/owner/repo/pull/123#issuecomment-1",
+) -> TimelineEvent:
+    return TimelineEvent(
+        kind="comment",
+        author=author,
+        author_type=author_type,
+        editor=editor,
+        editor_type=editor_type,
+        body=codex_clean_body() if body is None else body,
+        created_at="2026-09-28T09:00:00Z",
+        url=url,
+    )
+
+
+def codex_findings_review(commit_oid: str) -> TimelineEvent:
+    return TimelineEvent(
+        kind="review",
+        oid=commit_oid,
+        author=CODEX_BOT,
+        author_type="Bot",
+        body=codex_findings_body(commit_oid[:10]),
+        state="COMMENTED",
+        created_at="2026-09-28T08:00:00Z",
+        url="https://github.com/owner/repo/pull/123#pullrequestreview-1",
+    )
+
+
+def scenario_codex_review(
+    *,
+    head_sha: str = HEAD_SHA,
+    timeline: tuple[TimelineEvent, ...] | None = None,
+    linked_issues: tuple[LinkedIssue, ...] | None = None,
+    **overrides: Any,
+) -> PullRequestContext:
+    """A PR whose only approval evidence is a clean Codex comment on the current head."""
+
+    return build_pr_context(
+        head_ref_oid=head_sha,
+        timeline=(commit_event(head_sha), codex_comment()) if timeline is None else timeline,
+        linked_issues=(linked_story("executor:claude-code-sonnet"),) if linked_issues is None else linked_issues,
+        **overrides,
+    )
+
+
+def scenario_pr_298_timeline(**overrides: Any) -> PullRequestContext:
+    """The real timeline of PR #298: four commits, three findings reviews, one clean comment."""
+
+    first, second, third, head = PR_298_COMMITS
+    return scenario_codex_review(
+        head_sha=head,
+        timeline=(
+            commit_event(first),
+            codex_findings_review(first),
+            commit_event(second),
+            codex_findings_review(second),
+            commit_event(third),
+            codex_findings_review(third),
+            commit_event(head),
+            codex_comment(),
+        ),
         **overrides,
     )
 
@@ -203,11 +343,27 @@ def scenario_dirty_merge_state(*, head_sha: str = "head123", **overrides: Any) -
     return scenario_current_approval(head_sha=head_sha, merge_state_status="DIRTY", **overrides)
 
 
-def solo_override_body(*, head_sha: str) -> str:
+def separate_session_review_body(*, head_sha: str, reviewer_provider: str | None = "codex") -> str:
+    provider_line = "" if reviewer_provider is None else f"Reviewer provider: {reviewer_provider}\n\n"
     return (
         f"Reviewed head SHA `{head_sha}`.\n\n"
         f"No blockers remain for {head_sha}.\n\n"
-        f"{SOLO_OVERRIDE_MARKER}.\n\n"
-        "Formal GitHub approval is unavailable because no independent GitHub approver is available for this pull request.\n\n"
+        f"{SEPARATE_SESSION_REVIEW_MARKER}.\n\n"
+        f"{provider_line}"
         "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
     )
+
+
+def complete_review_evidence(
+    *,
+    timeline_items: tuple[dict[str, Any], ...] = (),
+    linked_issues: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
+    """Raw `reviewEvidence` payload, as `fetch_review_evidence` returns it after a complete read."""
+
+    return {
+        "error": None,
+        "repository": "owner/repo",
+        "timelineItems": list(timeline_items),
+        "closingIssuesReferences": {"pageInfo": {"hasNextPage": False}, "nodes": list(linked_issues)},
+    }
