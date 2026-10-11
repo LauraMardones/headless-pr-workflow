@@ -461,6 +461,7 @@ def _apply(
                 "move story",
                 f"story #{story.number} left `{STATUS_IN_REVIEW}` during the run; nothing was posted or moved",
             )
+        _require_unchanged_pr(decision, github)
         urls: tuple[str, ...] = ()
         if not summary_present:
             summary = github.session_summary(_session_summary_arguments(decision))
@@ -471,6 +472,7 @@ def _apply(
     if decision.action == ACTION_REQUEST_REVIEW:
         if dry_run:
             return Outcome(decision, DRY_RUN)
+        _require_unchanged_pr(decision, github)
         body = review_request_body(decision.head_sha, ordinal=decision.requests_posted + 1)
         return Outcome(decision, APPLIED, (github.post_comment(decision.pr, body),))
 
@@ -478,7 +480,31 @@ def _apply(
         return Outcome(decision, ALREADY_PRESENT)
     if dry_run:
         return Outcome(decision, DRY_RUN)
+    _require_unchanged_pr(decision, github)
     return Outcome(decision, APPLIED, (github.post_comment(story.number, blocker_body(decision, story)),))
+
+
+def _require_unchanged_pr(decision: Decision, github: GitHubGateway) -> None:
+    """Refresh the PR immediately before a mutation.
+
+    The decision rests on the review and checks of `decision.head_sha`. A commit
+    pushed since the first read makes it stale, so nothing is posted or moved
+    and the next run decides for the new head.
+    """
+
+    step = "revalidate PR head"
+    fresh = github.fetch_context(decision.pr)
+    if fresh.head_ref_oid != decision.head_sha:
+        raise BookkeepingError(
+            step,
+            f"PR #{decision.pr} head changed from {decision.head_sha} to {fresh.head_ref_oid or 'unknown'} "
+            "during the run; nothing was posted or moved",
+        )
+    if fresh.state != "OPEN" or fresh.is_draft:
+        raise BookkeepingError(
+            step,
+            f"PR #{decision.pr} is no longer open and ready for review; nothing was posted or moved",
+        )
 
 
 def blocker_body(decision: Decision, story: StoryBoard) -> str:

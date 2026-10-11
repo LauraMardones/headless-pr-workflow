@@ -589,6 +589,78 @@ def test_story_that_left_in_review_during_the_run_is_not_moved():
     assert github.pr_comments == [] and github.moves == []
 
 
+NEW_HEAD = "1823d34d30e18e32b8cab3519a1be75737fa873e"
+MUTATING_SCENARIOS = {
+    "move-in-merge": (request(), codex_comment()),
+    "move-in-implementation": (request(), codex_pr_298_findings_review(HEAD_SHA)),
+    "request-review": (request(SIX_HOURS_AGO),),
+    "blocker-external": (request(), codex_comment(CODEX_TASK_REPLY_BODY, url=UNKNOWN_URL)),
+    "blocker-resource": (request(SIX_HOURS_AGO), job_request(1), job_request(2), job_request(3)),
+}
+
+
+def _changing_pr(github: FakeGitHub, **changes) -> None:
+    """The first read sees the fixture; every later read sees the PR with `changes`."""
+
+    first = github.context
+    reads = []
+
+    def fetch_context(number: int) -> PullRequestContext:
+        reads.append(number)
+        return first if len(reads) == 1 else replace(first, **changes)
+
+    github.fetch_context = fetch_context
+
+
+@pytest.mark.parametrize("action", sorted(MUTATING_SCENARIOS))
+def test_commit_pushed_during_the_run_stops_every_mutation(action):
+    github = FakeGitHub(pr(*MUTATING_SCENARIOS[action]))
+    assert run_bookkeeping(PR, github=github, now=NOW, dry_run=True).decision.action == action
+    _changing_pr(github, head_ref_oid=NEW_HEAD)
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate PR head"
+    assert HEAD_SHA in error.value.message and NEW_HEAD in error.value.message
+    assert "nothing was posted or moved" in error.value.message
+    assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
+    assert github.status == "In review"
+
+
+@pytest.mark.parametrize("changes", [{"is_draft": True}, {"state": "CLOSED"}, {"state": "MERGED"}])
+def test_pr_that_stopped_being_open_and_ready_during_the_run_is_not_touched(changes):
+    github = FakeGitHub(pr(request(), codex_comment()))
+    _changing_pr(github, **changes)
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate PR head"
+    assert github.pr_comments == [] and github.moves == []
+
+
+def test_pr_is_read_again_immediately_before_the_mutation():
+    github = FakeGitHub(pr(request(), codex_comment()))
+    calls = []
+    for name in ("fetch_context", "fetch_story", "fetch_ci", "fetch_issue_comments", "post_comment", "set_story_status"):
+        original = getattr(github, name)
+        setattr(github, name, lambda *args, _name=name, _original=original: (calls.append(_name), _original(*args))[1])
+
+    run_bookkeeping(PR, github=github, now=NOW)
+
+    assert calls == [
+        "fetch_context",
+        "fetch_story",
+        "fetch_ci",
+        "fetch_issue_comments",
+        "fetch_story",
+        "fetch_context",
+        "post_comment",
+        "set_story_status",
+    ]
+
+
 def test_ineligible_pr_reads_no_board_state_or_story_comments():
     github = FakeGitHub(pr(request(), codex_comment(), is_draft=True))
     github.fetch_story = github.fetch_ci = github.fetch_issue_comments = None  # must not be called

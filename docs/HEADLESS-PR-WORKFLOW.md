@@ -130,6 +130,7 @@ Rules:
 - **Blockers** use the Declaration format in `PROJECT-STATUS.md` and are posted on the story. The board has no `Blocked` option, so the story stays in `In review`. No Slack notification is sent for them.
 - **Session Summary.** The job posts the exact output of `scripts/session-summary.sh --command review` as a PR comment. Its `Deviation:` line says the bookkeeping job produced it without a model session.
 - **Idempotency.** Every comment the job posts ends with a hidden marker naming the PR head and the kind of action. The job skips anything already done for that head. All state lives on GitHub.
+- **Fresh refresh.** Immediately before it posts or moves anything, the job reads the story status and the PR again. If the story left `In review`, the PR head changed, or the PR is no longer open and ready, it stops with an error and changes nothing; the next run decides for the new state.
 - **Failure.** When PR, story or board state cannot be read completely, a board status option is missing, or a mutation fails, the command exits non-zero, names the failed step and claims no action it did not complete.
 - **Trigger phrase.** The phrase is written only in a PR conversation comment that requests a review, by `/implement` or by this job (`AGENTS.md` → Codex Review Requests).
 
