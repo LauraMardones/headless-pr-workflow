@@ -85,7 +85,7 @@ Practical sequence:
 
 1. The implementation session pushes the candidate head SHA and requests review without self-approving that SHA.
 2. An independent reviewer reviews the exact current head SHA: Codex posts its result on the PR, or a separate review session refreshes GitHub state and records blockers or a no-blockers PR review summary.
-3. A separate review session that finds no blockers records the review summary described in `MERGE-POLICY.md` → Path 2, including the `Reviewer provider:` line, or a formal approval when GitHub allows it.
+3. A separate review session that finds no blockers records the review summary described in `MERGE-POLICY.md` → Path 2, including the `Reviewer provider:` line, or a formal approval when GitHub allows it. The session generates the summary text with `hpw review-evidence-text` instead of composing it, and confirms with `hpw approval-check` that it was accepted.
 4. If the review finds blockers, the implementation session makes changes and pushes a new head SHA. The earlier review is then stale and the loop restarts.
 5. After a no-blockers review exists for the current head SHA, the merge owner performs a fresh refresh and re-checks merge readiness before merging that same SHA.
 

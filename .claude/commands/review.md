@@ -21,6 +21,7 @@ Important:
 - Use GitHub as source of truth.
 - If no blockers remain, use formal approval when GitHub allows it.
 - If GitHub blocks approval because the authenticated account owns the PR, record the separate-session review summary documented in docs/MERGE-POLICY.md exactly, including the `Reviewer provider:` line.
+- Never compose or paraphrase the separate-session review summary. Generate it with `hpw review-evidence-text` or copy the template below verbatim; the approval gate rejects any other wording.
 
 Workflow status goals:
 - If blockers are found: "In review" -> "In implementation"
@@ -53,7 +54,9 @@ Required behavior:
 7. If no blockers remain:
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
    - if GitHub allows formal approval, approve the PR
-   - if GitHub blocks formal approval because the authenticated account owns the PR, submit a `COMMENT` review whose body is the separate-session review summary from docs/MERGE-POLICY.md (Path 2), exactly:
+   - if GitHub blocks formal approval because the authenticated account owns the PR, submit a `COMMENT` review that carries the separate-session review summary from docs/MERGE-POLICY.md (Path 2)
+   - generate the summary with `hpw review-evidence-text <head-sha> --reviewer-provider <claude|codex>`, using the full 40-character head SHA, and post its exact output
+   - if the helper cannot be run, copy this template verbatim, changing only `<head-sha>` and `<claude|codex>`:
 
      ```text
      Reviewed head SHA `<head-sha>`.
@@ -67,8 +70,14 @@ Required behavior:
      This solo-maintainer override is the approval to rely on for the current head SHA.
      ```
 
+   - never compose or paraphrase these sentences
+   - put the summary as its own block at the top of the review body, above the Session Summary; never rely on a `Deviation:` line as the only place that carries it
    - set `Reviewer provider:` to the provider running this review session (`claude` for Claude Code, `codex` for Codex); the approval gate rejects the summary when that provider is the one that implemented the PR, per the linked story's `executor:` label, so do not record it in that case and report that a different provider must review
    - ensure the approval evidence is recorded against the current head SHA
+   - after posting a separate-session review summary, run `hpw approval-check $ARGUMENTS --repo LauraMardones/headless-pr-workflow` and confirm it prints `separate-session review: accepted`
+   - if it is not accepted, post one corrected review on the same head SHA and run the check again
+   - if it is still not accepted, do not claim the PR is ready to merge: leave the story in "In review", name the rejected evidence in `--blockers`, do not use `--next merge` (use `--next implementation`, the only other value the script accepts), and add a `--deviation` saying that only the review evidence needs redoing, not the code
+   - if `hpw approval-check` cannot be run in the session, say so with `--deviation`; the verbatim-template rule still applies
    - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.

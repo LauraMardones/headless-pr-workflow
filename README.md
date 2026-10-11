@@ -122,6 +122,7 @@ All `hpw` commands are fully implemented:
 | `next-action` | Recommended next action for a PR |
 | `review-delta` | Diff summary since last review baseline |
 | `approval-check` | Approval status and head SHA binding |
+| `review-evidence-text` | Separate-session review summary text for a head SHA |
 | `pr-takeover` | Cross-session or cross-assistant takeover assessment |
 | `merge-pr` | Merge execution with pre-merge gates |
 | `post-merge-sync` | Post-merge state verification |

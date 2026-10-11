@@ -35,6 +35,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `worktree-status` | Report local worktrees, branches, and dirty state. | all | P1-high | C-session | report | core | implemented |
 | `review-sha` | Report current head SHA and approval SHA relationship. | reviewer, implementer | P0-blocking | F-review | hard-gate | core | implemented |
 | `approval-check` | Verify approval applies to current PR head SHA. | implementer, reviewer | P0-blocking | F-review | hard-gate | core | implemented |
+| `review-evidence-text` | Print the separate-session review summary text for a head SHA. | reviewer | P1-high | F-review | report | core | implemented |
 | `re-review-needed` | Detect whether new commits require review re-evaluation. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |
 | `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P1-high | F-review | report | core | implemented |
 | `unresolved-review-threads` | Detect unresolved GitHub review threads. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |

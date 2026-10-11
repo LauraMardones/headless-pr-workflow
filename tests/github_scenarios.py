@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from headless_pr_workflow.approval_check import SEPARATE_SESSION_REVIEW_MARKER
+from headless_pr_workflow.review_policy import REVIEWER_PROVIDER_LABEL, separate_session_review_text
 from headless_pr_workflow.github.pr_context import (
     CheckSummary,
     LinkedIssue,
@@ -344,14 +344,17 @@ def scenario_dirty_merge_state(*, head_sha: str = "head123", **overrides: Any) -
 
 
 def separate_session_review_body(*, head_sha: str, reviewer_provider: str | None = "codex") -> str:
-    provider_line = "" if reviewer_provider is None else f"Reviewer provider: {reviewer_provider}\n\n"
-    return (
-        f"Reviewed head SHA `{head_sha}`.\n\n"
-        f"No blockers remain for {head_sha}.\n\n"
-        f"{SEPARATE_SESSION_REVIEW_MARKER}.\n\n"
-        f"{provider_line}"
-        "This solo-maintainer override is the approval to rely on for the current head SHA.\n"
-    )
+    """Build the path 2 body from the helper's text, so the wording has one source.
+
+    Scenarios use short fake SHAs and invalid providers that the helper
+    rejects, so its output for a valid pair is rewritten.
+    """
+
+    provider_line = f"{REVIEWER_PROVIDER_LABEL} codex\n\n"
+    body = separate_session_review_text(HEAD_SHA, "codex")
+    assert provider_line in body
+    replacement = "" if reviewer_provider is None else f"{REVIEWER_PROVIDER_LABEL} {reviewer_provider}\n\n"
+    return body.replace(provider_line, replacement).replace(HEAD_SHA, head_sha)
 
 
 def complete_review_evidence(
