@@ -35,7 +35,7 @@ def test_review_guidance_preserves_current_head_and_thread_safety() -> None:
     text = command_text("review.md")
 
     assert "verify the target repository, PR number, and current head SHA" in text
-    assert "record the documented solo-maintainer override against that same verified SHA" in text
+    assert "record the documented separate-session review summary against that same verified SHA" in text
     assert "confirm it belongs to the verified PR" in text
     assert "never resolve a still-actionable thread" in text
 

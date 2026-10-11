@@ -62,39 +62,45 @@ For a reviewed head SHA, the same assistant session must not both implement and 
 
 This rule prevents self-review loops where an assistant validates its own implementation without an independent review context.
 
-## Solo-Maintainer Review Flow
+## Independent Review Flow
 
-Some repositories have only one GitHub account with write access. In that case, the workflow must still preserve review separation without inventing extra GitHub accounts or pretending that formal GitHub approval exists when GitHub does not allow it.
+The approval gate is satisfied when a reviewer independent of the implementer found no blockers on the exact current head SHA (ADR-007). One maintainer with one GitHub account is the normal case; the workflow preserves review separation without inventing extra GitHub accounts or pretending that a formal GitHub approval exists.
 
-Use the solo-maintainer path only when the conditions in `MERGE-POLICY.md` are satisfied. The override substitutes only for formal GitHub approval. It does not waive any other merge condition:
+`MERGE-POLICY.md` → Approval Gate: Independent Review defines the three kinds of evidence and when each fails closed:
 
-- The review must still be performed in a separate review session from the session that implemented the current head SHA.
-- The review must still be recorded on GitHub for the exact current head SHA, normally as a PR review submission summary.
+1. A clean Codex review of the current head (the default for Claude-implemented stories). It needs a linked story; a PR with no linked story uses path 2 or path 3.
+2. A separate-session review recorded as a PR review summary on the current head, naming the reviewing provider, which must differ from the implementing provider.
+3. A formal GitHub approval of the current head.
+
+Satisfying the approval gate does not waive any other merge condition:
+
+- The review must still come from a reviewer independent of the session that implemented the current head SHA.
+- The evidence must still be recorded on GitHub for the exact current head SHA.
 - The PR must still be Ready for review, not draft.
 - Required CI/checks must still pass for the current head SHA.
 - Blocking review threads or comments must still be resolved, outdated, or explicitly waived according to repo policy.
 - The merge owner must still perform a fresh GitHub refresh immediately before merge.
 
-Practical sequence for a one-person repository:
+Practical sequence:
 
 1. The implementation session pushes the candidate head SHA and requests review without self-approving that SHA.
-2. A separate review session refreshes GitHub state, reviews the exact current head SHA, and records blockers or a no-blockers PR review summary on GitHub.
-3. If formal GitHub approval is unavailable because there is no independent approver, that review session records the solo-maintainer override summary described in `MERGE-POLICY.md` as a GitHub PR review summary.
+2. An independent reviewer reviews the exact current head SHA: Codex posts its result on the PR, or a separate review session refreshes GitHub state and records blockers or a no-blockers PR review summary.
+3. A separate review session that finds no blockers records the review summary described in `MERGE-POLICY.md` → Path 2, including the `Reviewer provider:` line, or a formal approval when GitHub allows it.
 4. If the review finds blockers, the implementation session makes changes and pushes a new head SHA. The earlier review is then stale and the loop restarts.
 5. After a no-blockers review exists for the current head SHA, the merge owner performs a fresh refresh and re-checks merge readiness before merging that same SHA.
 
-The GitHub review summary for the override should make three facts explicit:
+A separate-session review summary makes three facts explicit:
 
-- Formal GitHub approval is unavailable in this repository.
 - No blockers remain for the exact current head SHA.
-- The solo-maintainer override is the approval to rely on for that current head SHA.
+- Which provider reviewed it.
+- The review is the approval to rely on for that current head SHA.
 
-The expected evidence surface is the GitHub PR review submission summary attached to the reviewed head SHA. Top-level issue or PR conversation comments can help with handoffs or discovery, but they are not the normal source of solo-maintainer override evidence.
+The evidence surface for a separate-session review is the GitHub PR review submission summary attached to the reviewed head SHA. The evidence surface for a Codex review is the Codex bot's PR conversation comment naming the reviewed commit. No other top-level issue or PR conversation comment is a source of approval evidence.
 
 This keeps the flow compatible with deterministic commands:
 
-- `approval-check` may treat the review summary as satisfying the approval gate only when the summary is attached to the current head SHA and contains the required solo-maintainer override language.
-- `pr-context` may normalize review submissions from `latestReviews` and `reviews`; those fields are review-discovery surfaces, not a change to the override policy.
+- `approval-check` treats evidence as satisfying the approval gate only when its recognizer accepts it for the current head SHA, and reports the source (`formal`, `codex-review` or `separate-session-review`) and the reason for any rejection.
+- `pr-context` normalizes review submissions from `latestReviews` and `reviews`, and reads the PR timeline, commits and linked stories the recognizers need. When these cannot be read completely, the Codex review and separate-session review paths fail closed.
 - `pre-merge` must still fail if the PR is draft, if checks are missing or failing, if mergeability is bad, if unresolved review threads remain active, or if the reviewed SHA is no longer current.
 
 ## Deterministic Automation
