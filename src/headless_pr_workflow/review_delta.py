@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .github import GHCommandError, PullRequestContext, ReviewSummary
-from .review_policy import is_accepted_solo_maintainer_override
+from .review_policy import is_accepted_separate_session_review
 
 
 @dataclass(frozen=True)
@@ -315,10 +315,10 @@ def _baseline_from_review(review: ReviewSummary) -> ReviewDeltaBaseline | None:
             review_author=review.author,
             review_submitted_at=review.submitted_at,
         )
-    if is_accepted_solo_maintainer_override(review, head_sha=review.commit_oid):
+    if is_accepted_separate_session_review(review, head_sha=review.commit_oid):
         return ReviewDeltaBaseline(
             sha=review.commit_oid,
-            source="solo-maintainer-override",
+            source="separate-session-review",
             review_state=review.state,
             review_author=review.author,
             review_submitted_at=review.submitted_at,

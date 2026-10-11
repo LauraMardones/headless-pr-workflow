@@ -224,8 +224,9 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
     print(f"latest review author: {summary.latest_review_author or 'none'}")
     print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
     print(f"formal approval status: {summary.approval_status}")
-    print(f"solo-maintainer override: {summary.solo_override.status}")
-    print(f"override review sha: {summary.solo_override.review_commit_oid or 'none'}")
+    print(f"codex review: {summary.codex_review.status}")
+    print(f"separate-session review: {summary.separate_session_review.status}")
+    print(f"separate-session review sha: {summary.separate_session_review.review_commit_oid or 'none'}")
     print(f"approval source: {summary.approval_source or 'none'}")
     print(f"satisfied by: {summary.satisfied_by or 'none'}")
     if summary.blocking_reasons:
@@ -256,7 +257,8 @@ def _print_re_review_needed(target: str | None, *, repo: str | None, as_json: bo
     print(f"latest review author: {summary.latest_review_author or 'none'}")
     print(f"latest approval sha: {summary.latest_approval_sha or 'none'}")
     print(f"approval status: {summary.approval_status}")
-    print(f"solo-maintainer override: {summary.solo_override.status}")
+    print(f"codex review: {summary.codex_review.status}")
+    print(f"separate-session review: {summary.separate_session_review.status}")
     print(f"approval source: {summary.approval_source or 'none'}")
     print(f"satisfied by: {summary.satisfied_by or 'none'}")
     print(f"re-review needed: {str(summary.re_review_needed).lower()}")
@@ -387,7 +389,8 @@ def _print_pr_takeover(target: str | None, *, repo: str | None, as_json: bool) -
     print(f"approval status: {approval.approval_status}")
     print(f"latest review sha: {approval.latest_review_sha or 'none'}")
     print(f"latest approval sha: {approval.latest_approval_sha or 'none'}")
-    print(f"solo-maintainer override: {approval.solo_override.status}")
+    print(f"codex review: {approval.codex_review.status}")
+    print(f"separate-session review: {approval.separate_session_review.status}")
     print(f"approval source: {approval.approval_source or 'none'}")
     print(f"satisfied by: {approval.satisfied_by or 'none'}")
     re_review_needed = not approval.hard_gate_passed
@@ -809,14 +812,18 @@ def _print_workflow_status(target: str | None, *, repo: str | None, as_json: boo
     print()
 
     print("[github truth]")
-    if approval.hard_gate_passed and approval.approval_source == "solo-maintainer-override":
-        print("approval status: satisfied (solo-maintainer override)")
+    if approval.hard_gate_passed and approval.approval_source == "separate-session-review":
+        print("approval status: satisfied (separate-session review)")
+        print(f"formal approval status: {approval.approval_status}")
+    elif approval.hard_gate_passed and approval.approval_source == "codex-review":
+        print("approval status: satisfied (codex review)")
         print(f"formal approval status: {approval.approval_status}")
     else:
         print(f"approval status: {approval.approval_status}")
     print(f"latest review sha: {approval.latest_review_sha or 'none'}")
     print(f"latest approval sha: {approval.latest_approval_sha or 'none'}")
-    print(f"solo-maintainer override: {approval.solo_override.status}")
+    print(f"codex review: {approval.codex_review.status}")
+    print(f"separate-session review: {approval.separate_session_review.status}")
     print(f"approval source: {approval.approval_source or 'none'}")
     print(f"satisfied by: {approval.satisfied_by or 'none'}")
     re_review_needed = re_review.re_review_needed

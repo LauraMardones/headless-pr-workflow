@@ -7,6 +7,11 @@ from headless_pr_workflow.github.review_threads import summarize_review_threads
 from tests.github_scenarios import (
     build_check,
     build_pr_context,
+    codex_comment,
+    codex_findings_review,
+    commit_event,
+    HEAD_SHA,
+    scenario_codex_review,
     scenario_comment_only_review,
     scenario_current_approval,
     scenario_dirty_merge_state,
@@ -15,7 +20,7 @@ from tests.github_scenarios import (
     scenario_failing_checks,
     scenario_mergeable_unknown,
     scenario_pending_checks,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
     with_context,
 )
@@ -181,7 +186,7 @@ def test_pre_merge_blocks_unresolved_review_threads():
 
 def test_pre_merge_allows_absent_checks_when_none_are_required():
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123"),
+        scenario_separate_session_review(head_sha="head123"),
         expected_base_ref_name="main",
         required_check_names=(),
     )
@@ -192,7 +197,7 @@ def test_pre_merge_allows_absent_checks_when_none_are_required():
 
 def test_pre_merge_allows_unavailable_checks_when_policy_absent():
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123"),
+        scenario_separate_session_review(head_sha="head123"),
         expected_base_ref_name="main",
         required_checks=RequiredStatusChecks(
             names=(),
@@ -211,7 +216,7 @@ def test_pre_merge_allows_unavailable_checks_when_policy_absent():
 
 def test_pre_merge_blocks_generic_unavailable_required_check_data():
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123", base_ref_name="release"),
+        scenario_separate_session_review(head_sha="head123", base_ref_name="release"),
         expected_base_ref_name="release",
         required_checks=RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
     )
@@ -222,7 +227,7 @@ def test_pre_merge_blocks_generic_unavailable_required_check_data():
 
 def test_pre_merge_blocks_unknown_reported_checks_even_when_policy_absent():
     summary = summarize_pre_merge(
-        scenario_solo_override(
+        scenario_separate_session_review(
             head_sha="head123",
             status_checks=(build_check(name="security", bucket="unknown"),),
         ),
@@ -259,7 +264,7 @@ def test_pre_merge_blocks_failing_or_pending_required_check_under_required_polic
     _write_required_policy(tmp_path)
     monkeypatch.chdir(tmp_path)
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123", status_checks=(build_check(name="pytest", bucket=bucket),)),
+        scenario_separate_session_review(head_sha="head123", status_checks=(build_check(name="pytest", bucket=bucket),)),
         expected_base_ref_name="main",
         required_checks=RequiredStatusChecks(names=("pytest",), status="configured"),
     )
@@ -273,7 +278,7 @@ def test_pre_merge_blocks_unavailable_required_check_data_under_required_policy(
     _write_required_policy(tmp_path)
     monkeypatch.chdir(tmp_path)
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123", status_checks=()),
+        scenario_separate_session_review(head_sha="head123", status_checks=()),
         expected_base_ref_name="main",
         required_checks=RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
     )
@@ -294,7 +299,7 @@ def test_pre_merge_blocks_unconfigured_required_checks_under_required_policy(mon
     _write_required_policy(tmp_path)
     monkeypatch.chdir(tmp_path)
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123", status_checks=status_checks),
+        scenario_separate_session_review(head_sha="head123", status_checks=status_checks),
         expected_base_ref_name="main",
         required_checks=RequiredStatusChecks(names=(), status="not_configured"),
     )
@@ -327,7 +332,7 @@ def test_pre_merge_blocks_inconsistent_required_check_policy(monkeypatch, tmp_pa
     _write_required_policy(tmp_path, required=required, workflows=workflows)
     monkeypatch.chdir(tmp_path)
     summary = summarize_pre_merge(
-        scenario_solo_override(head_sha="head123", status_checks=()),
+        scenario_separate_session_review(head_sha="head123", status_checks=()),
         expected_base_ref_name="main",
         required_checks=required_checks,
     )
@@ -338,3 +343,60 @@ def test_pre_merge_blocks_inconsistent_required_check_policy(monkeypatch, tmp_pa
         f"ci_workflows={workflows!r}. Source: docs/MERGE-POLICY.md#main-required-check-policy."
     ) in summary.blocking_reasons
     assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_inconsistent"
+
+
+def test_pre_merge_passes_with_clean_codex_review_and_reports_the_source():
+    summary = summarize_pre_merge(scenario_codex_review(), expected_base_ref_name="main", required_check_names=())
+
+    payload = summary.to_dict()
+    assert summary.hard_gate_passed is True
+    assert payload["approval"]["approval_source"] == "codex-review"
+    assert payload["approval"]["satisfied_by"] == "codex-review"
+    assert payload["approval_review_source"]["approval_source"] == "codex-review"
+    assert payload["approval_review_source"]["codex_review"]["status"] == "accepted"
+    assert payload["approval_review_source"]["separate_session_review"]["status"] == "missing"
+    assert "solo_override" not in payload["approval_review_source"]
+
+
+def test_pre_merge_passes_with_separate_session_review_and_reports_the_source():
+    summary = summarize_pre_merge(
+        scenario_separate_session_review(head_sha="head123"),
+        expected_base_ref_name="main",
+        required_check_names=(),
+    )
+
+    payload = summary.to_dict()
+    assert summary.hard_gate_passed is True
+    assert payload["approval_review_source"]["approval_source"] == "separate-session-review"
+    assert payload["approval_review_source"]["satisfied_by"] == "separate-session-review"
+    assert payload["approval_review_source"]["separate_session_review"]["reviewer_provider"] == "codex"
+
+
+def test_pre_merge_never_passes_when_the_codex_recognizer_rejects_the_evidence():
+    superseded = scenario_codex_review(
+        timeline=(commit_event(HEAD_SHA), codex_comment(), codex_findings_review(HEAD_SHA)),
+    )
+
+    summary = summarize_pre_merge(superseded, expected_base_ref_name="main", required_check_names=())
+
+    reason = "a newer Codex review submission follows the clean Codex review comment"
+    payload = summary.to_dict()
+    assert summary.hard_gate_passed is False
+    assert reason in summary.blocking_reasons
+    assert payload["approval_review_source"]["approval_source"] is None
+    assert payload["approval_review_source"]["codex_review"]["status"] == "superseded"
+    assert payload["approval_review_source"]["codex_review"]["reason"] == reason
+
+
+def test_pre_merge_never_passes_when_the_separate_session_recognizer_rejects_the_evidence():
+    summary = summarize_pre_merge(
+        scenario_separate_session_review(head_sha="head123", reviewer_provider=None),
+        expected_base_ref_name="main",
+        required_check_names=(),
+    )
+
+    payload = summary.to_dict()
+    assert summary.hard_gate_passed is False
+    assert payload["approval_review_source"]["approval_source"] is None
+    assert payload["approval_review_source"]["separate_session_review"]["status"] == "invalid"
+    assert payload["approval_review_source"]["separate_session_review"]["reason"] in summary.blocking_reasons

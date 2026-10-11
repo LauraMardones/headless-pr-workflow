@@ -8,7 +8,7 @@ from tests.github_scenarios import (
     scenario_changes_requested,
     scenario_comment_only_review,
     scenario_current_approval,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
 )
 
@@ -34,7 +34,7 @@ def test_re_review_needed_json_output_passes_for_formal_approval(monkeypatch, ca
     assert output["latest_review_author"] == "reviewer"
     assert output["latest_approval_sha"] == "head123"
     assert output["approval_status"] == "current"
-    assert output["solo_override"]["status"] == "missing"
+    assert output["separate_session_review"]["status"] == "missing"
     assert output["approval_source"] == "formal"
     assert output["satisfied_by"] == "formal-approval"
     assert output["re_review_needed"] is False
@@ -42,16 +42,16 @@ def test_re_review_needed_json_output_passes_for_formal_approval(monkeypatch, ca
     assert output["blocking_reasons"] == []
 
 
-def test_re_review_needed_json_output_passes_for_solo_override(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+def test_re_review_needed_json_output_passes_for_separate_session_review(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_separate_session_review(head_sha="head123"))
 
     exit_code = cli.main(["re-review-needed", "123", "--repo", "owner/repo", "--json"])
 
     assert exit_code == 0
     output = json.loads(capsys.readouterr().out)
     assert output["approval_status"] == "missing"
-    assert output["solo_override"]["status"] == "accepted"
-    assert output["approval_source"] == "solo-maintainer-override"
+    assert output["separate_session_review"]["status"] == "accepted"
+    assert output["approval_source"] == "separate-session-review"
     assert output["re_review_needed"] is False
     assert output["hard_gate_passed"] is True
 
@@ -80,7 +80,7 @@ def test_re_review_needed_json_output_fails_for_missing_review_evidence(monkeypa
     output = json.loads(capsys.readouterr().out)
     assert output["re_review_needed"] is True
     assert output["hard_gate_passed"] is False
-    assert "no formal approval or accepted solo-maintainer override exists for the current PR head SHA" in output["blocking_reasons"]
+    assert "no formal approval, clean Codex review or accepted separate-session review exists for the current PR head SHA" in output["blocking_reasons"]
 
 
 def test_re_review_needed_json_output_fails_for_changes_requested(monkeypatch, capsys):
@@ -110,11 +110,11 @@ def test_re_review_needed_human_output_names_result_and_blockers(monkeypatch, ca
     assert "latest review author: reviewer" in output
     assert "latest approval sha: none" in output
     assert "approval status: missing" in output
-    assert "solo-maintainer override: missing" in output
+    assert "separate-session review: missing" in output
     assert "approval source: none" in output
     assert "re-review needed: true" in output
     assert "blocking reasons:" in output
-    assert "- comment-only review exists without formal approval or an accepted solo-maintainer override" in output
+    assert "- comment-only review exists without formal approval, a clean Codex review or an accepted separate-session review" in output
     assert "hard gate passed: false" in output
 
 

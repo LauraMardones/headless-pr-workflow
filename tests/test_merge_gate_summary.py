@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import os
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -12,7 +13,16 @@ from types import SimpleNamespace
 import pytest
 
 from headless_pr_workflow.github import GHCommandError, RequiredStatusChecks
-from tests.github_scenarios import scenario_current_approval, scenario_stale_approval
+from tests.github_scenarios import (
+    CODEX_USAGE_LIMIT_BODY,
+    HEAD_SHA,
+    codex_comment,
+    commit_event,
+    scenario_codex_review,
+    scenario_current_approval,
+    scenario_separate_session_review,
+    scenario_stale_approval,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +85,7 @@ def test_dry_run_exact_output_and_no_gh_call(tmp_path):
     assert result.returncode == 0
     assert result.stdout == (
         "Merge gate: policy=pass(present_non_required), checks=absent-ok, "
-        "approval=solo-maintainer, threads=none, mergeable=yes, head=b607aa9\n"
+        "approval=separate-session, threads=none, mergeable=yes, head=b607aa9\n"
     )
     assert result.stderr == ""
 
@@ -352,3 +362,63 @@ def test_pr_fetch_failure_is_usage_error(monkeypatch, module, capsys):
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not use POSIX executable mode")
 def test_script_is_executable():
     assert SCRIPT.stat().st_mode & 0o111 == 0o111
+
+
+def test_dry_run_sample_line_is_a_passing_gate(module):
+    match = re.fullmatch(
+        r"Merge gate: policy=(.+), checks=(.+), approval=(.+), threads=(.+), mergeable=(.+), head=(.+)",
+        module.DRY_RUN_LINE,
+    )
+    assert match
+    assert module.GateResult(*match.groups()).passed is True
+
+
+@pytest.mark.parametrize(
+    ("context", "approval"),
+    [
+        (scenario_current_approval(head_sha="abcdef1234567890"), "formal"),
+        (scenario_codex_review(), "codex-review"),
+        (scenario_separate_session_review(head_sha="abcdef1234567890"), "separate-session"),
+    ],
+)
+def test_merge_gate_line_names_the_approval_source(monkeypatch, module, capsys, context, approval):
+    arrange_live(monkeypatch, module, context=context)
+
+    assert module.main(["--pr", "12", "--repo", "owner/repo"]) == 0
+    assert capsys.readouterr().out == (
+        "Merge gate: policy=pass(present_non_required), checks=absent-ok, "
+        f"approval={approval}, threads=none, mergeable=yes, head={context.head_ref_oid[:7]}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(scenario_codex_review(linked_issues=()), id="storyless-codex-review"),
+        pytest.param(
+            scenario_codex_review(timeline=(commit_event(HEAD_SHA), codex_comment(CODEX_USAGE_LIMIT_BODY))),
+            id="usage-limit-reply",
+        ),
+        pytest.param(
+            scenario_separate_session_review(head_sha="abcdef1234567890", reviewer_provider=None),
+            id="separate-session-review-without-provider",
+        ),
+    ],
+)
+def test_merge_gate_fails_when_a_recognizer_rejects_the_evidence(monkeypatch, module, capsys, context):
+    arrange_live(monkeypatch, module, context=context)
+
+    assert module.main(["--pr", "12", "--repo", "owner/repo"]) == 1
+    assert "approval=fail(missing-or-blocked)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("approval", ["formal", "codex-review", "separate-session"])
+def test_gate_result_accepts_each_passing_approval_value(module, approval):
+    result = module.GateResult("pass(absent)", "pass", approval, "none", "yes", "abcdef1")
+    assert result.passed is True
+
+
+@pytest.mark.parametrize("approval", ["solo-maintainer", "fail(stale)", "fail(missing-or-blocked)", "warn(unknown-source)"])
+def test_gate_result_rejects_every_other_approval_value(module, approval):
+    result = module.GateResult("pass(absent)", "pass", approval, "none", "yes", "abcdef1")
+    assert result.passed is False

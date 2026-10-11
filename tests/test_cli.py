@@ -8,12 +8,13 @@ from headless_pr_workflow.merge_pr import MergeCommandResult
 from tests.github_scenarios import (
     build_check,
     build_pr_context,
+    scenario_codex_review,
     scenario_comment_only_review,
     scenario_current_approval,
     scenario_draft_pr,
     scenario_empty_status_rollup,
     scenario_mergeable_unknown,
-    scenario_solo_override,
+    scenario_separate_session_review,
     scenario_stale_approval,
     with_context,
 )
@@ -95,8 +96,8 @@ def test_review_sha_json_output_fails_for_stale_approval(monkeypatch, capsys):
     assert '"hard_gate_passed": false' in output
 
 
-def test_review_sha_json_output_passes_for_solo_override(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+def test_review_sha_json_output_passes_for_separate_session_review(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_separate_session_review(head_sha="head123"))
 
     exit_code = cli.main(["review-sha", "123", "--repo", "owner/repo", "--json"])
 
@@ -133,8 +134,8 @@ def test_approval_check_json_output_passes_for_formal_approval(monkeypatch, caps
     assert '"hard_gate_passed": true' in output
 
 
-def test_approval_check_json_output_passes_for_solo_override(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+def test_approval_check_json_output_passes_for_separate_session_review(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_separate_session_review(head_sha="head123"))
 
     exit_code = cli.main(["approval-check", "123", "--repo", "owner/repo", "--json"])
 
@@ -142,8 +143,8 @@ def test_approval_check_json_output_passes_for_solo_override(monkeypatch, capsys
     output = capsys.readouterr().out
     assert '"approval_status": "missing"' in output
     assert '"status": "accepted"' in output
-    assert '"approval_source": "solo-maintainer-override"' in output
-    assert '"satisfied_by": "solo-maintainer-override"' in output
+    assert '"approval_source": "separate-session-review"' in output
+    assert '"satisfied_by": "separate-session-review"' in output
     assert '"hard_gate_passed": true' in output
 
 
@@ -156,7 +157,7 @@ def test_approval_check_json_output_fails_without_approval_or_override(monkeypat
     output = capsys.readouterr().out
     assert '"status": "missing"' in output
     assert '"hard_gate_passed": false' in output
-    assert '"blocking_reason": "comment-only review exists without formal approval or an accepted solo-maintainer override"' in output
+    assert '"blocking_reason": "comment-only review exists without formal approval, a clean Codex review or an accepted separate-session review"' in output
 
 
 def test_approval_check_json_output_fails_for_stale_approval(monkeypatch, capsys):
@@ -278,7 +279,7 @@ def test_merge_pr_json_output_ready(monkeypatch, capsys):
 
 
 def test_merge_pr_human_output_ready_names_dry_run_facts(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_solo_override(head_sha="head123"))
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_separate_session_review(head_sha="head123"))
     monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
     monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
     monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
@@ -291,7 +292,7 @@ def test_merge_pr_human_output_ready_names_dry_run_facts(monkeypatch, capsys):
     assert "selected method: rebase" in output
     assert "head sha: head123" in output
     assert "base branch: main" in output
-    assert "approval source: solo-maintainer-override" in output
+    assert "approval source: separate-session-review" in output
     assert "would merge: true" in output
 
 
@@ -655,3 +656,50 @@ def test_ci_summary_human_output_is_explicit_for_absent_required_checks(monkeypa
     assert "status rollup: empty" in output
     assert "required checks: not_configured" in output
     assert "No required status checks are configured for the target branch." in output
+
+
+def test_approval_check_human_output_names_each_path_and_the_source(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_codex_review())
+
+    exit_code = cli.main(["approval-check", "123", "--repo", "owner/repo"])
+
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "formal approval status: missing" in lines
+    assert "codex review: accepted" in lines
+    assert "separate-session review: missing" in lines
+    assert "approval source: codex-review" in lines
+    assert "satisfied by: codex-review" in lines
+    assert "hard gate passed: true" in lines
+    assert not any("solo-maintainer override" in line for line in lines)
+
+
+def test_approval_check_reports_rejected_codex_review_and_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_codex_review(linked_issues=()))
+
+    exit_code = cli.main(["approval-check", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hard_gate_passed"] is False
+    assert payload["approval_source"] is None
+    assert payload["satisfied_by"] is None
+    assert payload["codex_review"]["status"] == "not-applicable"
+    assert "needs a linked story" in payload["codex_review"]["reason"]
+    assert payload["blocking_reasons"] == [payload["codex_review"]["reason"]]
+    assert "solo_override" not in payload
+
+
+def test_pre_merge_reports_rejected_codex_review_and_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_codex_review(linked_issues=()))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+
+    exit_code = cli.main(["pre-merge", "123", "--repo", "owner/repo", "--json"])
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hard_gate_passed"] is False
+    assert payload["approval_review_source"]["approval_source"] is None
+    assert payload["approval_review_source"]["codex_review"]["status"] == "not-applicable"
