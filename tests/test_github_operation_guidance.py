@@ -152,7 +152,12 @@ def test_implement_requests_one_codex_review_per_finished_head() -> None:
     from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
 
     text = command_text("implement.md")
-    phrase = f"`{CODEX_REVIEW_TRIGGER_PHRASE}`"
+    # The command file names where the phrase is defined instead of repeating it.
+    phrase = (
+        "the Codex review trigger phrase (read it from ADR-006 → Decision or the constant "
+        "`CODEX_REVIEW_TRIGGER_PHRASE` in `src/headless_pr_workflow/review_policy.py`)"
+    )
+    assert CODEX_REVIEW_TRIGGER_PHRASE not in text.lower()
 
     ready = text.index("mark the PR Ready for review, or explicitly request review")
     in_review = text.index('set the story status to "In review"', ready)
@@ -164,7 +169,7 @@ def test_implement_requests_one_codex_review_per_finished_head() -> None:
     handoff = text.index("generate the handoff with `scripts/session-summary.sh --command implement", request)
     fix_round = text.index(
         "after a round of fixes for Codex findings on an `executor:claude-code-*` story, "
-        f"post exactly one new review request (a PR conversation comment whose first line is {phrase}), "
+        "post exactly one new review request (a PR conversation comment whose first line is the same trigger phrase), "
         "after the round's last push and after the story is back in \"In review\"",
         handoff,
     )
@@ -175,9 +180,8 @@ def test_implement_requests_one_codex_review_per_finished_head() -> None:
     assert "never post one on an issue" in text
     assert "post none for an `executor:codex` story" in text
     assert "write the trigger phrase only as that PR conversation comment" in text
+    assert "never in an issue, a PR description, a committed file or any other comment" in text
     assert "do not run `/review` for a Claude-implemented story" in text
-    # Exactly the two request instructions name the phrase.
-    assert text.count(CODEX_REVIEW_TRIGGER_PHRASE) == 2
 
 
 def test_agents_guidance_keeps_the_codex_trigger_phrase_in_pr_comments_only() -> None:
@@ -193,7 +197,7 @@ def test_agents_guidance_keeps_the_codex_trigger_phrase_in_pr_comments_only() ->
     # The rule is followed where it is stated: these files name ADR-006, not the phrase.
     adr = (ROOT / "docs" / "decisions" / "ADR-006-codex-review.md").read_text(encoding="utf-8")
     assert f"`{CODEX_REVIEW_TRIGGER_PHRASE}`" in adr
-    for path in ("AGENTS.md", "docs/HEADLESS-PR-WORKFLOW.md", ".claude/commands/review.md"):
+    for path in ("AGENTS.md", "docs/HEADLESS-PR-WORKFLOW.md", ".claude/commands/review.md", ".claude/commands/implement.md"):
         assert CODEX_REVIEW_TRIGGER_PHRASE not in (ROOT / path).read_text(encoding="utf-8").lower(), path
 
 
