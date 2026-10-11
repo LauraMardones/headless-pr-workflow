@@ -1,6 +1,9 @@
+import importlib.util
 import json
 import shutil
+import sys
 import uuid
+from importlib.machinery import SourceFileLoader
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -213,3 +216,26 @@ def test_policy_ci_workflows_not_absent_when_workflows_exist_on_main():
         "docs/required-check-policy.json declares ci_workflows 'absent' but workflow files exist "
         "in .github/workflows — update ci_workflows to 'present_non_required' or the correct value"
     )
+
+
+def test_live_main_policy_requires_pytest_and_merge_gate_reads_present_required():
+    # Reads the live file directly, so the autouse pin in conftest.py does not apply.
+    repo_root = Path(__file__).resolve().parents[1]
+    raw = json.loads((repo_root / "docs" / "required-check-policy.json").read_text(encoding="utf-8"))
+
+    main = raw["branches"]["main"]
+    assert raw["schema"] == "headless-pr-workflow.required-check-policy.v1"
+    assert main["required_status_checks"] == "required"
+    assert main["ci_workflows"] == "present_required"
+    assert main["source"] == "docs/MERGE-POLICY.md#main-required-check-policy"
+    assert "pytest" in main["rationale"]
+
+    script = repo_root / "scripts" / "merge-gate-summary"
+    loader = SourceFileLoader("merge_gate_summary_live_policy", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    assert module._policy_for_branch("main") == ("pass(present_required)", "present_required")

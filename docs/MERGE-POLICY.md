@@ -34,7 +34,7 @@ A PR may be merged only when all conditions are true after a fresh GitHub refres
 
 ### Required-check gate
 
-For `main` in this repository, required status checks are absent by policy while all of these are true:
+For `main` in this repository, GitHub branch protection requires the `pytest` check, so the absent-by-policy bypass does not apply to `main`. The bypass applies only to a branch whose `docs/required-check-policy.json` entry declares `required_status_checks` as `absent`, and only while all of these are true:
 
 - GitHub does not report configured required status checks for `main`, or branch-protection required-check data is unavailable for this private repository.
 - The current PR status-check rollup is empty, or every reported check is passing or skipped.
@@ -44,7 +44,7 @@ When those facts are verified, `hpw ci-summary` and `hpw pre-merge` may report t
 
 Non-required workflow files (i.e. `ci_workflows: "present_non_required"`) do not affect the required-check gate. Only the presence or absence of *configured required status checks* determines whether the gate passes.
 
-When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check — see the "PO Instructions" in issue #290), the absent-by-policy bypass never applies for that branch. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` defer to GitHub's live required-check status: a required check that is failing, pending, or has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
+When `docs/required-check-policy.json` declares `required_status_checks` as `required` for a branch (set once branch protection actually configures a required check; `main` was switched when #322 merged, after branch protection began requiring `pytest`), the absent-by-policy bypass never applies for that branch. `hpw ci-summary`, `hpw pre-merge`, and `scripts/merge-gate-summary` defer to GitHub's live required-check status: a required check that is failing, pending, or has not yet reported blocks merge readiness exactly as a real GitHub-configured required check would.
 
 `required_status_checks: "required"` must be paired with `ci_workflows: "present_required"`, and `present_required` is valid only with `required`. Any other pairing, or an unknown value in either field, is an inconsistent policy and fails closed. Under a `required` policy the gate also fails closed when it cannot confirm the configured checks:
 

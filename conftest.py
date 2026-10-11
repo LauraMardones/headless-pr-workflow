@@ -30,8 +30,8 @@ def pytest_configure(config: object) -> None:
 
 # Tests that summarize CI without an explicit repo_root read the policy relative to
 # the current directory, i.e. this repository's live docs/required-check-policy.json.
-# Pin those reads to the pre-#290 "no required checks" policy so that switching the
-# live file to "required" (a PO step after #290) does not change unrelated tests.
+# Pin those reads to the "no required checks" policy that main had before #322, so that
+# the live file's switch to "required" does not change unrelated tests.
 _REPO_ROOT = Path(__file__).resolve().parent
 _PINNED_POLICY = {
     "schema": "headless-pr-workflow.required-check-policy.v1",
