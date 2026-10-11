@@ -10,6 +10,15 @@
 # configured in repository Settings. ANTHROPIC_API_KEY and
 # OPENAI_API_KEY_CODEX are now explicitly referenced below.
 #
+# 2026-09-27 (issue #257): ready_for_refinement de-duplication state now
+# survives ephemeral runners. .dispatcher-state/ is restored from
+# actions/cache before the poll and saved under a unique per-run key right
+# after it (independent of whether an issue is ready for implementation).
+# Only default-branch runs write it, because caches are ref-scoped; a manual
+# run on another ref polls with --dry-run against the default-branch snapshot.
+# Workflow-level concurrency serializes scheduled and manual runs so two runs
+# never read the same snapshot and race to write it. Interim until #259.
+#
 # Prototype divergences:
 # D1: dispatcher-poll.sh does not yet exist on main (story #170 is in review).
 #     This workflow references the script by path; the run step will fail gracefully
@@ -22,6 +31,13 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+
+# One dispatcher run at a time per repository: scheduled and manual runs share
+# the same group, and queued runs wait instead of cancelling an in-progress
+# run, so refinement-notification state is never written by two runs at once.
+concurrency:
+  group: dispatcher-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   dispatch:
@@ -46,13 +62,55 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Actions caches are scoped by ref: a cache saved on a non-default ref is
+      # invisible to the scheduled run on the default branch. Only default-branch
+      # runs (every scheduled run, and manual runs dispatched on that branch)
+      # may send refinement notifications and save state; a manual run on any
+      # other ref reads the default-branch snapshot and polls with --dry-run.
+      - name: Resolve notification state scope
+        if: steps.guard.outputs.enabled == 'true'
+        id: scope
+        env:
+          STATE_WRITER: ${{ github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: |
+          echo "state_writer=$STATE_WRITER" >> "$GITHUB_OUTPUT"
+          if [ "$STATE_WRITER" != "true" ]; then
+            echo "Non-default ref ${GITHUB_REF}: poll runs with --dry-run; refinement notification state is read-only"
+          fi
+
+      # Restores the newest snapshot: restore-keys prefix matches pick the most
+      # recently created cache. A miss is not an error; dispatcher-poll.sh
+      # starts from empty state.
+      - name: Restore refinement notification state
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .dispatcher-state
+          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dispatcher-state-
+
       - name: Run dispatcher poll
         if: steps.guard.outputs.enabled == 'true'
         id: poll
         run: |
-          POLL_JSON=$(bash scripts/dispatcher-poll.sh --repo "${{ github.repository }}")
+          POLL_ARGS=(--repo "${{ github.repository }}")
+          if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
+            POLL_ARGS+=(--dry-run)
+          fi
+          POLL_JSON=$(bash scripts/dispatcher-poll.sh "${POLL_ARGS[@]}")
           NEXT_ISSUE=$(echo "$POLL_JSON" | jq -r '.ready_for_implementation[0].number // empty')
           echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"
+
+      # Saved on every successful enabled default-branch poll, not only when an
+      # issue is ready for implementation. Cache entries are immutable, so each
+      # run writes a new unique key that the next run's prefix restore picks up.
+      - name: Save refinement notification state
+        if: steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .dispatcher-state
+          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Set cache date
         if: steps.guard.outputs.enabled == 'true'

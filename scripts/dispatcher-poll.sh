@@ -16,12 +16,24 @@
 #   BOARD_URL          GitHub Projects board URL included in Red flow health notifications.
 #                      Falls back to "" if unset; slack-notify.sh renders "(no URL)" gracefully.
 #
+# Environment (optional, state):
+#   DISPATCHER_STATE_DIR  Directory holding persisted refinement-notification
+#                      state. Defaults to <repo-root>/.dispatcher-state. The
+#                      dispatcher workflow restores it from actions/cache before
+#                      the poll and saves it after (issue #257).
+#
 # Side effects:
-#   For each "Ready for refinement" issue not yet notified this runner session,
-#   calls scripts/slack-notify.sh ready_for_refinement. Notification state is
-#   tracked in a local temp file (see "Ready for refinement notification" section).
+#   For each "Ready for refinement" issue not already notified during its
+#   current continuous stay in that status, calls scripts/slack-notify.sh
+#   ready_for_refinement. De-duplication state is persisted per repository in
+#   $DISPATCHER_STATE_DIR/<owner>/<repo>/notified-refinement and reconciled on
+#   every non-dry-run poll: an issue is recorded only after slack-notify.sh
+#   succeeds, and is dropped as soon as it leaves "Ready for refinement", so a
+#   later re-entry notifies again (see "Ready for refinement notification").
 #   For Red flow health: calls scripts/slack-notify.sh red_flow_health when
 #   flow_health == "Red". No de-duplication; fires on every Red-health poll run.
+#   Under --dry-run neither notification is sent and the state file is read
+#   but never written.
 #   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
 # Requirements: bash, curl, jq
@@ -44,15 +56,19 @@
 #   D3  Label fetch: executor labels are fetched from the GraphQL project
 #       item's linked issue. Items with no linked issue (draft notes, PR
 #       items) are skipped entirely.
-#   D4  Dry-run is the only supported mode: no executor invocation or GitHub
-#       state mutation occurs in any run. The --dry-run flag adds a header
-#       line to stderr; behaviour is otherwise identical.
+#   D4  No executor invocation or GitHub state mutation occurs in any run.
+#       The --dry-run flag adds a header line to stderr and suppresses Slack
+#       notifications and refinement-state writes.
 #   D5  Both status filters are applied in jq against the same accumulated
 #       items list, so full-board pagination is done once per poll, not once
 #       per status.
-#   D6  Refinement notification de-duplication resets on runner restart. The
-#       state file lives in TMPDIR and is not persisted across CI runner
-#       restarts. Accepted prototype limitation; document in ops runbooks.
+#   D6  Refinement notification state persists across ephemeral GitHub-hosted
+#       runners only through the workflow's actions/cache restore/save steps
+#       (interim mechanism until #259 moves the dispatcher to persistent
+#       infrastructure). If the snapshot is missing or evicted the poll starts
+#       from empty state; if it is unreadable or malformed it also warns. Either
+#       way each issue currently in "Ready for refinement" may be notified once
+#       more.
 #   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
 #       independently. Acceptable at current scale; future refactor can share
 #       the query result.
@@ -104,6 +120,10 @@ done
 OWNER="${REPO%%/*}"
 REPO_NAME="${REPO##*/}"
 GRAPHQL="https://api.github.com/graphql"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
 
 # ─── GraphQL helper ───────────────────────────────────────────────────────────
 
@@ -264,11 +284,34 @@ echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(
 
 # ─── Ready for refinement notification ───────────────────────────────────────
 #
-# De-duplication state file: one notified issue number per line.
-# Survives within a single runner session; resets on runner restart (D6).
-# State file path: ${TMPDIR:-/tmp}/dispatcher-poll-notified-refinement-${REPO//\//-}
+# De-duplication state: one notified issue number per line, persisted per
+# repository at $STATE_DIR/<owner>/<repo>/notified-refinement (the directory
+# layout keeps owner/repo pairs from colliding). The dispatcher workflow
+# restores and saves $STATE_DIR via actions/cache (D6).
+#
+# Lifecycle, reconciled on every non-dry-run poll:
+#   - an issue is recorded only after slack-notify.sh exits 0; a failed
+#     delivery stays unrecorded and is retried on the next poll;
+#   - recorded issues no longer in "Ready for refinement" are dropped, so a
+#     later re-entry is a new stay and notifies once more.
+# Missing, unreadable, or malformed state is never fatal: the poll warns
+# (except for a plain missing file) and continues from empty state.
 
-REFINE_NOTIFIED_FILE="${TMPDIR:-/tmp}/dispatcher-poll-notified-refinement-${REPO//\//-}"
+REFINE_STATE_FILE="$STATE_DIR/$OWNER/$REPO_NAME/notified-refinement"
+PREV_NOTIFIED_FILE="$POLL_TMP_DIR/notified-prev"
+NEXT_NOTIFIED_FILE="$POLL_TMP_DIR/notified-next"
+: > "$PREV_NOTIFIED_FILE"
+: > "$NEXT_NOTIFIED_FILE"
+
+if [[ -e "$REFINE_STATE_FILE" ]]; then
+    if ! cp "$REFINE_STATE_FILE" "$PREV_NOTIFIED_FILE" 2>/dev/null; then
+        echo "[POLL] Warning: cannot read refinement notification state $REFINE_STATE_FILE; continuing with empty state" >&2
+        : > "$PREV_NOTIFIED_FILE"
+    elif grep -qvxE '[0-9]+' "$PREV_NOTIFIED_FILE"; then
+        echo "[POLL] Warning: malformed refinement notification state $REFINE_STATE_FILE; continuing with empty state" >&2
+        : > "$PREV_NOTIFIED_FILE"
+    fi
+fi
 
 if [[ "$REFINE_COUNT" -gt 0 ]]; then
     while IFS= read -r item; do
@@ -276,19 +319,41 @@ if [[ "$REFINE_COUNT" -gt 0 ]]; then
         TITLE=$(echo "$item" | jq -r '.title')
         URL="https://github.com/${REPO}/issues/${NUMBER}"
 
-        if ! grep -qxF "$NUMBER" "$REFINE_NOTIFIED_FILE" 2>/dev/null; then
-            CONTEXT_JSON=$(jq -n \
-                --arg issue_title "$TITLE" \
-                --arg issue_url "$URL" \
-                '{"issue_title": $issue_title, "issue_url": $issue_url}')
-            if bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON" >/dev/null; then
-                echo "$NUMBER" >> "$REFINE_NOTIFIED_FILE"
+        if grep -qxF "$NUMBER" "$PREV_NOTIFIED_FILE"; then
+            # Still in the same continuous stay: carry the record forward.
+            echo "$NUMBER" >> "$NEXT_NOTIFIED_FILE"
+            continue
+        fi
+
+        CONTEXT_JSON=$(jq -n \
+            --arg issue_title "$TITLE" \
+            --arg issue_url "$URL" \
+            '{"issue_title": $issue_title, "issue_url": $issue_url}')
+        if $DRY_RUN; then
+            echo "[DRY RUN] Would notify: ready_for_refinement #${NUMBER} ${TITLE}" >&2
+        else
+            NOTIFY_OK=false
+            bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON" >/dev/null && NOTIFY_OK=true || true
+            if $NOTIFY_OK; then
+                echo "$NUMBER" >> "$NEXT_NOTIFIED_FILE"
                 echo "[POLL] Notified: ready_for_refinement #${NUMBER} ${TITLE}" >&2
             else
                 echo "[POLL] Warning: slack-notify.sh failed for #${NUMBER}; will retry next cycle" >&2
             fi
         fi
     done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
+fi
+
+# Save the reconciled state atomically. Written even when empty so issues that
+# left "Ready for refinement" are cleared. A write failure only warns: the
+# next poll then re-notifies at most once per issue still waiting.
+if ! $DRY_RUN; then
+    if ! { mkdir -p "$(dirname "$REFINE_STATE_FILE")" \
+            && cp "$NEXT_NOTIFIED_FILE" "$REFINE_STATE_FILE.tmp.$$" \
+            && mv -f "$REFINE_STATE_FILE.tmp.$$" "$REFINE_STATE_FILE"; } 2>/dev/null; then
+        rm -f "$REFINE_STATE_FILE.tmp.$$" 2>/dev/null || true
+        echo "[POLL] Warning: cannot write refinement notification state $REFINE_STATE_FILE" >&2
+    fi
 fi
 
 # ─── Flow health notification (Red only) ─────────────────────────────────────
@@ -319,7 +384,11 @@ if [[ "$FLOW_HEALTH" == "Red" ]]; then
         --arg u "${BOARD_URL:-}" \
         '{"signal":$s,"wip_count":$w,"blocked_count":$b,"board_url":$u}')
 
-    bash "$(dirname "$0")/slack-notify.sh" red_flow_health "$CONTEXT" >/dev/null || true
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would notify: red_flow_health (${SIGNAL})" >&2
+    else
+        bash "$(dirname "$0")/slack-notify.sh" red_flow_health "$CONTEXT" >/dev/null || true
+    fi
 fi
 
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────

@@ -11,4 +11,5 @@ build/
 !.claude/commands/
 .dispatcher-budget/
 .dispatcher-allowance/
+.dispatcher-state/
 .env
