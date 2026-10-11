@@ -27,6 +27,7 @@ from .post_merge_sync import fetch_post_merge_pr_state, fetch_pr_changed_paths, 
 from .pre_merge import summarize_pre_merge
 from .pr_takeover import summarize_pr_takeover
 from .re_review_needed import summarize_re_review_needed
+from .review_policy import REVIEWER_PROVIDERS, separate_session_review_text
 from .review_delta import comparison_failure_summary, fetch_commit_comparison, select_review_delta_baseline, summarize_review_delta
 from .review_sha import summarize_review_sha
 from .target_branch import summarize_target_branch
@@ -51,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--json", action="store_true", help="Emit scaffold metadata as JSON.")
         if command.name == "pr-context":
             command_parser.add_argument("--include-raw", action="store_true", help="Include raw GitHub CLI payload in JSON output.")
+        if command.name == "review-evidence-text":
+            command_parser.add_argument(
+                "--reviewer-provider",
+                choices=REVIEWER_PROVIDERS,
+                help="Provider running the review session. Required; printed on the `Reviewer provider:` line.",
+            )
         if command.name == "target-branch-check":
             command_parser.add_argument("--expected-base", help="Expected PR base branch. Defaults to the repository default branch.")
         if command.name == "merge-owner":
@@ -235,6 +242,21 @@ def _print_approval_check(target: str | None, *, repo: str | None, as_json: bool
             print(f"- {reason}")
     print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
     return 0 if summary.hard_gate_passed else 1
+
+
+def _print_review_evidence_text(head_sha: str | None, *, reviewer_provider: str | None, as_json: bool) -> int:
+    try:
+        text = separate_session_review_text(head_sha, reviewer_provider)
+    except ValueError as error:
+        print(f"review-evidence-text: {error}", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(json.dumps({"head_sha": head_sha.lower(), "reviewer_provider": reviewer_provider, "text": text}, indent=2))
+        return 0
+
+    sys.stdout.write(text)
+    return 0
 
 
 def _print_re_review_needed(target: str | None, *, repo: str | None, as_json: bool) -> int:
@@ -1189,6 +1211,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "approval-check":
         return _print_approval_check(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "review-evidence-text":
+        return _print_review_evidence_text(args.target, reviewer_provider=args.reviewer_provider, as_json=args.json)
 
     if args.command == "re-review-needed":
         return _print_re_review_needed(args.target, repo=args.repo, as_json=args.json)
