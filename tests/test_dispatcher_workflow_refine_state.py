@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "dispatcher.yml"
 POLL_SCRIPT = REPO_ROOT / "scripts" / "dispatcher-poll.sh"
 
+SCOPE = "Resolve notification state scope"
 RESTORE = "Restore refinement notification state"
 POLL = "Run dispatcher poll"
 SAVE = "Save refinement notification state"
@@ -59,11 +60,44 @@ def test_restore_before_poll_and_save_after_poll_before_invoke():
 
 
 def test_state_steps_run_on_every_enabled_poll_regardless_of_issue_number():
-    for name in (RESTORE, SAVE):
+    for name in (SCOPE, RESTORE, SAVE):
         condition = _field(_step(name), "if")
         assert "steps.guard.outputs.enabled == 'true'" in condition
         assert "issue_number" not in condition
         assert "always()" not in condition, "save must not run after a failed poll"
+
+
+def test_only_default_branch_runs_write_state():
+    """Actions caches are ref-scoped: a snapshot saved by a manual run on a
+    non-default ref is invisible to scheduled default-branch runs, which would
+    then re-notify. Only default-branch runs may notify and save."""
+    names = [name for name, _ in _steps()]
+    assert names.index(SCOPE) < names.index(RESTORE)
+
+    scope = _step(SCOPE)
+    assert re.search(r"^\s+id:\s*scope\s*$", scope, re.MULTILINE)
+    writer = _field(scope, "STATE_WRITER")
+    assert "github.event_name == 'schedule'" in writer
+    assert (
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+        in writer
+    )
+    assert "state_writer=$STATE_WRITER" in scope
+
+    # Restore is not gated by ref: non-default refs read the default-branch
+    # snapshot (cache fallback) so their dry-run poll reflects shared state.
+    assert "state_writer" not in _field(_step(RESTORE), "if")
+
+    save_condition = _field(_step(SAVE), "if")
+    assert "steps.scope.outputs.state_writer == 'true'" in save_condition
+
+    poll = _step(POLL)
+    assert re.search(
+        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
+        r"\s+POLL_ARGS\+=\(--dry-run\)",
+        poll,
+    ), "non-default-ref polls must run with --dry-run (no Slack, no state write)"
+    assert 'dispatcher-poll.sh "${POLL_ARGS[@]}"' in poll
 
 
 def test_cache_actions_paths_and_keys():

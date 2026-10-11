@@ -143,9 +143,10 @@ Lifecycle, applied on every poll except `--dry-run`:
 
 GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` with `actions/cache`:
 
-1. **Restore refinement notification state** runs before **Run dispatcher poll**. Its `dispatcher-state-` prefix restores the most recently saved snapshot.
-2. **Save refinement notification state** runs right after a successful poll on every enabled run, whether or not an issue is ready for implementation. Cache entries are immutable, so each run saves under a unique `dispatcher-state-<run_id>-<run_attempt>` key.
-3. A workflow-level `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) serializes scheduled and manual runs, so no two runs read the same snapshot and race to write it. GitHub keeps at most one pending run per group; a newer pending run replaces an older pending one, and in-progress runs are never cancelled.
+1. **Restore refinement notification state** runs before **Run dispatcher poll** on every enabled run. Its `dispatcher-state-` prefix restores the most recently saved snapshot.
+2. **Save refinement notification state** runs right after a successful poll on every enabled default-branch run, whether or not an issue is ready for implementation. Cache entries are immutable, so each run saves under a unique `dispatcher-state-<run_id>-<run_attempt>` key.
+3. **Default branch only writes state.** Actions caches are scoped by ref, so a snapshot saved by a run on another ref would be invisible to the scheduled default-branch runs, and they would notify again. **Resolve notification state scope** therefore marks every scheduled run, and every manual run dispatched on the default branch, as the state writer. A manual `workflow_dispatch` on any other ref still restores the default-branch snapshot. It runs the poll with `--dry-run`, so it sends no Slack notification (including Red flow health) and the save step is skipped.
+4. A workflow-level `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) serializes scheduled and manual runs, so no two runs read the same snapshot and race to write it. GitHub keeps at most one pending run per group; a newer pending run replaces an older pending one, and in-progress runs are never cancelled.
 
 **Residual risk:** if the cache is evicted (GitHub removes entries unused for 7 days, or the oldest entries past the repository's size limit) or a save fails, the next poll starts from empty state. Each issue still in **Ready for refinement** can then be notified once more.
 
