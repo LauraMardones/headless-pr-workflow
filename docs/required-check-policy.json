@@ -2,10 +2,10 @@
   "schema": "headless-pr-workflow.required-check-policy.v1",
   "branches": {
     "main": {
-      "required_status_checks": "absent",
-      "ci_workflows": "present_non_required",
+      "required_status_checks": "required",
+      "ci_workflows": "present_required",
       "source": "docs/MERGE-POLICY.md#main-required-check-policy",
-      "rationale": "GitHub Actions workflows are present (.github/workflows/dispatcher.yml) but none are configured as required status checks for main. Required-check gating may treat unavailable branch-protection required-check data as policy-absent only when no failing, pending, unknown, or missing checks are reported."
+      "rationale": ".github/workflows/tests.yml runs the pytest check, and GitHub branch protection on main requires it. Tooling defers to GitHub's live required-check status; the absent-by-policy bypass does not apply to main."
     }
   }
 }
