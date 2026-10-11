@@ -140,3 +140,109 @@ def test_required_outputs_are_transport_agnostic() -> None:
 
         assert "using `mcp__github__" not in required_output, name
         assert "via `mcp__github__" not in required_output, name
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_implement_requests_one_codex_review_per_finished_head() -> None:
+    """ADR-006 (#292): one request on ready, one per fix round, none anywhere else."""
+
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    text = command_text("implement.md")
+    phrase = f"`{CODEX_REVIEW_TRIGGER_PHRASE}`"
+
+    ready = text.index("mark the PR Ready for review, or explicitly request review")
+    in_review = text.index('set the story status to "In review"', ready)
+    request = text.index(
+        "once the PR is Ready for review, post exactly one PR conversation comment "
+        f"whose first line is {phrase}",
+        in_review,
+    )
+    handoff = text.index("generate the handoff with `scripts/session-summary.sh --command implement", request)
+    fix_round = text.index(
+        "after a round of fixes for Codex findings on an `executor:claude-code-*` story, "
+        f"post exactly one new review request (a PR conversation comment whose first line is {phrase}), "
+        "after the round's last push and after the story is back in \"In review\"",
+        handoff,
+    )
+    assert ready < in_review < request < handoff < fix_round
+
+    assert "if the story carries an `executor:claude-code-*` label, request the Codex review (ADR-006)" in text
+    assert "post no review request on intermediate pushes" in text
+    assert "never post one on an issue" in text
+    assert "post none for an `executor:codex` story" in text
+    assert "write the trigger phrase only as that PR conversation comment" in text
+    assert "do not run `/review` for a Claude-implemented story" in text
+    # Exactly the two request instructions name the phrase.
+    assert text.count(CODEX_REVIEW_TRIGGER_PHRASE) == 2
+
+
+def test_agents_guidance_keeps_the_codex_trigger_phrase_in_pr_comments_only() -> None:
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    section = _one_line(agents.split("## Codex Review Requests", maxsplit=1)[1].split("\n## ", maxsplit=1)[0])
+
+    assert "The Codex review trigger phrase (ADR-006 → Decision) starts a Codex task wherever it is written" in section
+    assert "Post it only as a PR conversation comment that requests a review" in section
+    assert "only from `/implement` or the `codex-review-bookkeeping` workflow" in section
+    assert "Never write it in an issue body, an issue comment, a PR description or any other PR comment" in section
+    # The rule is followed where it is stated: these files name ADR-006, not the phrase.
+    adr = (ROOT / "docs" / "decisions" / "ADR-006-codex-review.md").read_text(encoding="utf-8")
+    assert f"`{CODEX_REVIEW_TRIGGER_PHRASE}`" in adr
+    for path in ("AGENTS.md", "docs/HEADLESS-PR-WORKFLOW.md", ".claude/commands/review.md"):
+        assert CODEX_REVIEW_TRIGGER_PHRASE not in (ROOT / path).read_text(encoding="utf-8").lower(), path
+
+
+def test_review_command_states_when_it_applies() -> None:
+    text = command_text("review.md")
+    section = text.split("## When this command applies", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+
+    assert "It remains the review path for `executor:codex` stories, which Claude Opus reviews" in section
+    assert "separate-session review under ADR-007 path 2" in section
+    assert "A Claude-implemented story (`executor:claude-code-*`) is reviewed by Codex (ADR-006)" in section
+    assert "The `codex-review-bookkeeping` workflow then moves the story and posts the review Session Summary" in section
+    assert "do not run this command for it unless a path 2 review is explicitly wanted" in section
+
+
+def test_workflow_docs_describe_the_codex_review_loop() -> None:
+    from headless_pr_workflow.codex_review_bookkeeping import (
+        DEFAULT_MAX_REQUESTS,
+        DEFAULT_RETRY_HOURS,
+        MAX_REQUESTS_ENV,
+        RETRY_HOURS_ENV,
+    )
+
+    workflow_doc = (ROOT / "docs" / "HEADLESS-PR-WORKFLOW.md").read_text(encoding="utf-8")
+    loop = workflow_doc.split("### Codex review loop", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+
+    # Request on ready.
+    assert "it posts one PR conversation comment that starts with the Codex review trigger phrase from ADR-006" in loop
+    assert "exactly one new request, after the round's last push and after the story is back in `In review`" in loop
+    assert "no request on intermediate pushes, none on an issue, and none for an `executor:codex` story" in loop
+    # The job.
+    assert "`.github/workflows/codex-review-bookkeeping.yml` runs `hpw codex-review-bookkeeping`" in loop
+    assert "It calls no model" in loop
+    assert "decides from current facts, so a redelivered event is a no-op" in loop
+    assert "that story's board status is exactly `In review`" in loop
+    assert "move the story `In review` → `In merge`" in loop
+    assert loop.count("move `In review` → `In implementation`") == 2
+    # Re-requests and the two blockers.
+    assert "Usage-limit reply, or a request with no answer" in loop
+    assert "one `Type: external` blocker on the story" in loop
+    assert "One `Type: resource` blocker on the story; no further request for that head" in loop
+    assert "the story stays in `In review`" in loop
+    # The two repository variables, with the defaults the code uses.
+    assert f"`{RETRY_HOURS_ENV}` (back-off, default `{DEFAULT_RETRY_HOURS:g}`" in loop
+    assert f"`{MAX_REQUESTS_ENV}` (requests the job posts per head, default `{DEFAULT_MAX_REQUESTS}`" in loop
+    assert "exact output of `scripts/session-summary.sh --command review`" in loop
+    assert "`/review` remains the path for `executor:codex` stories" in loop
+
+    automation_map = (ROOT / "docs" / "PR-AUTOMATION-MAP.md").read_text(encoding="utf-8")
+    assert (
+        "| `codex-review-bookkeeping` | Move the story and post the Session Summary after a Codex review, "
+        "with no model. | orchestrator | P1-high | F-review | action | core | implemented |"
+    ) in automation_map

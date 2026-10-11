@@ -7,11 +7,13 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from .approval_check import summarize_approval_check
 from .branch_cleanup import summarize_branch_cleanup
 from .catalog import COMMANDS, find_command
 from .ci_summary import summarize_ci
+from .codex_review_bookkeeping import BookkeepingConfig, BookkeepingError, GhCliGateway, run_bookkeeping
 from .github import (
     GHCommandError,
     fetch_pr_context,
@@ -57,6 +59,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "--reviewer-provider",
                 choices=REVIEWER_PROVIDERS,
                 help="Provider running the review session. Required; printed on the `Reviewer provider:` line.",
+            )
+        if command.name == "codex-review-bookkeeping":
+            command_parser.add_argument(
+                "--all",
+                action="store_true",
+                help="Run for every open, non-draft PR instead of one PR number.",
+            )
+            command_parser.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="Report the decision without posting a comment or moving the story.",
             )
         if command.name == "target-branch-check":
             command_parser.add_argument("--expected-base", help="Expected PR base branch. Defaults to the repository default branch.")
@@ -705,6 +718,55 @@ def _print_ci_summary(target: str | None, *, repo: str | None, as_json: bool) ->
     return 0
 
 
+def _print_codex_review_bookkeeping(
+    target: str | None,
+    *,
+    repo: str | None,
+    run_all: bool,
+    dry_run: bool,
+    as_json: bool,
+) -> int:
+    """Run the Codex review bookkeeping for one PR, or for every open, non-draft PR."""
+
+    results: list[dict[str, object]] = []
+    errors: list[dict[str, object]] = []
+
+    def fail(pr: int | None, error: BookkeepingError) -> None:
+        errors.append({"pr": pr, "step": error.step, "error": error.message})
+        if not as_json:
+            prefix = f"PR #{pr}: " if pr is not None else ""
+            print(f"{prefix}failed at step `{error.step}`: {error.message}", file=sys.stderr)
+
+    prs: tuple[int, ...] = ()
+    try:
+        if run_all == bool(target):
+            raise BookkeepingError("read arguments", "give exactly one of a PR number or --all")
+        if target and not target.isdigit():
+            raise BookkeepingError("read arguments", "the PR must be given as a number")
+        config = BookkeepingConfig.from_env()
+        github = GhCliGateway(repo or "")
+        prs = github.list_open_ready_prs() if run_all else (int(target or 0),)
+    except BookkeepingError as error:
+        fail(None, error)
+
+    for pr in prs:
+        try:
+            outcome = run_bookkeeping(pr, github=github, now=datetime.now(timezone.utc), config=config, dry_run=dry_run)
+        except BookkeepingError as error:
+            fail(pr, error)
+            continue
+        results.append(outcome.to_dict())
+        if not as_json:
+            print(outcome.to_line())
+
+    if as_json:
+        if run_all or not results:
+            print(json.dumps({"ok": not errors, "results": results, "errors": errors}, indent=2))
+        else:
+            print(json.dumps(results[0], indent=2))
+    return 1 if errors else 0
+
+
 def _print_unresolved_review_threads(target: str | None, *, repo: str | None, as_json: bool) -> int:
     try:
         summary = fetch_review_thread_summary(target, repo=repo)
@@ -1223,6 +1285,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ci-summary":
         return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "codex-review-bookkeeping":
+        return _print_codex_review_bookkeeping(
+            args.target,
+            repo=args.repo,
+            run_all=args.all,
+            dry_run=args.dry_run,
+            as_json=args.json,
+        )
 
     if args.command == "target-branch-check":
         return _print_target_branch_check(

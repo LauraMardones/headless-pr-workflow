@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from headless_pr_workflow.review_policy import REVIEWER_PROVIDER_LABEL, separate_session_review_text
+from headless_pr_workflow.review_policy import (
+    CODEX_REVIEW_TRIGGER_PHRASE,
+    REVIEWER_PROVIDER_LABEL,
+    separate_session_review_text,
+)
 from headless_pr_workflow.github.pr_context import (
     CheckSummary,
     LinkedIssue,
@@ -370,3 +374,77 @@ def complete_review_evidence(
         "timelineItems": list(timeline_items),
         "closingIssuesReferences": {"pageInfo": {"hasNextPage": False}, "nodes": list(linked_issues)},
     }
+
+
+# Real Codex payloads used by the bookkeeping job (#292), recorded 2026-09-27.
+# The footer Codex appends to review results names the trigger phrase, so it is
+# built from the shared constant instead of repeating the phrase here.
+def _codex_about_footer() -> str:
+    return (
+        "<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n"
+        "[Your team has set up Codex to review pull requests in this repo]"
+        "(https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n"
+        "- Open a pull request for review\n- Mark a draft as ready\n"
+        f'- Comment "{CODEX_REVIEW_TRIGGER_PHRASE}".\n\n'
+        "If Codex has suggestions, it will comment; otherwise it will react with \U0001f44d.\n\n\n\n\n"
+        'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n'
+        "            \n</details>"
+    )
+
+
+def codex_pr_287_clean_body(prefix: str = "40a27a562f") -> str:
+    """The clean comment on PR #287 (issuecomment-5856117552)."""
+
+    return (
+        "Codex Review: Didn't find any major issues. What shall we delve into next?\n\n"
+        f"**Reviewed commit:** `{prefix}`\n\n{_codex_about_footer()}"
+    )
+
+
+def codex_pr_298_findings_body(prefix: str = PR_298_COMMITS[0][:10]) -> str:
+    """The findings review on PR #298 (review 5331469921, state COMMENTED)."""
+
+    return (
+        "\n### \U0001f4a1 Codex Review\n\n"
+        "Here are some automated review suggestions for this pull request.\n\n"
+        f"**Reviewed commit:** `{prefix}`\n    \n\n{_codex_about_footer()}"
+    )
+
+
+# A Codex task reply, as on PR #297 (issuecomment-5857960089): not a review result.
+CODEX_TASK_REPLY_BODY = (
+    "### Summary\n\n"
+    "* No additional changes were necessary: the current branch already contains the requested ADR-006 wording.\n"
+    "* No new commit or pull request was created because the working tree contains no uncommitted changes.\n\n"
+    "**Testing**\n\n"
+    "* ✅ `git diff --check HEAD^ HEAD`\n\n"
+    " [View task →](https://chatgpt.com/s/cd_6ab94d606ee88191a3165a708d83e7a8)"
+)
+
+
+def codex_pr_298_findings_review(
+    commit_oid: str = PR_298_COMMITS[0],
+    *,
+    created_at: str = "2026-09-27T18:10:27Z",
+) -> TimelineEvent:
+    return TimelineEvent(
+        kind="review",
+        oid=commit_oid,
+        author=CODEX_BOT,
+        author_type="Bot",
+        body=codex_pr_298_findings_body(commit_oid[:10]),
+        state="COMMENTED",
+        created_at=created_at,
+        url="https://github.com/LauraMardones/headless-pr-workflow/pull/298#pullrequestreview-5331469921",
+    )
+
+
+def conversation_comment(
+    body: str,
+    *,
+    created_at: str,
+    author: str = "LauraMardones",
+    author_type: str = "User",
+    url: str = "https://github.com/owner/repo/pull/123#issuecomment-100",
+) -> TimelineEvent:
+    return TimelineEvent(kind="comment", author=author, author_type=author_type, body=body, created_at=created_at, url=url)
