@@ -19,6 +19,7 @@ Workflow status goals:
 - PR linked to issue -> story status should be "In implementation".
 - When implementation is ready for review -> story status should be "In review".
 - If you are fixing review blockers on an existing PR, keep the story in "In implementation" while fixes are underway, then move it back to "In review" only when the new head SHA is ready for review.
+- Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In review"`).
 
 Required behavior:
 1. Read the GitHub issue, acceptance criteria, linked context, and any existing PR state first.
@@ -49,7 +50,7 @@ Required behavior:
    - the PR body must be non-empty: include `Closes #$ARGUMENTS` and a brief description of what the PR changes and why; `--fill` alone is insufficient
    - link the PR to issue #$ARGUMENTS
    - ensure the PR references and closes #$ARGUMENTS when merged
-   - ensure the story moves to "In implementation"
+   - ensure the story moves to "In implementation" (best-effort, as described under Workflow status goals)
 10. If a PR already exists:
    - continue on the existing PR branch
    - update the existing PR instead of opening a parallel PR unless explicitly needed
@@ -61,6 +62,7 @@ Required behavior:
 15. Before requesting review, perform a self-review:
    - run `git diff main` (or the equivalent against the base branch) and verify the diff matches the issue scope exactly
    - run `scripts/ac-summary.sh --issue $ARGUMENTS --repo LauraMardones/headless-pr-workflow` and use the extracted checklist to verify AC/DoD coverage; exit `2` means no checklist was found and requires a manual issue-body fallback, not that coverage passed, while exit `1` is an invocation or lookup failure
+   - if `scripts/ac-summary.sh` exits `1` because `gh` or GraphQL is unavailable, read the AC/DoD checklist from the issue body through the available GitHub transport (the same manual fallback as exit `2`) and continue; AC/DoD coverage must still be verified
    - do not copy the extracted AC/DoD checklist into the handoff comment
    - if any changed file is eligible under `scripts/dispatcher-change-check.sh`, run `bash scripts/dispatcher-change-check.sh --files <changed-files...>`; fix every `FAIL` (exit `1`) before handoff, and treat exit `2` as an invocation or input blocker
    - confirm the PR body contains `Closes #$ARGUMENTS` and a meaningful description
@@ -73,7 +75,7 @@ Required behavior:
    - commit only the intended changes
    - confirm the current PR head SHA from GitHub
    - mark the PR Ready for review, or explicitly request review if Ready for review is unavailable
-   - set the story status to "In review"
+   - set the story status to "In review" (best-effort, as described under Workflow status goals)
    - generate the handoff with `scripts/session-summary.sh --command implement --issue $ARGUMENTS --pr <pr-number> --head <current-head-sha> --checks <checks> --blockers <blockers> --next review` and post its exact stdout
    - use repeatable `--deviation <text>` flags when deviations, residual risks, or decisions must be recorded
    - do not add any section after the generated Session Summary block; the PR body is the implementation document, so do not append “What was implemented”, “AC coverage”, or equivalent recap prose

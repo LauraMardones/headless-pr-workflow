@@ -49,9 +49,21 @@ Solo-maintainer example:
 - Treat the reviewer summary as a substitute only for formal approval.
 - Still require a fresh GitHub refresh, a matching current head SHA, and passing merge gates before merging.
 
-## Orchestrator
+## Analyst
 
-The orchestrator coordinates state across issues, PRs, sessions, assistants, and loops.
+The Analyst works with the product owner in the specification phase (planning, analysis and design) through `/spec`. It is an interactive LLM session, never autonomous.
+
+Responsibilities:
+
+- Challenge the product idea and read the codebase and existing decisions.
+- Create the Epic issue once the product owner decides to pursue the idea.
+- Write `spec.md` and `plan.md` and check them against the Definition of Ready in `specs/README.md` and the accepted ADRs.
+- Open the spec PR with `Refs #<number>`.
+- Never make product decisions on the product owner's behalf; record the product owner's decisions with their rejected alternatives.
+
+## Tech Lead
+
+The Tech Lead (formerly called the orchestrator) coordinates state across issues, PRs, sessions, assistants, and loops. It has two parts: a scheduler script that chooses the next action, and refinement sessions that break work down (ADR-009, ADR-010).
 
 Responsibilities:
 

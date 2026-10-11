@@ -1,6 +1,6 @@
 # ADR-001: Runner Integration for Status-Triggered Automation
 
-**Status:** Accepted  
+**Status:** Superseded by ADR-002  
 **Date:** 2026-06-01  
 **Story:** #154 — Evaluate GitHub Actions vs external runner  
 **Feature:** #111 — Prototype project status automation  

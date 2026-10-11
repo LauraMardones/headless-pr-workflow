@@ -1,3 +1,5 @@
+import pytest
+
 from headless_pr_workflow.pre_merge import summarize_pre_merge
 from headless_pr_workflow.github import RequiredStatusChecks
 from headless_pr_workflow.github.review_threads import summarize_review_threads
@@ -230,3 +232,109 @@ def test_pre_merge_blocks_unknown_reported_checks_even_when_policy_absent():
 
     assert "Status check security has an unknown result (state=unknown)." in summary.blocking_reasons
     assert summary.hard_gate_passed is False
+
+
+def _write_required_policy(repo_root, required="required", workflows="present_required"):
+    policy = repo_root / "docs" / "required-check-policy.json"
+    policy.parent.mkdir()
+    policy.write_text(
+        '{"schema":"headless-pr-workflow.required-check-policy.v1",'
+        f'"branches":{{"main":{{"required_status_checks":"{required}","ci_workflows":"{workflows}",'
+        '"source":"docs/MERGE-POLICY.md#main-required-check-policy"}}}',
+        encoding="utf-8",
+    )
+    workflows = repo_root / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "tests.yml").write_text("name: tests", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("bucket", "reason"),
+    [
+        ("failure", "Status check pytest is failing"),
+        ("pending", "Status check pytest is pending"),
+    ],
+)
+def test_pre_merge_blocks_failing_or_pending_required_check_under_required_policy(monkeypatch, tmp_path, bucket, reason):
+    _write_required_policy(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=(build_check(name="pytest", bucket=bucket),)),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=("pytest",), status="configured"),
+    )
+
+    assert summary.hard_gate_passed is False
+    assert any(blocker.startswith(reason) for blocker in summary.blocking_reasons)
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] != "policy_absent"
+
+
+def test_pre_merge_blocks_unavailable_required_check_data_under_required_policy(monkeypatch, tmp_path):
+    _write_required_policy(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=()),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
+    )
+
+    assert summary.hard_gate_passed is False
+    assert "Required status check data is unavailable from branch protection: Not Found." in summary.blocking_reasons
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "status_checks",
+    [
+        (),
+        (build_check(name="lint", bucket="success", status="COMPLETED", conclusion="SUCCESS"),),
+    ],
+)
+def test_pre_merge_blocks_unconfigured_required_checks_under_required_policy(monkeypatch, tmp_path, status_checks):
+    _write_required_policy(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=status_checks),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=(), status="not_configured"),
+    )
+
+    assert summary.hard_gate_passed is False
+    assert (
+        "Repository policy requires status checks for main, but GitHub reports none configured. "
+        "Source: docs/MERGE-POLICY.md#main-required-check-policy."
+    ) in summary.blocking_reasons
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_required_unconfigured"
+
+
+@pytest.mark.parametrize(
+    ("required", "workflows"),
+    [
+        ("absent", "present_required"),
+        ("required", "present_non_required"),
+        ("required", "absent"),
+        ("mandatory", "present_required"),
+    ],
+)
+@pytest.mark.parametrize(
+    "required_checks",
+    [
+        RequiredStatusChecks(names=(), status="not_configured"),
+        RequiredStatusChecks(names=(), status="unavailable", message="Not Found"),
+    ],
+)
+def test_pre_merge_blocks_inconsistent_required_check_policy(monkeypatch, tmp_path, required, workflows, required_checks):
+    _write_required_policy(tmp_path, required=required, workflows=workflows)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_solo_override(head_sha="head123", status_checks=()),
+        expected_base_ref_name="main",
+        required_checks=required_checks,
+    )
+
+    assert summary.hard_gate_passed is False
+    assert (
+        f"Repository policy for main is inconsistent: required_status_checks={required!r}, "
+        f"ci_workflows={workflows!r}. Source: docs/MERGE-POLICY.md#main-required-check-policy."
+    ) in summary.blocking_reasons
+    assert summary.to_dict()["required_check_summary"]["required_check_status"] == "policy_inconsistent"

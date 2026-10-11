@@ -1,0 +1,33 @@
+# GitHub Actions workflow: run the pytest suite on every PR targeting main.
+# Thin wrapper around `python -m pytest` — no bespoke reporting or gating logic —
+# so it can be re-expressed for a non-GitHub CI system. See issue #290.
+#
+# This workflow runs on every PR but is not yet a required status check. See
+# the "PO Instructions" in issue #290 for the manual step that marks the
+# `pytest` check as required in branch protection once it has run green at
+# least once.
+
+name: tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: python -m pytest

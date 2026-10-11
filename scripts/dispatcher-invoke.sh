@@ -14,6 +14,11 @@
 #             issue #262 (comment-triggered resume for decision blockers, alongside the
 #                         existing time-based stale-recovery loop — see Step 4 below)
 #             issue #263 (cross-provider /review pairing — no new executor: label)
+#             issue #256 (non-executable ready items — Epic, Feature, missing or
+#                         unsupported type — are skipped with a warning, not fatal)
+#             issue #317 (subscription allowance check before each session start:
+#                         scripts/dispatcher-allowance.sh, called at the top of
+#                         invoke_executor_command(); see docs/DISPATCHER-CONFIG.md)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -22,6 +27,7 @@
 #
 # Exit codes:
 #   0  — story completed (Done) or no more "Ready for implementation" stories
+#        (including when every remaining ready item is non-executable, issue #256)
 #   1  — pre-flight check failed or mid-cycle executor failure; blocker posted on issue
 #
 # Requirements: bash 4+, gh (GitHub CLI), jq, curl
@@ -205,6 +211,11 @@ DRY_RUN=false
 BUDGET_BLOCKED_COUNT=0
 TOTAL_READY_COUNT=0
 SKIPPED_ISSUES=""  # space-separated issue numbers skipped due to budget cap
+# Space-separated issue numbers skipped as non-executable (issue #256). Kept
+# apart from SKIPPED_ISSUES so all_budget_blocked accounting only ever counts
+# budget skips. Internal loop state, carried across the recursive exec like
+# --skipped-issues; not meant to be passed by callers.
+NON_EXECUTABLE_ISSUES=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -225,6 +236,9 @@ while [[ $# -gt 0 ]]; do
         --skipped-issues)
             [[ $# -ge 2 ]] || { echo "Error: --skipped-issues requires a value." >&2; exit 1; }
             SKIPPED_ISSUES="$2"; shift 2 ;;
+        --non-executable-issues)
+            [[ $# -ge 2 ]] || { echo "Error: --non-executable-issues requires a value." >&2; exit 1; }
+            NON_EXECUTABLE_ISSUES="$2"; shift 2 ;;
         *)
             echo "Error: Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -262,6 +276,7 @@ WIP_LIMIT=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
+ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
 
 # ─── Executor agent loop tuning (issue #254 / ADR-003) — overridable for tests ─
@@ -1013,6 +1028,81 @@ run_openai_agent() {
     return 1
 }
 
+# ─── Utility: subscription allowance check before a session start (#317) ────
+# Runs scripts/dispatcher-allowance.sh (ADR-012) and acts on its decision:
+#   exit 0 (start)  — return 0; the session starts as before.
+#   exit 1 (refuse) — before /implement: log [RESERVE SKIP], put the story back
+#                     to "Ready for implementation" (E1 already moved it), exit 0.
+#                     Before /review, /merge or /cleanup: one comment on the
+#                     story naming the step, the window, the share left, the
+#                     reserve and the reset time; exit 0. Resuming is #316.
+#   exit 2 (error)  — log [ALLOWANCE ERROR] and fail the job without a
+#                     dispatcher_error Slack message; after /implement, the
+#                     story gets the same comment with the reason.
+# Every non-start path sets DISPATCH_HANDLED=true and exits the script.
+
+allowance_comment() {
+    local step="$1" decision_json="$2"
+    jq -r --arg step "$step" --arg issue "$ISSUE_NUMBER" '
+        def line($name; $w): "- \($name): \($w.remaining_percent)% left, reserve \($w.reserve_percent)%, resets \($w.resets_at // "unknown")";
+        . as $d
+        | [ ["five-hour window", .five_hour], ["weekly window", .weekly] ]
+            | map(select(.[1].remaining_percent != null)) as $read
+        | ($read | map(select(.[1].remaining_percent < .[1].reserve_percent))) as $below
+        | (if $d.decision == "refuse"
+           then "/\($step) was not started for #\($issue): the subscription allowance is below the reserve the PO set."
+           else "/\($step) was not started for #\($issue): the subscription allowance could not be read, so nothing starts."
+           end) as $head
+        | ( if $d.decision == "refuse" and ($below | length) > 0 then $below
+            elif $d.decision == "refuse" then []
+            else $read end
+            | map(line(.[0]; .[1])) ) as $lines
+        | ["## Subscription allowance check", "", $head, ""]
+          + (if ($lines | length) > 0 then $lines + [""] else [] end)
+          + ["Reason: \($d.reason)", "",
+             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
+        | join("\n")' <<< "$decision_json"
+}
+
+check_subscription_allowance() {
+    local step="$1"
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check subscription allowance before /$step"
+        return 0
+    fi
+
+    local decision_json rc=0
+    decision_json=$(bash "$ALLOWANCE_SCRIPT") || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+
+    if ! jq -e 'type == "object" and (.decision | type) == "string"' <<< "$decision_json" >/dev/null 2>&1; then
+        decision_json=$(jq -n --argjson rc "$rc" '{decision: "error", reason: "allowance check exited \($rc) without a decision", five_hour: {}, weekly: {}}')
+        rc=2
+    fi
+
+    LAST_ACTION="allowance check before /$step for #$ISSUE_NUMBER"
+    if [[ $rc -eq 1 ]]; then
+        if [[ "$step" == "implement" ]]; then
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
+            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+        else
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /$step not started; commenting on the story"
+            post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+        fi
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+
+    echo "[ALLOWANCE ERROR] #$ISSUE_NUMBER: /$step not started: $(jq -r '.reason' <<< "$decision_json")" >&2
+    if [[ "$step" == "implement" ]]; then
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+    else
+        post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+    fi
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
 # ─── Utility: invoke an executor command via a direct provider API call ──────
 # Issue #254: no CLI binary, no install step. Resolves provider/model from the
 # data-driven tables above, loads the corresponding .claude/commands/*.md file
@@ -1030,6 +1120,8 @@ invoke_executor_command() {
     local slash_command="$1"
     local target_arg="$2"
     local executor_label="${3:-$EXECUTOR_LABEL}"
+
+    check_subscription_allowance "$slash_command"
 
     local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
     local executor_secret="${routing_value##*:}"
@@ -1208,8 +1300,10 @@ fetch_board_data() {
 # ─── Utility: find next Ready for implementation story (re-fetches board) ────
 
 find_next_ready_story() {
-    # Optional first arg: space-separated issue numbers to exclude (already budget-skipped)
-    local _fnrs_exclude="${1:-}"
+    # Optional first arg: space-separated issue numbers to exclude (already budget-skipped).
+    # Items already skipped as non-executable this run are always excluded
+    # (issue #256), so no selection path can return the same one twice.
+    local _fnrs_exclude="${1:-}${NON_EXECUTABLE_ISSUES:+ $NON_EXECUTABLE_ISSUES}"
     local board
     board=$(fetch_board_data) || return 1
 
@@ -1295,8 +1389,100 @@ TARGET=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER") || {
 TARGET_TITLE=$(echo "$TARGET" | jq -r '.title')
 TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
 TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
+TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
+
+# ─── Step 1b: Executable issue-type guard (issue #256) ───────────────────────
+# Only Stories, Tasks, and Bugs are executable units for /implement. Anything
+# else sitting in "Ready for implementation" (an Epic, a Feature, or an item
+# with missing or unsupported type metadata) is skipped with one warning,
+# excluded for the rest of this run, and selection continues. This runs before
+# Step 2 so a non-executable item never reaches the executor-label check,
+# which stays fatal for executable items.
+
+EXECUTABLE_ISSUE_TYPES="story task bug"
+
+# classify_issue_type <space-separated labels> <native issue type name>
+# Prints the detected type ("type:story", or "native issue type 'Bug'") and
+# returns 0 when executable. Otherwise prints why it is not and returns 1.
+# The type: label wins; the native GitHub issue type is only a fallback when
+# no type: label is present. Never infers type from the title or labels
+# such as executor:.
+classify_issue_type() {
+    local labels="$1" native="$2"
+    local lbl t
+    local -a type_labels=()
+    for lbl in $labels; do
+        [[ "$lbl" == type:* ]] && type_labels+=("$lbl")
+    done
+
+    if [[ ${#type_labels[@]} -gt 1 ]]; then
+        echo "unsupported type: conflicting type labels ${type_labels[*]}"
+        return 1
+    fi
+
+    if [[ ${#type_labels[@]} -eq 1 ]]; then
+        t="${type_labels[0]#type:}"
+        if [[ " $EXECUTABLE_ISSUE_TYPES " == *" $t "* ]]; then
+            echo "${type_labels[0]}"
+            return 0
+        fi
+        case "$t" in
+            epic|feature) echo "detected type: ${type_labels[0]}" ;;
+            *)            echo "unsupported type: ${type_labels[0]}" ;;
+        esac
+        return 1
+    fi
+
+    if [[ -n "$native" ]]; then
+        t=$(echo "$native" | tr '[:upper:]' '[:lower:]')
+        if [[ " $EXECUTABLE_ISSUE_TYPES " == *" $t "* ]]; then
+            echo "native issue type '$native'"
+            return 0
+        fi
+        echo "unsupported type: native issue type '$native'"
+        return 1
+    fi
+
+    echo "type missing: no type: label or native issue type"
+    return 1
+}
+
+LAST_ACTION="issue-type check for #$ISSUE_NUMBER"
+if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
+    echo "Warning: #$ISSUE_NUMBER is not an executable Story, Task, or Bug ($ISSUE_TYPE_DETAIL); skipping it for this run and continuing selection." >&2
+    NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$ISSUE_NUMBER"
+    LAST_ACTION="non-executable skip for #$ISSUE_NUMBER; searching for next story"
+    NEXT_ISSUE=$(find_next_ready_story "$SKIPPED_ISSUES" || true)
+    if [[ -z "$NEXT_ISSUE" ]]; then
+        # Non-executable skips never count toward all_budget_blocked; only an
+        # earlier budget skip of every executable story in this run can set it.
+        if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
+            [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+        fi
+        echo "No more executable \"Ready for implementation\" stories after non-executable skip. Dispatcher exiting cleanly."
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+    echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+        --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
+        --total-ready-count "$TOTAL_READY_COUNT" \
+        --non-executable-issues "$NON_EXECUTABLE_ISSUES")
+    [[ -n "$SKIPPED_ISSUES" ]] && _NEXT_ARGS+=(--skipped-issues "$SKIPPED_ISSUES")
+    $DRY_RUN && _NEXT_ARGS+=(--dry-run)
+    DISPATCH_HANDLED=true
+    exec bash "$0" "${_NEXT_ARGS[@]}"
+fi
+echo "Issue type: $ISSUE_TYPE_DETAIL (executable)"
 
 # ─── Step 2: Executor label routing ──────────────────────────────────────────
+
+# format_executor_hint — "executor:a, executor:b, ..." from EXECUTOR_ROUTING,
+# sorted so the hint is stable across runs.
+format_executor_hint() {
+    printf '%s\n' "${!EXECUTOR_ROUTING[@]}" | sort \
+        | awk '{ printf "%sexecutor:%s", (NR > 1 ? ", " : ""), $0 }'
+}
 
 LAST_ACTION="executor label routing for #$ISSUE_NUMBER"
 EXECUTOR_LABEL=""
@@ -1310,7 +1496,7 @@ done
 if [[ -z "$EXECUTOR_LABEL" ]]; then
     echo "Error: No executor: label found on #$ISSUE_NUMBER." >&2
     echo "       Labels present: ${TARGET_LABELS:-"(none)"}" >&2
-    echo "       Add one of: ${!EXECUTOR_ROUTING[*]}" | sed 's/ /, executor:/g' >&2
+    echo "       Add one of: $(format_executor_hint)" >&2
     exit 1
 fi
 
@@ -1636,6 +1822,7 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
                 --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
                 --total-ready-count "$TOTAL_READY_COUNT" \
                 --skipped-issues "$SKIPPED_ISSUES")
+            [[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
             $DRY_RUN && _NEXT_ARGS+=(--dry-run)
             DISPATCH_HANDLED=true
             exec bash "$0" "${_NEXT_ARGS[@]}"
@@ -1772,6 +1959,7 @@ echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution 
 _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
     --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
     --total-ready-count "$TOTAL_READY_COUNT")
+[[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
 $DRY_RUN && _NEXT_ARGS+=(--dry-run)
 
 if $DRY_RUN; then
