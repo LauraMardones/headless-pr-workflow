@@ -399,6 +399,16 @@ def decide(
     return request_or_blocker("No review request exists for the current head.")
 
 
+@dataclass(frozen=True)
+class _Reading:
+    """One complete read of a PR and the decision it leads to."""
+
+    decision: Decision
+    context: PullRequestContext
+    story: StoryBoard | None
+    story_comments: tuple[str, ...]
+
+
 def run_bookkeeping(
     pr: int,
     *,
@@ -407,8 +417,30 @@ def run_bookkeeping(
     config: BookkeepingConfig = BookkeepingConfig(),
     dry_run: bool = False,
 ) -> Outcome:
-    """Read one PR fresh, decide and apply the decision."""
+    """Read one PR fresh, decide and apply the decision.
 
+    Nothing is posted or moved on the strength of one read. Immediately before
+    the first mutation the job reads everything again and decides again; it
+    acts only when both readings lead to the same decision, so a push, a new
+    Codex result, a changed check or a board move during the run stops it.
+    """
+
+    first = _read(pr, github=github, now=now, config=config)
+
+    def confirm() -> None:
+        second = _read(pr, github=github, now=now, config=config).decision
+        if second != first.decision:
+            raise BookkeepingError(
+                "revalidate decision",
+                f"PR #{pr} changed during the run: the decision was `{first.decision.action}` for head "
+                f"{first.decision.head_sha} and is now `{second.action}` for head {second.head_sha or 'unknown'} "
+                f"({second.reason}); nothing was posted or moved",
+            )
+
+    return _apply(first, confirm=confirm, github=github, dry_run=dry_run)
+
+
+def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingConfig) -> _Reading:
     context = github.fetch_context(pr)
     if context.review_evidence_error:
         raise BookkeepingError("read PR", context.review_evidence_error)
@@ -423,25 +455,14 @@ def run_bookkeeping(
             ci = github.fetch_ci(context)
             story_comments = github.fetch_issue_comments(linked.number)
 
-    decision = decide(
-        context,
-        story_status=story.status if story else None,
-        ci=ci,
-        now=now,
-        config=config,
-    )
-    return _apply(decision, context=context, story=story, story_comments=story_comments, github=github, dry_run=dry_run)
+    decision = decide(context, story_status=story.status if story else None, ci=ci, now=now, config=config)
+    return _Reading(decision, context, story, story_comments)
 
 
-def _apply(
-    decision: Decision,
-    *,
-    context: PullRequestContext,
-    story: StoryBoard | None,
-    story_comments: tuple[str, ...],
-    github: GitHubGateway,
-    dry_run: bool,
-) -> Outcome:
+def _apply(reading: _Reading, *, confirm: Any, github: GitHubGateway, dry_run: bool) -> Outcome:
+    """Apply a decision. `confirm` re-reads and re-decides; it is called right before the first mutation."""
+
+    decision, context, story, story_comments = reading.decision, reading.context, reading.story, reading.story_comments
     if decision.action == ACTION_NONE:
         return Outcome(decision, NOT_NEEDED)
     if story is None or (decision.marker is None and decision.action != ACTION_REQUEST_REVIEW):
@@ -455,13 +476,7 @@ def _apply(
         summary_present = any(decision.marker in (event.body or "") for event in context.conversation_comments)
         if dry_run:
             return Outcome(decision, DRY_RUN)
-        current = github.fetch_story(story.number)
-        if current.status != STATUS_IN_REVIEW:
-            raise BookkeepingError(
-                "move story",
-                f"story #{story.number} left `{STATUS_IN_REVIEW}` during the run; nothing was posted or moved",
-            )
-        _require_unchanged_pr(decision, github)
+        confirm()
         urls: tuple[str, ...] = ()
         if not summary_present:
             summary = github.session_summary(_session_summary_arguments(decision))
@@ -472,7 +487,7 @@ def _apply(
     if decision.action == ACTION_REQUEST_REVIEW:
         if dry_run:
             return Outcome(decision, DRY_RUN)
-        _require_unchanged_pr(decision, github)
+        confirm()
         body = review_request_body(decision.head_sha, ordinal=decision.requests_posted + 1)
         return Outcome(decision, APPLIED, (github.post_comment(decision.pr, body),))
 
@@ -480,31 +495,8 @@ def _apply(
         return Outcome(decision, ALREADY_PRESENT)
     if dry_run:
         return Outcome(decision, DRY_RUN)
-    _require_unchanged_pr(decision, github)
+    confirm()
     return Outcome(decision, APPLIED, (github.post_comment(story.number, blocker_body(decision, story)),))
-
-
-def _require_unchanged_pr(decision: Decision, github: GitHubGateway) -> None:
-    """Refresh the PR immediately before a mutation.
-
-    The decision rests on the review and checks of `decision.head_sha`. A commit
-    pushed since the first read makes it stale, so nothing is posted or moved
-    and the next run decides for the new head.
-    """
-
-    step = "revalidate PR head"
-    fresh = github.fetch_context(decision.pr)
-    if fresh.head_ref_oid != decision.head_sha:
-        raise BookkeepingError(
-            step,
-            f"PR #{decision.pr} head changed from {decision.head_sha} to {fresh.head_ref_oid or 'unknown'} "
-            "during the run; nothing was posted or moved",
-        )
-    if fresh.state != "OPEN" or fresh.is_draft:
-        raise BookkeepingError(
-            step,
-            f"PR #{decision.pr} is no longer open and ready for review; nothing was posted or moved",
-        )
 
 
 def blocker_body(decision: Decision, story: StoryBoard) -> str:

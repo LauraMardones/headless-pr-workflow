@@ -585,7 +585,8 @@ def test_story_that_left_in_review_during_the_run_is_not_moved():
     with pytest.raises(BookkeepingError) as error:
         run_bookkeeping(PR, github=github, now=NOW)
 
-    assert error.value.step == "move story"
+    assert error.value.step == "revalidate decision"
+    assert "Story #290 is `In implementation`" in error.value.message
     assert github.pr_comments == [] and github.moves == []
 
 
@@ -621,7 +622,7 @@ def test_commit_pushed_during_the_run_stops_every_mutation(action):
     with pytest.raises(BookkeepingError) as error:
         run_bookkeeping(PR, github=github, now=NOW)
 
-    assert error.value.step == "revalidate PR head"
+    assert error.value.step == "revalidate decision"
     assert HEAD_SHA in error.value.message and NEW_HEAD in error.value.message
     assert "nothing was posted or moved" in error.value.message
     assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
@@ -636,11 +637,48 @@ def test_pr_that_stopped_being_open_and_ready_during_the_run_is_not_touched(chan
     with pytest.raises(BookkeepingError) as error:
         run_bookkeeping(PR, github=github, now=NOW)
 
-    assert error.value.step == "revalidate PR head"
+    assert error.value.step == "revalidate decision"
+    assert "now `none`" in error.value.message
     assert github.pr_comments == [] and github.moves == []
 
 
-def test_pr_is_read_again_immediately_before_the_mutation():
+def test_required_check_that_fails_during_the_run_stops_the_move_to_in_merge():
+    # A rerun flips the check on the same head: no push is involved.
+    github = FakeGitHub(pr(request(), codex_comment()))
+    _changing_pr(github, status_checks=pr(checks="failure").status_checks)
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate decision"
+    assert "was `move-in-merge`" in error.value.message and "now `move-in-implementation`" in error.value.message
+    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+
+
+def test_codex_findings_arriving_during_the_run_stop_the_move_to_in_merge():
+    github = FakeGitHub(pr(request(), codex_comment()))
+    later = pr(request(), codex_comment(), request(), codex_pr_298_findings_review(HEAD_SHA))
+    _changing_pr(github, timeline=later.timeline)
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate decision"
+    assert "was `move-in-merge`" in error.value.message and "now `move-in-implementation`" in error.value.message
+    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+
+
+def test_codex_answer_arriving_during_the_run_stops_a_re_request():
+    github = FakeGitHub(pr(request(SIX_HOURS_AGO)))
+    _changing_pr(github, timeline=pr(request(SIX_HOURS_AGO), codex_comment()).timeline)
+
+    with pytest.raises(BookkeepingError):
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert github.pr_comments == []
+
+
+def test_everything_is_read_and_decided_again_immediately_before_the_mutation():
     github = FakeGitHub(pr(request(), codex_comment()))
     calls = []
     for name in ("fetch_context", "fetch_story", "fetch_ci", "fetch_issue_comments", "post_comment", "set_story_status"):
@@ -654,8 +692,10 @@ def test_pr_is_read_again_immediately_before_the_mutation():
         "fetch_story",
         "fetch_ci",
         "fetch_issue_comments",
-        "fetch_story",
         "fetch_context",
+        "fetch_story",
+        "fetch_ci",
+        "fetch_issue_comments",
         "post_comment",
         "set_story_status",
     ]
