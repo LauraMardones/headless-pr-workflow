@@ -118,6 +118,25 @@ def test_event_payload_reaches_the_script_only_through_the_environment():
     assert "|| true" not in code and "continue-on-error" not in code
 
 
+def test_skips_with_a_notice_when_the_default_branch_lacks_the_command():
+    """On the PR that introduces the command, the default branch cannot run it yet."""
+    code = _code()
+    run = re.search(r"^        run: \|\n((?:          .*\n?)+)", code, re.MULTILINE)
+    assert run, "run step missing"
+    lines = [line.strip() for line in run.group(1).splitlines()]
+    module = "src/headless_pr_workflow/codex_review_bookkeeping.py"
+
+    assert (REPO_ROOT / module).is_file()
+    assert lines[:4] == [
+        f"if [ ! -f {module} ]; then",
+        'echo "::notice::The default branch has no codex-review-bookkeeping command yet; nothing to do."',
+        "exit 0",
+        "fi",
+    ]
+    # The guard is the only early exit: once the command exists, its failure fails the run.
+    assert sum(line.startswith("exit") for line in lines) == 1
+
+
 def test_bounds_come_from_repository_variables_and_no_state_is_kept_on_the_runner():
     code = _code()
 

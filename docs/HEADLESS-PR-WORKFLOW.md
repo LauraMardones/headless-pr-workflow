@@ -134,6 +134,7 @@ Rules:
 - **Idempotency.** Every comment the job posts ends with a hidden marker naming the PR head and the kind of action. The job skips anything already done for that head. All state lives on GitHub.
 - **Fresh refresh.** Nothing is posted or moved on the strength of one read. Immediately before the first mutation the job reads the PR, the story status, the required checks and the story comments again and decides again. It acts only when both readings lead to the same decision; otherwise it stops with an error and changes nothing, and the next run decides for the new state. A change in the instant after the second read cannot be excluded by any job; `/merge` refreshes every gate again before merging.
 - **Failure.** When PR, story or board state cannot be read completely, a board status option is missing, or a mutation fails, the command exits non-zero, names the failed step and claims no action it did not complete.
+- **Command not on the default branch yet.** The job runs the default branch's code. On the PR that introduces the command, the default branch does not have it, so the job skips with a notice and exits successfully instead of failing a check on that PR.
 - **Trigger phrase.** The phrase is written only in a PR conversation comment that requests a review, by `/implement` or by this job (`AGENTS.md` → Codex Review Requests).
 
 `/review` remains the path for `executor:codex` stories and for a separate-session review (path 2).

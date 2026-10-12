@@ -69,7 +69,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           CODEX_REVIEW_RETRY_HOURS: ${{ vars.CODEX_REVIEW_RETRY_HOURS }}
           CODEX_REVIEW_MAX_REQUESTS: ${{ vars.CODEX_REVIEW_MAX_REQUESTS }}
+        # Before the command first lands on the default branch (the PR that
+        # introduces it), there is nothing to run: skip with a notice.
         run: |
+          if [ ! -f src/headless_pr_workflow/codex_review_bookkeeping.py ]; then
+            echo "::notice::The default branch has no codex-review-bookkeeping command yet; nothing to do."
+            exit 0
+          fi
           if [ -n "$PR_NUMBER" ]; then
             sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY"
           else
