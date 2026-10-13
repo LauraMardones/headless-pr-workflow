@@ -99,19 +99,26 @@ Loop tuning is overridable via environment variables (defaults shown), primarily
 
 ## GitHub Token — `PROJECT_TOKEN`
 
-The dispatcher workflow requires a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `project` permission for user-owned GitHub Projects v2 boards, which the dispatcher needs to both read board state and write story status (via `updateProjectV2ItemFieldValue`).
+The dispatcher workflow (`.github/workflows/dispatcher.yml`) and the Codex review bookkeeping workflow (`.github/workflows/codex-review-bookkeeping.yml`) require a **repository secret named `PROJECT_TOKEN`** — not the built-in `GITHUB_TOKEN`. The built-in `GITHUB_TOKEN` does not receive the `project` permission for user-owned GitHub Projects v2 boards. With it, the `repository.projectsV2` GraphQL query returns an empty list, `scripts/dispatcher-poll.sh` exits with `Error: No GitHub Projects (v2) board linked to <repo>`, and no board status can be written.
 
-Provision a personal access token (PAT) with the following scopes and store it as a repository secret named `PROJECT_TOKEN`:
+Provision a **classic personal access token (PAT)** with the scopes below and store it as a repository secret (not a variable) named `PROJECT_TOKEN`:
 
 `https://github.com/<owner>/<repo>/settings/secrets/actions`
 
-| Secret | Type | Required scopes |
-|---|---|---|
-| `PROJECT_TOKEN` | Classic PAT | `repo` (full), `project` (full — required for write access to update board status) |
+This table is the only list of the token's scopes. Other documents and comments link here instead of repeating it.
 
-The workflow maps this secret to the `GH_TOKEN` environment variable, which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+| Scope | Reason |
+|---|---|
+| `repo` | Read and write access to repository contents, issues and pull requests: every `gh` read, comment, PR update and merge. |
+| `project` | Read and write access to the Projects v2 board. The full scope is needed because story status is written with `updateProjectV2ItemFieldValue`; read-only project access cannot move a board item. |
+| `workflow` | GitHub refuses a merge or push from a classic PAT without this scope when the change touches a file under `.github/workflows/`. Dispatcher-started sessions run `gh` with this token. |
+| `read:org` | Needed by the PR read of every `hpw` command (`fetch_pr_context()` in `src/headless_pr_workflow/github/pr_context.py`), including `hpw codex-review-bookkeeping` and `scripts/merge-gate-summary`. The read asks `gh pr view --json` for `reviewRequests`, and for that field `gh` requests a team's `name` and `slug` and its organisation's `login`. GitHub checks the token for this scope even when the PR has no team review request and the repository belongs to a user account. |
 
-**If the secret is absent**, the `gh` CLI will fail to authenticate and the workflow will exit with an error on the first API call.
+Both workflows map the secret to the `GH_TOKEN` environment variable (`GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}`), which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+
+**If the secret is absent**, the `gh` CLI fails to authenticate, the workflow exits with an error on the first API call and no story is dispatched.
+
+**If a scope is missing**, GitHub refuses the query that needs it. `hpw codex-review-bookkeeping` then exits non-zero and its error names the failed step, the missing scope and this section (see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop) → Failure).
 
 ---
 
@@ -153,34 +160,6 @@ GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persi
 **Residual risk:** if the cache is evicted (GitHub removes entries unused for 7 days, or the oldest entries past the repository's size limit) or a save fails, the next poll starts from empty state. Each issue still in **Ready for refinement** can then be notified once more.
 
 **Interim mechanism:** this cache exists only because the dispatcher runs on ephemeral GitHub-hosted runners. #259 moves the dispatcher to persistent infrastructure, where local disk supersedes the cache steps. That migration must keep the continuous-stay, exit/re-entry, delivery-only recording, and retry semantics above, and must revalidate #257's acceptance criteria before the cache steps are removed.
-
----
-
-## GitHub Authentication Token
-
-The dispatcher workflow uses `GH_TOKEN` to authenticate all GitHub API and GraphQL calls, including the Projects v2 board query in `scripts/dispatcher-poll.sh`.
-
-`GITHUB_TOKEN` — the default token available in GitHub Actions — does not carry the `read:project` scope for user-owned GitHub Projects v2 boards. Without this scope, the `repository.projectsV2` GraphQL query returns an empty list and `dispatcher-poll.sh` exits with `Error: No GitHub Projects (v2) board linked to <repo>`, making the entire dispatcher loop non-functional.
-
-To fix this, `GH_TOKEN` must be set to a personal access token (PAT) stored as the repository secret `PROJECT_TOKEN`.
-
-### Required PAT scopes
-
-| Scope | Reason |
-|---|---|
-| `repo` | Read and write access to repository contents, issues, and pull requests |
-| `read:project` | Read access to user-owned GitHub Projects v2 boards |
-| `workflow` | Permission to trigger and manage GitHub Actions workflow runs |
-
-### Adding the secret
-
-Add `PROJECT_TOKEN` as a **repository secret** (not a variable) at:
-
-`https://github.com/LauraMardones/headless-pr-workflow/settings/secrets/actions`
-
-The dispatcher workflow reads it automatically via `GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}` in the `dispatch` job `env` block — no other changes are needed.
-
-**If the secret is absent**, the GraphQL call will fail with an authentication error and no stories will be dispatched.
 
 ---
 

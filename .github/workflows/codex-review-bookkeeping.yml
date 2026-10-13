@@ -11,6 +11,9 @@
 #
 # The job always checks out the default branch, never the PR's code.
 # See docs/HEADLESS-PR-WORKFLOW.md -> "Codex review loop".
+#
+# The job runs with the PROJECT_TOKEN secret. The scopes that token needs are
+# listed in docs/DISPATCHER-CONFIG.md -> "GitHub Token — `PROJECT_TOKEN`".
 
 name: Codex review bookkeeping
 
