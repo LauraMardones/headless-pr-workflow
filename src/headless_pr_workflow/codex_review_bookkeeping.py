@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,13 @@ DECLARED_BY = f"{COMMAND_NAME} (GitHub Actions)"
 BLOCKER_OWNER = "PO (@LauraMardones)"
 SESSION_SUMMARY_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session-summary.sh"
 
+# The one place that lists the scopes of the token the job runs with.
+TOKEN_SCOPES_DOC = 'docs/DISPATCHER-CONFIG.md → "GitHub Token — `PROJECT_TOKEN`"'
+# GitHub's wording for a token without a scope a query needs, one sentence per refused field.
+MISSING_SCOPE_SIGNAL = "has not been granted the required scopes"
+_REQUIRED_SCOPES = re.compile(r"requires one of the following scopes: \[([^\]]*)\]")
+_GRANTED_SCOPES = re.compile(r"has only been granted the: \[([^\]]*)\]")
+
 STORY_BOARD_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -113,6 +121,44 @@ class BookkeepingError(RuntimeError):
         self.step = step
         self.message = message
         super().__init__(f"{step}: {message}")
+
+
+def missing_scope_message(detail: str) -> str | None:
+    """Name the token scopes GitHub reported as missing, or None when `detail` is another failure.
+
+    Each refused field lists the scopes that would allow it. A scope that would
+    allow every refused field is the one to add; without such a scope, all the
+    listed scopes are named.
+    """
+
+    if MISSING_SCOPE_SIGNAL not in detail:
+        return None
+    alternatives = [_scope_names(match) for match in _REQUIRED_SCOPES.findall(detail)]
+    alternatives = [names for names in alternatives if names]
+    if not alternatives:
+        return None
+    listed = list(dict.fromkeys(name for names in alternatives for name in names))
+    missing = [name for name in listed if all(name in names for names in alternatives)] or listed
+    granted = _GRANTED_SCOPES.search(detail)
+    has = f" (the token has: {_quoted(_scope_names(granted.group(1)))})" if granted else ""
+    return (
+        f"the GitHub token lacks a required scope: {_quoted(missing)}{has}. "
+        f"The scopes the token needs are listed in {TOKEN_SCOPES_DOC}."
+    )
+
+
+def _scope_names(listing: str) -> list[str]:
+    return [name for name in (part.strip().strip("'\"") for part in listing.split(",")) if name]
+
+
+def _quoted(names: list[str]) -> str:
+    return ", ".join(f"`{name}`" for name in names) or "none"
+
+
+def _gh_failure(step: str, detail: str, fallback: str) -> "BookkeepingError":
+    """The error for a failed `gh` call: a missing token scope is named, anything else keeps its text."""
+
+    return BookkeepingError(step, missing_scope_message(detail) or fallback)
 
 
 @dataclass(frozen=True)
@@ -669,13 +715,13 @@ class GhCliGateway:
         try:
             return fetch_pr_context(str(pr), repo=self.repo)
         except GHCommandError as error:
-            raise BookkeepingError("read PR", str(error)) from error
+            raise _gh_failure("read PR", str(error), str(error)) from error
 
     def fetch_ci(self, context: PullRequestContext) -> CiSummary:
         try:
             required_checks = fetch_required_status_check_context(self.repo, context.base_ref_name)
         except GHCommandError as error:
-            raise BookkeepingError("read required checks", str(error)) from error
+            raise _gh_failure("read required checks", str(error), str(error)) from error
         return summarize_ci(context, required_checks=required_checks)
 
     def fetch_story(self, number: int) -> StoryBoard:
@@ -759,8 +805,9 @@ class GhCliGateway:
         except FileNotFoundError:
             raise BookkeepingError(step, "GitHub CLI executable not found: gh") from None
         if result.returncode != 0:
-            detail = (result.stderr or "").strip().splitlines()
-            raise BookkeepingError(step, detail[-1] if detail else f"gh exited with code {result.returncode}")
+            stderr = (result.stderr or "").strip()
+            detail = stderr.splitlines()
+            raise _gh_failure(step, stderr, detail[-1] if detail else f"gh exited with code {result.returncode}")
         return result.stdout or ""
 
 
