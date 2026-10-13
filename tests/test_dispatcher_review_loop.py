@@ -175,7 +175,8 @@ fi
 
 
 @needs_tools
-def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d):
+@pytest.mark.parametrize("head_changes", [False, True])
+def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
     """The bookkeeping job acts only on "In review": a failed write must not end the hand-off for good."""
     d.add_story(STORY, "Ready for implementation")
     d.add_pr(PR, STORY)
@@ -196,27 +197,77 @@ def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d):
     assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
     assert d.status(STORY) == "In implementation"
 
-    # The write works again: a later run completes the hand-off, with no session.
+    # The write works again, and a commit landed meanwhile: a later run still completes the hand-off.
     d.fail_status_write("In review", False)
+    if head_changes:
+        d.add_pr(PR, STORY, head=NEW_HEAD)
     third = d.resume()
     assert third.returncode == 0, third.stdout + third.stderr
     assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in third.stdout
     assert d.status(STORY) == "In review"
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
-    assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
+    assert d.sessions == [f"implement {STORY}"]
+    assert len(d.posted(STORY)) == 2 and f"action=hand-off-done pr={PR}" in d.posted(STORY)[1]
+
+    # Completed once: a story that comes back to "In implementation" is not moved again.
+    d.set_status(STORY, "In implementation")
+    fourth = d.resume()
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    assert d.status(STORY) == "In implementation"
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert len(d.posted(STORY)) == 2
 
 
 @needs_tools
 def test_story_in_implementation_without_a_pending_hand_off_is_left_alone(d):
-    """A story someone is working on, with a ready PR and no marker, is not moved to "In review"."""
+    """A story someone is working on, with a ready PR, is not moved to "In review"."""
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
-    d.add_comment(STORY, "<!-- hpw:dispatcher action=hand-off-pending pr=900 head=" + "c" * 40 + " -->")  # older head
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr=90 head={HEAD} -->")  # another PR
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->",
+                  login="someone-else")  # forged
 
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.board_writes == [] and d.sessions == [] and d.posted(STORY) == []
+
+
+@needs_tools
+def test_forged_dispatcher_markers_are_ignored(d):
+    """Markers count only on comments by the dispatcher's own account."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->", login="someone-else")
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-max pr={PR} -->", login="someone-else")
+    d.add_story(600, "In merge")
+    d.add_pr(960, 600)
+    d.add_comment(600, f"<!-- hpw:dispatcher action=merge-attempt pr=960 head={HEAD} -->", login="someone-else")
+    new_head_on_implement_once(d)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == ["merge 960", "cleanup 600", f"implement {STORY}"]
+    assert "[RESUME SKIP]" not in proc.stdout
+
+
+@needs_tools
+def test_dispatcher_markers_by_its_own_account_are_honoured(d):
+    """The same markers as above, written by the dispatcher: both stories are skipped."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->")
+    d.add_story(600, "In merge")
+    d.add_pr(960, 600)
+    d.add_comment(600, f"<!-- hpw:dispatcher action=merge-attempt pr=960 head={HEAD} -->")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [] and proc.stdout.count("[RESUME SKIP]") == 2
 
 
 @needs_tools

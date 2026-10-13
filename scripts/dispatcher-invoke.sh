@@ -855,23 +855,45 @@ dispatcher_marker() {
     echo "<!-- hpw:dispatcher $* -->"
 }
 
-# marker_holds <issue> <marker> — 0 when the newest comment carrying <marker>
-# has no later PO `/unblock` line; 1 when there is no such comment or the PO
-# has unblocked it. A failed comment read counts as "holds", so an API error
-# never starts a session or posts a second blocker. A caller that acts when
-# the marker holds passes 1 as the third argument, so a failed read does
+# Markers are honoured only on comments written by the dispatcher's own
+# account (the login behind GH_TOKEN). Anyone can comment on a public
+# repository, and a forged marker must neither stop a fix round nor make the
+# dispatcher write a board status.
+DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}"
+resolve_dispatcher_login() {
+    if [[ -z "$DISPATCHER_LOGIN" ]]; then
+        DISPATCHER_LOGIN=$(gh api user | jq -r '.login // empty' 2>/dev/null || true)
+    fi
+    [[ -n "$DISPATCHER_LOGIN" ]]
+}
+
+# marker_holds <issue> <marker> [<on-read-error>] [<cancel-marker>]
+# 0 when the newest dispatcher comment carrying <marker> has no later PO
+# `/unblock` line and no later dispatcher comment carrying <cancel-marker>;
+# 1 when there is no such comment or it was unblocked or cancelled. <marker>
+# is matched as a substring, so a caller may pass a prefix. A failed read (of
+# the comments or of the dispatcher's login) counts as "holds", so an API
+# error never starts a session or posts a second blocker. A caller that acts
+# when the marker holds passes 1 as <on-read-error>, so a failed read does
 # nothing instead.
 marker_holds() {
-    local issue_num="$1" marker="$2" on_read_error="${3:-0}" comments
+    local issue_num="$1" marker="$2" on_read_error="${3:-0}" cancel_marker="${4:-}" comments
+    resolve_dispatcher_login || return "$on_read_error"
     comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return "$on_read_error"
-    jq -e --arg marker "$marker" --arg login "$DECISION_BLOCKER_PO_LOGIN" '
-        ([.[] | select((.body // "") | contains($marker))] | last) as $held
+    jq -e --arg marker "$marker" --arg cancel "$cancel_marker" \
+          --arg bot "$DISPATCHER_LOGIN" --arg login "$DECISION_BLOCKER_PO_LOGIN" '
+        [.[] | select((.user.login // "") == $bot)] as $own
+        | ([$own[] | select((.body // "") | contains($marker))] | last) as $held
         | if $held == null then false
           else ([.[] | select(
                    (.user.login // "") == $login and
                    .created_at > $held.created_at and
                    ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
                 )] | length == 0)
+               and
+               ($cancel == "" or
+                ([$own[] | select(.created_at > $held.created_at and ((.body // "") | contains($cancel)))]
+                 | length == 0))
           end' <<< "$comments" >/dev/null
 }
 
@@ -1776,8 +1798,19 @@ fix_round_attempt_marker() {
     dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
 }
 
+# A pending hand-off is matched by PR, not by head: a commit may land between
+# the failed write and the run that retries it. It is cancelled by the "done"
+# marker the retry posts, so it is completed once.
 hand_off_pending_marker() {
     dispatcher_marker "action=hand-off-pending pr=$1 head=$2"
+}
+
+hand_off_pending_prefix() {
+    echo "<!-- hpw:dispatcher action=hand-off-pending pr=$1 "
+}
+
+hand_off_done_marker() {
+    dispatcher_marker "action=hand-off-done pr=$1"
 }
 
 # set_project_status_checked — like set_project_status(), but returns 1 when
@@ -1872,7 +1905,7 @@ hand_off_to_codex_review_loop() {
         local pending_marker
         pending_marker=$(hand_off_pending_marker "$pr_number" "$pr_head")
         echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement; a later run retries the hand-off." >&2
-        if ! marker_holds "$ISSUE_NUMBER" "$pending_marker"; then
+        if ! marker_holds "$ISSUE_NUMBER" "$(hand_off_pending_prefix "$pr_number")" 0 "$(hand_off_done_marker "$pr_number")"; then
             post_comment "$ISSUE_NUMBER" "## Recovery Comment
 Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status could not be set to \"In review\".
 Action: none yet. The dispatcher sets the status on a later run; the Codex review loop acts only on a story in \"In review\".
@@ -1998,10 +2031,15 @@ resume_fix_round() {
         # write "In review", finish it now; otherwise the bookkeeping job
         # would never act on Codex's answer.
         if [[ "$pr_draft" != "true" ]] \
-           && marker_holds "$issue_num" "$(hand_off_pending_marker "$pr_number" "$pr_head")" 1; then
+           && marker_holds "$issue_num" "$(hand_off_pending_prefix "$pr_number")" 1 "$(hand_off_done_marker "$pr_number")"; then
             echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
             if set_project_status_checked "$item_id" "$issue_num" "In review"; then
                 RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+                post_comment "$issue_num" "## Recovery Comment
+Detected: a hand-off for #$issue_num on PR #$pr_number that could not set the board status earlier.
+Action: status set to \"In review\".
+
+$(hand_off_done_marker "$pr_number")" || true
             else
                 echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
             fi
@@ -2307,9 +2345,9 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
     # again as a ready story and pass the bound.
     if [[ -n "$pr_number" ]]; then
         pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
-        if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" \
+        if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" 1 \
            || { [[ -n "$pr_head_sha" ]] \
-                && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")"; }; then
+                && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
             echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
             continue
         fi
