@@ -492,6 +492,34 @@ def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, ret
 
 
 @needs_tools
+@pytest.mark.parametrize("status_after_session", ["In review", "In merge", None])
+def test_fix_round_that_pushes_nothing_is_recorded_whatever_the_status(d, status_after_session):
+    """The session moved the story on without a commit; the bookkeeping job would move it back."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    if status_after_session:
+        d.session_sets_status("implement", STORY, status_after_session)
+
+    first = d.resume()
+
+    assert first.returncode == 1
+    assert d.sessions == [f"implement {STORY}"]
+    assert d.board_writes == []
+    blockers = d.posted(STORY)
+    assert len(blockers) == 1 and "/implement completes successfully" in blockers[0]
+    assert f"action=fix-round-attempt pr={PR} head={HEAD}" in blockers[0]
+
+    # The bookkeeping job sees the findings for the same head and moves the story back.
+    d.set_status(STORY, "In implementation")
+    second = d.resume()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"implement {STORY}"]  # the same round does not start again
+    assert len(d.posted(STORY)) == 1
+    assert f"[RESUME SKIP] #{STORY}: the fix round was already tried on PR #{PR}" in second.stdout
+
+
+@needs_tools
 def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)

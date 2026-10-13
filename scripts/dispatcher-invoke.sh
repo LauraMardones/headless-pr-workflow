@@ -1761,7 +1761,8 @@ finish_story() {
 #     before this point;
 #   - a fix round that is due on the head the PR already had before the
 #     session means the session pushed no commit. The blocker records that
-#     head, so the same findings do not start a session on every poll;
+#     head, so the same findings do not start a session on every poll. This
+#     holds whatever status the session left the story in;
 #   - a fix round that is due on a new head means Codex answered, and the
 #     bookkeeping job acted, while the session was still running. Nothing is
 #     written and nothing is recorded: the next run starts that fix round.
@@ -1815,20 +1816,26 @@ hand_off_to_codex_review_loop() {
         echo "Error: Failed to re-read the project board for the hand-off of #$ISSUE_NUMBER." >&2; exit 1
     }
     status=$(board_status_of "$ISSUE_NUMBER")
-    if [[ "$status" == "In implementation" ]]; then
-        if ! fix_round_due "$pr_number" "$pr_head"; then
-            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
-        elif [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]]; then
-            echo "Error: /implement for #$ISSUE_NUMBER pushed no new commit to PR #$pr_number; the findings recorded for head ${pr_head:0:7} are still open." >&2
-            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
-                "$(fix_round_attempt_marker "$pr_number" "$pr_head")"
-            DISPATCH_HANDLED=true
-            exit 1
-        else
-            echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
-        fi
-    else
+    local due=false
+    fix_round_due "$pr_number" "$pr_head" && due=true
+
+    # Checked whatever the status is: a session that pushed nothing may still
+    # have moved the story to "In review", and the bookkeeping job would then
+    # move it back for the same head and start the same round again.
+    if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]]; then
+        echo "Error: /implement for #$ISSUE_NUMBER pushed no new commit to PR #$pr_number; the findings recorded for head ${pr_head:0:7} are still open." >&2
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
+            "$(fix_round_attempt_marker "$pr_number" "$pr_head")"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+
+    if [[ "$status" != "In implementation" ]]; then
         echo "#$ISSUE_NUMBER is \"$status\" on the board; the dispatcher leaves it there."
+    elif $due; then
+        echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
+    else
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
     fi
     echo "[HANDOFF] #$ISSUE_NUMBER: handed to the Codex review loop ($reviewer) on PR #$pr_number; no /review session started"
 }
