@@ -51,6 +51,17 @@ def new_head_on_implement(d: Dispatcher, status: str | None = "In review") -> No
     d.on_session("implement", script)
 
 
+def new_head_on_implement_once(d: Dispatcher) -> None:
+    """Only the first /implement session (the fix round) pushes a commit and sets "In review"."""
+    d.on_session("implement", f"""
+if [[ ! -f "$MOCK_DIR/fixed" ]]; then
+    touch "$MOCK_DIR/fixed"
+    jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+    jq '. + {{"ITEM_{STORY}": "In review"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"
+fi
+""")
+
+
 # ── Hand-off ────────────────────────────────────────────────────────────────
 
 
@@ -408,6 +419,34 @@ def test_ac12_invalid_maximum_stops_the_run(d, value):
 
 
 @needs_tools
+@pytest.mark.parametrize("seq,returncode,line", [("1", 0, "[RESERVE SKIP]"), ("2", 1, "[ALLOWANCE ERROR]")])
+def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, returncode, line):
+    """A fix round is unfinished work: it is not put back to "Ready for implementation"."""
+    d.add_story(700, "Ready for implementation")
+    d.add_pr(970, 700)
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+
+    first = d.run_issue(700, seq=seq)
+    second = d.run_issue(700, seq=seq)
+
+    for proc in (first, second):
+        assert proc.returncode == returncode, proc.stdout + proc.stderr
+        assert f"{line} #{STORY}:" in proc.stdout + proc.stderr
+    assert d.sessions == [] and d.board_writes == []
+    assert d.status(STORY) == "In implementation" and d.status(700) == "Ready for implementation"
+    assert d.posted(STORY) == [] and d.posted(700) == [] and d.slack_calls == []
+
+    # With allowance back, the fix round runs before the ready story.
+    new_head_on_implement_once(d)
+    third = d.run_issue(700)
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert d.sessions == [f"implement {STORY}", "implement 700"]
+    assert d.board_writes == ["700=In implementation", "700=In review"]
+
+
+@needs_tools
 def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
@@ -462,14 +501,7 @@ def test_ac13_in_merge_then_fix_round_then_ready_story(d):
     d.add_findings(PR, HEAD)
     d.add_story(600, "In merge")
     d.add_pr(960, 600)
-    # Only the first /implement session (the fix round) pushes a commit and sets the status.
-    d.on_session("implement", f"""
-if [[ ! -f "$MOCK_DIR/fixed" ]]; then
-    touch "$MOCK_DIR/fixed"
-    jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
-    jq '. + {{"ITEM_{STORY}": "In review"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"
-fi
-""")
+    new_head_on_implement_once(d)
 
     proc = d.run_issue(700)
 

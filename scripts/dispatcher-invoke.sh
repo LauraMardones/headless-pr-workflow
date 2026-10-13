@@ -370,6 +370,7 @@ OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
 DISPATCH_HANDLED=false  # set true before any expected exit 1 (blocker posted)
+FIX_ROUND_SESSION=false  # true while the resume pass starts the /implement of a fix round (issue #293)
 
 # ─── Utility: ISO-8601 timestamp to unix seconds (Linux + macOS) ──────────────
 
@@ -1148,6 +1149,10 @@ run_openai_agent() {
 #   exit 0 (start)  — return 0; the session starts as before.
 #   exit 1 (refuse) — before /implement: log [RESERVE SKIP], put the story back
 #                     to "Ready for implementation" (E1 already moved it), exit 0.
+#                     Before the /implement of a fix round (issue #293): log
+#                     [RESERVE SKIP] and write nothing. The story keeps its
+#                     place in "In implementation" and the resume pass tries
+#                     the fix round again on a later run.
 #                     Before /review, /merge or /cleanup: one comment on the
 #                     story naming the step, the window, the share left, the
 #                     reserve and the reset time; exit 0. Resuming is #316.
@@ -1215,7 +1220,9 @@ check_subscription_allowance() {
 
     LAST_ACTION="allowance check before /$step for #$ISSUE_NUMBER"
     if [[ $rc -eq 1 ]]; then
-        if [[ "$step" == "implement" ]]; then
+        if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: fix round not started; story stays in \"In implementation\" and the fix round is tried again on a later run"
+        elif [[ "$step" == "implement" ]]; then
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
             set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
         else
@@ -1227,7 +1234,9 @@ check_subscription_allowance() {
     fi
 
     echo "[ALLOWANCE ERROR] #$ISSUE_NUMBER: /$step not started: $(jq -r '.reason' <<< "$decision_json")" >&2
-    if [[ "$step" == "implement" ]]; then
+    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        echo "#$ISSUE_NUMBER stays in \"In implementation\"; the fix round is tried again on a later run" >&2
+    elif [[ "$step" == "implement" ]]; then
         set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
     else
         post_allowance_comment "$step" "$decision_json"
@@ -1945,12 +1954,16 @@ resume_fix_round() {
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     LAST_ACTION="invoking /implement for #$issue_num (fix round $round)"
     resolve_budget_estimate
+    # The allowance check must not put this story back to "Ready for
+    # implementation": it is unfinished work that holds its place.
+    FIX_ROUND_SESSION=true
     if ! invoke_executor_command "implement" "$issue_num"; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
         DISPATCH_HANDLED=true
         exit 1
     fi
+    FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
     increment_implement_budget
     hand_off_to_codex_review_loop

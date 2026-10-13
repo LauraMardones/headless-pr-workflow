@@ -319,7 +319,7 @@ A fix round is due when all of these hold:
 The dispatcher then runs `/implement` for the story, which continues on the existing PR, and applies the hand-off again. Log: `[RESUME] #<n>: fix round <k> of <max>, /implement on PR #<pr>`.
 
 - A fix round is picked up on the next run. It does not wait for the stale threshold.
-- The story already holds its place within the WIP limit, so the WIP and file-overlap checks are not run against it again. The allowance check before the session still applies.
+- The story already holds its place within the WIP limit, so the WIP and file-overlap checks are not run against it again. The allowance check before the session still applies. When it refuses, the story stays in `In implementation` and the log line is `[RESERVE SKIP] #<n>: fix round not started; …`. It is not put back to "Ready for implementation", unlike a refusal before a first `/implement`.
 - Once the session pushes a commit, the marker no longer names the PR's head, so the same findings start no second round.
 - The dispatcher reads only the bookkeeping job's marker. It does not parse Codex comments or reviews.
 - The bookkeeping job's account is the login behind the dispatcher's own token, because both workflows use `PROJECT_TOKEN`. Set `CODEX_BOOKKEEPING_LOGIN` in the environment if the two ever differ. A marker in a comment by any other account is ignored.
@@ -367,7 +367,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
 - The bookkeeping job can move a story to `In merge` while Codex review threads on the same head are still unresolved. `/merge` then fails on the unresolved-thread gate, and the one-attempt rule leaves the story in `In merge` with a blocker until the PO acts.
-- A fix round that cannot start for more than two hours (for example while the allowance is below the reserve) is rolled back to "Ready for implementation" by stale recovery. It then starts as a ready story, continues on the same PR and passes the WIP check again. A story held by one of the two fix-round blockers above is not rolled back: it waits for the PO.
+- Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 
 ---
@@ -457,7 +457,7 @@ The pin keeps the undocumented event shape stable. To change the version, edit t
 
 A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
 
-A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is tried again by the resume entry on a later run (issue #293). A refusal before a fix round puts the story back to "Ready for implementation", like any refusal before `/implement`; it then starts as a ready story and continues on the same PR. For `/review` and `/cleanup` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is tried again by the resume entry on a later run (issue #293). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` and `/cleanup` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
 
 The script prints exactly one JSON object on stdout in every exit path:
 
