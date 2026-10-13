@@ -67,20 +67,23 @@ def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
     assert d.status(STORY) == "In review"
     assert d.posted(STORY) == [] and d.posted(PR) == []
-    assert f"[HANDOFF] #{STORY}: handed to the Codex review loop (Codex Cloud) on PR #{PR}" in proc.stdout
+    assert f"[HANDOFF] #{STORY}: handed to the Codex review loop (Codex Cloud) on PR #{PR};" in proc.stdout
     assert "(review)" not in proc.stdout  # no review budget increment
     assert proc.stdout.count("[BUDGET] Increment:") == 1
 
 
 @needs_tools
-def test_ac1_dry_run_names_the_hand_off(d):
+@pytest.mark.parametrize("with_pr", [True, False])
+def test_ac1_dry_run_names_the_hand_off(d, with_pr):
     d.add_story(STORY, "Ready for implementation")
-    d.add_pr(PR, STORY)
+    if with_pr:
+        d.add_pr(PR, STORY)
 
     proc = d.run_issue(STORY, "--dry-run")
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"[DRY RUN] Would hand #{STORY} to the Codex review loop (Codex Cloud) on PR #{PR}" in proc.stdout
+    on = f"PR #{PR}" if with_pr else "the PR /implement opens"
+    assert f"[DRY RUN] Would hand #{STORY} to the Codex review loop (Codex Cloud) on {on}: no /review session" in proc.stdout
     assert "/review" not in proc.stdout.replace("no /review session", "")
     assert d.sessions == [] and d.board_writes == [] and d.posted(STORY) == []
 

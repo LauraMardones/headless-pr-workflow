@@ -1776,7 +1776,9 @@ hand_off_to_codex_review_loop() {
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
 
     if $DRY_RUN; then
-        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on ${pr_number:+PR #$pr_number}${pr_number:-the PR /implement opens}: no /review session and no review budget increment; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
+        local pr_label="the PR /implement opens"
+        [[ -n "$pr_number" ]] && pr_label="PR #$pr_number"
+        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session and no review budget increment; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
         return 0
     fi
 
