@@ -219,6 +219,60 @@ def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
 
 
 @needs_tools
+@pytest.mark.parametrize("failure", ["transient", "persistent"])
+def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
+    """The dispatcher's "In implementation" write fails and the session sets no status."""
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    d.fail_status_write("In implementation")
+
+    first = d.run_issue(STORY)
+
+    assert first.returncode == 1
+    assert "[HANDOFF]" not in first.stdout
+    assert d.sessions == [f"implement {STORY}"]  # not selected again as the next ready story
+    assert d.status(STORY) == "Ready for implementation"
+    comments = d.posted(STORY)
+    assert len(comments) == 1 and f"action=hand-off-pending pr={PR} head={HEAD}" in comments[0]
+
+    if failure == "persistent":
+        d.fail_status_write("In review")
+        second = d.run_issue(STORY)
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
+        assert d.status(STORY) == "Ready for implementation"
+        d.fail_status_write("In review", False)
+
+    # The board works again. The poll still reports the story as ready: no second session.
+    d.fail_status_write("In implementation", False)
+    later = d.run_issue(STORY)
+    assert later.returncode == 0, later.stdout + later.stderr
+    assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in later.stdout
+    assert d.sessions == [f"implement {STORY}"]
+    assert d.status(STORY) == "In review"
+    assert d.board_writes == [f"{STORY}=In review"]
+    assert len(d.posted(STORY)) == 2 and f"action=hand-off-done pr={PR}" in d.posted(STORY)[1]
+
+
+@needs_tools
+def test_pending_hand_off_that_still_fails_does_not_block_other_ready_stories(d):
+    """The pending story is kept out of the next-story search; another ready story still runs."""
+    d.add_story(700, "Ready for implementation")
+    d.add_pr(970, 700)
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->")
+    d.fail_status_write("In review")
+    d.session_sets_status("implement", 700, "In review")  # 700's own session sets its status
+
+    proc = d.run_issue(700)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == ["implement 700"]
+    assert d.status(STORY) == "Ready for implementation"
+
+
+@needs_tools
 def test_story_in_implementation_without_a_pending_hand_off_is_left_alone(d):
     """A story someone is working on, with a ready PR, is not moved to "In review"."""
     d.add_story(STORY, "In implementation")
@@ -693,6 +747,37 @@ def test_ac13_in_merge_then_fix_round_then_ready_story(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == ["merge 960", "cleanup 600", f"implement {STORY}", "implement 700"]
     assert d.board_writes == ["600=Done", "700=In implementation", "700=In review"]
+
+
+@needs_tools
+def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_resume_pass(d):
+    feature = "Feature group: #50 Feature: something"
+    d.add_story(600, "In merge", body=feature)
+    d.add_pr(960, 600)
+    d.add_story(601, "In merge", body=feature)
+    d.add_pr(961, 601)
+    d.add_story(602, "Done", body=feature)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
+    assert proc.stdout.count("Feature #50: all 3 stories Done.") == 1
+    assert len(d.slack_calls) == 1
+
+
+@needs_tools
+def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
+    feature = "Feature group: #50 Feature: something"
+    d.add_story(600, "In merge", body=feature)
+    d.add_pr(960, 600)
+    d.add_story(601, "In review", body=feature)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == ["merge 960", "cleanup 600"]
+    assert "all 2 stories Done" not in proc.stdout and d.slack_calls == []
 
 
 def poll_json(tmp_path, items: list[tuple[int, str]]) -> dict:

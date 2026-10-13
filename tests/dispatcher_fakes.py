@@ -290,6 +290,7 @@ class Dispatcher:
             "PATH": ":".join(path),
             "MOCK_DIR": self.mock.as_posix(),
             "MOCK_BOT": BOT,
+            "LC_ALL": "C.UTF-8",  # grep -P in the dispatcher needs a UTF-8 or unibyte locale
             "GH_TOKEN": "fake-token",
             "GITHUB_OUTPUT": (self.mock / "github_output").as_posix(),
             "ANTHROPIC_API_KEY": "fake-anthropic",

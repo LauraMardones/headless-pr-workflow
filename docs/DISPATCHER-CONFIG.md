@@ -293,7 +293,7 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 - finds the linked open PR. With no linked open PR, or a PR that is still a draft, it posts the mid-cycle blocker for `/implement`, leaves the story in `In implementation` and exits `1`;
 - writes `In review` only when the story is still `In implementation` and no fix round is due. It never overwrites `In review` or `In merge`, because the bookkeeping job may already have acted on Codex's answer;
 - writes nothing when Codex answered with findings while the session was still running: the story is already back in `In implementation` with a fix round due on the new head, and the next run starts it;
-- when that `In review` write fails, posts one recovery comment with a hidden marker for the PR and exits `1`. A later run finds the marker on a story still in `In implementation`, with a non-draft PR and no fix round due, and completes the hand-off (`[RESUME] #<n>: completing the hand-off on PR #<pr>`), also when the PR head has changed since. It then posts a second marker, so the hand-off is completed once. Without this the bookkeeping job, which acts only on `In review`, would never see Codex's answer;
+- when that `In review` write fails, or the story is still in "Ready for implementation" because no status write of the run took effect, posts one recovery comment with a hidden marker for the PR and exits `1`. The story is not reported as handed off and is not picked again as the next ready story. A later run finds the marker on a story still in `In implementation` or "Ready for implementation", with a non-draft PR and no fix round due, and completes the hand-off without starting `/implement` again (`[RESUME] #<n>: completing the hand-off on PR #<pr>`), also when the PR head has changed since. It then posts a second marker, so the hand-off is completed once. Without this the bookkeeping job, which acts only on `In review`, would never see Codex's answer;
 - starts no `/review` session and adds no review budget increment;
 - logs `[HANDOFF] #<n>: handed to the Codex review loop (Codex Cloud) on PR #<pr>; no /review session started` and goes on to the next ready story.
 
@@ -340,8 +340,8 @@ Set it as a repository variable; `.github/workflows/dispatcher.yml` passes it to
 
 Each run handles resumable work before it starts new work:
 
-1. stories in `In merge`;
-2. fix rounds that are due;
+1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`;
+2. fix rounds that are due, and hand-offs that are still pending;
 3. stories in **Ready for implementation**, as before.
 
 `scripts/dispatcher-poll.sh` reports the candidates in two more keys of its JSON, `in_merge` and `in_implementation` (each `[{number, title}]`), from the board read it already makes. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** either new list is non-empty:

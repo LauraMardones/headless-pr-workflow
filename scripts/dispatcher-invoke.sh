@@ -1846,6 +1846,52 @@ fix_round_due() {
     head_in_list "$head_sha" "$heads"
 }
 
+# record_pending_hand_off <pr> <head> — the session finished but the story is
+# not "In review" and could not be put there. The bookkeeping job acts only on
+# "In review", so this must not look like a finished hand-off: one recovery
+# comment carries the pending marker, the run exits 1, and a later run
+# completes the hand-off without a new session (complete_pending_hand_off()).
+record_pending_hand_off() {
+    local pr_number="$1" pr_head="$2"
+    if ! marker_holds "$ISSUE_NUMBER" "$(hand_off_pending_prefix "$pr_number")" 0 "$(hand_off_done_marker "$pr_number")"; then
+        post_comment "$ISSUE_NUMBER" "## Recovery Comment
+Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status is not \"In review\" and could not be set.
+Action: none yet. A later dispatcher run sets the status without starting /implement again; the Codex review loop acts only on a story in \"In review\".
+
+$(hand_off_pending_marker "$pr_number" "$pr_head")"
+    fi
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
+# complete_pending_hand_off <issue> <item-id> <pr> <draft> — writes "In review"
+# for a story whose earlier hand-off is still pending, and posts the "done"
+# marker. Does nothing when no pending marker holds or the PR is a draft. A
+# story it handled is not started as new work in this run; when the write
+# fails again the story is also kept out of the next-story search.
+HAND_OFF_RESUMED_ISSUES=""
+
+complete_pending_hand_off() {
+    local issue_num="$1" item_id="$2" pr_number="$3" pr_draft="$4"
+    [[ "$pr_draft" != "true" ]] || return 0
+    marker_holds "$issue_num" "$(hand_off_pending_prefix "$pr_number")" 1 "$(hand_off_done_marker "$pr_number")" || return 0
+
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
+    HAND_OFF_RESUMED_ISSUES="${HAND_OFF_RESUMED_ISSUES:+$HAND_OFF_RESUMED_ISSUES }$issue_num"
+    if set_project_status_checked "$item_id" "$issue_num" "In review"; then
+        RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+        post_comment "$issue_num" "## Recovery Comment
+Detected: a hand-off for #$issue_num on PR #$pr_number that could not set the board status earlier.
+Action: status set to \"In review\".
+
+$(hand_off_done_marker "$pr_number")" || true
+    else
+        echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
+        NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$issue_num"
+    fi
+    return 0
+}
+
 hand_off_to_codex_review_loop() {
     local head_before="${1:-}"
     local reviewer="${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]}"
@@ -1894,26 +1940,20 @@ hand_off_to_codex_review_loop() {
         exit 1
     fi
 
-    if [[ "$status" != "In implementation" ]]; then
+    if [[ "$status" == "Ready for implementation" || "$status" == "Ready" ]]; then
+        # Neither the dispatcher's own "In implementation" write nor the
+        # session's status write took effect. Reporting a hand-off here would
+        # let the next-story search pick this story again and start another
+        # /implement session for work that is already on the PR.
+        echo "Error: #$ISSUE_NUMBER is still \"$status\" after /implement; the board status did not advance." >&2
+        record_pending_hand_off "$pr_number" "$pr_head"
+    elif [[ "$status" != "In implementation" ]]; then
         echo "#$ISSUE_NUMBER is \"$status\" on the board; the dispatcher leaves it there."
     elif $due; then
         echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
     elif ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"; then
-        # The bookkeeping job acts only on a story "In review". A write that
-        # fails here must not look like a finished hand-off: the marker lets a
-        # later run retry it (see resume_fix_round()).
-        local pending_marker
-        pending_marker=$(hand_off_pending_marker "$pr_number" "$pr_head")
-        echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement; a later run retries the hand-off." >&2
-        if ! marker_holds "$ISSUE_NUMBER" "$(hand_off_pending_prefix "$pr_number")" 0 "$(hand_off_done_marker "$pr_number")"; then
-            post_comment "$ISSUE_NUMBER" "## Recovery Comment
-Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status could not be set to \"In review\".
-Action: none yet. The dispatcher sets the status on a later run; the Codex review loop acts only on a story in \"In review\".
-
-$pending_marker"
-        fi
-        DISPATCH_HANDLED=true
-        exit 1
+        echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement." >&2
+        record_pending_hand_off "$pr_number" "$pr_head"
     fi
     echo "[HANDOFF] #$ISSUE_NUMBER: handed to the Codex review loop ($reviewer) on PR #$pr_number; no /review session started"
 }
@@ -1921,7 +1961,8 @@ $pending_marker"
 # ─── Resume pass (issue #293) ─────────────────────────────────────────────────
 # Runs once at the start of every run, before new work, and decides everything
 # from GitHub facts read now (board status, linked PR, comment markers).
-# Order: stories "In merge", then due fix rounds.
+# Order: stories "In merge", then due fix rounds, then hand-offs that are
+# still pending.
 #
 # load_story_context sets the per-story globals the session helpers read
 # (ISSUE_NUMBER, TARGET_*, EXECUTOR_LABEL). It returns 1 with
@@ -1987,6 +2028,7 @@ resume_in_merge_story() {
         echo "${LOG_PREFIX}[RESUME] #$issue_num: /merge PR #$pr_number"
         RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
         run_merge_or_block "$pr_number" "$pr_head"
+        refresh_board_after_resumed_story
         finish_story
         return 0
     fi
@@ -1997,6 +2039,7 @@ resume_in_merge_story() {
             echo ""
             echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$merged_pr is already merged; Done and /cleanup"
             RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+            refresh_board_after_resumed_story
             finish_story
             return 0
         fi
@@ -2027,23 +2070,10 @@ resume_fix_round() {
 
     heads=$(fix_round_heads "$pr_number")
     if ! head_in_list "$pr_head" "$heads"; then
-        # No fix round is due. If an earlier hand-off for this head could not
-        # write "In review", finish it now; otherwise the bookkeeping job
-        # would never act on Codex's answer.
-        if [[ "$pr_draft" != "true" ]] \
-           && marker_holds "$issue_num" "$(hand_off_pending_prefix "$pr_number")" 1 "$(hand_off_done_marker "$pr_number")"; then
-            echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
-            if set_project_status_checked "$item_id" "$issue_num" "In review"; then
-                RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
-                post_comment "$issue_num" "## Recovery Comment
-Detected: a hand-off for #$issue_num on PR #$pr_number that could not set the board status earlier.
-Action: status set to \"In review\".
-
-$(hand_off_done_marker "$pr_number")" || true
-            else
-                echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
-            fi
-        fi
+        # No fix round is due. If an earlier hand-off could not write
+        # "In review", finish it now; otherwise the bookkeeping job would
+        # never act on Codex's answer.
+        complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$pr_draft"
         return 0
     fi
 
@@ -2084,6 +2114,30 @@ $(hand_off_done_marker "$pr_number")" || true
     hand_off_to_codex_review_loop "$pr_head"
 }
 
+# A story still "Ready for implementation" whose hand-off is pending: the
+# status writes of its run failed. It is completed here, before new work, so
+# it is not started a second time.
+resume_pending_hand_off() {
+    local issue_num="$1" item_id="$2"
+    local pr_json pr_number
+    load_story_context "$issue_num" "$item_id" || return 0
+    [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    [[ -n "$pr_number" ]] || return 0
+    complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$(jq -r '.draft // false' <<< "$pr_json")"
+}
+
+# The closure check of each finished story reads $BOARD_DATA. Re-read it after
+# every story the resume pass finishes, so the last two stories of a feature
+# finished in one pass see each other as Done.
+refresh_board_after_resumed_story() {
+    $DRY_RUN && return 0
+    BOARD_DATA=$(fetch_board_data) || {
+        echo "Error: Failed to fetch project board data." >&2; exit 1
+    }
+}
+
 run_resume_pass() {
     local items count i
     items=$(board_items_in_status "In merge")
@@ -2096,6 +2150,12 @@ run_resume_pass() {
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
         resume_fix_round "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+    done
+
+    items=$(board_items_in_status "Ready for implementation")
+    count=$(jq 'length' <<< "$items")
+    for ((i=0; i < count; i++)); do
+        resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
     done
 }
 
@@ -2116,6 +2176,14 @@ fi
 
 if $RESUME_ONLY; then
     echo "Resume pass finished ($RESUME_SESSIONS resumed). Dispatcher exiting cleanly."
+    DISPATCH_HANDLED=true
+    exit 0
+fi
+
+# A story whose pending hand-off the resume pass just handled already has its
+# work on the PR. It is not started as new work in this run.
+if [[ " $HAND_OFF_RESUMED_ISSUES " == *" $ISSUE_NUMBER "* ]]; then
+    echo "#$ISSUE_NUMBER: its hand-off was handled by the resume pass; /implement is not started again. Dispatcher exiting cleanly."
     DISPATCH_HANDLED=true
     exit 0
 fi
