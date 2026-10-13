@@ -82,16 +82,28 @@ The Claude Code / Codex split is a declared capability boundary, not a policy pr
 
 ### Cross-Provider Review Pairing
 
-The Executor Roles table above describes the intended split, but a story's `executor:` label only ever governs `/implement` — it says nothing about which provider reviews it. `scripts/dispatcher-invoke.sh` closes that gap (issue #263): `/review` is automatically paired to a different provider than whichever executor performed `/implement` on that story, computed at review time from the `REVIEW_EXECUTOR_ROUTING` table. No new `executor:` label value is introduced or stored — the pairing is derived, not assigned.
+The Executor Roles table above describes the intended split, but a story's `executor:` label only ever governs `/implement` — it says nothing about who reviews it. `scripts/dispatcher-invoke.sh` closes that gap from two lookup tables, keyed by the executor that performed `/implement` (issues #263 and #293, ADR-006). No new `executor:` label value is introduced or stored — the review path is derived, not assigned.
 
-| `/implement` executor | `/review` executor |
-|---|---|
-| `executor:claude-code-haiku` | Codex |
-| `executor:claude-code-sonnet` | Codex |
-| `executor:claude-code-opus` | Codex |
-| `executor:codex` | Claude Opus (the "deep code review, complex reasoning" tier — see Claude Model Tiers below) |
+| `/implement` executor | Review | Table in `scripts/dispatcher-invoke.sh` |
+|---|---|---|
+| `executor:claude-code-haiku` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
+| `executor:claude-code-sonnet` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
+| `executor:claude-code-opus` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
+| `executor:codex` | A `/review` session under Claude Opus (the "deep code review, complex reasoning" tier — see Claude Model Tiers below) | `REVIEW_EXECUTOR_ROUTING` |
 
-This applies only to the dispatcher's own invocation path (`invoke_executor_command()`'s Step E2 call in `scripts/dispatcher-invoke.sh`). A human or interactive Claude Code session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
+An executor with a row in neither table stops with a mid-cycle blocker after `/implement`, so a typo or a new tier never skips review silently.
+
+**Claude-implemented stories (Codex review loop).** Each Claude-implemented head is reviewed once, by Codex Cloud (ADR-006). `/implement` posts the review request, and the `codex-review-bookkeeping` workflow reads the answer and moves the story. The dispatcher's part is:
+
+1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and adds nothing to a review budget. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
+2. **Resume at `In merge`.** On a later run, a story in `In merge` gets `/merge`, then `Done` and `/cleanup`. This applies to every story, whatever its executor. There is one `/merge` attempt per PR head.
+3. **Fix round.** A story back in `In implementation`, for which the bookkeeping job recorded findings on the PR's current head, gets `/implement` again on the same PR. After that the hand-off applies again. The number of fix rounds per PR is limited by the repository variable `CODEX_FIX_ROUND_MAX` (default `3`).
+
+Each run handles resumable work before new work: stories in `In merge`, then fix rounds, then **Ready for implementation**. The rules, bounds and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#codex-review-loop-hand-off-and-resume).
+
+**Codex-implemented stories (paired session).** `/review` runs in the same dispatcher run, under Claude Opus, followed by `/merge` and `/cleanup`.
+
+This applies only to the dispatcher's own invocation path in `scripts/dispatcher-invoke.sh`. A human or interactive session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
 
 ### Claude Model Tiers (Claude Code)
 
