@@ -2210,6 +2210,19 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
         continue
     fi
 
+    # A story the dispatcher itself stopped at a fix-round bound (issue #293)
+    # is waiting for the PO, not stale. Rolling it back would start /implement
+    # again as a ready story and pass the bound.
+    if [[ -n "$pr_number" ]]; then
+        pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
+        if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" \
+           || { [[ -n "$pr_head_sha" ]] \
+                && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")"; }; then
+            echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
+            continue
+        fi
+    fi
+
     hours_inactive=$(( inactivity / 3600 ))
     echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
 

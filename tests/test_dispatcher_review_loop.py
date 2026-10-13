@@ -420,6 +420,33 @@ def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
     assert f"[RESUME SKIP] #{STORY}: the fix round was already tried on PR #{PR}" in second.stdout
 
 
+@needs_tools
+@pytest.mark.parametrize("held", [True, False])
+def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held):
+    """Stale recovery would restart /implement as a ready story and pass the maximum."""
+    d.add_story(700, "Ready for implementation")
+    d.add_pr(970, 700)
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    if held:
+        for head in ("1" * 40, HEAD):
+            d.add_findings(PR, head)
+
+    proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    comments = d.posted(STORY)
+    if held:
+        assert d.sessions == ["implement 700"]
+        assert d.status(STORY) == "In implementation"
+        assert len(comments) == 1 and "Type: resource" in comments[0]
+        assert f"#{STORY} is held by a fix-round blocker" in proc.stdout
+    else:
+        # Without the blocker the story is rolled back and picked up as a ready story.
+        assert len(comments) == 1 and "## Recovery Comment" in comments[0]
+        assert d.sessions == ["implement 700", f"implement {STORY}"]
+
+
 # ── Order and entry ─────────────────────────────────────────────────────────
 
 

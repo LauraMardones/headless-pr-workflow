@@ -3,7 +3,9 @@
 A fake ``gh`` (board, issues, pull requests, comments), a fake ``curl``
 (executor API and Slack webhook) and a stub allowance script on
 ``ALLOWANCE_SCRIPT``. All state lives in files under ``MOCK_DIR``, so a test
-can run the dispatcher several times against the same GitHub state.
+can run the dispatcher several times against the same GitHub state. Issues and
+PRs carry a fixed old activity date, so a story "In implementation" is always
+past the stale threshold.
 
 The fake ``curl`` reads the command a session was started for from the task
 prompt (the first line of ``.claude/commands/<command>.md``) and logs it. A
@@ -85,9 +87,9 @@ if [[ "$endpoint" == "graphql" ]]; then
                 pageInfo: {hasNextPage: false, endCursor: null},
                 nodes: [$b.items[] | {
                     id: .id,
-                    updatedAt: "2026-10-13T09:00:00Z",
+                    updatedAt: "2026-09-27T00:00:00Z",
                     content: {number: .number, title: .title, body: (.body // ""),
-                              updatedAt: "2026-10-13T09:00:00Z"},
+                              updatedAt: "2026-09-27T00:00:00Z"},
                     fieldValues: {nodes: [{name: ($st[0][.id] // .status),
                                            field: {name: "Status"}}]}
                 }]
@@ -241,7 +243,7 @@ class Dispatcher:
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
         pulls.append({"number": number, "body": f"Closes #{issue}", "state": state, "draft": draft,
                       "merged_at": "2026-10-13T09:30:00Z" if merged else None,
-                      "updated_at": "2026-10-13T09:00:00Z", "head": {"ref": "branch", "sha": head}})
+                      "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}})
         self._write("pulls.json", pulls)
 
     def add_comment(self, target: int, body: str, login: str = BOT) -> None:

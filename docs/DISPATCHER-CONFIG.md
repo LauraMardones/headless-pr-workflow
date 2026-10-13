@@ -367,7 +367,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
 - The bookkeeping job can move a story to `In merge` while Codex review threads on the same head are still unresolved. `/merge` then fails on the unresolved-thread gate, and the one-attempt rule leaves the story in `In merge` with a blocker until the PO acts.
-- A fix round that cannot start for more than two hours is rolled back to "Ready for implementation" by stale recovery. It then starts as a ready story, continues on the same PR and passes the WIP check again.
+- A fix round that cannot start for more than two hours (for example while the allowance is below the reserve) is rolled back to "Ready for implementation" by stale recovery. It then starts as a ready story, continues on the same PR and passes the WIP check again. A story held by one of the two fix-round blockers above is not rolled back: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 
 ---
