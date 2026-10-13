@@ -35,6 +35,16 @@ and `/review` still finish their real work. The merge gate is never skipped, so
 `/merge` requires the capability and stops before any GitHub mutation without
 it.
 
+## Codex Review Requests
+
+The Codex review trigger phrase (ADR-006 → Decision) starts a Codex task
+wherever it is written. Post it only as a PR conversation comment that requests
+a review, and only from `/implement` or the `codex-review-bookkeeping` workflow.
+Never write it in an issue body, an issue comment, a PR description or any
+other PR comment. In documentation and tests, refer to ADR-006 or to the shared
+constant in `src/headless_pr_workflow/review_policy.py` instead of repeating
+the phrase.
+
 ## Stale Checkout Handling
 
 The sandbox workspace may be initialized from an older checkout and `git fetch` may be blocked. At the start of each session:

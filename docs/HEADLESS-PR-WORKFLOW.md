@@ -103,6 +103,42 @@ This keeps the flow compatible with deterministic commands:
 - `pr-context` normalizes review submissions from `latestReviews` and `reviews`, and reads the PR timeline, commits and linked stories the recognizers need. When these cannot be read completely, the Codex review and separate-session review paths fail closed.
 - `pre-merge` must still fail if the PR is draft, if checks are missing or failing, if mergeability is bad, if unresolved review threads remain active, or if the reviewed SHA is no longer current.
 
+### Codex review loop
+
+For a Claude-implemented story (`executor:claude-code-*`), the review is requested and followed up without a review session (ADR-006):
+
+1. **Request on ready.** `/implement` opens the PR as a draft and pushes freely. When it marks the PR Ready for review, it posts one PR conversation comment that starts with the Codex review trigger phrase from ADR-006 → Decision. After a round of fixes for Codex findings it posts exactly one new request, after the round's last push and after the story is back in `In review`. It posts no request on intermediate pushes, none on an issue, and none for an `executor:codex` story.
+2. **The bookkeeping job.** `.github/workflows/codex-review-bookkeeping.yml` runs `hpw codex-review-bookkeeping` when the Codex bot comments on or reviews a PR, every 15 minutes for every open, non-draft PR, and on manual dispatch. It calls no model. An event only names the PR: the job reads the PR fresh from GitHub and decides from current facts, so a redelivered event is a no-op.
+3. **When it acts.** Only when the PR is open and not a draft, it has exactly one linked story with exactly one `executor:` label starting with `executor:claude-code-`, and that story's board status is exactly `In review`. Otherwise it does nothing and reports why.
+
+"For the current head" means after the last commit or force-push in the PR timeline.
+
+| Situation on the current head | Action |
+|---|---|
+| Clean Codex review accepted by the approval gate, required checks green | Post the Session Summary (`Next: merge`); move the story `In review` → `In merge`. |
+| Clean, but a reviewer requested changes | Nothing. The approval gate does not pass, and that reviewer owns the next step. |
+| Clean, a required check still running | Nothing; the scheduled run looks again. |
+| Clean, a required check failed | Post the Session Summary naming the check (`Next: implementation`); move `In review` → `In implementation`. |
+| Codex review with findings | Post the Session Summary linking the review (`Next: implementation`); move `In review` → `In implementation`. |
+| Usage-limit reply, or a request with no answer | Nothing until the back-off has passed, then one new review request. |
+| No request for the current head | One review request. |
+| Reply in an unknown format | No board move; one `Type: external` blocker on the story naming the reply. |
+| The job has posted its maximum number of requests for the head and another is due | One `Type: resource` blocker on the story; no further request for that head. |
+
+Rules:
+
+- **Progress comment.** Codex keeps one "Codex Review Summary" comment up to date on the PR. It is not a reply: a request stays pending while it says a review is running.
+- **Bounds.** Two repository variables set the bounds, so the PO changes them without a code change: `CODEX_REVIEW_RETRY_HOURS` (back-off, default `5`, the Codex usage window) and `CODEX_REVIEW_MAX_REQUESTS` (requests the job posts per head, default `3`).
+- **Blockers** use the Declaration format in `PROJECT-STATUS.md` and are posted on the story. The board has no `Blocked` option, so the story stays in `In review`. No Slack notification is sent for them.
+- **Session Summary.** The job posts the exact output of `scripts/session-summary.sh --command review` as a PR comment. Its `Deviation:` line says the bookkeeping job produced it without a model session.
+- **Idempotency.** Every comment the job posts ends with a hidden marker naming the PR head and the kind of action. The job skips anything already done for that head. All state lives on GitHub.
+- **Fresh refresh.** Nothing is posted or moved on the strength of one read. Immediately before the first mutation the job reads the PR, the story status, the required checks and the story comments again and decides again. It acts only when both readings lead to the same decision; otherwise it stops with an error and changes nothing, and the next run decides for the new state. A change in the instant after the second read cannot be excluded by any job; `/merge` refreshes every gate again before merging.
+- **Failure.** When PR, story or board state cannot be read completely, a board status option is missing, or a mutation fails, the command exits non-zero, names the failed step and claims no action it did not complete.
+- **Command not on the default branch yet.** The job runs the default branch's code. On the PR that introduces the command, the default branch does not have it, so the job skips with a notice and exits successfully instead of failing a check on that PR.
+- **Trigger phrase.** The phrase is written only in a PR conversation comment that requests a review, by `/implement` or by this job (`AGENTS.md` → Codex Review Requests).
+
+`/review` remains the path for `executor:codex` stories and for a separate-session review (path 2).
+
 ## Deterministic Automation
 
 Scripts should cover facts and gates that can be determined mechanically:

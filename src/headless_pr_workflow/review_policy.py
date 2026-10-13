@@ -27,6 +27,14 @@ EXECUTOR_LABEL_PREFIX = "executor:"
 CLAUDE_EXECUTOR_LABEL_PREFIX = "executor:claude-code-"
 CODEX_EXECUTOR_LABEL = "executor:codex"
 CODEX_BOT_LOGIN = "chatgpt-codex-connector"
+# The Codex review trigger phrase (ADR-006 -> Decision). A PR conversation
+# comment whose first line is this phrase starts one Codex review. It is posted
+# only as such a comment, by `/implement` or by the bookkeeping job, and never
+# written into an issue, a PR description or any other comment.
+CODEX_REVIEW_TRIGGER_PHRASE = "@codex review"
+# `status` is the progress comment Codex keeps up to date on a PR. It is not a
+# reply to a request, so the bookkeeping job ignores it.
+CODEX_EVENT_KINDS = ("clean", "findings", "usage-limit", "status", "unknown")
 
 _REVIEWER_PROVIDER_LINE = re.compile(
     rf"^[ \t]*{re.escape(REVIEWER_PROVIDER_LABEL)}[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE
@@ -35,6 +43,8 @@ _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 _CODEX_CLEAN_START = re.compile(r"^Codex Review:\s*Didn['’]t find any major issues\.")
 _CODEX_REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*[ \t]*`([0-9a-fA-F]{7,40})`")
 _CODEX_USAGE_LIMIT_START = "You have reached your Codex usage limits."
+_CODEX_STATUS_START = "<!-- codex-pull-request-review-summary -->"
+_CODEX_FINDINGS_START = "### 💡 Codex Review"
 
 
 @dataclass(frozen=True)
@@ -473,6 +483,41 @@ def _codex_not_applicable_reason(linked_issues: tuple[LinkedIssue, ...]) -> str 
     return None
 
 
+def classify_codex_event(event: TimelineEvent) -> str | None:
+    """Classify one Codex bot timeline event as one of `CODEX_EVENT_KINDS`.
+
+    Returns None for an event that is not a comment or review by the Codex
+    bot. A clean result and a usage-limit reply are PR conversation comments;
+    findings are a PR review submission. Codex's own progress comment is
+    `status`. Anything else by the bot is `unknown`.
+    """
+
+    if not _is_codex_bot(event):
+        return None
+    if event.kind == "comment":
+        if (event.body or "").strip().startswith(_CODEX_STATUS_START):
+            return "status"
+        return _codex_comment_kind(event.body)
+    if event.kind == "review":
+        return _codex_review_kind(event.body)
+    return None
+
+
+def codex_reviewed_commit(event: TimelineEvent) -> str | None:
+    """Return the lower-case commit prefix a Codex result names, or None when it names none or several."""
+
+    return _codex_reviewed_commit(event.body)
+
+
+def is_codex_review_request(event: TimelineEvent) -> bool:
+    """True for a PR conversation comment by a non-bot account whose first line is the trigger phrase."""
+
+    if event.kind != "comment" or event.author_type == "Bot":
+        return False
+    lines = (event.body or "").strip().splitlines()
+    return bool(lines) and lines[0].strip().lower() == CODEX_REVIEW_TRIGGER_PHRASE
+
+
 def _is_codex_actor(login: str | None, actor_type: str | None) -> bool:
     if actor_type != "Bot" or not login:
         return False
@@ -490,6 +535,13 @@ def _codex_comment_kind(body: str | None) -> str:
         return "clean"
     if text.startswith(_CODEX_USAGE_LIMIT_START):
         return "usage-limit"
+    return "unknown"
+
+
+def _codex_review_kind(body: str | None) -> str:
+    text = (body or "").strip()
+    if text.startswith(_CODEX_FINDINGS_START) and _codex_reviewed_commit(text) is not None:
+        return "findings"
     return "unknown"
 
 

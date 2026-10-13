@@ -40,6 +40,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `review-delta` | Show changes since the last reviewed SHA. | reviewer, implementer | P1-high | F-review | report | core | implemented |
 | `unresolved-review-threads` | Detect unresolved GitHub review threads. | reviewer, implementer | P1-high | F-review | hard-gate | core | implemented |
 | `blocking-comments` | Detect blocking review comments or labels. | reviewer, implementer | P1-high | F-review | hard-gate | core | scaffolded |
+| `codex-review-bookkeeping` | Move the story and post the Session Summary after a Codex review, with no model. | orchestrator | P1-high | F-review | action | core | implemented |
 | `ci-summary` | Summarize CI/check state for the current head SHA. | QA, implementer | P1-high | E-review-readiness | report | core | implemented |
 | `target-branch-check` | Verify PR targets the expected base branch. | implementer, merge-owner | P0-blocking | H-merge | hard-gate | core | implemented |
 | `merge-owner` | Determine whether this session may merge. | merge-owner, orchestrator | P1-high | H-merge | hard-gate | core | implemented |

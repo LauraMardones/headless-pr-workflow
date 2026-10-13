@@ -1,0 +1,83 @@
+# Codex review bookkeeping (ADR-006, issue #292)
+#
+# Deterministic follow-up to a Codex review: move the story on the board, post
+# the Session Summary, re-request a missing review within bounds, or post a
+# blocker. No model is called and no model secret is referenced.
+#
+# An event only names the PR. `hpw codex-review-bookkeeping` reads the PR fresh
+# from GitHub and decides from current facts, so a redelivered or late event is
+# a no-op, and the scheduled run makes up for any event that was missed. All
+# state lives on GitHub; nothing is kept on the runner or in a cache.
+#
+# The job always checks out the default branch, never the PR's code.
+# See docs/HEADLESS-PR-WORKFLOW.md -> "Codex review loop".
+
+name: Codex review bookkeeping
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number. Leave empty to run for every open, non-draft PR."
+        required: false
+        type: string
+
+# One run at a time for the repository, so a comment event and a scheduled run
+# never act on the same PR together. A queued run waits; a running one is never
+# cancelled. GitHub keeps only the newest queued run per group, which is safe
+# because every run decides from fresh state.
+concurrency:
+  group: codex-review-bookkeeping-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bookkeeping:
+    # Event runs start only for the Codex bot's own PR comments and reviews.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.comment.user.type == 'Bot' && github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.type == 'Bot' && github.event.review.user.login == 'chatgpt-codex-connector[bot]')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Event payload values reach the script only through environment variables.
+      - name: Run Codex review bookkeeping
+        env:
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          CODEX_REVIEW_RETRY_HOURS: ${{ vars.CODEX_REVIEW_RETRY_HOURS }}
+          CODEX_REVIEW_MAX_REQUESTS: ${{ vars.CODEX_REVIEW_MAX_REQUESTS }}
+        # Before the command first lands on the default branch (the PR that
+        # introduces it), there is nothing to run: skip with a notice.
+        run: |
+          if [ ! -f src/headless_pr_workflow/codex_review_bookkeeping.py ]; then
+            echo "::notice::The default branch has no codex-review-bookkeeping command yet; nothing to do."
+            exit 0
+          fi
+          if [ -n "$PR_NUMBER" ]; then
+            sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY"
+          else
+            sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY"
+          fi
