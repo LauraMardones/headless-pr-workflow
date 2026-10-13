@@ -858,10 +858,12 @@ dispatcher_marker() {
 # marker_holds <issue> <marker> — 0 when the newest comment carrying <marker>
 # has no later PO `/unblock` line; 1 when there is no such comment or the PO
 # has unblocked it. A failed comment read counts as "holds", so an API error
-# never starts a session or posts a second blocker.
+# never starts a session or posts a second blocker. A caller that acts when
+# the marker holds passes 1 as the third argument, so a failed read does
+# nothing instead.
 marker_holds() {
-    local issue_num="$1" marker="$2" comments
-    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return 0
+    local issue_num="$1" marker="$2" on_read_error="${3:-0}" comments
+    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return "$on_read_error"
     jq -e --arg marker "$marker" --arg login "$DECISION_BLOCKER_PO_LOGIN" '
         ([.[] | select((.body // "") | contains($marker))] | last) as $held
         | if $held == null then false
@@ -1774,6 +1776,35 @@ fix_round_attempt_marker() {
     dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
 }
 
+hand_off_pending_marker() {
+    dispatcher_marker "action=hand-off-pending pr=$1 head=$2"
+}
+
+# set_project_status_checked — like set_project_status(), but returns 1 when
+# the write did not happen, so the caller can keep a retryable state.
+set_project_status_checked() {
+    local item_id="$1" issue_num="$2" status_name="$3" option_id
+    option_id=$(get_status_option_id "$status_name")
+    [[ -n "$item_id" && -n "$STATUS_FIELD_ID" && -n "$option_id" ]] || return 1
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
+        return 0
+    fi
+    gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: { singleSelectOptionId: $optionId }
+      }) { projectV2Item { id } }
+    }
+    ' -f projectId="$PROJECT_ID" \
+      -f itemId="$item_id" \
+      -f fieldId="$STATUS_FIELD_ID" \
+      -f optionId="$option_id" >/dev/null
+}
+
 fix_round_due() {
     local pr_number="$1" head_sha="$2"
     local heads
@@ -1834,8 +1865,22 @@ hand_off_to_codex_review_loop() {
         echo "#$ISSUE_NUMBER is \"$status\" on the board; the dispatcher leaves it there."
     elif $due; then
         echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
-    else
-        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
+    elif ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"; then
+        # The bookkeeping job acts only on a story "In review". A write that
+        # fails here must not look like a finished hand-off: the marker lets a
+        # later run retry it (see resume_fix_round()).
+        local pending_marker
+        pending_marker=$(hand_off_pending_marker "$pr_number" "$pr_head")
+        echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement; a later run retries the hand-off." >&2
+        if ! marker_holds "$ISSUE_NUMBER" "$pending_marker"; then
+            post_comment "$ISSUE_NUMBER" "## Recovery Comment
+Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status could not be set to \"In review\".
+Action: none yet. The dispatcher sets the status on a later run; the Codex review loop acts only on a story in \"In review\".
+
+$pending_marker"
+        fi
+        DISPATCH_HANDLED=true
+        exit 1
     fi
     echo "[HANDOFF] #$ISSUE_NUMBER: handed to the Codex review loop ($reviewer) on PR #$pr_number; no /review session started"
 }
@@ -1937,17 +1982,32 @@ resume_in_merge_story() {
 # allowance check inside invoke_executor_command() still applies.
 resume_fix_round() {
     local issue_num="$1" item_id="$2"
-    local pr_json pr_number pr_head heads round attempt_marker
+    local pr_json pr_number pr_draft pr_head heads round attempt_marker
     load_story_context "$issue_num" "$item_id" || return 0
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
 
     pr_json=$(find_linked_pr_json "$issue_num")
     pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
     [[ -n "$pr_number" && -n "$pr_head" ]] || return 0
 
     heads=$(fix_round_heads "$pr_number")
-    head_in_list "$pr_head" "$heads" || return 0
+    if ! head_in_list "$pr_head" "$heads"; then
+        # No fix round is due. If an earlier hand-off for this head could not
+        # write "In review", finish it now; otherwise the bookkeeping job
+        # would never act on Codex's answer.
+        if [[ "$pr_draft" != "true" ]] \
+           && marker_holds "$issue_num" "$(hand_off_pending_marker "$pr_number" "$pr_head")" 1; then
+            echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
+            if set_project_status_checked "$item_id" "$issue_num" "In review"; then
+                RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+            else
+                echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
+            fi
+        fi
+        return 0
+    fi
 
     # One marker per head: the count is the number of this round.
     round=$(wc -l <<< "$heads" | tr -d '[:space:]')

@@ -70,6 +70,7 @@ tick() {
 
 if [[ "$endpoint" == "graphql" ]]; then
     if [[ "$query" == *mutation* ]]; then
+        [[ -f "$MOCK_DIR/fail_option_$option_id" ]] && { echo "fake gh: forced mutation failure" >&2; exit 1; }
         name=$(jq -r --arg o "$option_id" '.options | to_entries[] | select(.value == $o) | .key' "$MOCK_DIR/board.json")
         echo "$item_id=$name" >> "$MOCK_DIR/mutations.log"
         jq --arg i "$item_id" --arg n "$name" '. + {($i): $n}' "$MOCK_DIR/state.json" > "$MOCK_DIR/state.tmp"
@@ -270,6 +271,11 @@ class Dispatcher:
 
     def session_sets_status(self, command: str, number: int, status: str) -> None:
         self.on_session(command, f"""jq '. + {{"ITEM_{number}": "{status}"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"\n""")
+
+    def fail_status_write(self, status: str, failing: bool = True) -> None:
+        """Make the board write of ``status`` fail (a GraphQL error)."""
+        path = self.mock / f"fail_option_{self._read('board.json')['options'][status]}"
+        path.write_text("") if failing else path.unlink(missing_ok=True)
 
     def fail(self, command: str, failing: bool = True) -> None:
         path = self.mock / f"fail_{command}"

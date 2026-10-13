@@ -175,6 +175,51 @@ fi
 
 
 @needs_tools
+def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d):
+    """The bookkeeping job acts only on "In review": a failed write must not end the hand-off for good."""
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    d.fail_status_write("In review")
+
+    first = d.run_issue(STORY)
+
+    assert first.returncode == 1
+    assert "[HANDOFF]" not in first.stdout
+    assert d.sessions == [f"implement {STORY}"]
+    assert d.status(STORY) == "In implementation"
+    comments = d.posted(STORY)
+    assert len(comments) == 1 and f"action=hand-off-pending pr={PR} head={HEAD}" in comments[0]
+
+    # Still failing: no session, no second comment.
+    second = d.resume()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
+    assert d.status(STORY) == "In implementation"
+
+    # The write works again: a later run completes the hand-off, with no session.
+    d.fail_status_write("In review", False)
+    third = d.resume()
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in third.stdout
+    assert d.status(STORY) == "In review"
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
+
+
+@needs_tools
+def test_story_in_implementation_without_a_pending_hand_off_is_left_alone(d):
+    """A story someone is working on, with a ready PR and no marker, is not moved to "In review"."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_comment(STORY, "<!-- hpw:dispatcher action=hand-off-pending pr=900 head=" + "c" * 40 + " -->")  # older head
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.board_writes == [] and d.sessions == [] and d.posted(STORY) == []
+
+
+@needs_tools
 @pytest.mark.parametrize("draft", [None, True])
 def test_ac3_no_open_pr_or_draft_pr_blocks_after_implement(d, draft):
     d.add_story(STORY, "Ready for implementation")

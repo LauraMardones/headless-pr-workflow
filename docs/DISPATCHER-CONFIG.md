@@ -293,6 +293,7 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 - finds the linked open PR. With no linked open PR, or a PR that is still a draft, it posts the mid-cycle blocker for `/implement`, leaves the story in `In implementation` and exits `1`;
 - writes `In review` only when the story is still `In implementation` and no fix round is due. It never overwrites `In review` or `In merge`, because the bookkeeping job may already have acted on Codex's answer;
 - writes nothing when Codex answered with findings while the session was still running: the story is already back in `In implementation` with a fix round due on the new head, and the next run starts it;
+- when that `In review` write fails, posts one recovery comment with a hidden marker for the PR head and exits `1`. A later run finds the marker on a story still in `In implementation`, with no fix round due, and completes the hand-off (`[RESUME] #<n>: completing the hand-off on PR #<pr>`). Without this the bookkeeping job, which acts only on `In review`, would never see Codex's answer;
 - starts no `/review` session and adds no review budget increment;
 - logs `[HANDOFF] #<n>: handed to the Codex review loop (Codex Cloud) on PR #<pr>; no /review session started` and goes on to the next ready story.
 
