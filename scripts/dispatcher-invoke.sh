@@ -113,9 +113,8 @@
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
 #   In GitHub Actions, the workflow sets GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}.
-#   PROJECT_TOKEN must be a classic PAT with repo (full) + project (full) scopes;
-#   project (full) is required because the dispatcher writes board status via
-#   updateProjectV2ItemFieldValue — read:project alone is not sufficient.
+#   PROJECT_TOKEN must be a classic PAT. Its scopes, each with its reason, are
+#   listed only in docs/DISPATCHER-CONFIG.md -> "GitHub Token — `PROJECT_TOKEN`".
 #   ANTHROPIC_API_KEY and OPENAI_API_KEY_CODEX must be set as GitHub Secrets
 #   and wired into .github/workflows/dispatcher.yml's env: block for the
 #   "Run dispatcher invoke" step (or the job-level env: block) — GitHub

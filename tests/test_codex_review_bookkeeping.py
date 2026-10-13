@@ -27,16 +27,18 @@ from headless_pr_workflow.codex_review_bookkeeping import (
     NOT_NEEDED,
     BookkeepingConfig,
     BookkeepingError,
+    TOKEN_SCOPES_DOC,
     GhCliGateway,
     StoryBoard,
     action_marker,
     decide,
+    missing_scope_message,
     parse_story_board,
     review_request_body,
     run_bookkeeping,
     run_session_summary,
 )
-from headless_pr_workflow.github import PullRequestContext, RequiredStatusChecks, TimelineEvent
+from headless_pr_workflow.github import GHCommandError, PullRequestContext, RequiredStatusChecks, TimelineEvent
 from headless_pr_workflow.review_policy import (
     CODEX_REVIEW_TRIGGER_PHRASE,
     classify_codex_event,
@@ -1064,3 +1066,137 @@ def test_command_is_in_the_catalog():
 
     assert command is not None
     assert (command.status, command.command_type, command.layer) == ("implemented", "action", "core")
+
+
+# --- Missing token scope (issue #329) -----------------------------------------------------------
+
+GRANTED = "but your token has only been granted the: ['project', 'repo', 'workflow'] scopes."
+SCOPE_HELP = "Please modify your token's scopes at: https://github.com/settings/tokens."
+
+
+def refused(field: str, *scopes: str) -> str:
+    """One refused field in GitHub's wording, as in the failed runs on PR #328."""
+
+    return (
+        "Your token has not been granted the required scopes to execute this query. "
+        f"The '{field}' field requires one of the following scopes: {list(scopes)}, {GRANTED} {SCOPE_HELP}"
+    )
+
+
+# The PR read asks for a team's organisation login, name and slug (`reviewRequests`).
+PR_READ_REFUSED = "GraphQL: " + ", ".join(
+    [
+        refused("login", "read:org"),
+        refused("name", "read:org", "read:discussion"),
+        refused("slug", "read:org", "read:discussion"),
+    ]
+)
+
+
+def gateway_with_refused_pr_read(monkeypatch, stderr: str = PR_READ_REFUSED) -> GhCliGateway:
+    def refuse(target, *, repo):
+        raise GHCommandError(["gh", "pr", "view", target], 1, stderr)
+
+    monkeypatch.setattr(bookkeeping, "fetch_pr_context", refuse)
+    monkeypatch.setattr(
+        bookkeeping.subprocess,
+        "run",
+        lambda command, **kwargs: Completed(json.dumps([{"number": PR, "isDraft": False}])),
+    )
+    return GhCliGateway("owner/repo")
+
+
+def assert_names_read_org_and_the_docs(message: str) -> None:
+    assert "`read:org`" in message
+    assert "read:discussion" not in message  # it would not allow the `login` field
+    assert "docs/DISPATCHER-CONFIG.md" in message and "GitHub Token — `PROJECT_TOKEN`" in message
+    assert TOKEN_SCOPES_DOC in message
+
+
+@pytest.mark.parametrize("target", [str(PR), "--all"])
+def test_cli_names_the_missing_scope_and_the_docs_section_on_stderr(monkeypatch, capsys, target):
+    github = gateway_with_refused_pr_read(monkeypatch)
+
+    exit_code, out, err = run_cli(monkeypatch, capsys, github, target)
+
+    assert exit_code == 1
+    assert out == ""
+    lines = err.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("PR #123: failed at step `read PR`: ")
+    assert_names_read_org_and_the_docs(lines[0])
+
+
+@pytest.mark.parametrize("target", [str(PR), "--all"])
+def test_cli_names_the_missing_scope_and_the_docs_section_in_json(monkeypatch, capsys, target):
+    github = gateway_with_refused_pr_read(monkeypatch)
+
+    exit_code, out, err = run_cli(monkeypatch, capsys, github, target, "--json")
+
+    payload = json.loads(out)
+    assert exit_code == 1 and err == ""
+    assert set(payload) == {"ok", "results", "errors"}
+    assert payload["ok"] is False and payload["results"] == []
+    (entry,) = payload["errors"]
+    assert set(entry) == {"pr", "step", "error"}
+    assert (entry["pr"], entry["step"]) == (PR, "read PR")
+    assert_names_read_org_and_the_docs(entry["error"])
+
+
+def test_missing_scope_in_a_later_step_is_reported_the_same_way(monkeypatch, capsys):
+    stderr = "gh: " + refused("projectItems", "read:project")
+    monkeypatch.setattr(bookkeeping, "fetch_pr_context", lambda target, *, repo: pr(request(), codex_comment()))
+    monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, **kwargs: Completed(returncode=1, stderr=stderr))
+
+    exit_code, out, err = run_cli(monkeypatch, capsys, GhCliGateway("owner/repo"), str(PR))
+
+    assert exit_code == 1 and out == ""
+    assert err.startswith("PR #123: failed at step `read story board state`: ")
+    assert "`read:project`" in err and TOKEN_SCOPES_DOC in err
+
+
+def test_missing_scope_is_named_for_every_gh_read_and_write(monkeypatch):
+    stderr = "gh: " + refused("login", "read:org")
+    monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, **kwargs: Completed(returncode=1, stderr=stderr))
+
+    def refuse(*arguments, **kwargs):
+        raise GHCommandError(["gh", "api"], 1, stderr)
+
+    monkeypatch.setattr(bookkeeping, "fetch_required_status_check_context", refuse)
+    gateway = GhCliGateway("owner/repo")
+    story = StoryBoard(STORY, "t", "In review", "item", "project", "field", BOARD_OPTIONS)
+    calls = {
+        "read required checks": lambda: gateway.fetch_ci(pr(request(), codex_comment())),
+        "read story comments": lambda: gateway.fetch_issue_comments(STORY),
+        "post comment on #123": lambda: gateway.post_comment(PR, "body"),
+        "move story #290 to `In merge`": lambda: gateway.set_story_status(story, "In merge"),
+        "list open pull requests": gateway.list_open_ready_prs,
+    }
+
+    for step, call in calls.items():
+        with pytest.raises(BookkeepingError) as error:
+            call()
+        assert error.value.step == step
+        assert "`read:org`" in error.value.message and TOKEN_SCOPES_DOC in error.value.message
+
+
+def test_gh_failure_that_is_not_a_missing_scope_keeps_its_message(monkeypatch, capsys):
+    github = gateway_with_refused_pr_read(monkeypatch, "HTTP 502: Bad Gateway")
+
+    exit_code, _, err = run_cli(monkeypatch, capsys, github, str(PR))
+
+    assert exit_code == 1
+    assert err == "PR #123: failed at step `read PR`: GitHub CLI failed with exit code 1: HTTP 502: Bad Gateway\n"
+
+
+def test_missing_scope_message_falls_back_when_the_wording_is_not_recognized():
+    assert missing_scope_message("HTTP 403: Resource not accessible by personal access token") is None
+    # The signal without a scope list: nothing to name, so the caller keeps today's text.
+    assert missing_scope_message("Your token has not been granted the required scopes to execute this query.") is None
+
+
+def test_missing_scope_message_names_every_listed_scope_when_no_single_one_is_enough():
+    message = missing_scope_message(refused("a", "read:org") + ", " + refused("b", "read:discussion"))
+
+    assert message is not None
+    assert "`read:org`, `read:discussion`" in message
+    assert "`project`, `repo`, `workflow`" in message  # what the token has
