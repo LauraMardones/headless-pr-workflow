@@ -15,7 +15,9 @@ import subprocess
 import pytest
 
 from headless_pr_workflow import codex_review_bookkeeping as bookkeeping
-from tests.dispatcher_fakes import BASH, BOARD_OPTIONS, HAVE_TOOLS, INVOKE, PO, REPO_ROOT, Dispatcher
+from tests.dispatcher_fakes import (
+    BASH, BOARD_OPTIONS, BOT, HAVE_TOOLS, INVOKE, PO, REPO_ROOT, Dispatcher, bookkeeping_marker,
+)
 
 needs_tools = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
 
@@ -127,6 +129,49 @@ def test_ac2_no_write_while_a_fix_round_is_still_due(d):
     assert d.board_writes == [f"{STORY}=In implementation"]
     assert d.status(STORY) == "In implementation"
     assert len(d.posted(STORY)) == 1 and f"head={HEAD}" in d.posted(STORY)[0]
+
+
+@needs_tools
+@pytest.mark.parametrize("pr_before", [True, False])
+def test_ac2_findings_recorded_during_the_session_are_not_a_tried_fix_round(d, pr_before):
+    """Codex answers, and the bookkeeping job acts, before the /implement session returns."""
+    d.add_story(STORY, "Ready for implementation")
+    if pr_before:
+        d.add_pr(PR, STORY)  # a story that already had a PR, at the old head
+    findings = json.dumps({"user": {"login": BOT}, "created_at": "2026-10-13T10:59:00Z",
+                           "body": bookkeeping_marker("move-in-implementation", NEW_HEAD)})
+    pulls = json.dumps([{"number": PR, "body": f"Closes #{STORY}", "state": "open", "draft": False,
+                         "merged_at": None, "updated_at": "2026-09-27T00:00:00Z",
+                         "head": {"ref": "branch", "sha": NEW_HEAD}}])
+    (d.mock / "pulls_after.json").write_text(pulls, encoding="utf-8", newline="\n")
+    (d.mock / "comments_after.json").write_text(f"[{findings}]", encoding="utf-8", newline="\n")
+    # First session: a new head, and findings recorded for it. Second session: the fix.
+    d.on_session("implement", f"""
+if [[ ! -f "$MOCK_DIR/implemented" ]]; then
+    touch "$MOCK_DIR/implemented"
+    cp "$MOCK_DIR/pulls_after.json" "$MOCK_DIR/pulls.json"
+    cp "$MOCK_DIR/comments_after.json" "$MOCK_DIR/comments_{PR}.json"
+else
+    jq 'map(.head.sha = "{"c" * 40}")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+fi
+""")
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    assert d.board_writes == [f"{STORY}=In implementation"]
+    assert d.status(STORY) == "In implementation"
+    assert d.posted(STORY) == []
+    assert "the next run starts the fix round" in proc.stdout
+
+    # The next run starts the first fix round; it is not skipped as already tried.
+    again = d.resume()
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert f"[RESUME] #{STORY}: fix round 1 of 3, /implement on PR #{PR}" in again.stdout
+    assert d.sessions == [f"implement {STORY}"] * 2
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.posted(STORY) == []
 
 
 @needs_tools
