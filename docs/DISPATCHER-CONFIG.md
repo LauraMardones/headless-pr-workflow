@@ -66,22 +66,24 @@ Each call drives a bounded tool-use loop against the resolved provider (`run_ant
 
 See [ADR-003](decisions/ADR-003-interim-executor-session-boundary.md) for why this loop runs inside the GitHub Actions job at all (an explicit, temporary exception to ADR-002, pending migration to owned infrastructure — #259) and why `AGENT_MAX_WALLCLOCK_SECONDS` specifically — not the per-turn caps alone — is what keeps a run from ever approaching GitHub Actions' 6-hour job ceiling.
 
-### Review-time provider resolution (issue #263)
+### Review path (issues #263 and #293)
 
-`invoke_executor_command()` normally resolves the provider/model/secret for a `/implement`, `/merge`, or `/cleanup` call from the story's own `executor:` label (`$EXECUTOR_LABEL`). Its Step E2 `/review` call is the one exception: the dispatcher passes a third argument that overrides which executor label is resolved, so `/review` runs under a different provider than `/implement` — enforcing the cross-provider adversarial-review split documented in [ADAPTERS.md](ADAPTERS.md#cross-provider-review-pairing).
+How a story is reviewed is looked up from two tables in `scripts/dispatcher-invoke.sh` (alongside `EXECUTOR_ROUTING`), keyed by the story's `executor:` label. The script does not branch on an executor name anywhere else.
 
-The review executor is looked up in the `REVIEW_EXECUTOR_ROUTING` table (`scripts/dispatcher-invoke.sh`, alongside `EXECUTOR_ROUTING`):
+| `/implement` executor label | Review | Table |
+|---|---|---|
+| `claude-code-haiku` | Codex review loop (Codex Cloud, ADR-006) | `CODEX_REVIEW_LOOP_ROUTING` |
+| `claude-code-sonnet` | Codex review loop (Codex Cloud, ADR-006) | `CODEX_REVIEW_LOOP_ROUTING` |
+| `claude-code-opus` | Codex review loop (Codex Cloud, ADR-006) | `CODEX_REVIEW_LOOP_ROUTING` |
+| `codex` | `/review` session under `claude-code-opus` | `REVIEW_EXECUTOR_ROUTING` |
 
-| `/implement` executor label | `/review` executor label |
-|---|---|
-| `claude-code-haiku` | `codex` |
-| `claude-code-sonnet` | `codex` |
-| `claude-code-opus` | `codex` |
-| `codex` | `claude-code-opus` |
+- **Codex review loop.** The dispatcher starts no `/review` session. It hands the story over after `/implement` and resumes it on a later run; see [Codex review loop hand-off and resume](#codex-review-loop-hand-off-and-resume).
+- **Paired session.** `invoke_executor_command()` normally resolves the provider, model and secret from the story's own `executor:` label. For the Step E2 `/review` call the dispatcher passes a third argument that names the reviewing executor instead, so `/review` runs under a different provider than `/implement`. Its token cost is attributed to the *reviewing* executor's budget counter (see Budget Check in the Invoke Loop, below).
+- **Neither table.** An executor label with no row in either table gets a mid-cycle blocker after `/implement`.
 
-This is computed fresh at review time from the story's existing `executor:` label — it is never written back to the issue as a label or field. The story's `executor:` label continues to mean "the `/implement` executor" only. `/review`'s token cost is attributed to the *reviewing* executor's budget counter (see Budget Check in the Invoke Loop, below), which may differ from the story's own `EXECUTOR_BUDGET_TYPE`.
+The path is computed from the story's existing `executor:` label and is never written back to the issue. The label continues to mean "the `/implement` executor" only.
 
-This resolution is specific to the dispatcher's own invocation path. The manually-invoked `/review` command (`.claude/commands/review.md`, run by a human or an interactive session) is unaffected — it does not read `REVIEW_EXECUTOR_ROUTING` and its reviewer choice is unchanged.
+This is specific to the dispatcher's own invocation path. The manually-invoked `/review` command (`.claude/commands/review.md`, run by a human or an interactive session) reads neither table and its reviewer choice is unchanged.
 
 Loop tuning is overridable via environment variables (defaults shown), primarily for tests:
 
@@ -259,11 +261,13 @@ After each successful `/implement` invocation, the counter is incremented:
 
 If every available "Ready for implementation" story is skipped due to budget, `all_budget_blocked=true` is written to `$GITHUB_OUTPUT` (guarded: only when the env var is set). This output is consumed by the Slack pause notification step (Story C, issue #204).
 
-After each successful `/review` invocation, a second, independent increment attributes cost to the *reviewing* executor (issue #263) — which, per the cross-provider pairing above, is typically a different `<executor_type>` than the `/implement` increment logged just above it:
+For a story with a paired `/review` session (`executor:codex`), each successful `/review` invocation adds a second, independent increment that attributes cost to the *reviewing* executor (issue #263) — a different `<executor_type>` than the `/implement` increment logged just above it:
 
 ```
 [BUDGET] Increment: <executor_type> +<tokens> after #<N> (review)
 ```
+
+A story that uses the Codex review loop gets no review increment: the dispatcher starts no review session for it (issue #293). A fix round is an `/implement` session and adds the `/implement` increment once more, with no budget check before it.
 
 There is no pre-`/review` budget *check* (no `[BUDGET SKIP]` path for review) — only `/implement` gates a story from starting on daily cap. Once a story has begun, its `/review` step attributes cost but does not itself skip.
 
@@ -273,6 +277,100 @@ Under `--dry-run`, budget check and increment calls are logged but not executed:
 [DRY RUN] Would check: dispatcher-budget.sh check <executor_type>
 [DRY RUN] Would call: dispatcher-budget.sh increment <executor_type> <tokens>
 ```
+
+---
+
+## Codex review loop hand-off and resume
+
+A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the board status, the linked PR and hidden markers in comments. Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect.
+
+The `codex-review-bookkeeping` workflow does the part in between. It acts only on a story in `In review`, and moves it to `In merge` after a clean review with green required checks and a passed approval gate, or to `In implementation` after findings. `/implement` posts the review request; the dispatcher posts none.
+
+### Hand-off after `/implement`
+
+For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implement` succeeds the dispatcher:
+
+- finds the linked open PR. With no linked open PR, or a PR that is still a draft, it posts the mid-cycle blocker for `/implement`, leaves the story in `In implementation` and exits `1`;
+- writes `In review` only when the story is still `In implementation` and no fix round is due. It never overwrites `In review` or `In merge`, because the bookkeeping job may already have acted on Codex's answer;
+- writes nothing when Codex answered with findings while the session was still running: the story is already back in `In implementation` with a fix round due on the new head, and the next run starts it;
+- when that `In review` write fails, or the story is still in "Ready for implementation" because no status write of the run took effect, posts one recovery comment with a hidden marker for the PR and exits `1`. The story is not reported as handed off and is not picked again as the next ready story. A later run finds the marker on a story still in `In implementation` or "Ready for implementation", with a non-draft PR and no fix round due, and completes the hand-off without starting `/implement` again (`[RESUME] #<n>: completing the hand-off on PR #<pr>`), also when the PR head has changed since. It then posts a second marker, so the hand-off is completed once. Without this the bookkeeping job, which acts only on `In review`, would never see Codex's answer;
+- starts no `/review` session and adds no review budget increment;
+- logs `[HANDOFF] #<n>: handed to the Codex review loop (Codex Cloud) on PR #<pr>; no /review session started` and goes on to the next ready story.
+
+### Resume at `In merge`
+
+A story in `In merge` is taken up at `/merge`, whatever its executor. The board status is not trusted on its own: the merge gates inside `/merge` decide whether the PR merges.
+
+| Facts | What the dispatcher does |
+|---|---|
+| A linked open PR that is not a draft | `/merge`, then `Done` and `/cleanup`, then the feature and epic closure check. Log: `[RESUME] #<n>: /merge PR #<pr>` |
+| No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
+| Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
+
+**One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs start no session for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
+
+### Fix round
+
+A fix round is due when all of these hold:
+
+- the story's board status is `In implementation`;
+- it has exactly one `executor:` label, and that label has a `CODEX_REVIEW_LOOP_ROUTING` row;
+- it has a linked open PR;
+- the PR has a comment by the bookkeeping job's account that carries the job's hidden marker with `action=move-in-implementation` and `head=` equal to the PR's current head.
+
+The dispatcher then runs `/implement` for the story, which continues on the existing PR, and applies the hand-off again. Log: `[RESUME] #<n>: fix round <k> of <max>, /implement on PR #<pr>`.
+
+- A fix round is picked up on the next run. It does not wait for the stale threshold.
+- The story already holds its place within the WIP limit, so the WIP and file-overlap checks are not run against it again. This holds on both sides: the dispatcher does not run its pre-flight for a fix round, and `.claude/commands/implement.md` step 7 tells the session to skip its own WIP pre-flight for a story that is already `In implementation` with an open PR. The allowance check before the session still applies. When it refuses, the story stays in `In implementation` and the log line is `[RESERVE SKIP] #<n>: fix round not started; …`. It is not put back to "Ready for implementation", unlike a refusal before a first `/implement`.
+- Once the session pushes a commit, the marker no longer names the PR's head, so the same findings start no second round.
+- The dispatcher reads only the bookkeeping job's marker. It does not parse Codex comments or reviews.
+- The bookkeeping job's account is the login behind the dispatcher's own token, because both workflows use `PROJECT_TOKEN`. Set `CODEX_BOOKKEEPING_LOGIN` in the environment if the two ever differ. A marker in a comment by any other account is ignored.
+
+**Maximum fix rounds.** The dispatcher counts the PR heads for which the bookkeeping job recorded findings, one per head. When the count is above `CODEX_FIX_ROUND_MAX`, it starts no session, logs `[RESUME SKIP] #<n>: fix round <k> on PR #<pr> is above the maximum of <max>` and posts one `Type: resource` blocker on the story, once.
+
+| Variable | Valid values | Default |
+|---|---|---|
+| `CODEX_FIX_ROUND_MAX` | whole number of `1` or more | `3` |
+
+Set it as a repository variable; `.github/workflows/dispatcher.yml` passes it to the invoke step. An unset or empty variable uses the default. Any other value stops the run with an error before any session starts.
+
+**One fix-round attempt per head.** A fix round that fails, or an `/implement` session that ends on the same PR head it started on while the findings for that head are still open, is not repeated on the same head, whatever status the session left the story in. The mid-cycle blocker for `/implement` records the head, and later runs log `[RESUME SKIP] #<n>: the fix round was already tried on PR #<pr> at head <sha>` until the PR has a new head or the PO posts a standalone `/unblock` line.
+
+### Order and entry into a run
+
+Each run handles resumable work before it starts new work:
+
+1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`;
+2. fix rounds that are due, and hand-offs that are still pending;
+3. stories in **Ready for implementation**, as before.
+
+`scripts/dispatcher-poll.sh` reports the candidates in two more keys of its JSON, `in_merge` and `in_implementation` (each `[{number, title}]`), from the board read it already makes. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** either new list is non-empty:
+
+```
+bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable work first, then story <n>
+bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only
+```
+
+The workflow uses `--resume` when no story is ready for implementation. A run in which nothing is due starts no session and exits `0`.
+
+The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
+
+### Exit codes and `--dry-run`
+
+| Exit | Meaning |
+|---|---|
+| `0` | The story was handed to the review loop, a resume entry completed, a story was skipped by a bound, or there was nothing to do. |
+| `1` | A session failed and a blocker was posted. |
+| non-zero, no blocker | A missing board option or an invalid `CODEX_FIX_ROUND_MAX`. |
+
+Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, the hand-off is logged as `[DRY RUN] Would hand #<n> to the Codex review loop …`, and no session starts and nothing on GitHub changes.
+
+### Known limits
+
+- A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
+- The bookkeeping job can move a story to `In merge` while Codex review threads on the same head are still unresolved. `/merge` then fails on the unresolved-thread gate, and the one-attempt rule leaves the story in `In merge` with a blocker until the PO acts.
+- Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
+- The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 
 ---
 
@@ -356,12 +454,12 @@ The pin keeps the undocumented event shape stable. To change the version, edit t
 | Exit | Decision | Log line (stderr of the script) | Dispatcher behavior |
 |---|---|---|---|
 | `0` | `start` | `[RESERVE] five-hour 79% left (reserve 10%), weekly 71% left (reserve 20%) — start` | The session starts. |
-| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`, `/merge` or `/cleanup`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. |
+| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`, `/merge` or `/cleanup`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. The comment is not posted again while it is already the story's newest comment for that step. |
 | `2` | `error` | `[ALLOWANCE ERROR] <reason> — starting nothing` | No session. The job fails, without a `dispatcher_error` Slack message. After `/implement`, the story gets the same comment with the reason. |
 
 A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
 
-A refusal partway through a cycle leaves the story at its current step. Nothing restarts it automatically until #316; the PO can run the step by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is tried again by the resume entry on a later run (issue #293). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` and `/cleanup` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
 
 The script prints exactly one JSON object on stdout in every exit path:
 

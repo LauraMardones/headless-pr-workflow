@@ -52,7 +52,7 @@ jq -n --rawfile body "$BIG_BODY_FILE" '
 {
   "data": {"repository": {"projectsV2": {"nodes": [{
     "id": "PVT_1",
-    "fields": {"nodes": [{"id": "FIELD_STATUS", "name": "Status", "options": [{"id": "OPT1", "name": "Ready for implementation"}]}]},
+    "fields": {"nodes": [{"id": "FIELD_STATUS", "name": "Status", "options": [{"id": "OPT1", "name": "Ready for implementation"}, {"id": "OPT2", "name": "In review"}, {"id": "OPT3", "name": "In merge"}]}]},
     "items": {
       "pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
       "nodes": [{

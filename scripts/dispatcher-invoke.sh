@@ -3,10 +3,21 @@
 #
 # Dispatcher pre-flight gate and execution loop — executor routing, WIP check,
 # stale detection, comment-triggered decision-blocker resume, file-overlap
-# check, conflict blocker, and full story-cycle invocation (/implement →
-# /review → /merge → /cleanup) with board status transitions. After each
-# story completes or is blocked, the loop finds the next "Ready for
-# implementation" story and repeats the full pre-flight + cycle.
+# check, conflict blocker, and story-cycle invocation with board status
+# transitions. After each story completes, is handed off or is blocked, the
+# loop finds the next "Ready for implementation" story and repeats the full
+# pre-flight + cycle.
+#
+# The cycle depends on how the story is reviewed (issue #293, ADR-006):
+#   - Codex review loop (the Claude tiers): /implement, then the story is
+#     handed to the Codex review loop and its run ends. A later run resumes it
+#     from GitHub facts — at /merge → /cleanup when it is "In merge", or at
+#     /implement on the same PR when a fix round is due.
+#   - Paired session (executor:codex): /implement → /review → /merge →
+#     /cleanup in one run.
+# Every run handles resumable work first: stories "In merge", then due fix
+# rounds, then new work. See docs/DISPATCHER-CONFIG.md → "Codex review loop
+# hand-off and resume".
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
@@ -19,16 +30,30 @@
 #             issue #317 (subscription allowance check before each session start:
 #                         scripts/dispatcher-allowance.sh, called at the top of
 #                         invoke_executor_command(); see docs/DISPATCHER-CONFIG.md)
+#             issue #293 (hand-off to the Codex review loop after /implement, and
+#                         the two resume entries: "In merge" and fix rounds)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
 #       --repo <owner/repo> --issue <issue-number> [--dry-run]
+#   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
+#       --repo <owner/repo> --resume [--dry-run]
+#
+# --issue handles resumable work first, then the given story. --resume handles
+# only resumable work, for a run in which no story is ready for implementation.
+#
+# Environment:
+#   CODEX_FIX_ROUND_MAX — most fix rounds the dispatcher starts per PR
+#                         (whole number of one or more; default 3).
 #
 # Exit codes:
-#   0  — story completed (Done) or no more "Ready for implementation" stories
+#   0  — story completed (Done), story handed to the Codex review loop, a
+#        resume entry completed or was skipped by a bound, or nothing to do
 #        (including when every remaining ready item is non-executable, issue #256)
-#   1  — pre-flight check failed or mid-cycle executor failure; blocker posted on issue
+#   1  — pre-flight check failed or a session failed; blocker posted on issue.
+#        Also a missing "In review" / "In merge" board option or an invalid
+#        CODEX_FIX_ROUND_MAX, with no blocker.
 #
 # Requirements: bash 4+, gh (GitHub CLI), jq, curl
 #
@@ -53,19 +78,21 @@
 # below and dispatcher-budget.sh) — that mechanism is independent of which
 # secret authenticates the call.
 #
-# ─── Cross-provider review pairing (issue #263) ───────────────────────────────
+# ─── Review path (issue #263, issue #293, ADR-006) ────────────────────────────
 #
 # The table above (and the `executor:` label on a story) governs /implement
-# only. /review is paired to a *different* provider automatically, per the
-# REVIEW_EXECUTOR_ROUTING table below:
+# only. How the story is reviewed is read from two tables below, keyed by the
+# implementing executor:
 #
-# | /implement executor:        | /review executor       |
-# |------------------------------|-------------------------|
-# | claude-code-haiku/-sonnet/-opus (any Claude tier) | codex |
-# | codex                         | claude-code-opus        |
+# | /implement executor:                | Review                                 | Table                     |
+# |-------------------------------------|----------------------------------------|---------------------------|
+# | claude-code-haiku / -sonnet / -opus | Codex Cloud, through the review loop   | CODEX_REVIEW_LOOP_ROUTING |
+# | codex                               | /review session under claude-code-opus | REVIEW_EXECUTOR_ROUTING   |
 #
-# This is computed at review time from the story's existing `executor:`
-# label — no new label value is introduced or persisted on the issue.
+# The dispatcher starts no /review session for a story that uses the review
+# loop. An executor in neither table gets a mid-cycle blocker. The path is
+# computed from the story's existing `executor:` label — no new label value is
+# introduced or persisted on the issue.
 #
 # ─── Executor invocation mechanism (issue #254) ───────────────────────────────
 #
@@ -116,7 +143,8 @@ set -euo pipefail
 
 # ─── Job-level wall-clock deadline (ADR-003) — survives recursive exec ────────
 # One story's cycle calls invoke_executor_command() up to four times
-# (/implement, /review, /merge, /cleanup), and the tail-call
+# (/implement, /review, /merge, /cleanup), the resume pass adds sessions for
+# other stories, and the tail-call
 # `exec bash "$0" ...` used to move to the next ready story replaces this
 # process without starting a new Actions job — so all of that shares one
 # 6-hour job ceiling. DISPATCH_JOB_START_TS must therefore be set ONCE, at the
@@ -185,22 +213,27 @@ declare -A EXECUTOR_BUDGET_TYPE=(
     ["codex"]="codex"
 )
 
-# ─── Review-pairing table (data-driven, issue #263) ───────────────────────────
-# Maps the /implement executor label suffix to the /review executor label
-# suffix, enforcing the cross-provider adversarial-review split documented in
-# docs/ADAPTERS.md's Executor Roles table: any Claude tier that implements is
-# reviewed by Codex, and Codex is reviewed by Claude Opus (the "deep code
-# review, complex reasoning" tier). Computed at review time from the story's
-# existing `executor:` label — no new label value is introduced or persisted,
-# and the story's `executor:` label continues to govern /implement only.
-# OSS invariant: this is a lookup table, not a conditional branch on executor
-# name — add a row here (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
+# ─── Review-path tables (data-driven, issue #263 and issue #293) ──────────────
+# How a story is reviewed is looked up by its /implement executor label suffix.
+# An executor has a row in exactly one of the two tables:
+#   REVIEW_EXECUTOR_ROUTING   — a paired /review session in the same run, under
+#                               the executor named by the value.
+#   CODEX_REVIEW_LOOP_ROUTING — no dispatcher session: the story is handed to
+#                               the Codex review loop (ADR-006), and the value
+#                               names the reviewer for the log.
+# An executor in neither table stops with a mid-cycle blocker after
+# /implement, so a typo or a new tier never skips review silently.
+# OSS invariant: these are lookup tables, not conditional branches on executor
+# name — add a row to one of them (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
 # EXECUTOR_MODEL/EXECUTOR_BUDGET_TYPE) when adding a new executor tier.
 declare -A REVIEW_EXECUTOR_ROUTING=(
-    ["claude-code-haiku"]="codex"
-    ["claude-code-sonnet"]="codex"
-    ["claude-code-opus"]="codex"
     ["codex"]="claude-code-opus"
+)
+
+declare -A CODEX_REVIEW_LOOP_ROUTING=(
+    ["claude-code-haiku"]="Codex Cloud"
+    ["claude-code-sonnet"]="Codex Cloud"
+    ["claude-code-opus"]="Codex Cloud"
 )
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -216,6 +249,10 @@ SKIPPED_ISSUES=""  # space-separated issue numbers skipped due to budget cap
 # budget skips. Internal loop state, carried across the recursive exec like
 # --skipped-issues; not meant to be passed by callers.
 NON_EXECUTABLE_ISSUES=""
+RESUME_ONLY=false  # --resume: handle resumable work only (issue #293)
+# Internal loop state, carried across the recursive exec: the resume pass runs
+# once per run, not once per chained story.
+RESUME_PASS_DONE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -225,6 +262,10 @@ while [[ $# -gt 0 ]]; do
         --issue)
             [[ $# -ge 2 ]] || { echo "Error: --issue requires a value." >&2; exit 1; }
             ISSUE_NUMBER="$2"; shift 2 ;;
+        --resume)
+            RESUME_ONLY=true; shift ;;
+        --resume-pass-done)
+            RESUME_PASS_DONE=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --budget-blocked-count)
@@ -245,7 +286,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$REPO" ]]         || { echo "Error: --repo <owner/repo> is required." >&2;    exit 1; }
-[[ -n "$ISSUE_NUMBER" ]] || { echo "Error: --issue <issue-number> is required." >&2; exit 1; }
+if $RESUME_ONLY; then
+    [[ -z "$ISSUE_NUMBER" ]] || { echo "Error: --resume and --issue cannot be combined." >&2; exit 1; }
+else
+    [[ -n "$ISSUE_NUMBER" ]] || { echo "Error: --issue <issue-number> is required." >&2; exit 1; }
+fi
 [[ "$REPO" == *"/"* ]]   || { echo "Error: --repo must be in owner/repo format." >&2; exit 1; }
 
 # ─── Authentication ───────────────────────────────────────────────────────────
@@ -273,6 +318,24 @@ DECLARED_BY="dispatcher"
 NOW_TS=$(date -u +%s)
 STALE_THRESHOLD=7200   # 2 hours in seconds
 WIP_LIMIT=2
+
+# Most fix rounds the dispatcher starts per PR (issue #293). Set from the
+# repository variable of the same name; GitHub passes an unset variable as an
+# empty string, which means the default.
+CODEX_FIX_ROUND_MAX="${CODEX_FIX_ROUND_MAX:-3}"
+[[ "$CODEX_FIX_ROUND_MAX" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Error: CODEX_FIX_ROUND_MAX must be a whole number of one or more; got '$CODEX_FIX_ROUND_MAX'." >&2
+    exit 1
+}
+
+# The hidden marker the codex-review-bookkeeping job puts on the review Session
+# Summary it posts after findings. Mirrors MARKER_PREFIX and
+# ACTION_MOVE_IN_IMPLEMENTATION in src/headless_pr_workflow/codex_review_bookkeeping.py
+# (tests/test_dispatcher_review_loop.py checks that the two agree).
+BOOKKEEPING_FIX_MARKER="<!-- hpw:codex-review-bookkeeping action=move-in-implementation head="
+# Account the bookkeeping job posts with. Both workflows authenticate with
+# PROJECT_TOKEN, so the default is the login behind this run's own token.
+CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
@@ -307,6 +370,7 @@ OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
 DISPATCH_HANDLED=false  # set true before any expected exit 1 (blocker posted)
+FIX_ROUND_SESSION=false  # true while the resume pass starts the /implement of a fix round (issue #293)
 
 # ─── Utility: ISO-8601 timestamp to unix seconds (Linux + macOS) ──────────────
 
@@ -763,6 +827,9 @@ post_mid_cycle_blocker() {
     local issue_num="$1"
     local issue_title="$2"
     local failed_command="$3"
+    # Optional hidden marker (issue #293): records the PR head a resumable step
+    # was tried on, so a later run does not repeat it on the same head.
+    local marker="${4:-}"
     local body
     body="## Blocked Declaration
 Type: external
@@ -771,8 +838,81 @@ Blocks: #$issue_num — $issue_title
 Unblocked when: /$failed_command completes successfully for #$issue_num with exit code 0
 Owner: PO (@LauraMardones)
 State of in-progress work: execution loop halted after /$failed_command failed; board reflects last successful state"
+    [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
     post_comment "$issue_num" "$body"
+}
+
+# ─── Utility: "posted once" markers for the resume entries (issue #293) ──────
+# The resume entries run on every poll, so each bound is recorded on the story
+# as a hidden marker in the blocker comment. Nothing is remembered on the
+# runner. A marker holds until the PO posts a standalone `/unblock` line after
+# it (the resolving-comment rule of issue #262); a marker that names a PR head
+# also stops holding when the PR gets a new head, because the new marker text
+# differs.
+
+dispatcher_marker() {
+    echo "<!-- hpw:dispatcher $* -->"
+}
+
+# Markers are honoured only on comments written by the dispatcher's own
+# account (the login behind GH_TOKEN). Anyone can comment on a public
+# repository, and a forged marker must neither stop a fix round nor make the
+# dispatcher write a board status.
+DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}"
+resolve_dispatcher_login() {
+    if [[ -z "$DISPATCHER_LOGIN" ]]; then
+        DISPATCHER_LOGIN=$(gh api user | jq -r '.login // empty' 2>/dev/null || true)
+    fi
+    [[ -n "$DISPATCHER_LOGIN" ]]
+}
+
+# marker_holds <issue> <marker> [<on-read-error>] [<cancel-marker>]
+# 0 when the newest dispatcher comment carrying <marker> has no later PO
+# `/unblock` line and no later dispatcher comment carrying <cancel-marker>;
+# 1 when there is no such comment or it was unblocked or cancelled. <marker>
+# is matched as a substring, so a caller may pass a prefix. A failed read (of
+# the comments or of the dispatcher's login) counts as "holds", so an API
+# error never starts a session or posts a second blocker. A caller that acts
+# when the marker holds passes 1 as <on-read-error>, so a failed read does
+# nothing instead.
+marker_holds() {
+    local issue_num="$1" marker="$2" on_read_error="${3:-0}" cancel_marker="${4:-}" comments
+    resolve_dispatcher_login || return "$on_read_error"
+    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return "$on_read_error"
+    jq -e --arg marker "$marker" --arg cancel "$cancel_marker" \
+          --arg bot "$DISPATCHER_LOGIN" --arg login "$DECISION_BLOCKER_PO_LOGIN" '
+        [.[] | select((.user.login // "") == $bot)] as $own
+        | ([$own[] | select((.body // "") | contains($marker))] | last) as $held
+        | if $held == null then false
+          else ([.[] | select(
+                   (.user.login // "") == $login and
+                   .created_at > $held.created_at and
+                   ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
+                )] | length == 0)
+               and
+               ($cancel == "" or
+                ([$own[] | select(.created_at > $held.created_at and ((.body // "") | contains($cancel)))]
+                 | length == 0))
+          end' <<< "$comments" >/dev/null
+}
+
+# post_blocker_once <issue> <title> <type> <marker> <unblocked-when> <state>
+post_blocker_once() {
+    local issue_num="$1" issue_title="$2" blocker_type="$3" marker="$4" unblocked_when="$5" state="$6"
+    if marker_holds "$issue_num" "$marker"; then
+        return 0
+    fi
+    echo "BLOCKED: posting $blocker_type blocker on #$issue_num"
+    post_comment "$issue_num" "## Blocked Declaration
+Type: $blocker_type
+Declared by: $DECLARED_BY
+Blocks: #$issue_num — $issue_title
+Unblocked when: $unblocked_when
+Owner: PO (@LauraMardones)
+State of in-progress work: $state
+
+$marker"
 }
 
 # ─── Utility: POST JSON to a URL, fail closed on transport/HTTP error ────────
@@ -1033,6 +1173,10 @@ run_openai_agent() {
 #   exit 0 (start)  — return 0; the session starts as before.
 #   exit 1 (refuse) — before /implement: log [RESERVE SKIP], put the story back
 #                     to "Ready for implementation" (E1 already moved it), exit 0.
+#                     Before the /implement of a fix round (issue #293): log
+#                     [RESERVE SKIP] and write nothing. The story keeps its
+#                     place in "In implementation" and the resume pass tries
+#                     the fix round again on a later run.
 #                     Before /review, /merge or /cleanup: one comment on the
 #                     story naming the step, the window, the share left, the
 #                     reserve and the reset time; exit 0. Resuming is #316.
@@ -1060,8 +1204,26 @@ allowance_comment() {
         | ["## Subscription allowance check", "", $head, ""]
           + (if ($lines | length) > 0 then $lines + [""] else [] end)
           + ["Reason: \($d.reason)", "",
-             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
+             (if $step == "merge"
+              then "The story stays in \"In merge\". A later dispatcher run tries /merge again; nothing is needed from you."
+              else "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."
+              end)]
         | join("\n")' <<< "$decision_json"
+}
+
+# Posts the allowance comment unless it is already the story's newest comment
+# for this step (issue #293): a resume entry is tried again on every run, and
+# a refusal that repeats must not add a comment each time.
+post_allowance_comment() {
+    local step="$1" decision_json="$2" newest
+    newest=$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" \
+        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    if [[ "$newest" == "## Subscription allowance check"* \
+          && "$newest" == *"/$step was not started for #$ISSUE_NUMBER:"* ]]; then
+        echo "#$ISSUE_NUMBER: the allowance comment for /$step is already the newest comment; not posting it again"
+        return 0
+    fi
+    post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
 }
 
 check_subscription_allowance() {
@@ -1082,22 +1244,26 @@ check_subscription_allowance() {
 
     LAST_ACTION="allowance check before /$step for #$ISSUE_NUMBER"
     if [[ $rc -eq 1 ]]; then
-        if [[ "$step" == "implement" ]]; then
+        if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: fix round not started; story stays in \"In implementation\" and the fix round is tried again on a later run"
+        elif [[ "$step" == "implement" ]]; then
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
             set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
         else
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /$step not started; commenting on the story"
-            post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+            post_allowance_comment "$step" "$decision_json"
         fi
         DISPATCH_HANDLED=true
         exit 0
     fi
 
     echo "[ALLOWANCE ERROR] #$ISSUE_NUMBER: /$step not started: $(jq -r '.reason' <<< "$decision_json")" >&2
-    if [[ "$step" == "implement" ]]; then
+    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        echo "#$ISSUE_NUMBER stays in \"In implementation\"; the fix round is tried again on a later run" >&2
+    elif [[ "$step" == "implement" ]]; then
         set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
     else
-        post_comment "$ISSUE_NUMBER" "$(allowance_comment "$step" "$decision_json")"
+        post_allowance_comment "$step" "$decision_json"
     fi
     DISPATCH_HANDLED=true
     exit 1
@@ -1176,6 +1342,73 @@ find_linked_pr() {
                 (.body // "") | ascii_downcase |
                 test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
             )) | first | .number // empty'
+}
+
+# ─── Utility: linked PR facts for the hand-off and resume entries (#293) ─────
+# find_linked_pr_json prints the linked open PR as one JSON object (number,
+# draft, head.sha), or nothing. find_merged_linked_pr prints the number of a
+# merged PR that closes the issue, looking at the 100 most recently updated
+# closed PRs.
+
+find_linked_pr_json() {
+    local issue_num="$1"
+    gh api "repos/$REPO/pulls?state=open&per_page=100" \
+        | jq -c --argjson n "$issue_num" '
+            map(select(
+                (.body // "") | ascii_downcase |
+                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
+            )) | first // empty'
+}
+
+find_merged_linked_pr() {
+    local issue_num="$1"
+    gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
+        | jq -r --argjson n "$issue_num" '
+            map(select(
+                .merged_at != null and
+                ((.body // "") | ascii_downcase |
+                 test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b"))
+            )) | first | .number // empty'
+}
+
+# ─── Utility: fix-round facts from the bookkeeping job's marker (#293) ───────
+# fix_round_heads prints, one per line, the PR heads for which the
+# codex-review-bookkeeping job recorded findings on PR <pr>: comments by the
+# job's account that carry its hidden marker with action=move-in-implementation.
+# The dispatcher reads only this marker; it never parses Codex comments or
+# reviews (the recognizer lives in review_policy.py). A marker in a comment by
+# any other account is ignored. An unresolved account or a failed read prints
+# nothing, so no fix round starts.
+
+bookkeeping_login() {
+    if [[ -z "$CODEX_BOOKKEEPING_LOGIN" ]]; then
+        CODEX_BOOKKEEPING_LOGIN=$(gh api user | jq -r '.login // empty' 2>/dev/null || true)
+        [[ -n "$CODEX_BOOKKEEPING_LOGIN" ]] \
+            || echo "Warning: could not resolve the bookkeeping job's account; no fix round can be recognised." >&2
+    fi
+    echo "$CODEX_BOOKKEEPING_LOGIN"
+}
+
+fix_round_heads() {
+    local pr_number="$1" login
+    login=$(bookkeeping_login)
+    [[ -n "$login" ]] || return 0
+    gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" \
+        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER" '
+            [ add // [] | .[]
+              | select((.user.login // "") == $login)
+              | (.body // "") | split($marker)[1:][]
+              | capture("^(?<head>[0-9a-fA-F]+)[ ]").head | ascii_downcase
+            ] | unique | .[]' 2>/dev/null || true
+}
+
+# head_in_list <head> <newline-separated heads> — 0 when <head> is one of them.
+head_in_list() {
+    local head="${1,,}" line
+    while IFS= read -r line; do
+        [[ -n "$line" && "$line" == "$head" ]] && return 0
+    done <<< "$2"
+    return 1
 }
 
 # ─── Utility: paginated project board fetch (D1 fix) ──────────────────────────
@@ -1378,26 +1611,20 @@ get_status_option_id() {
     echo "$result"
 }
 
-# ─── Step 1: Fetch target story ───────────────────────────────────────────────
+# ─── Required board options (issue #293) ──────────────────────────────────────
+# The hand-off and the resume entries depend on "In review" and "In merge".
+# A board without one of them is a configuration error that stops the run
+# before any session starts; it is not skipped with a warning.
 
-LAST_ACTION="fetching target story #$ISSUE_NUMBER"
-echo "Fetching target story #$ISSUE_NUMBER..."
-TARGET=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER") || {
-    echo "Error: Could not fetch issue #$ISSUE_NUMBER from $REPO." >&2; exit 1
-}
+for _required_status in "In review" "In merge"; do
+    if [[ -z "$(get_status_option_id "$_required_status")" ]]; then
+        echo "Error: the project board has no \"$_required_status\" Status option; the dispatcher cannot run without it." >&2
+        exit 1
+    fi
+done
 
-TARGET_TITLE=$(echo "$TARGET" | jq -r '.title')
-TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
-TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
-TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
-
-# ─── Step 1b: Executable issue-type guard (issue #256) ───────────────────────
-# Only Stories, Tasks, and Bugs are executable units for /implement. Anything
-# else sitting in "Ready for implementation" (an Epic, a Feature, or an item
-# with missing or unsupported type metadata) is skipped with one warning,
-# excluded for the rest of this run, and selection continues. This runs before
-# Step 2 so a non-executable item never reaches the executor-label check,
-# which stays fatal for executable items.
+# ─── Executable issue types (issue #256) ──────────────────────────────────────
+# Used by the resume pass below and by Step 1b.
 
 EXECUTABLE_ISSUE_TYPES="story task bug"
 
@@ -1447,6 +1674,541 @@ classify_issue_type() {
     return 1
 }
 
+# ─── Utility: board facts from the current $BOARD_DATA snapshot ──────────────
+
+board_status_of() {
+    local issue_num="$1"
+    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
+        .data.repository.projectsV2.nodes[0].items.nodes[]
+        | select((.content | type) == "object" and .content.number == $n)
+        | [.fieldValues.nodes[] | select((.field.name? // "") == "Status") | .name][0] // empty' | head -1
+}
+
+board_items_in_status() {
+    local status_name="$1"
+    echo "$BOARD_DATA" | jq -c --arg s "$status_name" '[
+        .data.repository.projectsV2.nodes[0].items.nodes[]
+        | select(
+            (.content | type) == "object" and
+            (.content.number != null) and
+            ([ .fieldValues.nodes[]
+               | select((.field.name? // "") == "Status" and (.name? // "") == $s)
+             ] | length > 0)
+          )
+        | { id: .id, number: .content.number, title: .content.title }
+    ]'
+}
+
+# ─── Utility: per-story budget estimate and /implement increment (#203) ──────
+# resolve_budget_estimate sets BUDGET_TYPE and ESTIMATED_TOKENS from the
+# current story's labels and executor.
+
+resolve_budget_estimate() {
+    BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$EXECUTOR_LABEL]:-}"
+
+    SIZE_LABEL=""
+    local _lbl
+    for _lbl in $TARGET_LABELS; do
+        if [[ "$_lbl" == size:* || "$_lbl" == "small" || "$_lbl" == "medium" || "$_lbl" == "large" ]]; then
+            SIZE_LABEL="$_lbl"
+            break
+        fi
+    done
+
+    ESTIMATED_TOKENS=75000
+    if [[ -f "$BUDGET_SCRIPT" ]]; then
+        ESTIMATED_TOKENS=$(bash "$BUDGET_SCRIPT" estimate "${SIZE_LABEL:-medium}" 2>/dev/null || echo 75000)
+    fi
+}
+
+increment_implement_budget() {
+    if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
+        if $DRY_RUN; then
+            echo "[DRY RUN] Would call: dispatcher-budget.sh increment $BUDGET_TYPE $ESTIMATED_TOKENS"
+        else
+            echo "[BUDGET] Increment: $BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER"
+            bash "$BUDGET_SCRIPT" increment "$BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
+                echo "Warning: Budget increment failed for $BUDGET_TYPE; continuing." >&2
+        fi
+    fi
+}
+
+# ─── Utility: /merge and /cleanup, shared by Steps E3/E4 and the resume pass ─
+# One merge attempt per PR head (issue #293): when /merge fails, the mid-cycle
+# blocker records the head it was tried on. The story stays "In merge", and
+# the resume pass skips it until the PR has a new head or the PO posts a
+# standalone `/unblock` line after the blocker. Without this a blocked merge
+# would start a model session on every poll.
+
+merge_attempt_marker() {
+    dispatcher_marker "action=merge-attempt pr=$1 head=$2"
+}
+
+run_merge_or_block() {
+    local pr_number="$1" head_sha="$2" marker=""
+    [[ -n "$head_sha" ]] && marker=$(merge_attempt_marker "$pr_number" "$head_sha")
+    LAST_ACTION="invoking /merge for PR #$pr_number"
+    if ! invoke_executor_command "merge" "$pr_number"; then
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    echo "✓ /merge completed for PR #$pr_number"
+}
+
+finish_story() {
+    LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
+    echo ""
+    echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
+    set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
+    # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
+    if ! invoke_executor_command "cleanup" "$ISSUE_NUMBER"; then
+        echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
+    fi
+    echo "✓ Story #$ISSUE_NUMBER completed (Done)."
+
+    # Feature/epic closure check (issue #179)
+    LAST_ACTION="feature/epic closure check after #$ISSUE_NUMBER Done"
+    notify_closure_if_complete "$ISSUE_NUMBER" || true
+}
+
+# ─── Utility: hand a story to the Codex review loop after /implement (#293) ──
+# For a story whose executor has a CODEX_REVIEW_LOOP_ROUTING row. The
+# dispatcher starts no /review session, adds nothing to a review budget and
+# posts no review request (/implement posts it, issue #292). It only makes
+# sure the story is where the bookkeeping job expects it:
+#   - no linked open PR, or a draft PR: mid-cycle blocker for /implement, the
+#     story stays "In implementation", exit 1;
+#   - "In review" is written only when the story is still "In implementation"
+#     and no fix round is due. It is never written over "In review" or
+#     "In merge": Codex may have answered, and the bookkeeping job acted,
+#     before this point;
+#   - a fix round that is due on the head the PR already had before the
+#     session means the session pushed no commit. The blocker records that
+#     head, so the same findings do not start a session on every poll. This
+#     holds whatever status the session left the story in;
+#   - a fix round that is due on a new head means Codex answered, and the
+#     bookkeeping job acted, while the session was still running. Nothing is
+#     written and nothing is recorded: the next run starts that fix round.
+#
+# Argument: the PR head before the /implement session, or empty when the story
+# had no open PR then.
+
+fix_round_attempt_marker() {
+    dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
+}
+
+# A pending hand-off is matched by PR, not by head: a commit may land between
+# the failed write and the run that retries it. It is cancelled by the "done"
+# marker the retry posts, so it is completed once.
+hand_off_pending_marker() {
+    dispatcher_marker "action=hand-off-pending pr=$1 head=$2"
+}
+
+hand_off_pending_prefix() {
+    echo "<!-- hpw:dispatcher action=hand-off-pending pr=$1 "
+}
+
+hand_off_done_marker() {
+    dispatcher_marker "action=hand-off-done pr=$1"
+}
+
+# set_project_status_checked — like set_project_status(), but returns 1 when
+# the write did not happen, so the caller can keep a retryable state.
+set_project_status_checked() {
+    local item_id="$1" issue_num="$2" status_name="$3" option_id
+    option_id=$(get_status_option_id "$status_name")
+    [[ -n "$item_id" && -n "$STATUS_FIELD_ID" && -n "$option_id" ]] || return 1
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
+        return 0
+    fi
+    gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: { singleSelectOptionId: $optionId }
+      }) { projectV2Item { id } }
+    }
+    ' -f projectId="$PROJECT_ID" \
+      -f itemId="$item_id" \
+      -f fieldId="$STATUS_FIELD_ID" \
+      -f optionId="$option_id" >/dev/null
+}
+
+fix_round_due() {
+    local pr_number="$1" head_sha="$2"
+    local heads
+    [[ -n "$head_sha" ]] || return 1
+    heads=$(fix_round_heads "$pr_number")
+    head_in_list "$head_sha" "$heads"
+}
+
+# record_pending_hand_off <pr> <head> — the session finished but the story is
+# not "In review" and could not be put there. The bookkeeping job acts only on
+# "In review", so this must not look like a finished hand-off: one recovery
+# comment carries the pending marker, the run exits 1, and a later run
+# completes the hand-off without a new session (complete_pending_hand_off()).
+record_pending_hand_off() {
+    local pr_number="$1" pr_head="$2"
+    if ! marker_holds "$ISSUE_NUMBER" "$(hand_off_pending_prefix "$pr_number")" 0 "$(hand_off_done_marker "$pr_number")"; then
+        post_comment "$ISSUE_NUMBER" "## Recovery Comment
+Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status is not \"In review\" and could not be set.
+Action: none yet. A later dispatcher run sets the status without starting /implement again; the Codex review loop acts only on a story in \"In review\".
+
+$(hand_off_pending_marker "$pr_number" "$pr_head")"
+    fi
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
+# complete_pending_hand_off <issue> <item-id> <pr> <draft> — writes "In review"
+# for a story whose earlier hand-off is still pending, and posts the "done"
+# marker. Does nothing when no pending marker holds or the PR is a draft. A
+# story it handled is not started as new work in this run; when the write
+# fails again the story is also kept out of the next-story search.
+HAND_OFF_RESUMED_ISSUES=""
+
+complete_pending_hand_off() {
+    local issue_num="$1" item_id="$2" pr_number="$3" pr_draft="$4"
+    [[ "$pr_draft" != "true" ]] || return 0
+    marker_holds "$issue_num" "$(hand_off_pending_prefix "$pr_number")" 1 "$(hand_off_done_marker "$pr_number")" || return 0
+
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
+    HAND_OFF_RESUMED_ISSUES="${HAND_OFF_RESUMED_ISSUES:+$HAND_OFF_RESUMED_ISSUES }$issue_num"
+    if set_project_status_checked "$item_id" "$issue_num" "In review"; then
+        RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+        post_comment "$issue_num" "## Recovery Comment
+Detected: a hand-off for #$issue_num on PR #$pr_number that could not set the board status earlier.
+Action: status set to \"In review\".
+
+$(hand_off_done_marker "$pr_number")" || true
+    else
+        echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
+        NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$issue_num"
+    fi
+    return 0
+}
+
+hand_off_to_codex_review_loop() {
+    local head_before="${1:-}"
+    local reviewer="${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]}"
+    local pr_json pr_number pr_draft pr_head status
+    LAST_ACTION="hand-off to the Codex review loop for #$ISSUE_NUMBER"
+    pr_json=$(find_linked_pr_json "$ISSUE_NUMBER")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
+    pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
+
+    if $DRY_RUN; then
+        local pr_label="the PR /implement opens"
+        [[ -n "$pr_number" ]] && pr_label="PR #$pr_number"
+        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session and no review budget increment; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
+        return 0
+    fi
+
+    if [[ -z "$pr_number" ]]; then
+        echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    if [[ "$pr_draft" == "true" ]]; then
+        echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement." >&2
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+
+    BOARD_DATA=$(fetch_board_data) || {
+        echo "Error: Failed to re-read the project board for the hand-off of #$ISSUE_NUMBER." >&2; exit 1
+    }
+    status=$(board_status_of "$ISSUE_NUMBER")
+    local due=false
+    fix_round_due "$pr_number" "$pr_head" && due=true
+
+    # Checked whatever the status is: a session that pushed nothing may still
+    # have moved the story to "In review", and the bookkeeping job would then
+    # move it back for the same head and start the same round again.
+    if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]]; then
+        echo "Error: /implement for #$ISSUE_NUMBER pushed no new commit to PR #$pr_number; the findings recorded for head ${pr_head:0:7} are still open." >&2
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
+            "$(fix_round_attempt_marker "$pr_number" "$pr_head")"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+
+    if [[ "$status" == "Ready for implementation" || "$status" == "Ready" ]]; then
+        # Neither the dispatcher's own "In implementation" write nor the
+        # session's status write took effect. Reporting a hand-off here would
+        # let the next-story search pick this story again and start another
+        # /implement session for work that is already on the PR.
+        echo "Error: #$ISSUE_NUMBER is still \"$status\" after /implement; the board status did not advance." >&2
+        record_pending_hand_off "$pr_number" "$pr_head"
+    elif [[ "$status" != "In implementation" ]]; then
+        echo "#$ISSUE_NUMBER is \"$status\" on the board; the dispatcher leaves it there."
+    elif $due; then
+        echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
+    elif ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"; then
+        echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement." >&2
+        record_pending_hand_off "$pr_number" "$pr_head"
+    fi
+    echo "[HANDOFF] #$ISSUE_NUMBER: handed to the Codex review loop ($reviewer) on PR #$pr_number; no /review session started"
+}
+
+# ─── Resume pass (issue #293) ─────────────────────────────────────────────────
+# Runs once at the start of every run, before new work, and decides everything
+# from GitHub facts read now (board status, linked PR, comment markers).
+# Order: stories "In merge", then due fix rounds, then hand-offs that are
+# still pending.
+#
+# load_story_context sets the per-story globals the session helpers read
+# (ISSUE_NUMBER, TARGET_*, EXECUTOR_LABEL). It returns 1 with
+# STORY_SKIP_REASON set when the item is not an executable story with a known
+# executor: label.
+
+RESUME_SESSIONS=0
+STORY_SKIP_REASON=""
+STORY_EXECUTOR_LABEL_COUNT=0
+LOG_PREFIX=""
+$DRY_RUN && LOG_PREFIX="[DRY RUN] "
+
+load_story_context() {
+    local issue_num="$1" item_id="$2" detail lbl
+    STORY_SKIP_REASON=""
+    TARGET=$(gh api "repos/$REPO/issues/$issue_num") || {
+        STORY_SKIP_REASON="the issue could not be read"; return 1
+    }
+    ISSUE_NUMBER="$issue_num"
+    TARGET_ITEM_ID="$item_id"
+    TARGET_TITLE=$(echo "$TARGET" | jq -r '.title')
+    TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
+    TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
+    TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
+    if ! detail=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
+        STORY_SKIP_REASON="not an executable Story, Task, or Bug ($detail)"
+        return 1
+    fi
+    EXECUTOR_LABEL=""
+    STORY_EXECUTOR_LABEL_COUNT=0
+    for lbl in $TARGET_LABELS; do
+        if [[ "$lbl" == executor:* ]]; then
+            [[ -z "$EXECUTOR_LABEL" ]] && EXECUTOR_LABEL="${lbl#executor:}"
+            STORY_EXECUTOR_LABEL_COUNT=$(( STORY_EXECUTOR_LABEL_COUNT + 1 ))
+        fi
+    done
+    if [[ -z "$EXECUTOR_LABEL" || -z "${EXECUTOR_ROUTING[$EXECUTOR_LABEL]+x}" ]]; then
+        STORY_SKIP_REASON="no known executor: label"
+        return 1
+    fi
+}
+
+# A story "In merge", whatever its executor. The board status is not trusted
+# on its own: the merge gates inside /merge decide whether the PR merges.
+resume_in_merge_story() {
+    local issue_num="$1" item_id="$2"
+    local pr_json pr_number pr_draft pr_head merged_pr
+    if ! load_story_context "$issue_num" "$item_id"; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: $STORY_SKIP_REASON" >&2
+        return 0
+    fi
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
+    pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
+
+    if [[ -n "$pr_number" && "$pr_draft" != "true" ]]; then
+        if [[ -n "$pr_head" ]] && marker_holds "$issue_num" "$(merge_attempt_marker "$pr_number" "$pr_head")"; then
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /merge was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
+            return 0
+        fi
+        echo ""
+        echo "${LOG_PREFIX}[RESUME] #$issue_num: /merge PR #$pr_number"
+        RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+        run_merge_or_block "$pr_number" "$pr_head"
+        refresh_board_after_resumed_story
+        finish_story
+        return 0
+    fi
+
+    if [[ -z "$pr_number" ]]; then
+        merged_pr=$(find_merged_linked_pr "$issue_num")
+        if [[ -n "$merged_pr" ]]; then
+            echo ""
+            echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$merged_pr is already merged; Done and /cleanup"
+            RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+            refresh_board_after_resumed_story
+            finish_story
+            return 0
+        fi
+    fi
+
+    echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: \"In merge\" with no open non-draft PR and no merged PR that closes it"
+    post_blocker_once "$issue_num" "$TARGET_TITLE" "external" \
+        "$(dispatcher_marker "action=in-merge-without-pr")" \
+        "#$issue_num has a linked open PR that is ready for review, or its board status is corrected" \
+        "none started by the dispatcher; the story is \"In merge\" with no open non-draft PR and no merged PR that closes it"
+}
+
+# A story "In implementation" for which the bookkeeping job recorded findings
+# on the PR's current head. The story already holds its place within the WIP
+# limit, so the WIP and file-overlap checks are not run against it again; the
+# allowance check inside invoke_executor_command() still applies.
+resume_fix_round() {
+    local issue_num="$1" item_id="$2"
+    local pr_json pr_number pr_draft pr_head heads round attempt_marker
+    load_story_context "$issue_num" "$item_id" || return 0
+    [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
+
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
+    pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
+    [[ -n "$pr_number" && -n "$pr_head" ]] || return 0
+
+    heads=$(fix_round_heads "$pr_number")
+    if ! head_in_list "$pr_head" "$heads"; then
+        # No fix round is due. If an earlier hand-off could not write
+        # "In review", finish it now; otherwise the bookkeeping job would
+        # never act on Codex's answer.
+        complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$pr_draft"
+        return 0
+    fi
+
+    # One marker per head: the count is the number of this round.
+    round=$(wc -l <<< "$heads" | tr -d '[:space:]')
+    if [[ "$round" -gt "$CODEX_FIX_ROUND_MAX" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: fix round $round on PR #$pr_number is above the maximum of $CODEX_FIX_ROUND_MAX; no session started"
+        post_blocker_once "$issue_num" "$TARGET_TITLE" "resource" \
+            "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" \
+            "the findings on PR #$pr_number are fixed by hand, or CODEX_FIX_ROUND_MAX is raised and the PO posts /unblock" \
+            "PR #$pr_number has had $CODEX_FIX_ROUND_MAX automatic fix rounds and Codex still has findings on head ${pr_head:0:7}; branch and commits intact"
+        return 0
+    fi
+
+    attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
+    if marker_holds "$issue_num" "$attempt_marker"; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the fix round was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
+        return 0
+    fi
+
+    echo ""
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: fix round $round of $CODEX_FIX_ROUND_MAX, /implement on PR #$pr_number"
+    RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+    LAST_ACTION="invoking /implement for #$issue_num (fix round $round)"
+    resolve_budget_estimate
+    # The allowance check must not put this story back to "Ready for
+    # implementation": it is unfinished work that holds its place.
+    FIX_ROUND_SESSION=true
+    if ! invoke_executor_command "implement" "$issue_num"; then
+        check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
+        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    FIX_ROUND_SESSION=false
+    echo "✓ /implement completed for #$issue_num"
+    increment_implement_budget
+    hand_off_to_codex_review_loop "$pr_head"
+}
+
+# A story still "Ready for implementation" whose hand-off is pending: the
+# status writes of its run failed. It is completed here, before new work, so
+# it is not started a second time.
+resume_pending_hand_off() {
+    local issue_num="$1" item_id="$2"
+    local pr_json pr_number
+    load_story_context "$issue_num" "$item_id" || return 0
+    [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    [[ -n "$pr_number" ]] || return 0
+    complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$(jq -r '.draft // false' <<< "$pr_json")"
+}
+
+# The closure check of each finished story reads $BOARD_DATA. Re-read it after
+# every story the resume pass finishes, so the last two stories of a feature
+# finished in one pass see each other as Done.
+refresh_board_after_resumed_story() {
+    $DRY_RUN && return 0
+    BOARD_DATA=$(fetch_board_data) || {
+        echo "Error: Failed to fetch project board data." >&2; exit 1
+    }
+}
+
+run_resume_pass() {
+    local items count i
+    items=$(board_items_in_status "In merge")
+    count=$(jq 'length' <<< "$items")
+    for ((i=0; i < count; i++)); do
+        resume_in_merge_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+    done
+
+    items=$(board_items_in_status "In implementation")
+    count=$(jq 'length' <<< "$items")
+    for ((i=0; i < count; i++)); do
+        resume_fix_round "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+    done
+
+    items=$(board_items_in_status "Ready for implementation")
+    count=$(jq 'length' <<< "$items")
+    for ((i=0; i < count; i++)); do
+        resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+    done
+}
+
+REQUESTED_ISSUE="$ISSUE_NUMBER"
+if ! $RESUME_PASS_DONE; then
+    LAST_ACTION="resume pass"
+    echo "Checking for resumable work (\"In merge\", then fix rounds)..."
+    run_resume_pass
+    RESUME_PASS_DONE=true
+    ISSUE_NUMBER="$REQUESTED_ISSUE"
+    if [[ $RESUME_SESSIONS -gt 0 && $DRY_RUN == false ]]; then
+        echo "Re-fetching board after the resume pass..."
+        BOARD_DATA=$(fetch_board_data) || {
+            echo "Error: Failed to fetch project board data." >&2; exit 1
+        }
+    fi
+fi
+
+if $RESUME_ONLY; then
+    echo "Resume pass finished ($RESUME_SESSIONS resumed). Dispatcher exiting cleanly."
+    DISPATCH_HANDLED=true
+    exit 0
+fi
+
+# A story whose pending hand-off the resume pass just handled already has its
+# work on the PR. It is not started as new work in this run.
+if [[ " $HAND_OFF_RESUMED_ISSUES " == *" $ISSUE_NUMBER "* ]]; then
+    echo "#$ISSUE_NUMBER: its hand-off was handled by the resume pass; /implement is not started again. Dispatcher exiting cleanly."
+    DISPATCH_HANDLED=true
+    exit 0
+fi
+
+# ─── Step 1: Fetch target story ───────────────────────────────────────────────
+
+LAST_ACTION="fetching target story #$ISSUE_NUMBER"
+echo "Fetching target story #$ISSUE_NUMBER..."
+TARGET=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER") || {
+    echo "Error: Could not fetch issue #$ISSUE_NUMBER from $REPO." >&2; exit 1
+}
+
+TARGET_TITLE=$(echo "$TARGET" | jq -r '.title')
+TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
+TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
+TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
+
+# ─── Step 1b: Executable issue-type guard (issue #256) ───────────────────────
+# Only Stories, Tasks, and Bugs are executable units for /implement. Anything
+# else sitting in "Ready for implementation" (an Epic, a Feature, or an item
+# with missing or unsupported type metadata) is skipped with one warning,
+# excluded for the rest of this run, and selection continues. This runs before
+# Step 2 so a non-executable item never reaches the executor-label check,
+# which stays fatal for executable items.
+
 LAST_ACTION="issue-type check for #$ISSUE_NUMBER"
 if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
     echo "Warning: #$ISSUE_NUMBER is not an executable Story, Task, or Bug ($ISSUE_TYPE_DETAIL); skipping it for this run and continuing selection." >&2
@@ -1464,7 +2226,7 @@ if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TY
         exit 0
     fi
     echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
         --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
         --total-ready-count "$TOTAL_READY_COUNT" \
         --non-executable-issues "$NON_EXECUTABLE_ISSUES")
@@ -1646,6 +2408,19 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
         continue
     fi
 
+    # A story the dispatcher itself stopped at a fix-round bound (issue #293)
+    # is waiting for the PO, not stale. Rolling it back would start /implement
+    # again as a ready story and pass the bound.
+    if [[ -n "$pr_number" ]]; then
+        pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
+        if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" 1 \
+           || { [[ -n "$pr_head_sha" ]] \
+                && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
+            echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
+            continue
+        fi
+    fi
+
     hours_inactive=$(( inactivity / 3600 ))
     echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
 
@@ -1774,20 +2549,7 @@ fi
 # Check daily token budget before invoking /implement. Skip and log if the cap
 # is reached; track counts for all_budget_blocked detection.
 
-BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$EXECUTOR_LABEL]:-}"
-
-SIZE_LABEL=""
-for _lbl in $TARGET_LABELS; do
-    if [[ "$_lbl" == size:* || "$_lbl" == "small" || "$_lbl" == "medium" || "$_lbl" == "large" ]]; then
-        SIZE_LABEL="$_lbl"
-        break
-    fi
-done
-
-ESTIMATED_TOKENS=75000
-if [[ -f "$BUDGET_SCRIPT" ]]; then
-    ESTIMATED_TOKENS=$(bash "$BUDGET_SCRIPT" estimate "${SIZE_LABEL:-medium}" 2>/dev/null || echo 75000)
-fi
+resolve_budget_estimate
 
 TOTAL_READY_COUNT=$(( TOTAL_READY_COUNT + 1 ))
 
@@ -1818,7 +2580,7 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
                 exit 0
             fi
             echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-            _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
+            _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
                 --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
                 --total-ready-count "$TOTAL_READY_COUNT" \
                 --skipped-issues "$SKIPPED_ISSUES")
@@ -1830,12 +2592,54 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
     fi
 fi
 
+# ─── Utility: go on to the next Ready for implementation story ───────────────
+# Called when this story's run ends: after E4, and after the hand-off to the
+# Codex review loop (issue #293). It never returns: it either exits 0 or
+# replaces this process with the next story's run.
+
+continue_with_next_ready_story() {
+    LAST_ACTION="searching for next Ready for implementation story"
+    echo ""
+    echo "Searching for next \"Ready for implementation\" story..."
+    NEXT_ISSUE=$(find_next_ready_story || true)
+
+    if [[ -z "$NEXT_ISSUE" ]]; then
+        # Check all_budget_blocked: every story that reached the budget check was skipped.
+        if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
+            [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
+        fi
+        echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+
+    echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+
+    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
+        --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
+        --total-ready-count "$TOTAL_READY_COUNT")
+    [[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
+    $DRY_RUN && _NEXT_ARGS+=(--dry-run)
+
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would exec: bash $0 ${_NEXT_ARGS[*]}"
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+
+    DISPATCH_HANDLED=true
+    exec bash "$0" "${_NEXT_ARGS[@]}"
+}
+
 # ─── Step E1: /implement ──────────────────────────────────────────────────────
 
 LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
 echo ""
 echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
+# The PR head before the session, if the story already has an open PR: the
+# hand-off uses it to tell "pushed nothing" from "Codex already answered".
+HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
 if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
@@ -1845,26 +2649,30 @@ fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
 
 # Budget increment after successful /implement (issue #203)
-if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would call: dispatcher-budget.sh increment $BUDGET_TYPE $ESTIMATED_TOKENS"
-    else
-        echo "[BUDGET] Increment: $BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER"
-        bash "$BUDGET_SCRIPT" increment "$BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
-            echo "Warning: Budget increment failed for $BUDGET_TYPE; continuing." >&2
-    fi
+increment_implement_budget
+
+# ─── Review path (issue #293) ─────────────────────────────────────────────────
+# Table lookup, not a branch on an executor name: a story whose executor has a
+# CODEX_REVIEW_LOOP_ROUTING row is handed to the Codex review loop and this
+# run goes on to the next ready story. Every other story continues at E2.
+
+if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
+    echo ""
+    echo "── Hand-off: #$ISSUE_NUMBER to the Codex review loop ───────────────────"
+    hand_off_to_codex_review_loop "$HEAD_BEFORE_IMPLEMENT"
+    continue_with_next_ready_story
 fi
 
 # ─── Step E2: /review ─────────────────────────────────────────────────────────
-# Review pairing (issue #263): /review always runs under a different provider
-# than whichever executor performed /implement, per REVIEW_EXECUTOR_ROUTING —
-# no new `executor:` label is read or stored; the pairing is computed here,
-# at review time, from the story's existing $EXECUTOR_LABEL.
+# Paired session (issue #263): /review runs under a different provider than
+# the executor that performed /implement, per REVIEW_EXECUTOR_ROUTING — no new
+# `executor:` label is read or stored; the pairing is computed here, at review
+# time, from the story's existing $EXECUTOR_LABEL.
 
 LAST_ACTION="review-executor pairing for #$ISSUE_NUMBER"
 REVIEW_EXECUTOR_LABEL="${REVIEW_EXECUTOR_ROUTING[$EXECUTOR_LABEL]:-}"
 if [[ -z "$REVIEW_EXECUTOR_LABEL" ]]; then
-    echo "Error: No review-pairing entry for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING." >&2
+    echo "Error: No review path for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING or CODEX_REVIEW_LOOP_ROUTING." >&2
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
     DISPATCH_HANDLED=true
     exit 1
@@ -1908,65 +2716,19 @@ if [[ -n "$REVIEW_BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
 fi
 
 # ─── Step E3: /merge ──────────────────────────────────────────────────────────
+# The head is read now, after /review, so a failed attempt is recorded against
+# the head /merge was tried on (see run_merge_or_block()).
 
-LAST_ACTION="invoking /merge for PR #$PR_NUMBER"
 echo ""
 echo "── E3: /merge PR #$PR_NUMBER ────────────────────────────────────────────"
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready to merge"
-if ! invoke_executor_command "merge" "$PR_NUMBER"; then
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge"
-    DISPATCH_HANDLED=true
-    exit 1
-fi
-echo "✓ /merge completed for PR #$PR_NUMBER"
+PR_HEAD_SHA=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"
+run_merge_or_block "$PR_NUMBER" "$PR_HEAD_SHA"
 
-# ─── Step E4: /cleanup ────────────────────────────────────────────────────────
+# ─── Step E4: /cleanup, then the feature/epic closure check (issue #179) ──────
 
-LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
-echo ""
-echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
-# Cleanup failure is non-fatal: story is already Done; log and continue to loop.
-if ! invoke_executor_command "cleanup" "$ISSUE_NUMBER"; then
-    echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
-fi
-echo "✓ Story #$ISSUE_NUMBER completed (Done)."
-
-# ─── Feature/epic closure check (issue #179) ──────────────────────────────────
-
-LAST_ACTION="feature/epic closure check after #$ISSUE_NUMBER Done"
-notify_closure_if_complete "$ISSUE_NUMBER" || true
+finish_story
 
 # ─── Loop: find and process the next Ready for implementation story ───────────
 
-LAST_ACTION="searching for next Ready for implementation story"
-echo ""
-echo "Searching for next \"Ready for implementation\" story..."
-NEXT_ISSUE=$(find_next_ready_story || true)
-
-if [[ -z "$NEXT_ISSUE" ]]; then
-    # Check all_budget_blocked: every story that reached the budget check was skipped.
-    if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
-        [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
-    fi
-    echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
-    DISPATCH_HANDLED=true
-    exit 0
-fi
-
-echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-
-_NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" \
-    --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-    --total-ready-count "$TOTAL_READY_COUNT")
-[[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
-$DRY_RUN && _NEXT_ARGS+=(--dry-run)
-
-if $DRY_RUN; then
-    echo "[DRY RUN] Would exec: bash $0 ${_NEXT_ARGS[*]}"
-    DISPATCH_HANDLED=true
-    exit 0
-fi
-
-DISPATCH_HANDLED=true
-exec bash "$0" "${_NEXT_ARGS[@]}"
+continue_with_next_ready_story

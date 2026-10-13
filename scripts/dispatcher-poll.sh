@@ -250,6 +250,24 @@ READY_FOR_REFINE=$(echo "$ITEMS" | jq '[
   { number: .content.number, title: .content.title }
 ]')
 
+# Resumable work for dispatcher-invoke.sh (issue #293): stories "In merge" are
+# resumed at /merge, and stories "In implementation" may have a fix round due.
+status_items() {
+    echo "$ITEMS" | jq --arg s "$1" '[
+      .data.repository.projectsV2.nodes[0].items.nodes[] |
+      select(
+        (.content.number? != null) and
+        ([ .fieldValues.nodes[] |
+           select((.field.name? // "") == "Status" and (.name? // "") == $s)
+        ] | length > 0)
+      ) |
+      { number: .content.number, title: .content.title }
+    ]'
+}
+
+IN_MERGE=$(status_items "In merge")
+IN_IMPLEMENTATION=$(status_items "In implementation")
+
 IMPL_COUNT=$(echo "$READY_FOR_IMPL" | jq 'length')
 REFINE_COUNT=$(echo "$READY_FOR_REFINE" | jq 'length')
 
@@ -281,6 +299,7 @@ else
 fi
 
 echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(s) ready for refinement." >&2
+echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN_IMPLEMENTATION" | jq 'length') item(s) in implementation." >&2
 
 # ─── Ready for refinement notification ───────────────────────────────────────
 #
@@ -396,4 +415,7 @@ fi
 jq -n \
     --argjson impl "$READY_FOR_IMPL" \
     --argjson refine "$READY_FOR_REFINE" \
-    '{ready_for_implementation: $impl, ready_for_refinement: $refine}'
+    --argjson in_merge "$IN_MERGE" \
+    --argjson in_implementation "$IN_IMPLEMENTATION" \
+    '{ready_for_implementation: $impl, ready_for_refinement: $refine,
+      in_merge: $in_merge, in_implementation: $in_implementation}'

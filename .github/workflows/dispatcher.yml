@@ -19,6 +19,11 @@
 # Workflow-level concurrency serializes scheduled and manual runs so two runs
 # never read the same snapshot and race to write it. Interim until #259.
 #
+# 2026-10-13 (issue #293): the invoke step also runs when the poll reports a
+# story "In merge" or "In implementation", so the dispatcher can resume a story
+# after the Codex review loop answered. With no story ready for implementation
+# it runs dispatcher-invoke.sh with --resume.
+#
 # Prototype divergences:
 # D1: dispatcher-poll.sh does not yet exist on main (story #170 is in review).
 #     This workflow references the script by path; the run step will fail gracefully
@@ -101,6 +106,11 @@ jobs:
           POLL_JSON=$(bash scripts/dispatcher-poll.sh "${POLL_ARGS[@]}")
           NEXT_ISSUE=$(echo "$POLL_JSON" | jq -r '.ready_for_implementation[0].number // empty')
           echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"
+          # Issue #293: a story "In merge", or "In implementation" with a fix
+          # round due, is resumed by dispatcher-invoke.sh even when no story is
+          # ready for implementation.
+          RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // [])) | length > 0')
+          echo "resumable=$RESUMABLE" >> "$GITHUB_OUTPUT"
 
       # Saved on every successful enabled default-branch poll, not only when an
       # issue is ready for implementation. Cache entries are immutable, so each
@@ -117,7 +127,7 @@ jobs:
         run: echo "TODAY=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
 
       - name: Restore budget state cache
-        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -132,11 +142,11 @@ jobs:
       # undocumented rate_limit_event shape changes only on a deliberate bump;
       # see docs/DISPATCHER-CONFIG.md → "Subscription allowance and reserve".
       - name: Install Claude Code
-        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         run: npm install -g @anthropic-ai/claude-code@2.1.296
 
       - name: Run dispatcher invoke
-        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         id: invoke
         env:
           BUDGET_DAILY_HAIKU: ${{ vars.BUDGET_DAILY_HAIKU }}
@@ -148,13 +158,19 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
           RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
+          CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}
+          NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}
         run: |
-          bash scripts/dispatcher-invoke.sh \
-            --repo "${{ github.repository }}" \
-            --issue "${{ steps.poll.outputs.issue_number }}"
+          # Resumable work is handled first in both forms; --resume is the run
+          # with no story ready for implementation (issue #293).
+          if [ -n "$NEXT_ISSUE" ]; then
+            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --issue "$NEXT_ISSUE"
+          else
+            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --resume
+          fi
 
       - name: Save budget state cache
-        if: steps.guard.outputs.enabled == 'true' && steps.poll.outputs.issue_number != ''
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         uses: actions/cache/save@v4
         with:
           path: |

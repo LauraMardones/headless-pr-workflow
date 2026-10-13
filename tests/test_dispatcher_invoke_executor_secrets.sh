@@ -87,37 +87,46 @@ else
     assert "EXECUTOR_ROUTING: no stale per-tier ANTHROPIC_API_KEY_* names remain" 0
 fi
 
-# ─── Static check 1b: REVIEW_EXECUTOR_ROUTING table content (issue #263) ─────
+# ─── Static check 1b: review-path tables (issues #263 and #293) ──────────────
 # Lookup-table test, not a conditional-branch test, per the "data-driven, not
-# hardcoded" convention already used for EXECUTOR_ROUTING above.
+# hardcoded" convention already used for EXECUTOR_ROUTING above. The Claude
+# tiers are reviewed through the Codex review loop (ADR-006), so they have no
+# paired /review session; only codex has one.
 
 REVIEW_ROUTING_BLOCK=$(awk '/^declare -A REVIEW_EXECUTOR_ROUTING=\($/{p=1} p{print} p && /^\)$/{exit}' "$INVOKE_SCRIPT")
+LOOP_ROUTING_BLOCK=$(awk '/^declare -A CODEX_REVIEW_LOOP_ROUTING=\($/{p=1} p{print} p && /^\)$/{exit}' "$INVOKE_SCRIPT")
 
 echo ""
-echo "Checking REVIEW_EXECUTOR_ROUTING table (cross-provider review pairing)..."
+echo "Checking the review-path tables (paired session and Codex review loop)..."
 if [[ -z "$REVIEW_ROUTING_BLOCK" ]]; then
     echo "FAIL: could not extract REVIEW_EXECUTOR_ROUTING from $INVOKE_SCRIPT (table renamed or removed?)"
     exit 1
 fi
-for pair in \
-    'claude-code-haiku:codex' \
-    'claude-code-sonnet:codex' \
-    'claude-code-opus:codex' \
-    'codex:claude-code-opus'
-do
-    impl_label="${pair%%:*}"
-    review_label="${pair##*:}"
-    if echo "$REVIEW_ROUTING_BLOCK" | grep -qF "[\"$impl_label\"]=\"$review_label\""; then
-        assert "REVIEW_EXECUTOR_ROUTING: $impl_label implemented -> $review_label reviews" 0
+if [[ -z "$LOOP_ROUTING_BLOCK" ]]; then
+    echo "FAIL: could not extract CODEX_REVIEW_LOOP_ROUTING from $INVOKE_SCRIPT (table renamed or removed?)"
+    exit 1
+fi
+if echo "$REVIEW_ROUTING_BLOCK" | grep -qF '["codex"]="claude-code-opus"'; then
+    assert "REVIEW_EXECUTOR_ROUTING: codex implemented -> claude-code-opus reviews" 0
+else
+    assert "REVIEW_EXECUTOR_ROUTING: codex implemented -> claude-code-opus reviews" 1
+fi
+for impl_label in claude-code-haiku claude-code-sonnet claude-code-opus; do
+    if echo "$REVIEW_ROUTING_BLOCK" | grep -qF "[\"$impl_label\"]="; then
+        assert "REVIEW_EXECUTOR_ROUTING: $impl_label has no paired /review session" 1
     else
-        assert "REVIEW_EXECUTOR_ROUTING: $impl_label implemented -> $review_label reviews" 1
+        assert "REVIEW_EXECUTOR_ROUTING: $impl_label has no paired /review session" 0
+    fi
+    if echo "$LOOP_ROUTING_BLOCK" | grep -qF "[\"$impl_label\"]="; then
+        assert "CODEX_REVIEW_LOOP_ROUTING: $impl_label uses the Codex review loop" 0
+    else
+        assert "CODEX_REVIEW_LOOP_ROUTING: $impl_label uses the Codex review loop" 1
     fi
 done
-# No tier reviews itself — the whole point of cross-provider pairing.
-if echo "$REVIEW_ROUTING_BLOCK" | grep -qE '\["claude-code-(haiku|sonnet|opus)"\]="claude-code-(haiku|sonnet|opus)"'; then
-    assert "REVIEW_EXECUTOR_ROUTING: no Claude tier is paired to review itself" 1
+if echo "$LOOP_ROUTING_BLOCK" | grep -qF '["codex"]='; then
+    assert "CODEX_REVIEW_LOOP_ROUTING: codex is not reviewed through its own review loop" 1
 else
-    assert "REVIEW_EXECUTOR_ROUTING: no Claude tier is paired to review itself" 0
+    assert "CODEX_REVIEW_LOOP_ROUTING: codex is not reviewed through its own review loop" 0
 fi
 if echo "$REVIEW_ROUTING_BLOCK" | grep -qF '["codex"]="codex"'; then
     assert "REVIEW_EXECUTOR_ROUTING: codex is not paired to review itself" 1

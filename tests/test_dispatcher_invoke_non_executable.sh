@@ -197,7 +197,7 @@ new_env() {
     mkdir -p "$d/budget"
     jq -n '{items: [], options: {
         "Ready for implementation": "OPT_READY", "In implementation": "OPT_IMPL",
-        "In review": "OPT_REVIEW", "Ready to merge": "OPT_MERGE", "Done": "OPT_DONE"}}' \
+        "In review": "OPT_REVIEW", "In merge": "OPT_MERGE", "Done": "OPT_DONE"}}' \
         > "$d/board.json"
     echo "$d"
 }
