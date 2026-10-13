@@ -562,6 +562,22 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
         assert d.sessions == ["implement 700", f"implement {STORY}"]
 
 
+def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_implementation():
+    """The fix-round session runs implement.md: the prompt itself must not stop on WIP or file overlap."""
+    text = (REPO_ROOT / ".claude" / "commands" / "implement.md").read_text(encoding="utf-8")
+    step = re.search(r"^7\. Run the WIP pre-flight check.*?(?=^8\. )", text, re.MULTILINE | re.DOTALL)
+    assert step
+    bullets = re.findall(r"^   - (.+)$", step.group(0), re.MULTILINE)
+    skip = bullets[0]  # stated before the stop conditions
+    assert skip.startswith('skip this check when the story is already "In implementation" and has an open PR linked to it')
+    assert "steps 10 and 17" in skip
+    assert any(b.startswith("stop if 2 or more stories") for b in bullets[1:])
+    assert any(b.startswith("stop if any active story declares overlapping files") for b in bullets[1:])
+    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull from "Ready for implementation".
+    policy = (REPO_ROOT / "docs" / "PROJECT-STATUS.md").read_text(encoding="utf-8")
+    assert "Before pulling a story from **Ready for implementation** into **In implementation**" in policy
+
+
 # ── Order and entry ─────────────────────────────────────────────────────────
 
 

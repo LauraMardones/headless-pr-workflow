@@ -33,6 +33,7 @@ Required behavior:
 5. Keep the work strictly within the issue scope and acceptance criteria.
 6. If the issue is dependency-heavy, verify that hard dependencies are complete before implementation starts.
 7. Run the WIP pre-flight check defined in `docs/PROJECT-STATUS.md` before pulling the story:
+   - skip this check when the story is already "In implementation" and has an open PR linked to it (continuing work, or fixing review blockers under steps 10 and 17): the check applies only when a story is pulled from "Ready for implementation", and this story already holds its place within the WIP limit
    - read the candidate story's `## Files affected` section
    - scan open stories with status "In implementation"
    - stop if 2 or more stories are already "In implementation"
