@@ -4,38 +4,37 @@ This document covers all configurable variables for the headless PR workflow dis
 
 ---
 
-## Token Budget Variables
+## Usage limit
 
-The dispatcher tracks daily token consumption per executor type to prevent the PO's API subscription from being exhausted by autonomous runs. All budget variables are **safety backstops** against multi-window runaway usage within a UTC day. Normal enforcement is by the subscription provider on a per-5-hour-window basis; these caps are a secondary protection layer.
+The PO caps how many autonomous sessions the dispatcher starts per UTC day with one repository variable (issue #320, ADR-012). It replaces the four daily token caps (`BUDGET_DAILY_*`), the token estimates per story size and the `budget_cap_reached` notification.
 
-Set these as GitHub Actions repository variables under **Settings → Secrets and variables → Actions → Variables**:
-
-`https://github.com/<owner>/<repo>/settings/variables/actions`
-
-| Variable | Recommended value | Rationale |
+| Variable | Valid values | Suggested first value |
 |---|---|---|
-| `BUDGET_DAILY_HAIKU` | `500000` | ~90–95 % of estimated Claude Pro 5-hour-window capacity for Haiku across a full day |
-| `BUDGET_DAILY_SONNET` | `1000000` | ~90–95 % of estimated Claude Pro 5-hour-window capacity for Sonnet across a full day |
-| `BUDGET_DAILY_OPUS` | `400000` | Opus is expensive and used sparingly; conservative safety backstop |
-| `BUDGET_DAILY_CODEX` | `10000000` | Effectively no dispatcher-level daily cap; 100 % of Codex window available to the dispatcher |
+| `USAGE_LIMIT_SESSIONS_PER_DAY` | A whole number of zero or more, in decimal digits only (`08` is eight). `0` means no session starts. | `10` |
 
-These values were decided on 2026-06-07 as part of Feature #164 (Token budget management and pause/resume).
+**Change it** under **Settings → Secrets and variables → Actions → Variables** (`https://github.com/<owner>/<repo>/settings/variables/actions`). No code change is needed; the new value applies on the next poll that finds work.
 
-### How the budget check works
+**What counts.** Every model session the dispatcher starts counts once, when it starts: `/implement` (including a fix round), `/review`, `/merge` and `/cleanup`, and refinement sessions that use the same start function. A session that fails, times out or is stopped by a provider limit still counts, so a loop of failing restarts reaches the limit. The allowance probe (#317) does not count, and a start refused by the reserve does not count. Codex Cloud review (ADR-006) is not started by the dispatcher and does not count.
 
-`scripts/dispatcher-budget.sh` reads counter files from `.dispatcher-budget/` (a directory created at runtime, not committed to source control). Each counter file holds a single line in the format `YYYY-MM-DD:<usage>`. When the UTC date changes, the counter automatically resets — no manual intervention is needed.
+**Where.** `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` checks the limit first and the allowance second, so no probe turn is spent when the limit already stops the session. `scripts/dispatcher-usage-limit.sh` holds the count (`check`, `record`, `status`, `notify-due`, `mark-notified`).
 
-The calling workflow (`.github/workflows/dispatcher.yml`) is responsible for saving and restoring the `.dispatcher-budget/` directory using `actions/cache` with key `budget-YYYY-MM-DD-{executor_type}` so that counter state persists across workflow runs within the same UTC day.
+**UTC-day reset.** `.dispatcher-usage/sessions` holds `YYYY-MM-DD:<count>`; a file dated another day reads as 0, and the cache key `session-state-YYYY-MM-DD-<run id>` changes each UTC day. The entry also holds the allowance hold. A lost or evicted cache entry reads as a count of 0, so the limit can be exceeded after a cache loss. The workflow's "Save session state cache" step runs with `always()`, so a failed invoke step is still counted.
 
-### Adjusting caps
+**Log lines.**
 
-To raise or lower a cap, update the corresponding repository variable. Changes take effect on the next dispatcher run. To disable the daily cap for a specific executor type, set the variable to a very large number (e.g., `999999999`).
+```
+[USAGE LIMIT] 3 of 10 sessions today — start
+[USAGE LIMIT SKIP] #<N>: /<step> not started; 10 of 10 sessions today
+[USAGE LIMIT ERROR] USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more (value: "<value>") — starting nothing
+```
 
-### Interpreting remaining-token output
+**When the limit stops a session** the story is left where a refusal by the reserve leaves it, the run exits `0` and starts no other session (it does not go on to the next story): before `/implement` the story goes back to "Ready for implementation"; before a fix round it keeps its place in "In implementation" and nothing is written; before `/review`, `/merge` or `/cleanup` one comment starting `## Usage limit` names the step, `N of M sessions today` and the reset time (00:00 UTC), and is not posted again while it is the story's newest comment for that step. Only `/merge` is tried again by a later run; the others are run by hand after the reset until #316.
 
-`bash scripts/dispatcher-budget.sh check <executor_type>` prints the remaining tokens as a bare integer to stdout (e.g., `750000`) and exits:
-- `0` — budget available, dispatcher may proceed
-- `1` — cap reached, dispatcher should pause
+**Notification.** The first stop of a UTC day sets the invoke step output `usage_limit_reached=true`. The workflow step "Notify usage limit reached" runs in the same run, sends one `usage_limit_reached` Slack message (`sessions_today`, `limit`, `settings_url`: the count, the limit and a link to the variables page) and only then writes the day's marker. If the send fails, no marker is written and the next run tries again; a second stop on the same day after a successful send sends nothing. A full retry with a durable record is #295.
+
+**Invalid value.** A missing, empty or invalid value (`abc`, `-1`, `7.5`, `10 `, `1e3`) starts no session. The run log has the `[USAGE LIMIT ERROR]` line, the job fails and no `dispatcher_error` Slack message is sent. Before `/implement` the story goes back to "Ready for implementation"; before a later step it gets a `## Usage limit` comment.
+
+`--dry-run` neither counts nor notifies and logs `[DRY RUN] Would check usage limit before /<step>`.
 
 ---
 
@@ -48,7 +47,7 @@ The dispatcher needs credentials to start the sessions of the story cycle. There
 | `CLAUDE_CODE_OAUTH_TOKEN` | Repository secret | All three Claude tiers (`executor:claude-code-haiku`, `-sonnet`, `-opus`): every Claude session runs Claude Code signed in with the PO's subscription (issue #314, ADR-012). The same secret signs in the allowance probe; see [Subscription token](#subscription-token--claude_code_oauth_token). |
 | `OPENAI_API_KEY_CODEX` | Repository secret | `executor:codex`, through the direct OpenAI API loop, until #315 |
 
-One subscription token serves every Claude tier — Haiku, Sonnet and Opus are model aliases chosen per session, not separate credentials (issue #252 removed the per-tier secrets). Per-tier **budget** enforcement (`BUDGET_DAILY_HAIKU`/`_SONNET`/`_OPUS`/`_CODEX`, see above) is a separate mechanism and stays per-tier.
+One subscription token serves every Claude tier — Haiku, Sonnet and Opus are model aliases chosen per session, not separate credentials (issue #252 removed the per-tier secrets). The [usage limit](#usage-limit) is one number for all sessions, not per tier.
 
 The metered Anthropic API key is no longer used. Since issue #314 it is not read by any script and not wired into the workflow; delete the repository secret and revoke the key at the provider (#308 → PO steps). Every `ANTHROPIC_*` variable is removed from the environment Claude Code runs in, so a metered key can never be used even if one is set again.
 
@@ -127,7 +126,7 @@ How a story is reviewed is looked up from two tables in `scripts/dispatcher-invo
 | `codex` | `/review` session under `claude-code-opus` | `REVIEW_EXECUTOR_ROUTING` |
 
 - **Codex review loop.** The dispatcher starts no `/review` session. It hands the story over after `/implement` and resumes it on a later run; see [Codex review loop hand-off and resume](#codex-review-loop-hand-off-and-resume).
-- **Paired session.** `invoke_executor_command()` normally resolves the provider, model and secret from the story's own `executor:` label. For the Step E2 `/review` call the dispatcher passes a third argument that names the reviewing executor instead, so `/review` runs under a different provider than `/implement`. Its token cost is attributed to the *reviewing* executor's budget counter (see Budget Check in the Invoke Loop, below).
+- **Paired session.** `invoke_executor_command()` normally resolves the provider, model and secret from the story's own `executor:` label. For the Step E2 `/review` call the dispatcher passes a third argument that names the reviewing executor instead, so `/review` runs under a different provider than `/implement`. The session counts once toward the [usage limit](#usage-limit), whichever executor runs it.
 - **Neither table.** An executor label with no row in either table gets a mid-cycle blocker after `/implement`.
 
 The path is computed from the story's existing `executor:` label and is never written back to the issue. The label continues to mean "the `/implement` executor" only.
@@ -231,16 +230,12 @@ To update this variable:
 
 ---
 
-## Budget Cap Notification
+## Usage Limit Notification
 
-When every "Ready for implementation" story in a dispatcher run is skipped due to daily token cap limits, the dispatcher workflow sends a `budget_cap_reached` Slack notification. This notification fires only when `all_budget_blocked=true` is output by the invoke step. It does not fire if the dispatcher exits early for other reasons (e.g., `DISPATCHER_ENABLED=false`, no stories available, or only some stories were budget-blocked).
-
-The Slack message contains:
-- A header identifying the pause: `:no_entry: Budget Cap Reached -- Dispatcher Paused`
-- Per-executor remaining token counts (Haiku, Sonnet, Opus, Codex)
-- A direct link to [GitHub Settings - Variables](https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions) to adjust caps or toggle `DISPATCHER_ENABLED`
-
-The notification step calls `dispatcher-budget.sh check <executor_type> || true` for each executor type to obtain remaining tokens, then passes the values to `scripts/slack-notify.sh budget_cap_reached`. The `|| true` ensures the step captures the remaining count even when exit code 1 (cap reached) is returned.
+The first time the usage limit stops a session on a UTC day, the dispatcher workflow sends a `usage_limit_reached` Slack notification (see [Usage limit](#usage-limit)). The Slack message contains:
+- A header identifying the pause: `:no_entry: Daily session limit reached -- Dispatcher Paused`
+- The sessions started today and the limit, and that no new work starts until 00:00 UTC
+- A direct link to [GitHub Settings - Variables](https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions) to change the limit or toggle `DISPATCHER_ENABLED`
 
 To enable this notification, ensure `SLACK_WEBHOOK_URL` is configured as a repository secret (see Slack Notifications section above).
 
@@ -266,7 +261,7 @@ Type is never inferred from the title or from an `executor:` label. A non-execut
 Warning: #<N> is not an executable Story, Task, or Bug (detected type: type:epic); skipping it for this run and continuing selection.
 ```
 
-If no executable item remains, the run exits `0` and invokes no executor. Non-executable skips are tracked separately from budget skips, so they never cause `all_budget_blocked=true`. `--dry-run` makes the same skip decisions without any executor invocation or GitHub mutation.
+If no executable item remains, the run exits `0` and invokes no executor. `--dry-run` makes the same skip decisions without any executor invocation or GitHub mutation.
 
 This skip applies only to the item's type. A Story, Task, or Bug with a missing or unrecognised `executor:` label is still a fatal configuration error (non-zero exit), and the error lists the supported labels:
 
@@ -278,37 +273,14 @@ This skip applies only to the item's type. A Story, Task, or Bug with a missing 
 
 ---
 
-## Budget Check in the Invoke Loop
+## Usage Limit Check in the Invoke Loop
 
-Budget enforcement is wired into `scripts/dispatcher-invoke.sh` (Story #203). Before each `/implement` invocation, the dispatcher calls `dispatcher-budget.sh check <executor_type>`. If the daily cap is reached, the story is skipped and the loop continues to the next available story:
+Every session start goes through `invoke_executor_command()`. It calls `check_usage_limit` first (see [Usage limit](#usage-limit)), then `check_subscription_allowance`, and counts the session with `record_session_start` just before it starts. A fix round is an `/implement` session and counts like any other.
 
-```
-[BUDGET SKIP] #<N>: <story title> — <executor_type> daily cap reached; skipping
-```
-
-After each successful `/implement` invocation, the counter is incremented:
+Under `--dry-run` the check is logged and nothing is counted or sent:
 
 ```
-[BUDGET] Increment: <executor_type> +<tokens> after #<N>
-```
-
-If every available "Ready for implementation" story is skipped due to budget, `all_budget_blocked=true` is written to `$GITHUB_OUTPUT` (guarded: only when the env var is set). This output is consumed by the Slack pause notification step (Story C, issue #204).
-
-For a story with a paired `/review` session (`executor:codex`), each successful `/review` invocation adds a second, independent increment that attributes cost to the *reviewing* executor (issue #263) — a different `<executor_type>` than the `/implement` increment logged just above it:
-
-```
-[BUDGET] Increment: <executor_type> +<tokens> after #<N> (review)
-```
-
-A story that uses the Codex review loop gets no review increment: the dispatcher starts no review session for it (issue #293). A fix round is an `/implement` session and adds the `/implement` increment once more, with no budget check before it.
-
-There is no pre-`/review` budget *check* (no `[BUDGET SKIP]` path for review) — only `/implement` gates a story from starting on daily cap. Once a story has begun, its `/review` step attributes cost but does not itself skip.
-
-Under `--dry-run`, budget check and increment calls are logged but not executed:
-
-```
-[DRY RUN] Would check: dispatcher-budget.sh check <executor_type>
-[DRY RUN] Would call: dispatcher-budget.sh increment <executor_type> <tokens>
+[DRY RUN] Would check usage limit before /<step>
 ```
 
 ---
@@ -327,7 +299,7 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 - writes `In review` only when the story is still `In implementation` and no fix round is due. It never overwrites `In review` or `In merge`, because the bookkeeping job may already have acted on Codex's answer;
 - writes nothing when Codex answered with findings while the session was still running: the story is already back in `In implementation` with a fix round due on the new head, and the next run starts it;
 - when that `In review` write fails, or the story is still in "Ready for implementation" because no status write of the run took effect, posts one recovery comment with a hidden marker for the PR and exits `1`. The story is not reported as handed off and is not picked again as the next ready story. A later run finds the marker on a story still in `In implementation` or "Ready for implementation", with a non-draft PR and no fix round due, and completes the hand-off without starting `/implement` again (`[RESUME] #<n>: completing the hand-off on PR #<pr>`), also when the PR head has changed since. It then posts a second marker, so the hand-off is completed once. Without this the bookkeeping job, which acts only on `In review`, would never see Codex's answer;
-- starts no `/review` session and adds no review budget increment;
+- starts no `/review` session;
 - logs `[HANDOFF] #<n>: handed to the Codex review loop (Codex Cloud) on PR #<pr>; no /review session started` and goes on to the next ready story.
 
 ### Resume at `In merge`
@@ -404,29 +376,6 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
-
----
-
-## Token Estimate Constants
-
-Token estimates per invocation are derived from the story's size label via `scripts/dispatcher-budget.sh estimate <size_label>`. Constants are defined in `dispatcher-budget.sh` and must not be redefined elsewhere:
-
-| Story size label | Estimated tokens |
-|---|---|
-| `size:small` | 25 000 |
-| `size:medium` | 75 000 |
-| `size:large` | 150 000 |
-| unknown / default | 75 000 |
-
-These are conservative estimates (Option A, decided 2026-06-07). Values can be raised once actual usage data is available.
-
----
-
-## Daily Reset Mechanism
-
-Counter files are date-scoped: each file stores the UTC date alongside the cumulative usage. When a new UTC day begins, the counter file's date no longer matches `TODAY`, so `dispatcher-budget.sh check` treats usage as 0 (full budget available). The workflow's cache key (`budget-YYYY-MM-DD-{executor_type}`) also changes on a new UTC day, ensuring a fresh cache entry is created automatically.
-
-No manual reset, cron job, or scheduled cleanup is required.
 
 ---
 
@@ -514,7 +463,7 @@ Values that were not read are `null`. `remaining_percent` is rounded down for di
 
 A refusal from a probe writes `.dispatcher-allowance/hold.json` (override with `ALLOWANCE_STATE_DIR`) with `until` set to the latest reset time among the windows below the reserve, and the two reserve values in force. Until that time, and while both reserve values are unchanged, the script refuses with `source: "hold"` and does not run Claude Code. The remaining share only goes up at a reset, so no chance to start is lost. A missing, unreadable or malformed hold file means the script probes; it never means a start without a probe.
 
-The hold lives in the same `actions/cache` entry as the budget counters, whose key changes every UTC day. A hold therefore lasts at most until the next UTC day; after that, one probe re-creates it.
+The hold lives in the same `actions/cache` entry as the usage limit's session count, whose key changes every UTC day. A hold therefore lasts at most until the next UTC day; after that, one probe re-creates it.
 
 ### A repeated `[ALLOWANCE ERROR]`
 

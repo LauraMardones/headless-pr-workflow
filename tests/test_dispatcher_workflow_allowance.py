@@ -72,10 +72,11 @@ def test_invoke_env_wires_token_and_reserves():
 
 
 def test_cache_steps_keep_allowance_state():
-    for name in ("Restore budget state cache", "Save budget state cache"):
+    for name in ("Restore session state cache", "Save session state cache"):
         paths = cache_paths(step(name))
         assert ".dispatcher-allowance" in paths, (name, paths)
-        assert ".dispatcher-budget" in paths, (name, paths)
+        assert ".dispatcher-usage" in paths, (name, paths)
+        assert ".dispatcher-budget" not in paths, (name, paths)
 
 
 def test_allowance_state_dir_is_gitignored():

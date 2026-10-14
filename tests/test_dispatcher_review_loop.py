@@ -81,8 +81,7 @@ def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
     assert d.status(STORY) == "In review"
     assert d.posted(STORY) == [] and d.posted(PR) == []
     assert f"[HANDOFF] #{STORY}: handed to the Codex review loop (Codex Cloud) on PR #{PR};" in proc.stdout
-    assert "(review)" not in proc.stdout  # no review budget increment
-    assert proc.stdout.count("[BUDGET] Increment:") == 1
+    assert d.usage_count == 1  # only the /implement session counts
 
 
 @needs_tools
@@ -356,8 +355,7 @@ def test_ac4_codex_story_keeps_the_paired_review_session(d):
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
                               f"{STORY}=In merge", f"{STORY}=Done"]
     assert "Review executor: Claude Opus" in proc.stdout
-    assert f"[BUDGET] Increment: codex +75000 after #{STORY}\n" in proc.stdout
-    assert f"[BUDGET] Increment: opus +75000 after #{STORY} (review)" in proc.stdout
+    assert d.usage_count == 4
 
 
 def test_ac5_review_path_tables():
@@ -389,6 +387,9 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
     row = '    ["claude-code-haiku"]="Codex Cloud"\n'
     assert row in text
     (scripts / "dispatcher-invoke.sh").write_text(text.replace(row, ""), encoding="utf-8", newline="\n")
+    (scripts / "dispatcher-usage-limit.sh").write_text(
+        (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
+        encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
     for lib in ("claude-session.sh", "decision-blocker.sh"):  # sourced by the script (#314, #296)
         (scripts / "lib" / lib).write_text(
@@ -906,11 +907,12 @@ def workflow_step(name: str) -> str:
     raise AssertionError(f"step {name!r} not found in {WORKFLOW}")
 
 
-@pytest.mark.parametrize("name", ["Restore budget state cache", "Install Claude Code",
-                                  "Run dispatcher invoke", "Save budget state cache"])
-def test_ac14_workflow_steps_run_on_resumable_work(name):
+@pytest.mark.parametrize("name,prefix", [("Restore session state cache", ""), ("Install Claude Code", ""),
+                                         ("Run dispatcher invoke", ""),
+                                         ("Save session state cache", "always() && ")])
+def test_ac14_workflow_steps_run_on_resumable_work(name, prefix):
     condition = re.search(r"^        if: (.+)$", workflow_step(name), re.MULTILINE)
-    assert condition and condition.group(1).strip() == WORK_CONDITION
+    assert condition and condition.group(1).strip() == prefix + WORK_CONDITION
 
 
 def test_ac14_workflow_poll_step_reports_resumable_work():

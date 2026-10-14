@@ -1332,7 +1332,7 @@ check_usage_limit() {
     fi
 
     local out rc=0 count="" limit=""
-    out=$(bash "$USAGE_LIMIT_SCRIPT") || rc=$?
+    out=$(bash "$USAGE_LIMIT_SCRIPT" check) || rc=$?
     [[ $rc -eq 0 ]] && return 0
     read -r count limit <<< "$out"
     LAST_ACTION="usage limit check before /$step for #$ISSUE_NUMBER"

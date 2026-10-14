@@ -80,6 +80,8 @@ TABLES_AND_FUNC="$GLOBAL_TMP/extracted.sh"
     # The subscription allowance check (issue #317) is covered by
     # tests/test_dispatcher_allowance*.py; this test isolates the API path.
     echo 'check_subscription_allowance() { :; }'
+    echo 'check_usage_limit() { :; }'
+    echo 'record_session_start() { :; }'
 } > "$TABLES_AND_FUNC"
 
 for fn in _curl_json _run_agent_bash_tool run_openai_agent invoke_executor_command; do
