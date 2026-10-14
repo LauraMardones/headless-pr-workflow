@@ -124,6 +124,17 @@ def test_kept_branch_is_reported_not_failed(h):
     assert "git worktree remove ../wt" in proc.stdout
 
 
+def test_branch_cleanup_report_with_ok_false_is_a_failure(h):
+    h.set("hpw_branch-cleanup.json", json.dumps({
+        "ok": False, "deleted": [], "manual_commands": ["git branch -d claude/issue-12-x"],
+        "kept": [{"branch": "claude/issue-12-x", "reason": "deletion failed: permission denied"}]}))
+    h.set("hpw_branch-cleanup.rc", "1")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "branch-cleanup reported failure" in proc.stdout
+    assert "git branch -d claude/issue-12-x" in proc.stdout  # the safe command is still reported
+
+
 def test_helper_without_a_report_is_a_failure(h):
     h.set("hpw_branch-cleanup.json", "not json")
     h.set("hpw_branch-cleanup.rc", "2")

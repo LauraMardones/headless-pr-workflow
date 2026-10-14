@@ -81,6 +81,11 @@ branch_json=$("$HPW_BIN" branch-cleanup "$PR" --repo "$REPO" --execute --json 2>
 if ! jq -e . >/dev/null 2>&1 <<< "$branch_json"; then
     failed+=("branch-cleanup produced no report")
 else
+    # A valid report with ok=false is a failed step (for example a verified
+    # deletion that was refused); its kept entries and manual commands stay.
+    if ! jq -e '.ok == true' >/dev/null 2>&1 <<< "$branch_json"; then
+        failed+=("branch-cleanup reported failure: $(jq -r '[.error // empty, .message // empty, (.kept[]? | select(.reason | test("failed")) | "\(.branch): \(.reason)")] | join("; ")' <<< "$branch_json")")
+    fi
     while IFS= read -r line; do [[ -n "$line" ]] && did+=("deleted: $line"); done < <(jq -r '.deleted[]?' <<< "$branch_json")
     while IFS= read -r line; do [[ -n "$line" ]] && kept+=("$line"); done < <(jq -r '.kept[]? | "\(.branch) kept: \(.reason)"' <<< "$branch_json")
     while IFS= read -r line; do [[ -n "$line" ]] && manual+=("$line"); done < <(jq -r '.manual_commands[]?' <<< "$branch_json")

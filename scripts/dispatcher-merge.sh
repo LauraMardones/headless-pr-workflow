@@ -78,10 +78,14 @@ fi
 # supply, so it never merges on takeover.
 OWNER_ID="dispatcher"
 owner_args=(--session-id "$OWNER_ID")
-if ! comment_bodies=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[].body' 2>/dev/null); then
+# Both fields must come from ONE /implement handoff comment: an older implement
+# summary next to a review summary for this head is not owner evidence.
+if ! comment_bodies=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[].body | @json' 2>/dev/null); then
     block "the PR comments could not be read, so merge ownership cannot be verified."
 fi
-if grep -qxF "Head: $head_sha" <<< "$comment_bodies" && grep -qxF "Command: implement" <<< "$comment_bodies"; then
+if jq -e -s --arg head "$head_sha" '
+        any(.[]; test("(^|\n)Command: implement\r?(\n|$)") and test("(^|\n)Head: " + $head + "\r?(\n|$)"))
+    ' <<< "$comment_bodies" >/dev/null 2>&1; then
     owner_args+=(--expected-owner "$OWNER_ID" --expected-owner-sha "$head_sha")
 fi
 if ! owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>/dev/null); then

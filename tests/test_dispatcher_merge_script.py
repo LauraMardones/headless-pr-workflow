@@ -112,6 +112,13 @@ def test_missing_owner_evidence_for_the_head_blocks_before_the_merge(h):
     assert_no_mutation(h) and h.log("gate.log") == []
 
 
+def test_owner_fields_from_different_comments_are_not_owner_evidence(h):
+    review = {"body": f"## Session Summary\nCommand: review\nIssue/PR: #1 / #{PR}\nHead: {HEAD}\nNext: merge\n"}
+    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff("b" * 40), review])
+    run(h)
+    assert owner_calls(h) and "--expected-owner" not in owner_calls(h)[0]
+
+
 def test_ownership_gate_failure_blocks_even_with_evidence(h):
     h.set("hpw_merge-owner.rc", "1")
     proc = run(h)
