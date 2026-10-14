@@ -390,9 +390,10 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
     assert row in text
     (scripts / "dispatcher-invoke.sh").write_text(text.replace(row, ""), encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
-    (scripts / "lib" / "claude-session.sh").write_text(  # sourced by the script (issue #314)
-        (REPO_ROOT / "scripts" / "lib" / "claude-session.sh").read_text(encoding="utf-8"),
-        encoding="utf-8", newline="\n")
+    for lib in ("claude-session.sh", "decision-blocker.sh"):  # sourced by the script (#314, #296)
+        (scripts / "lib" / lib).write_text(
+            (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
+            encoding="utf-8", newline="\n")
     commands = tmp_path / "repo" / ".claude" / "commands"
     commands.mkdir(parents=True)
     for name in ("implement", "review", "merge", "cleanup"):
