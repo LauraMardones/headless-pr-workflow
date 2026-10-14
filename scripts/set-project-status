@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Set a story's Status on the GitHub Projects v2 board and read it back.
+#
+# Usage:
+#   scripts/set-project-status --issue <n> --status "<Status name>" [--repo <owner/repo>] [--dry-run]
+#
+# --repo defaults to $GITHUB_REPOSITORY. --dry-run prints the write and the
+# item it would change, and changes nothing.
+#
+# Output (stdout, one line):
+#   Status: #<n> <old> -> <new>     the status was changed
+#   Status: #<n> already <new>      nothing to change
+# Errors go to stderr as one line naming the failed step. The token and request
+# headers are never printed.
+#
+# Exit codes:
+#   0  The story now has the intended status, read back from the board.
+#   1  The write was needed or attempted and did not happen: no token, GraphQL
+#      refused, the issue is not on the board, the status is not an option, or
+#      the read-back disagrees with the write.
+#   2  Invalid arguments.
+#
+# The token is the one `gh` uses (GH_TOKEN in a dispatcher-started session,
+# which is PROJECT_TOKEN). See docs/DISPATCHER-CONFIG.md -> "GitHub Token —
+# `PROJECT_TOKEN`".
+
+set -euo pipefail
+
+DOC='docs/DISPATCHER-CONFIG.md -> "GitHub Token — `PROJECT_TOKEN`"'
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage: set-project-status --issue <n> --status "<Status name>" [--repo <owner/repo>] [--dry-run]
+USAGE
+}
+
+fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+
+issue="" status="" repo="${GITHUB_REPOSITORY:-}" dry_run=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --issue)   [[ $# -ge 2 ]] || { usage; exit 2; }; issue="$2"; shift 2 ;;
+        --status)  [[ $# -ge 2 ]] || { usage; exit 2; }; status="$2"; shift 2 ;;
+        --repo)    [[ $# -ge 2 ]] || { usage; exit 2; }; repo="$2"; shift 2 ;;
+        --dry-run) dry_run=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Error: unknown argument: %s\n' "$1" >&2; usage; exit 2 ;;
+    esac
+done
+
+if [[ ! "$issue" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Error: --issue must be a positive integer.\n' >&2; usage; exit 2
+fi
+if [[ -z "$status" ]]; then
+    printf 'Error: --status must not be empty.\n' >&2; usage; exit 2
+fi
+if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    printf 'Error: --repo must be <owner/repo> (or set GITHUB_REPOSITORY).\n' >&2; usage; exit 2
+fi
+owner="${repo%%/*}" name="${repo##*/}"
+
+command -v gh >/dev/null 2>&1 || fail "step 'gh': gh is not installed; see $DOC"
+command -v jq >/dev/null 2>&1 || fail "step 'jq': jq is not installed"
+
+if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] && ! gh auth status >/dev/null 2>&1; then
+    fail "step 'token': no GH_TOKEN, no GITHUB_TOKEN and no gh login; see $DOC"
+fi
+
+# One read answers: the board's Status field and options, and the issue's board items.
+# shellcheck disable=SC2016
+QUERY='query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    projectsV2(first: 1) {
+      nodes {
+        id
+        fields(first: 30) {
+          nodes { ... on ProjectV2SingleSelectField { id name options { id name } } }
+        }
+      }
+    }
+    issue(number: $number) {
+      projectItems(first: 20) {
+        nodes {
+          id
+          project { id }
+          fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+        }
+      }
+    }
+  }
+}'
+# shellcheck disable=SC2016
+MUTATION='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+    value: { singleSelectOptionId: $optionId }
+  }) { projectV2Item { id } }
+}'
+
+# graphql <step> <args...>: prints the response; exits 1 on a refused call.
+graphql() {
+    local step="$1"; shift
+    local out err_file rc=0
+    err_file="$(mktemp)"
+    out=$(gh api graphql "$@" 2>"$err_file") || rc=$?
+    local err
+    err=$(tr '\n' ' ' < "$err_file" | cut -c1-300)
+    rm -f "$err_file"
+    if [[ $rc -ne 0 ]]; then
+        fail "step '$step': GraphQL call refused (${err:-exit $rc}); the token needs the 'project' and 'repo' scopes, see $DOC"
+    fi
+    if [[ -n "$out" ]] && jq -e '(.errors // []) | length > 0' >/dev/null 2>&1 <<<"$out"; then
+        err=$(jq -r '[.errors[].message] | join("; ")' <<<"$out" | cut -c1-300)
+        fail "step '$step': GraphQL returned errors ($err); the token needs the 'project' and 'repo' scopes, see $DOC"
+    fi
+    printf '%s' "$out"
+}
+
+read_board() {
+    graphql "$1" -f query="$QUERY" -f owner="$owner" -f repo="$name" -F number="$issue"
+}
+
+board=$(read_board "read board")
+project_id=$(jq -r '.data.repository.projectsV2.nodes[0].id // empty' <<<"$board")
+[[ -n "$project_id" ]] || fail "step 'read board': no Projects v2 board is visible on $repo; the token needs the 'project' scope, see $DOC"
+
+field_id=$(jq -r '[.data.repository.projectsV2.nodes[0].fields.nodes[] | select(.name? == "Status") | .id][0] // empty' <<<"$board")
+[[ -n "$field_id" ]] || fail "step 'read board': the board has no Status field"
+
+option_id=$(jq -r --arg s "$status" '[.data.repository.projectsV2.nodes[0].fields.nodes[] | select(.name? == "Status") | .options[] | select(.name == $s) | .id][0] // empty' <<<"$board")
+if [[ -z "$option_id" ]]; then
+    options=$(jq -r '[.data.repository.projectsV2.nodes[0].fields.nodes[] | select(.name? == "Status") | .options[].name] | join(", ")' <<<"$board")
+    fail "step 'resolve status': '$status' is not a Status option (options: $options)"
+fi
+
+item_json=$(jq -c --arg p "$project_id" '[.data.repository.issue.projectItems.nodes[]? | select(.project.id == $p)][0] // empty' <<<"$board")
+[[ -n "$item_json" ]] || fail "step 'find item': issue #$issue is not on the project board of $repo"
+item_id=$(jq -r '.id' <<<"$item_json")
+old=$(jq -r '.fieldValueByName.name // "(none)"' <<<"$item_json")
+
+if [[ "$old" == "$status" ]]; then
+    printf 'Status: #%s already %s\n' "$issue" "$status"
+    exit 0
+fi
+
+if $dry_run; then
+    printf '[DRY RUN] Would set #%s (item %s) from "%s" to "%s"\n' "$issue" "$item_id" "$old" "$status"
+    exit 0
+fi
+
+graphql "write status" -f query="$MUTATION" -f projectId="$project_id" \
+    -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" >/dev/null
+
+after=$(read_board "read back")
+now=$(jq -r --arg p "$project_id" '[.data.repository.issue.projectItems.nodes[]? | select(.project.id == $p)][0].fieldValueByName.name // "(none)"' <<<"$after")
+if [[ "$now" != "$status" ]]; then
+    fail "step 'read back': wrote '$status' for #$issue but the board shows '$now'"
+fi
+printf 'Status: #%s %s -> %s\n' "$issue" "$old" "$status"
