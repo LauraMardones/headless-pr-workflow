@@ -114,6 +114,8 @@ load_state() {
     fi
 }
 
+# save_state returns 1 when the state cannot be written, so a caller never
+# treats an event as recorded when it exists only in the temporary copy.
 save_state() {
     $DRY_RUN && return 0
     if ! { mkdir -p "$(dirname "$STATE_FILE")" \
@@ -121,6 +123,7 @@ save_state() {
             && mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"; } 2>/dev/null; then
         rm -f "$STATE_FILE.tmp.$$" 2>/dev/null || true
         echo "[NOTIFY] Warning: cannot write actionable event state $STATE_FILE" >&2
+        return 1
     fi
 }
 
@@ -142,7 +145,16 @@ if [[ "$MODE" == register ]]; then
     jq -nc --arg k "$KEY" --arg e "$EVENT" --argjson i "$ISSUE" --arg s "$SINCE" --arg c "$CONTEXT" \
         '{key:$k, event:$e, issue:$i, since:$s, context:$c, delivered:false,
           failed_cycles:0, first_failed_at:"", comment_posted:false}' >> "$EVENTS"
-    save_state
+    if ! save_state; then
+        # The record cannot be kept for a later cycle, so deliver it now rather
+        # than lose a one-time event; a failed delivery fails the call.
+        if SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"                 bash "$SCRIPT_DIR/slack-notify.sh" "$EVENT" "$CONTEXT" >/dev/null; then
+            echo "[NOTIFY] State not writable; delivered synchronously: $KEY" >&2
+            exit 0
+        fi
+        echo "[NOTIFY] Error: cannot record or deliver actionable event $KEY" >&2
+        exit 1
+    fi
     echo "[NOTIFY] Registered actionable event: $KEY" >&2
     exit 0
 fi
@@ -229,7 +241,10 @@ The Slack notification \`$event\` for #$issue could not be delivered for $cycles
 done < "$EVENTS"
 
 cp "$NEXT" "$EVENTS"
-save_state
+if ! save_state; then
+    echo "[NOTIFY] Error: actionable event state could not be saved; delivery progress and failure counts are lost for this cycle" >&2
+    exit 1
+fi
 
 if $RED; then
     echo "[NOTIFY] Error: an actionable Slack notification failed for $FAILURE_BOUND or more cycles in a row" >&2

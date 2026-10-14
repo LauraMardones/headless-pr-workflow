@@ -231,6 +231,22 @@ test_malformed_line_keeps_pending_record() {
     check "pending record next to a malformed line: recorded delivered" $(( $(jq -s '[.[]|select(.delivered)]|length' "$(STATE)") == 1 ? 0 : 1 ))
 }
 
+test_unwritable_state_is_observable() {
+    setup
+    : > "$T/blocker"   # a file where the state directory should be
+    export DISPATCHER_STATE_DIR="$T/blocker"
+    retry register --repo o/r --event decision_blocker --issue 7 --since 2026-10-14T10:00:00Z --context '{"story_title":"S"}'; rc=$?
+    check "unwritable state: register delivers synchronously, exit 0" $(( rc ))
+    check "unwritable state: one send" $(( $(slack_count) == 1 ? 0 : 1 ))
+    touch "$T/slack-fail"
+    retry register --repo o/r --event decision_blocker --issue 8 --since 2026-10-14T10:00:00Z --context '{"story_title":"S"}'; rc=$?
+    check "unwritable state and failed send: register fails" $(( rc == 1 ? 0 : 1 ))
+    check "unwritable state and failed send: error logged" $(grep -q 'Error: cannot record or deliver' "$T/stderr"; echo $?)
+    retry run --repo o/r; rc=$?
+    check "unwritable state: run exits non-zero" $(( rc == 1 ? 0 : 1 ))
+    check "unwritable state: run logs an error" $(grep -q 'could not be saved' "$T/stderr"; echo $?)
+}
+
 test_dry_run_sends_nothing() {
     setup
     reg_decision 7 2026-10-14T10:00:00Z
@@ -256,6 +272,7 @@ test_drain_delivers_without_counting_failures
 test_invoke_drains_before_every_chained_exec
 test_bad_state_warns_and_continues
 test_malformed_line_keeps_pending_record
+test_unwritable_state_is_observable
 test_dry_run_sends_nothing
 
 echo ""
