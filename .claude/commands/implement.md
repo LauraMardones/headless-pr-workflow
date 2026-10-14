@@ -42,6 +42,7 @@ Required behavior:
 8. If you discover blocked prerequisites, unclear acceptance criteria, scope drift, unresolved dependency decisions, WIP limit violations, or file ownership conflicts:
    - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
    - only if no documented answer exists, declare the decision blocker with the protocol's required `Checked:` line naming what was searched
+   - when declaring the decision blocker, also write the `Question:` (one sentence), `Options:` (2–4 lines, each `<letter>) <option> — <consequence>`) and `Recommendation:` (one option letter plus a one-sentence reason) fields, after `Checked:`
    - stop
    - report WIP limit violations and file ownership conflicts through the Blocked Status Protocol
    - report other blockers clearly

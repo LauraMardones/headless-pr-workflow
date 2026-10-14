@@ -135,7 +135,8 @@
 # ─── Notification events (issue #179) ────────────────────────────────────────
 #
 # Four Slack events are wired into this script via scripts/slack-notify.sh:
-#   decision_blocker          — executor declared Type: decision during /implement or /review
+#   decision_blocker          — executor declared Type: decision during /implement or /review;
+#                               carries the declaration's Question, Options and Recommendation
 #   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
@@ -352,6 +353,8 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests 
 # Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
 # shellcheck source=scripts/lib/claude-session.sh
 source "$SCRIPT_DIR/lib/claude-session.sh"
+# shellcheck source=scripts/lib/decision-blocker.sh
+source "$SCRIPT_DIR/lib/decision-blocker.sh"
 
 # ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
 # AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
@@ -526,18 +529,9 @@ check_and_notify_decision_blocker() {
     [[ -z "$blocker_json" ]] && return 0
     blocker_body=$(jq -r '.body // ""' <<< "$blocker_json")
     blocker_since=$(jq -r '.created_at // ""' <<< "$blocker_json")
-    local unblocked_when issue_url
-    unblocked_when=$(echo "$blocker_body" \
-        | grep -oP '(?<=Unblocked when: ).*' | head -1 \
-        | sed 's/[[:space:]]*$//' || echo "condition to be determined by PO")
-    issue_url="https://github.com/$REPO/issues/$issue_num"
+    local issue_url="https://github.com/$REPO/issues/$issue_num"
     register_actionable_event "decision_blocker" "$issue_num" "$blocker_since" \
-        "$(jq -n \
-               --arg st "$issue_title" \
-               --arg iu "$issue_url" \
-               --arg bt "decision" \
-               --arg uw "$unblocked_when" \
-               '{story_title: $st, issue_url: $iu, blocker_type: $bt, unblocked_when: $uw}')"
+        "$(decision_blocker_context "$blocker_body" "$issue_title" "$issue_url")"
 }
 
 # ─── Utility: comment-triggered resume for decision blockers (issue #262) ────

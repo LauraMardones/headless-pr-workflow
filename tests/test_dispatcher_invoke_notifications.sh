@@ -15,6 +15,8 @@
 #   9. EXIT trap fires dispatcher_error on unexpected non-zero exit
 #  10. EXIT trap suppressed when DISPATCH_HANDLED=true
 #  11. EXIT trap suppressed on clean exit (rc=0)
+#  12. decision_blocker context carries Question/Options/Recommendation, legacy fallback (#296)
+#  13. check_and_notify_decision_blocker passes the extracted fields to notify_slack (#296)
 #
 # Usage: bash tests/test_dispatcher_invoke_notifications.sh
 # Requires: bash 4+, jq (skips gracefully if jq not available)
@@ -666,6 +668,64 @@ test_dispatcher_error_suppressed_on_clean_exit() {
         "SLACK_CALLED: dispatcher_error"
 }
 
+# ─── Test 12: decision_blocker context carries Question/Options/Recommendation (#296)
+# Runs the real decision_blocker_context() from scripts/lib/decision-blocker.sh.
+
+test_decision_blocker_context_fields() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "decision_blocker context carries the decision fields"
+        return
+    fi
+    local lib="$REPO_ROOT/scripts/lib/decision-blocker.sh" out
+    local body=$'## Blocked Declaration\nType: decision\nChecked: docs; no existing decision found\nQuestion: Ship A or B?\nOptions: \nA) ship A — fast\nB) ship B — Question: is slow\nRecommendation: B because safe\nDeclared by: executor\nUnblocked when: PO decides\nOwner: PO'
+    out=$(bash -c "source '$lib'; decision_blocker_context \"\$1\" 'T' 'https://x/1'" _ "$body")
+    local want_opts=$'A) ship A — fast\nB) ship B — Question: is slow'
+    [[ "$(jq -r .question <<< "$out")" == "Ship A or B?" ]] \
+        && assert_contains "context: question parsed" "ok" "ok" \
+        || assert_contains "context: question parsed" "$out" "Ship A or B?"
+    [[ "$(jq -r .options <<< "$out")" == "$want_opts" ]] \
+        && assert_contains "context: multi-line options preserved, label inside option text kept" "ok" "ok" \
+        || assert_contains "context: multi-line options preserved" "$out" "$want_opts"
+    assert_contains "context: recommendation parsed" "$(jq -r .recommendation <<< "$out")" "B because safe"
+    assert_contains "context: unblocked_when kept" "$(jq -r .unblocked_when <<< "$out")" "PO decides"
+    assert_contains "context: story title and url kept" "$(jq -c '[.story_title,.issue_url]' <<< "$out")" '["T","https://x/1"]'
+
+    # Legacy declaration without the new fields → empty strings, still a valid context
+    local legacy=$'## Blocked Declaration\nType: decision\nUnblocked when: PO must decide\nOwner: PO'
+    out=$(bash -c "source '$lib'; decision_blocker_context \"\$1\" 'T' 'u'" _ "$legacy")
+    assert_contains "legacy: new fields empty" \
+        "$(jq -c '[.question,.options,.recommendation]' <<< "$out")" '["","",""]'
+    assert_contains "legacy: unblocked_when kept" "$(jq -r .unblocked_when <<< "$out")" "PO must decide"
+}
+
+# ─── Test 13: wired call passes the extracted fields to notify_slack (#296) ────
+
+test_decision_blocker_wired_passes_fields() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "check_and_notify_decision_blocker passes the decision fields"
+        return
+    fi
+    local tmpdir call_log fn
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log="$tmpdir/calls.log"
+    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p' "$INVOKE_SCRIPT")
+    bash -c "
+        set -euo pipefail
+        REPO='owner/repo'
+        source '$REPO_ROOT/scripts/lib/decision-blocker.sh'
+        gh() { jq -n '[{body: \"## Blocked Declaration\nType: decision\nQuestion: Q?\nOptions:\nA) a — x\nB) b — y\nRecommendation: A: ok\nUnblocked when: soon\"}]'; }
+        register_actionable_event() { echo \"SLACK_CALLED: \$1 \$4\" >> '$call_log'; }
+        $fn
+        check_and_notify_decision_blocker 42 'Story'
+    " 2>&1 || true
+    local logged
+    logged=$(cat "$call_log" 2>/dev/null || true)
+    assert_contains "wired: decision_blocker fired" "$logged" "SLACK_CALLED: decision_blocker"
+    assert_contains "wired: question in context" "$logged" '"question":"Q?"'
+    assert_contains "wired: options in context line by line" "$logged" '"options":"A) a — x\nB) b — y"'
+    assert_contains "wired: recommendation in context" "$logged" '"recommendation":"A: ok"'
+}
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 run_all_tests() {
@@ -675,6 +735,8 @@ run_all_tests() {
     test_notify_slack_failure_does_not_abort
     test_decision_blocker_fires_for_decision_type
     test_decision_blocker_silent_for_conflict_type
+    test_decision_blocker_context_fields
+    test_decision_blocker_wired_passes_fields
     test_feature_closure_fires_when_all_done
     test_feature_closure_silent_when_stories_remain
     test_epic_closure_fires_when_all_done
