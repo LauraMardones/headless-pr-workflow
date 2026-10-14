@@ -1362,6 +1362,8 @@ check_usage_limit() {
     else
         post_usage_limit_comment "$step" "" ""
     fi
+    # The story is already Done; the closure notification is not a session.
+    [[ "$step" == "cleanup" ]] && { notify_closure_if_complete "$ISSUE_NUMBER" || true; }
     DISPATCH_HANDLED=true
     exit 1
 }

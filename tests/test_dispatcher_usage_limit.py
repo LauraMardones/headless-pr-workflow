@@ -345,3 +345,13 @@ def test_cache_keys_differ_per_attempt_and_the_save_uses_the_day_it_ends_on():
     assert "env.TODAY" not in step("Save session state cache").split("key:", 1)[1]
     assert "date -u" in step("Set cache save date")
     assert step_if(step("Set cache save date")).startswith("always()")
+
+
+def test_an_invalid_limit_before_cleanup_still_notifies_the_closure(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(ISSUE, "In merge", executor="codex", body="Feature group: #50 Feature: something")
+    d.add_pr(PR, ISSUE, merged=True, state="closed")
+    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": ""})
+    assert "[USAGE LIMIT ERROR]" in proc.stderr
+    assert d.sessions == []
+    assert "Feature #50: all 1 stories Done." in proc.stdout
