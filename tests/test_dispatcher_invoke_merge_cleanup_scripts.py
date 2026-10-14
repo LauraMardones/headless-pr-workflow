@@ -67,6 +67,16 @@ def test_paired_codex_run_has_two_sessions_then_two_scripts(tmp_path):
     assert increments == ["codex", "opus"]  # /implement and /review only
 
 
+def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_pr(PR, STORY)
+    proc = d.run_issue(STORY, seq="0,0,1,1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    owner = [b for b in d.posted(PR) if "action=merge-owner" in b]
+    assert len(owner) == 1 and re.fullmatch(rf"<!-- hpw:dispatcher action=merge-owner pr={PR} head=\S+ -->", owner[0])
+
+
 def test_merge_script_failure_posts_the_marker_blocker_and_keeps_in_merge(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "In merge")

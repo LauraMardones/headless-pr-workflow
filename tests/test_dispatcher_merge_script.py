@@ -26,7 +26,8 @@ def h(tmp_path):
     harness = PhaseHarness(tmp_path)
     harness.fixture(f"repos/{REPO}/pulls/{PR}/files", [{"filename": "src/a.py"}, {"filename": "docs/x.md"}])
     harness.fixture(f"repos/{REPO}/pulls/{PR}", pr_json())
-    harness.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff(HEAD)])
+    harness.fixture("user", {"login": "bot"})
+    harness.fixture(f"repos/{REPO}/issues/{PR}/comments", [owner_marker(HEAD)])
     harness.set("gate_line", GATE + "\n")
     harness.set("hpw_merge-pr.json", json.dumps({"merged": True, "head_sha": HEAD, "blocking_reasons": []}))
     harness.git("init", "-q", "-b", "main")
@@ -34,8 +35,8 @@ def h(tmp_path):
     return harness
 
 
-def implement_handoff(head):
-    return {"body": f"## Session Summary\nCommand: implement\nIssue/PR: #1 / #{PR}\nHead: {head}\nNext: review\n"}
+def owner_marker(head, login="bot", pr=PR):
+    return {"user": {"login": login}, "body": f"<!-- hpw:dispatcher action=merge-owner pr={pr} head={head} -->"}
 
 
 def owner_calls(h):
@@ -103,7 +104,7 @@ def test_owner_evidence_for_the_current_head_is_passed_to_merge_owner(h):
 
 
 def test_missing_owner_evidence_for_the_head_blocks_before_the_merge(h):
-    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff("b" * 40)])  # an older head
+    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [owner_marker("b" * 40)])  # an older head
     h.set("hpw_merge-owner.rc", "1")
     h.set("hpw_merge-owner.json", json.dumps({"blocking_reasons": ["Expected merge owner evidence is missing"]}))
     proc = run(h)
@@ -112,9 +113,16 @@ def test_missing_owner_evidence_for_the_head_blocks_before_the_merge(h):
     assert_no_mutation(h) and h.log("gate.log") == []
 
 
-def test_owner_fields_from_different_comments_are_not_owner_evidence(h):
-    review = {"body": f"## Session Summary\nCommand: review\nIssue/PR: #1 / #{PR}\nHead: {HEAD}\nNext: merge\n"}
-    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff("b" * 40), review])
+@pytest.mark.parametrize("comment", [
+    # a manual /implement handoff names the head but is not the dispatcher's marker
+    {"user": {"login": "bot"}, "body": "## Session Summary\nCommand: implement\nIssue/PR: #1 / #" + str(PR) + "\nHead: " + HEAD + "\nNext: review\n"},
+    # the marker text posted by anyone but the dispatcher's own account
+    owner_marker(HEAD, login="someone-else"),
+    # a marker for another PR
+    owner_marker(HEAD, pr=PR + 1),
+])
+def test_only_the_dispatcher_owner_marker_for_this_head_is_owner_evidence(h, comment):
+    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [comment])
     run(h)
     assert owner_calls(h) and "--expected-owner" not in owner_calls(h)[0]
 

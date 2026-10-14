@@ -72,25 +72,30 @@ fi
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || block "the PR head SHA could not be verified."
 
 # Merge ownership (docs/MERGE-POLICY.md): the session that produced the approved
-# head merges it. The durable evidence is the /implement handoff comment for this
-# exact head SHA; without one the owner is unknown and `hpw merge-owner` blocks.
-# A takeover needs a recorded human/operator decision, which this script cannot
-# supply, so it never merges on takeover.
+# head merges it. The durable evidence is the owner marker the dispatcher posts
+# on the PR right after its own /implement session for this exact head SHA
+# (scripts/dispatcher-invoke.sh, record_merge_owner). It counts only on a comment
+# written by the dispatcher's own account, so a manual /implement handoff or any
+# other commenter cannot supply it. Without it the owner is unknown and
+# `hpw merge-owner` blocks. A takeover needs a recorded human/operator decision,
+# which this script cannot supply, so it never merges on takeover.
 OWNER_ID="dispatcher"
 owner_args=(--session-id "$OWNER_ID")
-# Both fields must come from ONE /implement handoff comment: an older implement
-# summary next to a review summary for this head is not owner evidence.
-if ! comment_bodies=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[].body | @json' 2>/dev/null); then
+if ! bot_login=$(gh api user --jq '.login' 2>/dev/null) || [[ -z "$bot_login" ]]; then
+    block "the dispatcher account could not be identified, so merge ownership cannot be verified."
+fi
+if ! comment_records=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[] | {l: (.user.login // ""), b: (.body // "")} | @json' 2>/dev/null); then
     block "the PR comments could not be read, so merge ownership cannot be verified."
 fi
-if jq -e -s --arg head "$head_sha" '
-        any(.[]; test("(^|\n)Command: implement\r?(\n|$)") and test("(^|\n)Head: " + $head + "\r?(\n|$)"))
-    ' <<< "$comment_bodies" >/dev/null 2>&1; then
+owner_marker="<!-- hpw:dispatcher action=merge-owner pr=$PR head=$head_sha -->"
+if jq -e -s --arg bot "$bot_login" --arg marker "$owner_marker" '
+        any(.[];.l == $bot and (.b | contains($marker)))
+    ' <<< "$comment_records" >/dev/null 2>&1; then
     owner_args+=(--expected-owner "$OWNER_ID" --expected-owner-sha "$head_sha")
 fi
 if ! owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>/dev/null); then
     reasons=$(jq -r '(.blocking_reasons // []) | join("; ")' <<< "$owner_out" 2>/dev/null)
-    block "merge ownership gate not passed (no /implement handoff for head ${head_sha:0:7}, or takeover required). ${reasons}"
+    block "merge ownership gate not passed (no dispatcher owner marker for head ${head_sha:0:7}, or takeover required). ${reasons}"
 fi
 
 # Merge gate, run against the freshly refreshed evidence. Only exit 0 merges.

@@ -1800,6 +1800,28 @@ run_phase_script() {
     bash "$script" "$@" --repo "$REPO"
 }
 
+# Merge ownership evidence (docs/MERGE-POLICY.md, issue #264): right after the
+# dispatcher's own /implement session, the PR carries a marker naming the head
+# that session produced. scripts/dispatcher-merge.sh merges only a head with
+# this marker on a comment of the dispatcher's own account, so a head pushed by
+# anyone else (a manual /implement, a human) is never merged by the dispatcher.
+merge_owner_marker() {
+    dispatcher_marker "action=merge-owner pr=$1 head=$2"
+}
+
+record_merge_owner() {
+    local issue_num="$1" pr_json pr_number head_sha
+    pr_json=$(find_linked_pr_json "$issue_num" 2>/dev/null) || pr_json=""
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json" 2>/dev/null)
+    head_sha=$(jq -r '.head.sha // empty' <<< "$pr_json" 2>/dev/null)
+    if [[ -z "$pr_number" || -z "$head_sha" ]]; then
+        echo "Warning: no linked PR head for #$issue_num; merge ownership not recorded (the merge will block)." >&2
+        return 0
+    fi
+    post_comment "$pr_number" "$(merge_owner_marker "$pr_number" "$head_sha")" \
+        || echo "Warning: could not record merge ownership on PR #$pr_number; the merge will block." >&2
+}
+
 merge_attempt_marker() {
     dispatcher_marker "action=merge-attempt pr=$1 head=$2"
 }
@@ -2170,6 +2192,7 @@ resume_fix_round() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
+    record_merge_owner "$issue_num"
     increment_implement_budget
     hand_off_to_codex_review_loop "$pr_head"
 }
@@ -2707,6 +2730,7 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
+record_merge_owner "$ISSUE_NUMBER"
 
 # Budget increment after successful /implement (issue #203)
 increment_implement_budget
