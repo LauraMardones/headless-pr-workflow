@@ -82,7 +82,7 @@ claude -p --output-format stream-json --verbose --permission-mode bypassPermissi
 
 - **Model aliases.** `EXECUTOR_MODEL` names `haiku`, `sonnet` and `opus`. The pinned Claude Code version decides which model each alias means, so a model change is a deliberate version bump.
 - **Never `--bare`.** Bare mode ignores the OAuth token (ADR-012 → Candidate B).
-- **Flags.** Checked on 2026-10-14 against Claude Code 2.1.295, one patch below the pin; the AC19 proof run on the pinned 2.1.296 confirms them. `--max-turns` is no longer listed in `claude --help` but is still accepted. No flag changed from the issue's command line.
+- **Flags.** Checked on 2026-10-14 against Claude Code 2.1.295 and against the pinned 2.1.296: each flag above is accepted, and an unknown option is rejected. `--max-turns` is no longer listed in `claude --help` but is still accepted. No flag changed from the issue's command line. A live session on the subscription is not part of this check; it is proven by the dispatcher proof run of #314 (AC19).
 - **Token and environment.** `scripts/lib/claude-session.sh`, shared with the allowance probe, removes every whitespace character from `CLAUDE_CODE_OAUTH_TOKEN` and every variable whose name starts with `ANTHROPIC_` from Claude Code's environment.
 - **Bounds.** `--max-turns` is `AGENT_MAX_TURNS`. The session runs under `timeout` set to the time left of `AGENT_MAX_WALLCLOCK_SECONDS` since `DISPATCH_JOB_START_TS`. When no time is left, the session does not start.
 - **Tools.** `--permission-mode bypassPermissions` allows any command, as the API loop's `bash` tool did. Isolation comes from the fresh GitHub-hosted runner (ADR-012 → Consequences).
