@@ -181,12 +181,14 @@ jobs:
       # Issue #295: delivers and retries the Slack notifications that need PO
       # action (decision blocker, Feature closure, Epic closure). It runs on
       # every enabled cycle, including when no story is ready or resumable and
-      # the invoke step is skipped, and even after the invoke step failed. A
+      # the invoke step is skipped, and even after the invoke step failed, but
+      # not after a failed poll: the state is saved only after a successful poll,
+      # so a delivery recorded then would be lost and sent again. A
       # failed delivery does not fail the step until it has failed for 3 cycles
       # in a row, then the run is red. A non-default ref only reports what it
       # would send (--dry-run), like the poll.
       - name: Retry actionable Slack notifications
-        if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}
+        if: ${{ !cancelled() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' }}
         run: |
           RETRY_ARGS=(run --repo "${{ github.repository }}")
           if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
