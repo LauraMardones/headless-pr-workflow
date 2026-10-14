@@ -26,11 +26,20 @@ def h(tmp_path):
     harness = PhaseHarness(tmp_path)
     harness.fixture(f"repos/{REPO}/pulls/{PR}/files", [{"filename": "src/a.py"}, {"filename": "docs/x.md"}])
     harness.fixture(f"repos/{REPO}/pulls/{PR}", pr_json())
+    harness.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff(HEAD)])
     harness.set("gate_line", GATE + "\n")
     harness.set("hpw_merge-pr.json", json.dumps({"merged": True, "head_sha": HEAD, "blocking_reasons": []}))
     harness.git("init", "-q", "-b", "main")
     harness.git("commit", "-q", "--allow-empty", "-m", "init")
     return harness
+
+
+def implement_handoff(head):
+    return {"body": f"## Session Summary\nCommand: implement\nIssue/PR: #1 / #{PR}\nHead: {head}\nNext: review\n"}
+
+
+def owner_calls(h):
+    return [line for line in h.log("hpw.log") if line.startswith("hpw merge-owner")]
 
 
 def pr_json(**overrides):
@@ -83,6 +92,46 @@ def test_gate_exit_0_merges_and_comments(h):
     assert body.startswith(GATE + "\n\n## Session Summary\n")  # exact line, outside the generated block
     assert "Command: merge" in body and HEAD in body
     assert "Next: cleanup" in body
+
+
+def test_owner_evidence_for_the_current_head_is_passed_to_merge_owner(h):
+    assert run(h).returncode == 0
+    assert owner_calls(h) == [
+        f"hpw merge-owner {PR} --repo {REPO} --session-id dispatcher --expected-owner dispatcher "
+        f"--expected-owner-sha {HEAD} --json"
+    ]
+
+
+def test_missing_owner_evidence_for_the_head_blocks_before_the_merge(h):
+    h.fixture(f"repos/{REPO}/issues/{PR}/comments", [implement_handoff("b" * 40)])  # an older head
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", json.dumps({"blocking_reasons": ["Expected merge owner evidence is missing"]}))
+    proc = run(h)
+    assert proc.returncode == 1 and "ownership gate not passed" in proc.stderr
+    assert "--expected-owner" not in owner_calls(h)[0]
+    assert_no_mutation(h) and h.log("gate.log") == []
+
+
+def test_ownership_gate_failure_blocks_even_with_evidence(h):
+    h.set("hpw_merge-owner.rc", "1")
+    proc = run(h)
+    assert proc.returncode == 1 and "ownership gate not passed" in proc.stderr
+    assert_no_mutation(h)
+
+
+def test_unreadable_comments_block(h):
+    (h.mock / f"repos_{REPO.replace('/', '_')}_issues_{PR}_comments.json").unlink()
+    proc = run(h)
+    assert proc.returncode == 1 and "ownership cannot be verified" in proc.stderr
+    assert_no_mutation(h)
+
+
+def test_confirmation_comment_failure_fails_the_phase_with_the_text_logged(h):
+    h.set("post_fail", "")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "could not be posted after 3 attempts" in proc.stderr and GATE in proc.stderr
+    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 3
 
 
 @pytest.mark.parametrize("rc", [1, 2])

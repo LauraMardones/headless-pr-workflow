@@ -15,7 +15,8 @@
 # writes the board: a blocked story stays "In merge" (one attempt per head,
 # #293) and the dispatcher's finish_story writes "Done" after a merge.
 #
-# Overridable for tests: HPW_BIN, MERGE_GATE_SCRIPT, SESSION_SUMMARY_SCRIPT.
+# Overridable for tests: HPW_BIN, MERGE_GATE_SCRIPT, SESSION_SUMMARY_SCRIPT,
+# COMMENT_RETRY_DELAY.
 
 set -uo pipefail
 
@@ -70,6 +71,24 @@ fi
 [[ "$draft" != "true" ]] || block "the PR is a draft."
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || block "the PR head SHA could not be verified."
 
+# Merge ownership (docs/MERGE-POLICY.md): the session that produced the approved
+# head merges it. The durable evidence is the /implement handoff comment for this
+# exact head SHA; without one the owner is unknown and `hpw merge-owner` blocks.
+# A takeover needs a recorded human/operator decision, which this script cannot
+# supply, so it never merges on takeover.
+OWNER_ID="dispatcher"
+owner_args=(--session-id "$OWNER_ID")
+if ! comment_bodies=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" --jq '.[].body' 2>/dev/null); then
+    block "the PR comments could not be read, so merge ownership cannot be verified."
+fi
+if grep -qxF "Head: $head_sha" <<< "$comment_bodies" && grep -qxF "Command: implement" <<< "$comment_bodies"; then
+    owner_args+=(--expected-owner "$OWNER_ID" --expected-owner-sha "$head_sha")
+fi
+if ! owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>/dev/null); then
+    reasons=$(jq -r '(.blocking_reasons // []) | join("; ")' <<< "$owner_out" 2>/dev/null)
+    block "merge ownership gate not passed (no /implement handoff for head ${head_sha:0:7}, or takeover required). ${reasons}"
+fi
+
 # Merge gate, run against the freshly refreshed evidence. Only exit 0 merges.
 gate_line=$(python3 "$MERGE_GATE_SCRIPT" --pr "$PR" --repo "$REPO" 2>/dev/null)
 gate_rc=$?
@@ -94,14 +113,24 @@ merged_head=$(jq -r '.head_sha // empty' <<< "$merge_json")
 echo "✓ PR #$PR merged at head ${merged_head:0:7}"
 
 # Merge confirmation comment: the exact gate line, then the generated summary.
-if summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command merge --pr "$PR" --head "$merged_head" \
+# It is durable evidence and the merged PR is never merged again, so a failure to
+# post it (after retries) fails the phase; the full text goes to the log.
+summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command merge --pr "$PR" --head "$merged_head" \
         --checks "merge gate pass (scripts/merge-gate-summary), hpw merge-pr --execute ($METHOD)" \
-        --blockers none --next cleanup); then
-    if ! gh api "repos/$REPO/issues/$PR/comments" -X POST -f body="$gate_line"$'\n\n'"$summary" >/dev/null; then
-        echo "Warning: the merge confirmation comment on PR #$PR could not be posted." >&2
+        --blockers none --next cleanup) \
+    || { echo "PR #$PR is merged, but the merge Session Summary could not be generated; no confirmation comment posted." >&2; exit 1; }
+confirmation="$gate_line"$'\n\n'"$summary"
+posted=false
+for attempt in 1 2 3; do
+    if gh api "repos/$REPO/issues/$PR/comments" -X POST -f body="$confirmation" >/dev/null; then
+        posted=true; break
     fi
-else
-    echo "Warning: the merge Session Summary could not be generated; no confirmation comment posted." >&2
+    sleep "${COMMENT_RETRY_DELAY:-2}"
+done
+if ! $posted; then
+    echo "PR #$PR is merged, but the merge confirmation comment could not be posted after 3 attempts. Post it manually:" >&2
+    echo "$confirmation" >&2
+    exit 1
 fi
 
 # Safe post-merge cleanup (merge.md steps 10-15): the local topic branch only.

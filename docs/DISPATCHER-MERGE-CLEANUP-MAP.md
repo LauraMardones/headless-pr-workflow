@@ -21,6 +21,7 @@ was mutated than the step reached. Exit `2`: invalid invocation.
 |---|---|---|---|
 | Decision documents (ADR-011) | PR files match `specs/<n>-<slug>/` or `docs/decisions/ADR-*.md` → exit 1, "the PO merges it", no mutation | `gh api pulls/N/files` | `test_decision_document_pr_is_refused` |
 | GraphQL pre-flight | `gh api graphql` first; failure → exit 1, no mutation, no comment | `gh` | `test_graphql_preflight_failure_makes_no_mutation` |
+| Merge ownership (`docs/MERGE-POLICY.md`) | `hpw merge-owner`; expected owner is supplied only when an `/implement` handoff comment names the current head SHA; otherwise unknown owner → exit 1, no merge. Takeover is never assumed | `hpw merge-owner` | `test_owner_evidence_for_the_current_head_is_passed_to_merge_owner`, `test_missing_owner_evidence_for_the_head_blocks_before_the_merge`, `test_ownership_gate_failure_blocks_even_with_evidence` |
 | 1 fresh refresh | `gh api pulls/N` read immediately before the gate | `gh` | all |
 | 2 verify head, review state, checks, target branch, blockers, draft | draft or not-open PR → exit 1; the rest is evaluated by the gate in step 5 | `scripts/merge-gate-summary` | `test_draft_pr_is_not_merged`, `test_closed_unmerged_pr_is_not_merged` |
 | 3 review evidence in the right surfaces | owned by `merge-gate-summary`; not re-derived | `scripts/merge-gate-summary` | gate stub in each test |
@@ -34,7 +35,7 @@ was mutated than the step reached. Exit `2`: invalid invocation.
 | 10–11 delete the local topic branch only when merged, not checked out, unused by another worktree, clean | `git branch -d` (never `-D`) after those four checks; a missing branch is not an error | `git` | `test_merged_local_branch_is_deleted`, `test_checked_out_branch_is_kept`, `test_branch_used_by_other_worktree_is_kept`, `test_dirty_checkout_keeps_the_local_branch` |
 | 12–13 no worktree removal, no remote branch deletion | not implemented here (left to cleanup) | n/a | `test_merged_local_branch_is_deleted` |
 | 14–15 never force; unsafe or squash-ambiguous → report | `git branch -d` refusing is reported as "needs a cleanup session" and is not a failure | `git` | `test_unmerged_local_branch_is_kept_not_forced` |
-| Output: merge confirmation comment | PR comment: exact `Merge gate:` line, then `scripts/session-summary.sh --command merge --next cleanup` | `scripts/session-summary.sh` | `test_gate_exit_0_merges_and_comments` |
+| Output: merge confirmation comment | PR comment: exact `Merge gate:` line, then `scripts/session-summary.sh --command merge --next cleanup`; 3 attempts, a failed post exits 1 with the text logged | `scripts/session-summary.sh` | `test_gate_exit_0_merges_and_comments`, `test_confirmation_comment_failure_fails_the_phase_with_the_text_logged` |
 
 ## `/cleanup` → `scripts/dispatcher-cleanup.sh --issue N --repo R`
 
@@ -56,7 +57,7 @@ fails because something was *kept*.
 | 12–14 worktree only when clean, unused, tied to the story, not current; never force | same helper (it never forces) | `hpw branch-cleanup` | `test_kept_branch_is_reported_not_failed` |
 | 15 blocked step: exact safe command | the helpers' `manual_commands` are printed in the report | both helpers | `test_unrelated_dirty_base_is_left_alone` |
 | 16 end-of-run report | deleted, kept, restored/fast-forwarded, why, manual follow-up printed to stdout | both helpers | `test_report_names_what_was_done` |
-| Output: closing comment on the issue | `scripts/session-summary.sh --command cleanup --next done` posted on the issue | `scripts/session-summary.sh` | `test_report_names_what_was_done` |
+| Output: closing comment on the issue | `scripts/session-summary.sh --command cleanup --next done` posted on the issue (3 attempts; a failed post exits 1 with the text logged) | `scripts/session-summary.sh` | `test_report_names_what_was_done`, `test_closing_comment_failure_fails_the_phase_with_the_text_logged` |
 
 ## Dispatcher wiring
 

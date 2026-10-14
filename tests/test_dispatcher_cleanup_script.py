@@ -134,3 +134,11 @@ def test_helper_without_a_report_is_a_failure(h):
 @pytest.mark.parametrize("args", [["--issue", "x", "--repo", REPO], ["--issue", "1", "--repo", "bad"], ["--issue", "1", "--repo", REPO, "--pr", "y"]])
 def test_invalid_invocation_exits_2(h, args):
     assert h.run("dispatcher-cleanup.sh", *args).returncode == 2
+
+
+def test_closing_comment_failure_fails_the_phase_with_the_text_logged(h):
+    h.set("post_fail", "")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "could not be posted after 3 attempts" in proc.stderr and "Command: cleanup" in proc.stderr
+    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 3

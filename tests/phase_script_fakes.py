@@ -37,6 +37,7 @@ if [[ "$endpoint" == "graphql" ]]; then
     echo '{"data":{"viewer":{"login":"bot"}}}'; exit 0
 fi
 if [[ "$method" == "POST" ]]; then
+    [[ -f "$MOCK_DIR/post_fail" ]] && { echo "HTTP 500" >&2; exit 1; }
     echo "POST $endpoint" >> "$MOCK_DIR/posts.log"
     printf '%s' "$body" > "$MOCK_DIR/post_$(echo "${endpoint%%\?*}" | tr / _).body"
     exit 0
@@ -99,6 +100,7 @@ class PhaseHarness:
             "HOME": self.tmp.as_posix(),
             "PATH": ":".join([self.bin.as_posix(), "/usr/bin", "/bin"]),
             "MOCK_DIR": self.mock.as_posix(),
+            "COMMENT_RETRY_DELAY": "0",
             "HPW_BIN": (self.bin / "hpw").as_posix(),
             "MERGE_GATE_SCRIPT": (self.bin / "gate").as_posix(),
             "GIT_CONFIG_GLOBAL": os.devnull,

@@ -17,7 +17,7 @@
 # Exit 0: cleanup ran; kept items are reported. Exit 1: the PR is not confirmed
 # merged, or a step failed. Exit 2: invalid invocation. Nothing is forced.
 #
-# Overridable for tests: HPW_BIN, SESSION_SUMMARY_SCRIPT.
+# Overridable for tests: HPW_BIN, SESSION_SUMMARY_SCRIPT, COMMENT_RETRY_DELAY.
 
 set -uo pipefail
 
@@ -97,12 +97,25 @@ echo "Manual follow-up:"; [[ ${#manual[@]} -gt 0 ]] && printf '  %s\n' "${manual
 if [[ ${#failed[@]} -gt 0 ]]; then blockers="${failed[*]}"; else blockers="none"; fi
 checks="hpw post-merge-sync --execute, hpw branch-cleanup --execute"
 [[ ${#kept[@]} -gt 0 ]] && checks+="; kept: ${#kept[@]} item(s), reported in the dispatcher log"
+# Durable evidence: retried, and a failure to post fails the phase (the
+# dispatcher logs it as a warning; the story is already Done) with the text logged.
 if summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command cleanup --issue "$ISSUE" --pr "$PR" \
         --checks "$checks" --blockers "$blockers" --next done); then
-    gh api "repos/$REPO/issues/$ISSUE/comments" -X POST -f body="$summary" >/dev/null \
-        || echo "Warning: the closing comment on #$ISSUE could not be posted." >&2
+    posted=false
+    for attempt in 1 2 3; do
+        if gh api "repos/$REPO/issues/$ISSUE/comments" -X POST -f body="$summary" >/dev/null; then
+            posted=true; break
+        fi
+        sleep "${COMMENT_RETRY_DELAY:-2}"
+    done
+    if ! $posted; then
+        echo "The closing comment on #$ISSUE could not be posted after 3 attempts. Post it manually:" >&2
+        echo "$summary" >&2
+        failed+=("closing comment not posted")
+    fi
 else
-    echo "Warning: the cleanup Session Summary could not be generated." >&2
+    echo "The cleanup Session Summary could not be generated; no closing comment posted." >&2
+    failed+=("closing comment not generated")
 fi
 
 [[ ${#failed[@]} -eq 0 ]] || exit 1
