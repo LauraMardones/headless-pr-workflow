@@ -30,6 +30,7 @@ query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
             totalCount
             nodes {
               id
+              url
               body
               createdAt
               updatedAt
@@ -39,6 +40,7 @@ query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
               outdated
               author {
                 login
+                __typename
               }
               pullRequestReview {
                 state
@@ -73,6 +75,8 @@ class ReviewThreadComment:
     review_state: str | None
     review_author: str | None
     review_commit_oid: str | None
+    url: str | None = None
+    author_type: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "ReviewThreadComment":
@@ -90,6 +94,8 @@ class ReviewThreadComment:
             review_state=_dict_get(review, "state"),
             review_author=_login(_dict_get(review, "author")),
             review_commit_oid=_dict_get(_dict_get(review, "commit"), "oid"),
+            url=raw.get("url"),
+            author_type=_dict_get(raw.get("author"), "__typename"),
         )
 
     def to_dict(self) -> dict[str, Any]:

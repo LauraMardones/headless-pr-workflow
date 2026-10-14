@@ -29,8 +29,12 @@ from headless_pr_workflow.codex_review_bookkeeping import (
     BookkeepingError,
     TOKEN_SCOPES_DOC,
     GhCliGateway,
+    RemainingThread,
+    ResolvedThread,
+    ReviewThreadFact,
     StoryBoard,
     action_marker,
+    classify_threads,
     decide,
     missing_scope_message,
     parse_story_board,
@@ -131,6 +135,26 @@ class FakeGitHub:
         self.moves: list[str] = []
         self.fail_next_move = False
         self.posted_at = "2026-10-11T12:00:00Z"
+        self.threads: list[ReviewThreadFact] = []
+        self.thread_reads = 0
+        self.thread_read_error: BookkeepingError | None = None
+        self.resolve_calls: list[str] = []
+        self.fail_resolve_of: str | None = None
+        self.order: list[str] = []
+
+    def fetch_review_threads(self, context: PullRequestContext) -> tuple[ReviewThreadFact, ...]:
+        self.thread_reads += 1
+        if self.thread_read_error:
+            raise self.thread_read_error
+        return tuple(self.threads)
+
+    def resolve_review_thread(self, thread_id: str) -> None:
+        if thread_id == self.fail_resolve_of:
+            self.fail_resolve_of = None
+            raise BookkeepingError("resolve review thread", f"GitHub did not confirm that review thread {thread_id} is resolved")
+        self.resolve_calls.append(thread_id)
+        self.order.append(f"resolve:{thread_id}")
+        self.threads = [replace(thread, is_resolved=True) if thread.id == thread_id else thread for thread in self.threads]
 
     def fetch_context(self, number: int) -> PullRequestContext:
         return self.context
@@ -148,6 +172,7 @@ class FakeGitHub:
         if number == PR:
             url = f"https://github.com/owner/repo/pull/{PR}#issuecomment-job-{len(self.pr_comments)}"
             self.pr_comments.append(body)
+            self.order.append("summary")
             event = conversation_comment(body, created_at=self.posted_at, url=url)
             self.context = replace(self.context, timeline=(*self.context.timeline, event))
             return url
@@ -159,6 +184,7 @@ class FakeGitHub:
             self.fail_next_move = False
             raise BookkeepingError(f"move story #{story.number} to `{status}`", "GitHub did not confirm the board update")
         self.moves.append(status)
+        self.order.append("move")
         self.status = status
 
     def session_summary(self, arguments: tuple[str, ...]) -> str:
@@ -986,6 +1012,8 @@ def test_cli_json_output_follows_the_output_contract(monkeypatch, capsys):
         "requests_posted": 0,
         "max_requests": 3,
         "applied": {"state": "applied", "comment_urls": [f"https://github.com/owner/repo/pull/{PR}#issuecomment-job-0"]},
+        "threads_resolved": [],
+        "threads_remaining": [],
     }
 
 
@@ -1200,3 +1228,408 @@ def test_missing_scope_message_names_every_listed_scope_when_no_single_one_is_en
     assert message is not None
     assert "`read:org`, `read:discussion`" in message
     assert "`project`, `repo`, `workflow`" in message  # what the token has
+
+
+# --- Superseded Codex review threads (issue #331) -----------------------------------------------
+
+OLDER_SHA = "ab667c97d9bec69cd3c444fc8f4a1c3cdbffc864"
+MIDDLE_SHA = "1823d34d30e18e32b8cab3519a1be75737fa873e"
+THREAD_BASE = f"https://github.com/owner/repo/pull/{PR}#discussion_r"
+
+
+def thread(
+    number: int,
+    *,
+    codex: bool = True,
+    commit: str | None = OLD_SHA,
+    resolved: bool = False,
+    outdated: bool = False,
+    opener: str | None = None,
+) -> ReviewThreadFact:
+    return ReviewThreadFact(
+        id=f"PRRT_{number}",
+        url=f"{THREAD_BASE}{number}",
+        is_resolved=resolved,
+        is_outdated=outdated,
+        opener=opener or (CODEX_BOT if codex else "LauraMardones"),
+        opener_is_codex=codex,
+        review_commit=commit,
+    )
+
+
+def with_threads(*threads: ReviewThreadFact, events=None) -> FakeGitHub:
+    github = FakeGitHub(pr(*(events or (request(), codex_comment()))))
+    github.threads = list(threads)
+    return github
+
+
+def blocker_of(github: FakeGitHub) -> str:
+    (body,) = github.story_comments
+    return body
+
+
+def test_superseded_codex_threads_are_resolved_then_summarized_then_the_story_moves():
+    github = with_threads(thread(1, commit=OLDER_SHA), thread(2, commit=MIDDLE_SHA), thread(3, commit=OLD_SHA))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
+    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary", "move"]
+    (summary,) = github.pr_comments
+    for number, commit in ((1, OLDER_SHA), (2, MIDDLE_SHA), (3, OLD_SHA)):
+        assert f"{THREAD_BASE}{number} (opened in the Codex review of {commit}, superseded by the clean Codex result {CLEAN_URL})" in summary
+    assert [thread.id for thread in outcome.decision.threads_resolved] == ["PRRT_1", "PRRT_2", "PRRT_3"]
+    assert outcome.decision.threads_remaining == ()
+
+
+def test_clean_result_without_threads_says_so_and_otherwise_behaves_as_before():
+    github = with_threads()
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
+    assert github.order == ["summary", "move"] and github.resolve_calls == []
+    assert "no Codex threads resolved" in github.pr_comments[0]
+
+
+def test_threads_already_resolved_are_left_alone_and_resolved_ones_are_not_called_again():
+    github = with_threads(thread(1, resolved=True), thread(2, codex=False, resolved=True))
+
+    run_bookkeeping(PR, github=github, now=NOW)
+
+    assert github.resolve_calls == []
+
+
+def test_human_threads_are_never_resolved_and_block_the_move():
+    github = with_threads(
+        thread(1, commit=OLDER_SHA),
+        thread(2, codex=False, commit=OLD_SHA),
+        thread(3, codex=False, commit=OLD_SHA, opener=CODEX_BOT),  # a `User` account whose login looks like the bot's
+    )
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_BLOCKER_EXTERNAL, APPLIED)
+    assert github.resolve_calls == [] and github.moves == [] and github.pr_comments == []
+    assert [(t.id, t.reason) for t in outcome.decision.threads_remaining] == [
+        ("PRRT_2", "not-codex"),
+        ("PRRT_3", "not-codex"),
+    ]
+
+
+def test_human_thread_is_not_resolved_when_outdated_or_when_codex_replied_in_it():
+    # An outdated human thread does not block the gate and stays untouched; the superseded Codex thread is resolved.
+    github = with_threads(thread(1, codex=False, outdated=True), thread(2, commit=OLDER_SHA))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_MOVE_IN_MERGE
+    assert github.resolve_calls == ["PRRT_2"]
+    assert [(t.id, t.reason) for t in outcome.decision.threads_remaining] == [("PRRT_1", "not-codex")]
+
+
+def test_codex_thread_on_the_current_head_is_not_resolved_also_after_a_clean_result():
+    github = with_threads(thread(1, commit=HEAD_SHA), events=(request(), codex_pr_298_findings_review(HEAD_SHA), codex_comment()))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_BLOCKER_EXTERNAL, APPLIED)
+    assert github.resolve_calls == [] and github.moves == []
+    assert [t.reason for t in outcome.decision.threads_remaining] == ["current-head"]
+    assert "current-head" in outcome.to_line()
+
+
+def test_codex_thread_with_an_unknown_review_commit_fails_closed():
+    github = with_threads(thread(1, commit=None))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_BLOCKER_EXTERNAL
+    assert github.resolve_calls == []
+    assert [t.reason for t in outcome.decision.threads_remaining] == ["unknown-commit"]
+
+
+def test_blocker_resolves_nothing_names_only_the_remaining_threads_and_follows_the_format():
+    github = with_threads(
+        thread(1, commit=OLDER_SHA),
+        thread(2, codex=False),
+        thread(3, codex=False, outdated=True),
+        thread(4, commit=HEAD_SHA),
+    )
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert github.resolve_calls == [] and github.moves == [] and github.status == "In review"
+    lines = blocker_of(github).splitlines()
+    assert lines[:2] == ["## Blocked Declaration", "Type: external"]
+    assert lines[4] == f"Unblocked when: the listed threads are resolved on GitHub, or a new head is pushed to PR #{PR}"
+    assert lines[5] == "Owner: PO (@LauraMardones)"
+    assert lines[8] == action_marker(ACTION_BLOCKER_EXTERNAL, HEAD_SHA, source="review-threads")
+    assert f"{THREAD_BASE}2 - opened by an account other than the Codex bot" in lines[6]
+    assert f"{THREAD_BASE}4 - opened by Codex in a review of the current head" in lines[6]
+    assert f"{THREAD_BASE}1" not in lines[6] and f"{THREAD_BASE}3" not in lines[6]
+    assert "threads_remaining=3" in outcome.to_line()  # the outdated human thread is reported, not blocking
+
+
+def test_recovery_after_the_blocker_moves_the_story_without_a_second_blocker():
+    github = with_threads(thread(1, codex=False), thread(2, commit=OLDER_SHA))
+
+    first = run_bookkeeping(PR, github=github, now=NOW)
+    again = run_bookkeeping(PR, github=github, now=NOW)
+    github.threads = [replace(t, is_resolved=True) if t.id == "PRRT_1" else t for t in github.threads]
+    recovered = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (first.applied, again.applied) == (APPLIED, ALREADY_PRESENT)
+    assert (recovered.decision.action, recovered.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
+    assert github.resolve_calls == ["PRRT_2"] and github.moves == ["In merge"]
+    assert len(github.story_comments) == 1
+
+
+def test_a_run_after_the_move_changes_nothing():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+
+    run_bookkeeping(PR, github=github, now=NOW)
+    reads = github.thread_reads
+    second = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (second.decision.action, second.applied) == (ACTION_NONE, NOT_NEEDED)
+    assert github.resolve_calls == ["PRRT_1"] and len(github.pr_comments) == 1 and github.moves == ["In merge"]
+    assert github.thread_reads == reads
+
+
+def test_retry_after_a_failed_resolve_finishes_the_rest_with_one_summary_listing_every_thread():
+    github = with_threads(thread(1, commit=OLDER_SHA), thread(2, commit=MIDDLE_SHA), thread(3, commit=OLD_SHA))
+    github.fail_resolve_of = "PRRT_2"
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+    assert error.value.step == "resolve review thread"
+    assert github.pr_comments == [] and github.moves == [] and github.resolve_calls == ["PRRT_1"]
+
+    retry = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert retry.applied == APPLIED
+    assert github.resolve_calls == ["PRRT_1", "PRRT_2", "PRRT_3"]
+    (summary,) = github.pr_comments
+    assert all(f"{THREAD_BASE}{number}" in summary for number in (1, 2, 3))
+    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary", "move"]
+
+
+def test_retry_after_a_failed_move_does_not_resolve_or_summarize_again():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+    github.fail_next_move = True
+
+    with pytest.raises(BookkeepingError):
+        run_bookkeeping(PR, github=github, now=NOW)
+    run_bookkeeping(PR, github=github, now=NOW)
+
+    assert github.resolve_calls == ["PRRT_1"] and len(github.pr_comments) == 1 and github.moves == ["In merge"]
+
+
+@pytest.mark.parametrize("change", ["opened", "resolved", "unresolved"])
+def test_a_thread_that_changes_between_the_two_reads_stops_the_run_with_no_mutation(change):
+    github = with_threads(thread(1, commit=OLDER_SHA), thread(2, commit=OLD_SHA, resolved=change == "unresolved"))
+    read = github.fetch_review_threads
+    calls = []
+
+    def changing(context):
+        facts = read(context)
+        calls.append(1)
+        if len(calls) == 1:
+            return facts
+        if change == "opened":
+            return (*facts, thread(3, commit=OLDER_SHA))
+        if change == "resolved":
+            return tuple(replace(t, is_resolved=True) if t.id == "PRRT_1" else t for t in facts)
+        return tuple(replace(t, is_resolved=False) for t in facts)
+
+    github.fetch_review_threads = changing
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate decision" and "changed during the run" in error.value.message
+    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+
+
+def test_failed_thread_read_is_a_named_failure_with_no_mutation():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+    github.thread_read_error = BookkeepingError("read review threads", "GitHub review-thread payload could not be parsed")
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "read review threads"
+    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        (request(), codex_pr_298_findings_review(HEAD_SHA)),
+        (request(SIX_HOURS_AGO), usage_limit(TWO_HOURS_AGO)),
+        (request(),),
+        (request(), codex_comment(CODEX_TASK_REPLY_BODY, url=UNKNOWN_URL)),
+    ],
+)
+def test_other_branches_neither_read_nor_resolve_threads(events):
+    github = with_threads(thread(1, commit=OLDER_SHA), events=events)
+
+    run_bookkeeping(PR, github=github, now=NOW, config=BookkeepingConfig(retry_hours=0))
+
+    assert github.thread_reads == 0 and github.resolve_calls == []
+
+
+def test_clean_result_with_a_failing_or_running_check_or_a_failed_gate_resolves_nothing():
+    for checks in ("failure", "pending"):
+        github = FakeGitHub(pr(request(), codex_comment(), checks=checks))
+        github.threads = [thread(1, commit=OLDER_SHA)]
+        run_bookkeeping(PR, github=github, now=NOW)
+        assert github.thread_reads == 0 and github.resolve_calls == [], checks
+
+    gate = FakeGitHub(pr(request(), codex_comment(), review_decision="CHANGES_REQUESTED"))
+    gate.threads = [thread(1, commit=OLDER_SHA)]
+    run_bookkeeping(PR, github=gate, now=NOW)
+    assert gate.thread_reads == 0 and gate.resolve_calls == []
+
+
+def test_dry_run_reports_the_threads_it_would_resolve_and_mutates_nothing():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW, dry_run=True)
+
+    assert outcome.applied == DRY_RUN
+    assert [t.id for t in outcome.decision.threads_resolved] == ["PRRT_1"]
+    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+
+
+def test_json_and_human_output_report_resolved_and_remaining_threads():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+    payload = outcome.to_dict()
+
+    assert payload["threads_resolved"] == [
+        {"id": "PRRT_1", "url": f"{THREAD_BASE}1", "review_commit": OLDER_SHA, "superseded_by": CLEAN_URL}
+    ]
+    assert payload["threads_remaining"] == []
+    assert outcome.to_line().startswith(f"PR #{PR}: result=clean action=move-in-merge applied=applied threads_resolved=1 - ")
+
+    blocked = run_bookkeeping(PR, github=with_threads(thread(2, codex=False, opener="LauraMardones")), now=NOW)
+    assert blocked.to_dict()["threads_remaining"] == [
+        {"id": "PRRT_2", "url": f"{THREAD_BASE}2", "opener": "LauraMardones", "review_commit": OLD_SHA, "reason": "not-codex"}
+    ]
+    assert " threads_remaining=1 - " in blocked.to_line()
+
+
+def test_classify_threads_ignores_replies_and_compares_commits_case_insensitively():
+    resolvable, remaining, already = classify_threads(
+        (
+            thread(1, commit=OLDER_SHA.upper()),
+            thread(2, commit=HEAD_SHA.upper()),
+            thread(3, commit=OLDER_SHA, resolved=True),
+            thread(4, codex=False, commit=OLDER_SHA, resolved=True),
+        ),
+        head_sha=HEAD_SHA,
+        clean_url=CLEAN_URL,
+    )
+
+    assert [t.id for t in resolvable] == ["PRRT_1"]
+    assert [(t.id, t.reason) for t in remaining] == [("PRRT_2", "current-head")]
+    assert [t.id for t in already] == ["PRRT_3"]
+
+
+# --- Thread read and resolve through `gh` ----------------------------------------------------------
+
+
+def raw_thread(thread_id: str, *, login: str, kind: str, commit: str | None, resolved=False, outdated=False, replies=()) -> dict:
+    def comment(number: int, who: str, who_type: str, review_commit: str | None) -> dict:
+        return {
+            "id": f"c{number}",
+            "url": f"{THREAD_BASE}{thread_id}-{number}",
+            "body": "text",
+            "author": {"login": who, "__typename": who_type},
+            "outdated": outdated,
+            "pullRequestReview": {"state": "COMMENTED", "author": {"login": who}, "commit": {"oid": review_commit}}
+            if review_commit
+            else None,
+        }
+
+    nodes = [comment(0, login, kind, commit), *(comment(i + 1, *reply, commit) for i, reply in enumerate(replies))]
+    return {"id": thread_id, "isResolved": resolved, "isOutdated": outdated, "comments": {"totalCount": len(nodes), "nodes": nodes}}
+
+
+def test_gateway_decides_ownership_by_the_opener_account_and_type_not_by_replies(monkeypatch):
+    raw = (
+        raw_thread("T1", login=CODEX_BOT, kind="Bot", commit=OLDER_SHA),
+        raw_thread("T2", login="chatgpt-codex-connector", kind="User", commit=OLDER_SHA),
+        raw_thread("T3", login="LauraMardones", kind="User", commit=OLDER_SHA, replies=((CODEX_BOT, "Bot"),)),
+        raw_thread("T4", login=CODEX_BOT, kind="Bot", commit=None),
+        raw_thread("T5", login=CODEX_BOT, kind="Bot", commit=OLDER_SHA, replies=(("LauraMardones", "User"),)),
+    )
+    monkeypatch.setattr(bookkeeping, "fetch_review_threads_for_context", lambda context, *, repo: raw)
+
+    facts = GhCliGateway("owner/repo").fetch_review_threads(pr(request(), codex_comment()))
+
+    assert [(f.id, f.opener_is_codex, f.review_commit) for f in facts] == [
+        ("T1", True, OLDER_SHA),
+        ("T2", False, OLDER_SHA),
+        ("T3", False, OLDER_SHA),
+        ("T4", True, None),
+        ("T5", True, OLDER_SHA),
+    ]
+    assert facts[0].url == f"{THREAD_BASE}T1-0"
+
+
+def test_gateway_thread_read_failures_name_the_step_and_a_missing_scope(monkeypatch):
+    def refuse(context, *, repo):
+        raise GHCommandError(["gh", "api", "graphql"], 1, "gh: " + refused("reviewThreads", "repo"))
+
+    monkeypatch.setattr(bookkeeping, "fetch_review_threads_for_context", refuse)
+
+    with pytest.raises(BookkeepingError) as error:
+        GhCliGateway("owner/repo").fetch_review_threads(pr(request(), codex_comment()))
+
+    assert error.value.step == "read review threads"
+    assert "`repo`" in error.value.message and TOKEN_SCOPES_DOC in error.value.message
+
+    def partial(context, *, repo):
+        raise GHCommandError(["gh", "api", "graphql"], 0, "page without cursor", error="gh-parse-failed")
+
+    monkeypatch.setattr(bookkeeping, "fetch_review_threads_for_context", partial)
+    with pytest.raises(BookkeepingError) as error:
+        GhCliGateway("owner/repo").fetch_review_threads(pr(request(), codex_comment()))
+    assert error.value.step == "read review threads"
+
+
+def test_gateway_resolves_a_thread_through_the_mutation_and_requires_confirmation(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return Completed(json.dumps({"data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}}))
+
+    monkeypatch.setattr(bookkeeping.subprocess, "run", fake_run)
+    GhCliGateway("owner/repo").resolve_review_thread("T1")
+    assert "resolveReviewThread" in " ".join(commands[0]) and "threadId=T1" in commands[0]
+
+    for stdout in (
+        json.dumps({"data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": False}}}}),
+        json.dumps({"data": None, "errors": [{"message": "no"}]}),
+        "not json",
+    ):
+        monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, stdout=stdout, **kwargs: Completed(stdout))
+        with pytest.raises(BookkeepingError) as error:
+            GhCliGateway("owner/repo").resolve_review_thread("T1")
+        assert error.value.step == "resolve review thread"
+
+
+def test_gateway_resolve_failure_names_a_missing_scope(monkeypatch):
+    stderr = "gh: " + refused("resolveReviewThread", "repo")
+    monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, **kwargs: Completed(returncode=1, stderr=stderr))
+
+    with pytest.raises(BookkeepingError) as error:
+        GhCliGateway("owner/repo").resolve_review_thread("T1")
+
+    assert error.value.step == "resolve review thread"
+    assert "`repo`" in error.value.message and TOKEN_SCOPES_DOC in error.value.message
