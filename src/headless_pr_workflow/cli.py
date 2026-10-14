@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -13,7 +14,7 @@ from .approval_check import summarize_approval_check
 from .branch_cleanup import summarize_branch_cleanup
 from .catalog import COMMANDS, find_command
 from .ci_summary import summarize_ci
-from .codex_review_bookkeeping import BookkeepingConfig, BookkeepingError, GhCliGateway, run_bookkeeping
+from .codex_review_bookkeeping import CHANGED_DURING_RUN_STEP, BookkeepingConfig, BookkeepingError, GhCliGateway, run_bookkeeping
 from .github import (
     GHCommandError,
     fetch_pr_context,
@@ -70,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
                 "--dry-run",
                 action="store_true",
                 help="Report the decision without posting a comment or moving the story.",
+            )
+            command_parser.add_argument(
+                "--errors-file",
+                help="Write the failures of the run to this JSON file, for the failure notification (issue #330).",
             )
         if command.name == "target-branch-check":
             command_parser.add_argument("--expected-base", help="Expected PR base branch. Defaults to the repository default branch.")
@@ -725,8 +730,14 @@ def _print_codex_review_bookkeeping(
     run_all: bool,
     dry_run: bool,
     as_json: bool,
+    errors_file: str | None = None,
 ) -> int:
-    """Run the Codex review bookkeeping for one PR, or for every open, non-draft PR."""
+    """Run the Codex review bookkeeping for one PR, or for every open, non-draft PR.
+
+    Exit codes: 0 when nothing failed, 3 when the only failures were PRs that
+    changed during the run (nothing was done; the next run decides again), 1
+    for any other failure.
+    """
 
     results: list[dict[str, object]] = []
     errors: list[dict[str, object]] = []
@@ -764,7 +775,14 @@ def _print_codex_review_bookkeeping(
             print(json.dumps({"ok": not errors, "results": results, "errors": errors}, indent=2))
         else:
             print(json.dumps(results[0], indent=2))
-    return 1 if errors else 0
+    if errors_file:
+        try:
+            Path(errors_file).write_text(json.dumps({"dry_run": dry_run, "errors": errors}), encoding="utf-8")
+        except OSError as error:
+            print(f"could not write the errors file: {error}", file=sys.stderr)
+    if not errors:
+        return 0
+    return 3 if all(error["step"] == CHANGED_DURING_RUN_STEP for error in errors) else 1
 
 
 def _print_unresolved_review_threads(target: str | None, *, repo: str | None, as_json: bool) -> int:
@@ -1293,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
             run_all=args.all,
             dry_run=args.dry_run,
             as_json=args.json,
+            errors_file=args.errors_file,
         )
 
     if args.command == "target-branch-check":

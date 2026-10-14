@@ -90,10 +90,47 @@ def test_checks_out_the_default_branch_never_the_pr():
         assert pr_ref not in code, pr_ref
 
 
+def _step(name: str) -> str:
+    match = re.search(rf"^      - name: {re.escape(name)}\n((?:        .*\n|\n)+)", _code() + "\n", re.MULTILINE)
+    assert match, name
+    return match.group(1)
+
+
+def test_webhook_secret_is_used_by_the_notify_step_alone():
+    notify = _step("Notify the PO of the failure")
+    bookkeeping = _step("Run Codex review bookkeeping")
+
+    assert "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}" in notify
+    assert "secrets." not in bookkeeping
+    assert "SLACK_WEBHOOK_URL" not in bookkeeping
+    assert "GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}" in _code().split("steps:")[0]
+    assert "if: failure() && github.event_name != 'workflow_dispatch'" in notify
+    assert "pull_request" not in notify and "checkout" not in notify
+
+
+def test_exit_code_3_is_a_warning_and_a_green_run():
+    script = _step("Run Codex review bookkeeping")
+
+    assert 'if [ "$status" -eq 3 ]; then' in script
+    assert "::warning::" in script.split('-eq 3 ]; then')[1].split("fi")[0]
+    assert 'exit "$status"' in script
+
+
+def test_errors_file_is_passed_only_when_the_default_branch_hpw_has_it():
+    script = _step("Run Codex review bookkeeping")
+
+    probe = script.index("--help")
+    assert "grep -q -e '--errors-file'" in script
+    assert script.index("set -- --errors-file") > probe
+    assert script.index("set --\n") > probe
+    # Never hard-wired onto the command lines, which main's hpw may not accept.
+    assert not re.search(r"hpw codex-review-bookkeeping [^\n]*--repo[^\n]*--errors-file", script)
+
+
 def test_project_token_is_the_only_secret_and_no_model_is_referenced():
     text = _workflow()
 
-    assert set(re.findall(r"secrets\.(\w+)", text)) == {"PROJECT_TOKEN"}
+    assert set(re.findall(r"secrets\.(\w+)", text)) == {"PROJECT_TOKEN", "SLACK_WEBHOOK_URL"}
     assert "GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}" in text
     assert "secrets: inherit" not in text
     # Checked on the whole file, comments included.
@@ -105,15 +142,13 @@ def test_project_token_is_the_only_secret_and_no_model_is_referenced():
 
 def test_event_payload_reaches_the_script_only_through_the_environment():
     code = _code()
-    run = re.search(r"^        run: \|\n((?:          .*\n?)+)", code, re.MULTILINE)
-    assert run, "run step missing"
-    script = run.group(1)
+    script = _step("Run Codex review bookkeeping").split("run: |\n")[1]
 
     assert "${{" not in script
-    assert len(re.findall(r"^\s+run:", code, re.MULTILINE)) == 1
+    assert len(re.findall(r"^\s+run:", code, re.MULTILINE)) == 2  # the command step and the notify step
     assert "PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number }}" in code
-    assert 'sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY"' in script
-    assert 'sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY"' in script
+    assert 'sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" "$@"' in script
+    assert 'sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" "$@"' in script
     # A failing command must fail the run: no `|| true`, no `continue-on-error`.
     assert "|| true" not in code and "continue-on-error" not in code
 
@@ -121,9 +156,7 @@ def test_event_payload_reaches_the_script_only_through_the_environment():
 def test_skips_with_a_notice_when_the_default_branch_lacks_the_command():
     """On the PR that introduces the command, the default branch cannot run it yet."""
     code = _code()
-    run = re.search(r"^        run: \|\n((?:          .*\n?)+)", code, re.MULTILINE)
-    assert run, "run step missing"
-    lines = [line.strip() for line in run.group(1).splitlines()]
+    lines = [line.strip() for line in _step("Run Codex review bookkeeping").split("run: |\n")[1].splitlines()]
     module = "src/headless_pr_workflow/codex_review_bookkeeping.py"
 
     assert (REPO_ROOT / module).is_file()
@@ -133,8 +166,8 @@ def test_skips_with_a_notice_when_the_default_branch_lacks_the_command():
         "exit 0",
         "fi",
     ]
-    # The guard is the only early exit: once the command exists, its failure fails the run.
-    assert sum(line.startswith("exit") for line in lines) == 1
+    # Past the guard, only exit code 3 (a warning) ends the step green; any other failure fails the run.
+    assert [line for line in lines if line.startswith("exit")] == ["exit 0", "exit 0", 'exit "$status"']
 
 
 def test_bounds_come_from_repository_variables_and_no_state_is_kept_on_the_runner():
