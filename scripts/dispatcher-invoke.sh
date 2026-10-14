@@ -149,6 +149,20 @@
 
 set -euo pipefail
 
+# ─── Read the whole script before any session starts (issue #345) ─────────────
+# bash reads a script from the file in pieces, by byte offset. A session this
+# run starts (/implement, a fix round) may rewrite this very file, and bash
+# would then resume in the middle of a line. Everything below, up to the final
+# `}; exit $?`, is therefore one brace group: bash parses a compound command
+# completely before it runs the first line of it, and `exit` sits on the same
+# line as the closing brace so that nothing is read from the file afterwards.
+# Keep it that way: no code after the group, and no `return` at the top level.
+# `exec bash "$0"` tail calls start a new process and so read the file anew, on
+# purpose: the next story runs the code that was just merged. Sibling scripts
+# are safe: lib/*.sh are sourced once at start and the others run as separate
+# processes read at call time. See docs/DISPATCHER-CONFIG.md.
+{
+
 # ─── Job-level wall-clock deadline (ADR-003) — survives recursive exec ────────
 # One story's cycle calls invoke_executor_command() up to four times
 # (/implement, /review, /merge, /cleanup), the resume pass adds sessions for
@@ -2774,3 +2788,4 @@ finish_story
 # ─── Loop: find and process the next Ready for implementation story ───────────
 
 continue_with_next_ready_story
+}; exit $?
