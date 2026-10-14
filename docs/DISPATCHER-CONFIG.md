@@ -138,6 +138,8 @@ The dispatcher workflow passes this secret to the shell environment automaticall
 
 **If the secret is absent or invalid**, `slack-notify.sh` exits with code 1, but `dispatcher-invoke.sh` wraps the call in `|| true` so a missing webhook never aborts the workflow. Notifications silently fail; the dispatch run continues normally.
 
+`.github/workflows/codex-review-bookkeeping.yml` also reads `SLACK_WEBHOOK_URL`, in its notify step only, to send a `dispatcher_error` message when a bookkeeping run fails (at most one a day while the failure lasts; see `HEADLESS-PR-WORKFLOW.md` → "Codex review loop"). A missing secret there is a warning, not a failure of its own.
+
 For local development, copy `.env.example` to `.env` and set your webhook URL there. `.env` is listed in `.gitignore` and must not be committed.
 
 ### Ready for refinement notification state

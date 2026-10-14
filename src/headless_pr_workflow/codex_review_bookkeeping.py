@@ -43,6 +43,8 @@ from .review_policy import (
 
 
 COMMAND_NAME = "codex-review-bookkeeping"
+# The only failure that exits 3: two readings of the PR disagreed (issue #330).
+CHANGED_DURING_RUN_STEP = "revalidate decision"
 STATUS_IN_REVIEW = "In review"
 STATUS_IN_MERGE = "In merge"
 STATUS_IN_IMPLEMENTATION = "In implementation"
@@ -583,7 +585,7 @@ def run_bookkeeping(
         second = _read(pr, github=github, now=now, config=config).decision
         if second != first.decision:
             raise BookkeepingError(
-                "revalidate decision",
+                CHANGED_DURING_RUN_STEP,
                 f"PR #{pr} changed during the run: the decision was `{first.decision.action}` for head "
                 f"{first.decision.head_sha} and is now `{second.action}` for head {second.head_sha or 'unknown'} "
                 f"({second.reason}); nothing was posted or moved",

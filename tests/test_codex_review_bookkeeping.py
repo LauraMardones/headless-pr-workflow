@@ -1633,3 +1633,53 @@ def test_gateway_resolve_failure_names_a_missing_scope(monkeypatch):
 
     assert error.value.step == "resolve review thread"
     assert "`repo`" in error.value.message and TOKEN_SCOPES_DOC in error.value.message
+
+
+# --- Exit code 3 and the errors file (issue #330) ------------------------------------------------
+
+
+def _changing_story(github):
+    statuses = iter(["In review", "In implementation"])
+    fetch_story = github.fetch_story
+    github.fetch_story = lambda number: replace(fetch_story(number), status=next(statuses))
+
+
+def test_cli_exits_3_when_the_only_failure_is_the_pr_changing_during_the_run(monkeypatch, capsys, tmp_path):
+    github = FakeGitHub(pr(request(), codex_comment()))
+    _changing_story(github)
+    errors_file = tmp_path / "errors.json"
+
+    exit_code, out, err = run_cli(monkeypatch, capsys, github, str(PR), "--json", "--errors-file", str(errors_file))
+
+    assert exit_code == 3
+    assert json.loads(out)["ok"] is False
+    assert "failed at step `revalidate decision`" not in err  # --json keeps stderr empty
+    saved = json.loads(errors_file.read_text())
+    assert saved["dry_run"] is False
+    assert [error["step"] for error in saved["errors"]] == ["revalidate decision"]
+    assert github.pr_comments == [] and github.moves == []
+
+
+def test_cli_exits_1_when_the_pr_change_comes_with_another_failure(monkeypatch, capsys):
+    github = FakeGitHub(pr(request(), codex_comment()))
+    _changing_story(github)
+    broken = pr(request(), review_evidence_error="PR head changed while the PR timeline was being read")
+    github.list_open_ready_prs = lambda: (7, PR)
+    fetch = github.fetch_context
+    github.fetch_context = lambda number: broken if number == 7 else fetch(number)
+
+    exit_code, out, _ = run_cli(monkeypatch, capsys, github, "--all", "--json")
+
+    assert exit_code == 1
+    assert [error["step"] for error in json.loads(out)["errors"]] == ["read PR", "revalidate decision"]
+
+
+@pytest.mark.parametrize("arguments", [(), ("12x",), ("--all", "5")])
+def test_cli_exits_1_for_a_failure_before_any_pr_is_read(monkeypatch, capsys, tmp_path, arguments):
+    github = FakeGitHub(pr(request(), codex_comment()))
+    errors_file = tmp_path / "errors.json"
+
+    exit_code, _, _ = run_cli(monkeypatch, capsys, github, *arguments, "--errors-file", str(errors_file))
+
+    assert exit_code == 1
+    assert json.loads(errors_file.read_text())["errors"][0]["pr"] is None

@@ -11,6 +11,12 @@
 # a no-op, and the scheduled run makes up for any event that was missed. All
 # state lives on GitHub; nothing is kept on the runner or in a cache.
 #
+# A failed run tells the PO through Slack (issue #330): one message when a
+# failure streak starts, then at most one a day, decided from this workflow's
+# own run history. A manual run and a run that only saw a PR change under it
+# (exit code 3, a warning) send nothing. SLACK_WEBHOOK_URL is read by the notify
+# step only. See docs/HEADLESS-PR-WORKFLOW.md -> "Codex review loop".
+#
 # The job always checks out the default branch, never the PR's code.
 # See docs/HEADLESS-PR-WORKFLOW.md -> "Codex review loop".
 #
@@ -43,6 +49,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   bookkeeping:
@@ -72,6 +79,7 @@ jobs:
         env:
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number }}
           REPOSITORY: ${{ github.repository }}
+          ERRORS_FILE: ${{ runner.temp }}/bookkeeping-errors.json
           CODEX_REVIEW_RETRY_HOURS: ${{ vars.CODEX_REVIEW_RETRY_HOURS }}
           CODEX_REVIEW_MAX_REQUESTS: ${{ vars.CODEX_REVIEW_MAX_REQUESTS }}
         # Before the command first lands on the default branch (the PR that
@@ -81,8 +89,32 @@ jobs:
             echo "::notice::The default branch has no codex-review-bookkeeping command yet; nothing to do."
             exit 0
           fi
+          status=0
           if [ -n "$PR_NUMBER" ]; then
-            sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY"
+            sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" --errors-file "$ERRORS_FILE" || status=$?
           else
-            sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY"
+            sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" --errors-file "$ERRORS_FILE" || status=$?
           fi
+          # Exit 3: a PR changed during the run, nothing was done, the next run decides again.
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::A PR changed during the run; nothing was posted or moved. The next run decides again."
+            exit 0
+          fi
+          exit "$status"
+
+      # Only after a failure, and never for a manual run.
+      - name: Notify the PO of the failure
+        if: failure() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ERRORS_FILE: ${{ runner.temp }}/bookkeeping-errors.json
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ ! -f src/headless_pr_workflow/bookkeeping_failure_notice.py ]; then
+            echo "::warning::The default branch has no failure notification yet; the PO was not notified."
+            exit 0
+          fi
+          PYTHONPATH=src python -m headless_pr_workflow.bookkeeping_failure_notice
