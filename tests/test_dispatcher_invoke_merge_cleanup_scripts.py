@@ -27,7 +27,7 @@ def assert_zero_model_footprint(d, proc):
     assert d.claude_calls == []
     assert not [line for line in d._log("curl.log") if "openai" in line]
     assert d.allowance_calls == 0
-    assert list((d.mock / "budget").iterdir()) == []  # no executor budget increment
+    assert list((d.mock / "usage").iterdir()) == []  # no session counted (#320)
     assert d.sessions == []
     assert "Subscription allowance" not in "".join(d.posted(STORY))
 
