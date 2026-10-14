@@ -172,6 +172,31 @@ test_persistent_failure_is_red_and_comments_once() {
     check "recovery delivers and exits 0" $(( r5 + ($(slack_count) == 6 ? 0 : 1) ))
 }
 
+test_drain_delivers_without_counting_failures() {
+    setup
+    reg_decision 7 2026-10-14T10:00:00Z
+    touch "$T/slack-fail"
+    for _ in 1 2 3 4; do retry run --repo o/r --drain; rc=$?; done
+    check "failing drains never exit red" $(( rc ))
+    check "failing drains post no comment" $(( $(cat "$T/gh/posts.log" 2>/dev/null | wc -l) == 0 ? 0 : 1 ))
+    check "failing drains leave failed_cycles at 0" $(( $(jq -s '.[0].failed_cycles' "$(STATE)") == 0 ? 0 : 1 ))
+    rm "$T/slack-fail"
+    retry run --repo o/r --drain
+    check "a drain delivers and records the event" $(( $(jq -s '[.[]|select(.delivered)]|length' "$(STATE)") == 1 ? 0 : 1 ))
+    retry run --repo o/r
+    check "the cycle's own run sends nothing more" $(( $(slack_count) == 5 ? 0 : 1 ))
+}
+
+test_invoke_drains_before_every_chained_exec() {
+    local f="$REPO_ROOT/scripts/dispatcher-invoke.sh" n bad=0
+    n=$(grep -c '^ *exec bash "\$0"' "$f")
+    while IFS=: read -r ln _; do
+        sed -n "$((ln - 1))p" "$f" | grep -q 'drain_actionable_events' || bad=1
+    done < <(grep -n '^ *exec bash "\$0"' "$f")
+    check "invoke has chained exec sites" $(( n >= 3 ? 0 : 1 ))
+    check "each chained exec is preceded by drain_actionable_events" $bad
+}
+
 test_bad_state_warns_and_continues() {
     local kind
     for kind in malformed unreadable; do
@@ -227,6 +252,8 @@ test_unblock_by_someone_else_or_before_blocker_does_not_resolve
 test_closed_issue_stops_retry
 test_new_blocker_after_resolved_one_notifies_once
 test_persistent_failure_is_red_and_comments_once
+test_drain_delivers_without_counting_failures
+test_invoke_drains_before_every_chained_exec
 test_bad_state_warns_and_continues
 test_malformed_line_keeps_pending_record
 test_dry_run_sends_nothing
