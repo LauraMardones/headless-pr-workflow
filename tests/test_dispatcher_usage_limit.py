@@ -316,3 +316,32 @@ def test_usage_limit_reached_event_payload(tmp_path):
     failing = subprocess.run([BASH, str(NOTIFY), "usage_limit_reached", ctx], env={**env, "MOCK_RC": "22"},
                              capture_output=True, text=True)
     assert failing.returncode != 0
+
+
+# ── review findings on the first head ───────────────────────────────────────
+
+
+def test_a_counter_that_cannot_be_written_starts_nothing(d):
+    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_STATE_DIR": "/dev/null/usage"})
+    assert d.sessions == []
+    assert "[USAGE LIMIT ERROR] could not record the session start" in proc.stderr
+
+
+def test_a_limit_stop_before_cleanup_still_notifies_the_closure(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(ISSUE, "Ready for implementation", executor="codex",
+                body="Feature group: #50 Feature: something")
+    d.add_pr(PR, ISSUE)
+    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": "3"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {ISSUE}", f"review {PR}", f"merge {PR}"]
+    assert "Feature #50: all 1 stories Done." in proc.stdout
+
+
+def test_cache_keys_differ_per_attempt_and_the_save_uses_the_day_it_ends_on():
+    for name in ("Restore session state cache", "Save session state cache"):
+        assert "${{ github.run_attempt }}" in step(name), name
+    assert "env.SAVE_DAY" in step("Save session state cache")
+    assert "env.TODAY" not in step("Save session state cache").split("key:", 1)[1]
+    assert "date -u" in step("Set cache save date")
+    assert step_if(step("Set cache save date")).startswith("always()")

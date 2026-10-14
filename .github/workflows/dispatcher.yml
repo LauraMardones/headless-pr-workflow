@@ -137,7 +137,7 @@ jobs:
           path: |
             .dispatcher-usage
             .dispatcher-allowance
-          key: session-state-${{ env.TODAY }}-${{ github.run_id }}
+          key: session-state-${{ env.TODAY }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             session-state-${{ env.TODAY }}-
 
@@ -188,6 +188,12 @@ jobs:
 
       # Issue #320: runs even when the invoke step failed, so a session that
       # failed is still counted and a loop of failing restarts reaches the limit.
+      # The counter is dated by the day each session started, which can be
+      # later than the day this run began; save under the day it ends on.
+      - name: Set cache save date
+        if: always() && steps.guard.outputs.enabled == 'true'
+        run: echo "SAVE_DAY=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
       - name: Save session state cache
         if: always() && steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         uses: actions/cache/save@v4
@@ -195,4 +201,4 @@ jobs:
           path: |
             .dispatcher-usage
             .dispatcher-allowance
-          key: session-state-${{ env.TODAY }}-${{ github.run_id }}
+          key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1349,6 +1349,8 @@ check_usage_limit() {
         if bash "$USAGE_LIMIT_SCRIPT" notify-due && [[ -n "${GITHUB_OUTPUT:-}" ]]; then
             echo "usage_limit_reached=true" >> "$GITHUB_OUTPUT"
         fi
+        # The story is already Done; the closure notification is not a session.
+        [[ "$step" == "cleanup" ]] && { notify_closure_if_complete "$ISSUE_NUMBER" || true; }
         DISPATCH_HANDLED=true
         exit 0
     fi
@@ -1368,8 +1370,10 @@ check_usage_limit() {
 # allowance check passed, so a refused start does not count, and a session
 # that later fails or is stopped by a provider limit still does.
 record_session_start() {
-    bash "$USAGE_LIMIT_SCRIPT" record || \
-        echo "Warning: could not record the session start; continuing." >&2
+    bash "$USAGE_LIMIT_SCRIPT" record || {
+        echo "[USAGE LIMIT ERROR] could not record the session start — starting nothing" >&2
+        return 1
+    }
 }
 
 # ─── Utility: invoke an executor command (issue #254, issue #314) ────────────
@@ -1432,7 +1436,8 @@ invoke_executor_command() {
         return 0
     fi
 
-    record_session_start
+    # Fail closed: a session that cannot be counted does not start.
+    record_session_start || return 1
 
     case "$provider" in
         claude-code)
