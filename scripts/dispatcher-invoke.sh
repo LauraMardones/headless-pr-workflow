@@ -78,9 +78,8 @@
 # subscription token (CLAUDE_CODE_OAUTH_TOKEN; ADR-012, issue #314). Their
 # model is a Claude Code alias: the Claude Code version the workflow pins
 # decides which model each alias means, so a model change is a deliberate
-# version bump. Per-tier daily token *budgets* remain separate (see
-# EXECUTOR_BUDGET_TYPE below and dispatcher-budget.sh) — that mechanism is
-# independent of which credential signs the session in.
+# version bump. How many sessions may start per day is a separate limit the
+# PO sets (dispatcher-usage-limit.sh, issue #320), the same for every tier.
 #
 # ─── Review path (issue #263, issue #293, ADR-006) ────────────────────────────
 #
@@ -207,16 +206,6 @@ declare -A EXECUTOR_API_KEY_ENV=(
     ["codex"]="OPENAI_API_KEY"
 )
 
-# ─── Executor budget type table (data-driven, parallel to EXECUTOR_ROUTING) ───
-# Maps executor label suffix to the budget executor type accepted by dispatcher-budget.sh.
-# Add a new row here when adding a new executor tier (OSS invariant: data-driven).
-declare -A EXECUTOR_BUDGET_TYPE=(
-    ["claude-code-haiku"]="haiku"
-    ["claude-code-sonnet"]="sonnet"
-    ["claude-code-opus"]="opus"
-    ["codex"]="codex"
-)
-
 # ─── Review-path tables (data-driven, issue #263 and issue #293) ──────────────
 # How a story is reviewed is looked up by its /implement executor label suffix.
 # An executor has a row in exactly one of the two tables:
@@ -229,7 +218,7 @@ declare -A EXECUTOR_BUDGET_TYPE=(
 # /implement, so a typo or a new tier never skips review silently.
 # OSS invariant: these are lookup tables, not conditional branches on executor
 # name — add a row to one of them (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
-# EXECUTOR_MODEL/EXECUTOR_BUDGET_TYPE) when adding a new executor tier.
+# EXECUTOR_MODEL) when adding a new executor tier.
 declare -A REVIEW_EXECUTOR_ROUTING=(
     ["codex"]="claude-code-opus"
 )
@@ -245,13 +234,9 @@ declare -A CODEX_REVIEW_LOOP_ROUTING=(
 REPO=""
 ISSUE_NUMBER=""
 DRY_RUN=false
-BUDGET_BLOCKED_COUNT=0
-TOTAL_READY_COUNT=0
-SKIPPED_ISSUES=""  # space-separated issue numbers skipped due to budget cap
-# Space-separated issue numbers skipped as non-executable (issue #256). Kept
-# apart from SKIPPED_ISSUES so all_budget_blocked accounting only ever counts
-# budget skips. Internal loop state, carried across the recursive exec like
-# --skipped-issues; not meant to be passed by callers.
+# Space-separated issue numbers skipped as non-executable (issue #256).
+# Internal loop state, carried across the recursive exec; not meant to be
+# passed by callers.
 NON_EXECUTABLE_ISSUES=""
 RESUME_ONLY=false  # --resume: handle resumable work only (issue #293)
 # Internal loop state, carried across the recursive exec: the resume pass runs
@@ -272,15 +257,6 @@ while [[ $# -gt 0 ]]; do
             RESUME_PASS_DONE=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
-        --budget-blocked-count)
-            [[ $# -ge 2 ]] || { echo "Error: --budget-blocked-count requires a value." >&2; exit 1; }
-            BUDGET_BLOCKED_COUNT="$2"; shift 2 ;;
-        --total-ready-count)
-            [[ $# -ge 2 ]] || { echo "Error: --total-ready-count requires a value." >&2; exit 1; }
-            TOTAL_READY_COUNT="$2"; shift 2 ;;
-        --skipped-issues)
-            [[ $# -ge 2 ]] || { echo "Error: --skipped-issues requires a value." >&2; exit 1; }
-            SKIPPED_ISSUES="$2"; shift 2 ;;
         --non-executable-issues)
             [[ $# -ge 2 ]] || { echo "Error: --non-executable-issues requires a value." >&2; exit 1; }
             NON_EXECUTABLE_ISSUES="$2"; shift 2 ;;
@@ -343,7 +319,7 @@ CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
+USAGE_LIMIT_SCRIPT="${USAGE_LIMIT_SCRIPT:-$SCRIPT_DIR/dispatcher-usage-limit.sh}"  # overridable for tests
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 COMMANDS_DIR="$REPO_ROOT/.claude/commands"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)
@@ -1301,6 +1277,101 @@ check_subscription_allowance() {
     exit 1
 }
 
+# ─── Utility: usage limit before a session start (#320) ─────────────────────
+# The PO caps the sessions the dispatcher starts per UTC day with
+# USAGE_LIMIT_SESSIONS_PER_DAY (scripts/dispatcher-usage-limit.sh). Checked
+# before the allowance probe, so a stop by the limit spends no probe turn.
+#   exit 0 (start)  — return 0.
+#   exit 1 (refuse) — same placement as a refusal by the reserve: before
+#                     /implement the story goes back to "Ready for
+#                     implementation"; before a fix round it keeps its place
+#                     and nothing is written; before /review, /merge or
+#                     /cleanup one comment says so. The first stop of a UTC
+#                     day sets the step output usage_limit_reached=true, which
+#                     the workflow turns into one Slack notification. Exit 0:
+#                     no other session starts in this run.
+#   exit 2 (error)  — [USAGE LIMIT ERROR] from the script; fail the job without
+#                     a dispatcher_error Slack message.
+# The session is counted by record_session_start, just before it starts.
+
+usage_limit_comment() {
+    local step="$1" count="$2" limit="$3"
+    local head tail
+    if [[ -n "$limit" ]]; then
+        head="/$step was not started for #$ISSUE_NUMBER: the dispatcher has started $count of $limit sessions today, the daily limit the PO set. New sessions start again at 00:00 UTC."
+    else
+        head="/$step was not started for #$ISSUE_NUMBER: USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more, so nothing starts."
+    fi
+    if [[ "$step" == "merge" ]]; then
+        tail="The story stays in \"In merge\". A later dispatcher run tries /merge again; nothing is needed from you."
+    else
+        tail="The story stays at its current step. Nothing restarts it automatically until #316; run /$step by hand after the reset time."
+    fi
+    printf '## Usage limit\n\n%s\n\n%s\n' "$head" "$tail"
+}
+
+# Posts the comment unless it is already the story's newest comment for this
+# step: a resume entry is tried again on every run.
+post_usage_limit_comment() {
+    local step="$1" count="$2" limit="$3" newest
+    newest=$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" \
+        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    if [[ "$newest" == "## Usage limit"* \
+          && "$newest" == *"/$step was not started for #$ISSUE_NUMBER:"* ]]; then
+        echo "#$ISSUE_NUMBER: the usage limit comment for /$step is already the newest comment; not posting it again"
+        return 0
+    fi
+    post_comment "$ISSUE_NUMBER" "$(usage_limit_comment "$step" "$count" "$limit")"
+}
+
+check_usage_limit() {
+    local step="$1"
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check usage limit before /$step"
+        return 0
+    fi
+
+    local out rc=0 count="" limit=""
+    out=$(bash "$USAGE_LIMIT_SCRIPT") || rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    read -r count limit <<< "$out"
+    LAST_ACTION="usage limit check before /$step for #$ISSUE_NUMBER"
+
+    if [[ $rc -eq 1 ]]; then
+        echo "[USAGE LIMIT SKIP] #$ISSUE_NUMBER: /$step not started; $count of $limit sessions today"
+        if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+            echo "#$ISSUE_NUMBER stays in \"In implementation\"; the fix round is tried again on a later run"
+        elif [[ "$step" == "implement" ]]; then
+            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+        else
+            post_usage_limit_comment "$step" "$count" "$limit"
+        fi
+        if bash "$USAGE_LIMIT_SCRIPT" notify-due && [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+            echo "usage_limit_reached=true" >> "$GITHUB_OUTPUT"
+        fi
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+
+    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        echo "#$ISSUE_NUMBER stays in \"In implementation\"; the fix round is tried again on a later run" >&2
+    elif [[ "$step" == "implement" ]]; then
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+    else
+        post_usage_limit_comment "$step" "" ""
+    fi
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
+# Counts one session, just before it starts: after the usage limit and the
+# allowance check passed, so a refused start does not count, and a session
+# that later fails or is stopped by a provider limit still does.
+record_session_start() {
+    bash "$USAGE_LIMIT_SCRIPT" record || \
+        echo "Warning: could not record the session start; continuing." >&2
+}
+
 # ─── Utility: invoke an executor command (issue #254, issue #314) ────────────
 # Resolves provider/model from the data-driven tables above, loads the
 # corresponding .claude/commands/*.md file as the task prompt — the same
@@ -1320,6 +1391,7 @@ invoke_executor_command() {
     local target_arg="$2"
     local executor_label="${3:-$EXECUTOR_LABEL}"
 
+    check_usage_limit "$slash_command"
     check_subscription_allowance "$slash_command"
 
     local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
@@ -1359,6 +1431,8 @@ invoke_executor_command() {
         fi
         return 0
     fi
+
+    record_session_start
 
     case "$provider" in
         claude-code)
@@ -1575,7 +1649,7 @@ fetch_board_data() {
 # ─── Utility: find next Ready for implementation story (re-fetches board) ────
 
 find_next_ready_story() {
-    # Optional first arg: space-separated issue numbers to exclude (already budget-skipped).
+    # Optional first arg: space-separated issue numbers to exclude (already handled).
     # Items already skipped as non-executable this run are always excluded
     # (issue #256), so no selection path can return the same one twice.
     local _fnrs_exclude="${1:-}${NON_EXECUTABLE_ISSUES:+ $NON_EXECUTABLE_ISSUES}"
@@ -1739,40 +1813,6 @@ board_items_in_status() {
           )
         | { id: .id, number: .content.number, title: .content.title }
     ]'
-}
-
-# ─── Utility: per-story budget estimate and /implement increment (#203) ──────
-# resolve_budget_estimate sets BUDGET_TYPE and ESTIMATED_TOKENS from the
-# current story's labels and executor.
-
-resolve_budget_estimate() {
-    BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$EXECUTOR_LABEL]:-}"
-
-    SIZE_LABEL=""
-    local _lbl
-    for _lbl in $TARGET_LABELS; do
-        if [[ "$_lbl" == size:* || "$_lbl" == "small" || "$_lbl" == "medium" || "$_lbl" == "large" ]]; then
-            SIZE_LABEL="$_lbl"
-            break
-        fi
-    done
-
-    ESTIMATED_TOKENS=75000
-    if [[ -f "$BUDGET_SCRIPT" ]]; then
-        ESTIMATED_TOKENS=$(bash "$BUDGET_SCRIPT" estimate "${SIZE_LABEL:-medium}" 2>/dev/null || echo 75000)
-    fi
-}
-
-increment_implement_budget() {
-    if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
-        if $DRY_RUN; then
-            echo "[DRY RUN] Would call: dispatcher-budget.sh increment $BUDGET_TYPE $ESTIMATED_TOKENS"
-        else
-            echo "[BUDGET] Increment: $BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER"
-            bash "$BUDGET_SCRIPT" increment "$BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
-                echo "Warning: Budget increment failed for $BUDGET_TYPE; continuing." >&2
-        fi
-    fi
 }
 
 # ─── Utility: /merge and /cleanup, shared by Steps E3/E4 and the resume pass ─
@@ -1947,7 +1987,7 @@ hand_off_to_codex_review_loop() {
     if $DRY_RUN; then
         local pr_label="the PR /implement opens"
         [[ -n "$pr_number" ]] && pr_label="PR #$pr_number"
-        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session and no review budget increment; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
+        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
         return 0
     fi
 
@@ -2140,7 +2180,6 @@ resume_fix_round() {
     echo "${LOG_PREFIX}[RESUME] #$issue_num: fix round $round of $CODEX_FIX_ROUND_MAX, /implement on PR #$pr_number"
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     LAST_ACTION="invoking /implement for #$issue_num (fix round $round)"
-    resolve_budget_estimate
     # The allowance check must not put this story back to "Ready for
     # implementation": it is unfinished work that holds its place.
     FIX_ROUND_SESSION=true
@@ -2152,7 +2191,6 @@ resume_fix_round() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
-    increment_implement_budget
     hand_off_to_codex_review_loop "$pr_head"
 }
 
@@ -2256,23 +2294,15 @@ if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TY
     echo "Warning: #$ISSUE_NUMBER is not an executable Story, Task, or Bug ($ISSUE_TYPE_DETAIL); skipping it for this run and continuing selection." >&2
     NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$ISSUE_NUMBER"
     LAST_ACTION="non-executable skip for #$ISSUE_NUMBER; searching for next story"
-    NEXT_ISSUE=$(find_next_ready_story "$SKIPPED_ISSUES" || true)
+    NEXT_ISSUE=$(find_next_ready_story || true)
     if [[ -z "$NEXT_ISSUE" ]]; then
-        # Non-executable skips never count toward all_budget_blocked; only an
-        # earlier budget skip of every executable story in this run can set it.
-        if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
-            [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
-        fi
         echo "No more executable \"Ready for implementation\" stories after non-executable skip. Dispatcher exiting cleanly."
         DISPATCH_HANDLED=true
         exit 0
     fi
     echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
     _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
-        --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-        --total-ready-count "$TOTAL_READY_COUNT" \
         --non-executable-issues "$NON_EXECUTABLE_ISSUES")
-    [[ -n "$SKIPPED_ISSUES" ]] && _NEXT_ARGS+=(--skipped-issues "$SKIPPED_ISSUES")
     $DRY_RUN && _NEXT_ARGS+=(--dry-run)
     DISPATCH_HANDLED=true
     exec bash "$0" "${_NEXT_ARGS[@]}"
@@ -2587,53 +2617,6 @@ if [[ -z "$TARGET_ITEM_ID" ]]; then
     echo "Warning: Could not find project item ID for #$ISSUE_NUMBER; board updates will be skipped." >&2
 fi
 
-# ─── Budget check before /implement (issue #203) ─────────────────────────────
-# Check daily token budget before invoking /implement. Skip and log if the cap
-# is reached; track counts for all_budget_blocked detection.
-
-resolve_budget_estimate
-
-TOTAL_READY_COUNT=$(( TOTAL_READY_COUNT + 1 ))
-
-if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would check: dispatcher-budget.sh check $BUDGET_TYPE"
-    else
-        _budget_rc=0
-        bash "$BUDGET_SCRIPT" check "$BUDGET_TYPE" >/dev/null || _budget_rc=$?
-        if [[ $_budget_rc -eq 2 ]]; then
-            echo "Error: Budget configuration error for executor '$BUDGET_TYPE' (dispatcher-budget.sh exit 2)." >&2
-            echo "       Ensure BUDGET_DAILY_$(echo "$BUDGET_TYPE" | tr '[:lower:]' '[:upper:]') is set in the workflow environment." >&2
-            DISPATCH_HANDLED=true
-            exit 1
-        elif [[ $_budget_rc -eq 1 ]]; then
-            echo "[BUDGET SKIP] #$ISSUE_NUMBER: $TARGET_TITLE — ${BUDGET_TYPE} daily cap reached; skipping"
-            BUDGET_BLOCKED_COUNT=$(( BUDGET_BLOCKED_COUNT + 1 ))
-            # Track this issue as skipped so find_next_ready_story won't reselect it
-            SKIPPED_ISSUES="${SKIPPED_ISSUES:+$SKIPPED_ISSUES }$ISSUE_NUMBER"
-            LAST_ACTION="budget-skip for #$ISSUE_NUMBER; searching for next story"
-            NEXT_ISSUE=$(find_next_ready_story "$SKIPPED_ISSUES" || true)
-            if [[ -z "$NEXT_ISSUE" ]]; then
-                if [[ $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
-                    [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
-                fi
-                echo "No more \"Ready for implementation\" stories after budget skip. Dispatcher exiting cleanly."
-                DISPATCH_HANDLED=true
-                exit 0
-            fi
-            echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-            _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
-                --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-                --total-ready-count "$TOTAL_READY_COUNT" \
-                --skipped-issues "$SKIPPED_ISSUES")
-            [[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
-            $DRY_RUN && _NEXT_ARGS+=(--dry-run)
-            DISPATCH_HANDLED=true
-            exec bash "$0" "${_NEXT_ARGS[@]}"
-        fi
-    fi
-fi
-
 # ─── Utility: go on to the next Ready for implementation story ───────────────
 # Called when this story's run ends: after E4, and after the hand-off to the
 # Codex review loop (issue #293). It never returns: it either exits 0 or
@@ -2646,10 +2629,6 @@ continue_with_next_ready_story() {
     NEXT_ISSUE=$(find_next_ready_story || true)
 
     if [[ -z "$NEXT_ISSUE" ]]; then
-        # Check all_budget_blocked: every story that reached the budget check was skipped.
-        if [[ $TOTAL_READY_COUNT -gt 0 && $BUDGET_BLOCKED_COUNT -eq $TOTAL_READY_COUNT ]]; then
-            [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "all_budget_blocked=true" >> "$GITHUB_OUTPUT"
-        fi
         echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
         DISPATCH_HANDLED=true
         exit 0
@@ -2657,9 +2636,7 @@ continue_with_next_ready_story() {
 
     echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
 
-    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
-        --budget-blocked-count "$BUDGET_BLOCKED_COUNT" \
-        --total-ready-count "$TOTAL_READY_COUNT")
+    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done)
     [[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
     $DRY_RUN && _NEXT_ARGS+=(--dry-run)
 
@@ -2689,9 +2666,6 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
-
-# Budget increment after successful /implement (issue #203)
-increment_implement_budget
 
 # ─── Review path (issue #293) ─────────────────────────────────────────────────
 # Table lookup, not a branch on an executor name: a story whose executor has a
@@ -2741,21 +2715,6 @@ if ! invoke_executor_command "review" "$PR_NUMBER" "$REVIEW_EXECUTOR_LABEL"; the
     exit 1
 fi
 echo "✓ /review completed for PR #$PR_NUMBER"
-
-# Budget increment after successful /review (issue #263): attributed to the
-# reviewing executor's budget type, which may differ from the story's
-# /implement BUDGET_TYPE above — e.g. a Codex-implemented story reviewed by
-# Opus increments Opus's counter, not Codex's.
-REVIEW_BUDGET_TYPE="${EXECUTOR_BUDGET_TYPE[$REVIEW_EXECUTOR_LABEL]:-}"
-if [[ -n "$REVIEW_BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would call: dispatcher-budget.sh increment $REVIEW_BUDGET_TYPE $ESTIMATED_TOKENS"
-    else
-        echo "[BUDGET] Increment: $REVIEW_BUDGET_TYPE +$ESTIMATED_TOKENS after #$ISSUE_NUMBER (review)"
-        bash "$BUDGET_SCRIPT" increment "$REVIEW_BUDGET_TYPE" "$ESTIMATED_TOKENS" || \
-            echo "Warning: Budget increment failed for $REVIEW_BUDGET_TYPE; continuing." >&2
-    fi
-fi
 
 # ─── Step E3: /merge ──────────────────────────────────────────────────────────
 # The head is read now, after /review, so a failed attempt is recorded against
