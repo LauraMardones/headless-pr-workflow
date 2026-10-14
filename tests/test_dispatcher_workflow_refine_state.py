@@ -82,6 +82,16 @@ def test_retry_step_runs_every_enabled_cycle_even_without_work():
     ), "non-default-ref runs must not send or record"
 
 
+def test_retry_does_not_record_delivery_when_state_will_not_be_saved():
+    """Codex finding on #295: the save requires a successful poll, so the retry
+    step must require it too; otherwise a delivery recorded after a failed poll
+    is never persisted and the next cycle sends it again."""
+    retry_condition = _field(_step(RETRY), "if")
+    save_condition = _field(_step(SAVE), "if")
+    assert "steps.poll.outcome == 'success'" in save_condition
+    assert "steps.poll.outcome == 'success'" in retry_condition
+
+
 def test_state_is_saved_even_when_invoke_or_retry_fails():
     condition = _field(_step(SAVE), "if")
     assert "!cancelled()" in condition
