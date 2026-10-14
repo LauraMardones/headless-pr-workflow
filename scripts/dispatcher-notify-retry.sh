@@ -91,16 +91,20 @@ load_state() {
         echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; continuing with empty state" >&2
         return 0
     fi
-    # Every line must be an object carrying the fields the cycle relies on.
-    if [[ -s "$copy" ]] && ! jq -e -s 'all(.[]; type == "object"
+    # Keep every line that is an object carrying the fields the cycle relies
+    # on; drop the rest. A malformed line must not discard a valid pending
+    # record next to it, since a closure event is not registered again.
+    jq -R -c 'fromjson? | select(type == "object"
             and (.key|type) == "string" and (.event|type) == "string"
             and (.issue|type) == "number" and (.context|type) == "string"
             and (.delivered|type) == "boolean" and (.failed_cycles|type) == "number")' \
-            "$copy" >/dev/null 2>&1; then
-        echo "[NOTIFY] Warning: malformed actionable event state $STATE_FILE; continuing with empty state" >&2
-        return 0
+        "$copy" > "$EVENTS" 2>/dev/null || : > "$EVENTS"
+    local total kept
+    total="$(grep -c . "$copy" || true)"
+    kept="$(grep -c . "$EVENTS" || true)"
+    if [[ "$total" != "$kept" ]]; then
+        echo "[NOTIFY] Warning: malformed lines in actionable event state $STATE_FILE; dropped $((total - kept)), kept $kept" >&2
     fi
-    jq -c '.' "$copy" > "$EVENTS"
 }
 
 save_state() {
