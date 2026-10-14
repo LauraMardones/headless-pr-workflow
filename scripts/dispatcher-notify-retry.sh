@@ -9,13 +9,19 @@
 # Usage:
 #   bash scripts/dispatcher-notify-retry.sh register --repo <owner/repo> \
 #       --event <event> --issue <n> [--since <iso8601>] --context <json> [--dry-run]
-#   bash scripts/dispatcher-notify-retry.sh run --repo <owner/repo> [--dry-run]
+#   bash scripts/dispatcher-notify-retry.sh run --repo <owner/repo> [--dry-run] [--drain]
 #
 # register  Records an actionable event as pending (idempotent per event key).
 #           Called by dispatcher-invoke.sh where it used to send directly.
 # run       One delivery cycle: drops resolved events, sends every undelivered
 #           one, records the result. Run by the workflow on every cycle, also
 #           when no story is ready or resumable.
+#
+# run --drain  An extra delivery attempt that dispatcher-invoke.sh makes before
+#           it chains to the next story, so an alert is not held back by hours
+#           of chained sessions. It records a success but never counts a
+#           failure, posts a comment or exits 1: the bound is counted once per
+#           cycle, by the workflow's own run.
 #
 # Event key: <event>:<issue>:<since>. For decision_blocker, <since> is the
 # created_at of the "## Blocked Declaration" comment, so a new blocker on the
@@ -59,7 +65,7 @@ die() { echo "Error: $*" >&2; exit 2; }
 MODE="$1"; shift
 [[ "$MODE" == register || "$MODE" == run ]] || die "unknown mode: $MODE"
 
-REPO="" EVENT="" ISSUE="" SINCE="" CONTEXT="" DRY_RUN=false
+REPO="" EVENT="" ISSUE="" SINCE="" CONTEXT="" DRY_RUN=false DRAIN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo)    [[ $# -ge 2 ]] || die "--repo requires a value"; REPO="$2"; shift 2 ;;
@@ -68,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --since)   [[ $# -ge 2 ]] || die "--since requires a value"; SINCE="$2"; shift 2 ;;
         --context) [[ $# -ge 2 ]] || die "--context requires a value"; CONTEXT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --drain)   DRAIN=true; shift ;;
         *) die "unknown flag: $1" ;;
     esac
 done
@@ -190,6 +197,12 @@ while IFS= read -r rec; do
             bash "$SCRIPT_DIR/slack-notify.sh" "$event" "$context" >/dev/null; then
         echo "[NOTIFY] Delivered: $key" >&2
         jq -c '.delivered = true' <<< "$rec" >> "$NEXT"
+        continue
+    fi
+
+    if $DRAIN; then
+        echo "[NOTIFY] Warning: Slack delivery failed for $key during drain; the cycle's retry step will try again" >&2
+        echo "$rec" >> "$NEXT"
         continue
     fi
 
