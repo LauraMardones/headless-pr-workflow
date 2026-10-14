@@ -49,6 +49,7 @@ Required behavior:
 6. If blockers are found:
    - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
    - only if no documented answer exists, declare the decision blocker with the Blocked Status Protocol's required `Checked:` line naming what was searched
+   - when declaring the decision blocker, also write the `Question:` (one sentence), `Options:` (2–4 lines, each `<letter>) <option> — <consequence>`) and `Recommendation:` (one option letter plus a one-sentence reason) fields, after `Checked:`
    - record findings on GitHub in the correct PR review surfaces
    - use "Request changes" when available
    - clearly describe the blockers

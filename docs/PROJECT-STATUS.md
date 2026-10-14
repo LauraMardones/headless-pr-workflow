@@ -269,6 +269,9 @@ When declaring a blocker, post a structured GitHub comment on the issue or PR us
 ## Blocked Declaration
 Type: <dependency | decision | external | conflict | resource>
 Checked: <required when Type is decision: repository documentation and parent Epic/Feature Decisions sections searched, followed by "no existing decision found"; omit for all other blocker types>
+Question: <required when Type is decision: the decision itself, one sentence; omit for all other blocker types>
+Options: <required when Type is decision: 2-4 options, one per line, each as "<letter>) <option> — <consequence>"; omit for all other blocker types>
+Recommendation: <required when Type is decision: the letter of one listed option plus a one-sentence reason; omit for all other blocker types>
 Declared by: <executor name or GitHub handle>
 Blocks: #<issue-number> — <story title>
 Unblocked when: <specific, testable condition — not a general description>
@@ -277,7 +280,7 @@ State of in-progress work: <branch name and summary of work completed so far, or
 Resume instruction: <required when Type is decision: "To resume: reply on this issue with your decision, including a line that is exactly `/unblock`." — write "n/a" for all other blocker types>
 ```
 
-All fields shown for the selected blocker type are required. The **"Checked"** field is mandatory for `Type: decision` and must name what was searched so the pre-declaration check is auditable; omit it for other types. The **"Unblocked when"** field must state a specific, testable condition — not a vague description like "when the dependency is done". The **"Resume instruction"** field is what makes the `/unblock` convention discoverable at the point the PO is asked to respond — never omit it from a `Type: decision` declaration.
+All fields shown for the selected blocker type are required. The **"Checked"** field is mandatory for `Type: decision` and must name what was searched so the pre-declaration check is auditable; omit it for other types. The **"Unblocked when"** field must state a specific, testable condition — not a vague description like "when the dependency is done". The **"Resume instruction"** field is what makes the `/unblock` convention discoverable at the point the PO is asked to respond — never omit it from a `Type: decision` declaration. The **"Question"**, **"Options"** and **"Recommendation"** fields are required for `Type: decision` and omitted for the other four types: `Question` is one sentence; `Options` is 2–4 lines, each `<letter>) <option> — <consequence>`; `Recommendation` names one listed option letter and a one-sentence reason. The `decision_blocker` Slack notification carries them so the PO can decide without opening the issue.
 
 ### Decision blockers
 
@@ -286,6 +289,7 @@ Decision blockers require immediate PO involvement:
 - Before declaring one, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, all other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections for an existing answer.
 - If an existing answer is found, record and follow it directly. This is a lookup task: do not declare a decision blocker or escalate it to the PO.
 - If no answer is found, include a **Checked** line naming the documentation and parent decision sections searched and ending with `no existing decision found`.
+- State the decision itself with the **Question**, **Options** and **Recommendation** fields, written after **Checked**.
 - Post the declaration comment — including the **Resume instruction** field above, filled in verbatim — and **@mention the PO** in the same comment.
 - Only the PO may resolve a decision blocker.
 - The executor must not attempt to unblock a decision blocker unilaterally.

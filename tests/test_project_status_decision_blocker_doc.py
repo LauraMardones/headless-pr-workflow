@@ -66,3 +66,45 @@ def test_decision_blockers_section_requires_resume_field_be_filled_in() -> None:
     decision_section = document[decision_start:decision_end]
 
     assert "Resume instruction" in decision_section
+
+
+def _template_block() -> str:
+    document = read("docs/PROJECT-STATUS.md")
+    start = document.index("## Blocked Declaration")
+    return document[start : document.index("```", start)]
+
+
+def test_declaration_template_includes_decision_content_fields_after_checked() -> None:
+    template = _template_block()
+
+    for field in ("Question:", "Options:", "Recommendation:"):
+        assert field in template, f"{field} must be in the fenced template block"
+    assert (
+        template.index("Checked:")
+        < template.index("Question:")
+        < template.index("Options:")
+        < template.index("Recommendation:")
+    )
+    assert '<letter>) <option> — <consequence>' in template
+
+
+def test_decision_content_fields_are_documented_as_decision_only() -> None:
+    document = read("docs/PROJECT-STATUS.md")
+    start = document.index("All fields shown for the selected blocker type")
+    paragraph = document[start : document.index("### Decision blockers", start)]
+
+    for field in ("Question", "Options", "Recommendation"):
+        assert f'"{field}"' in paragraph
+    assert "omitted for the other four types" in paragraph
+
+    decision_start = document.index("### Decision blockers")
+    decision_section = document[decision_start : document.index("### Monitoring", decision_start)]
+    for field in ("Question", "Options", "Recommendation"):
+        assert field in decision_section
+
+
+def test_implement_and_review_tell_executor_to_write_decision_fields() -> None:
+    for path in (".claude/commands/implement.md", ".claude/commands/review.md"):
+        text = read(path)
+        for field in ("`Question:`", "`Options:`", "`Recommendation:`"):
+            assert field in text, f"{path} must mention {field}"

@@ -9,7 +9,9 @@
 #   SLACK_WEBHOOK_URL=<url> bash scripts/slack-notify.sh <EVENT_TYPE> <CONTEXT_JSON>
 #
 # Supported EVENT_TYPE values:
-#   decision_blocker          fields: story_title, issue_url, blocker_type, unblocked_when
+#   decision_blocker          fields: story_title, issue_url, blocker_type, unblocked_when,
+#                                     question, options, recommendation (the last three optional;
+#                                     missing ones are named in the message)
 #   feature_closure_confirmation  fields: feature_title, summary_url
 #   epic_closure_approval     fields: epic_title, summary_url
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
@@ -52,32 +54,52 @@ build_payload() {
     case "$event" in
 
         decision_blocker)
-            local story_title issue_url blocker_type unblocked_when
-            story_title=$(echo "$ctx" | jq -r '.story_title // "(unknown)"')
-            issue_url=$(echo "$ctx" | jq -r '.issue_url // ""')
-            blocker_type=$(echo "$ctx" | jq -r '.blocker_type // "(unknown)"')
-            unblocked_when=$(echo "$ctx" | jq -r '.unblocked_when // "(unknown)"')
-            jq -n \
-                --arg story_title "$story_title" \
-                --arg issue_url "$issue_url" \
-                --arg blocker_type "$blocker_type" \
-                --arg unblocked_when "$unblocked_when" \
-                '{
-                    blocks: [
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ":warning: *Decision Blocker*" }
-                        },
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ("*Story:* " + $story_title + "\n*Blocker type:* " + $blocker_type + "\n*Unblocked when:* " + $unblocked_when) }
-                        },
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ("*Issue:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)" end)) }
-                        }
-                    ]
-                }'
+            # Block Kit allows 3000 characters per section text and 50 blocks;
+            # the payload has a fixed number of blocks and every text is capped
+            # below 3000. Options are cut consequence-first (letter and name
+            # stay); question and recommendation are cut last, with the
+            # larger caps. The issue link and resume line are never cut.
+            jq -n --argjson c "$ctx" '
+                def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
+                def str: if type == "string" then . else "" end;
+                def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
+                def cut_option($n):
+                    if length <= $n then .
+                    else (index(" — ")) as $i
+                        | if $i == null or $i + 4 >= $n then cut($n)
+                          else .[0:($i + 3)] + (.[($i + 3):] | cut($n - $i - 3)) end
+                    end;
+                def cut_options($total):
+                    split("\n") | map(select(test("\\S"))) as $ls
+                    | ($ls | length) as $k
+                    | if $k == 0 then ""
+                      else (($total - $k + 1) / $k | floor) as $per
+                        | $ls | map(cut_option($per)) | join("\n") end;
+                ($c.story_title | clean) as $title
+                | ($c.issue_url | clean) as $url
+                | ($c.blocker_type | clean) as $type
+                | ($c.unblocked_when | clean) as $uw
+                | ($c.question | clean) as $q
+                | ($c.options | clean) as $o
+                | ($c.recommendation | clean) as $r
+                | ([if $q == "" then "Question" else empty end,
+                    if $o == "" then "Options" else empty end,
+                    if $r == "" then "Recommendation" else empty end]) as $missing
+                | {blocks: ([
+                    {type: "section", text: {type: "mrkdwn", text: ":warning: *Decision Blocker*"}},
+                    {type: "section", text: {type: "mrkdwn", text: (
+                        "*Story:* " + (if $title == "" then "(unknown)" else $title | cut(500) end)
+                        + "\n*Blocker type:* " + (if $type == "" then "(unknown)" else $type | cut(100) end))}}
+                  ]
+                  + (if $q != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Question:* " + ($q | cut(1000)))}}] else [] end)
+                  + (if $o != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Options:*\n" + ($o | cut_options(2500)))}}] else [] end)
+                  + (if $r != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Recommendation:* " + ($r | cut(1000)))}}] else [] end)
+                  + (if ($missing | length) > 0 then [{type: "section", text: {type: "mrkdwn", text: ("_Declaration is missing: " + ($missing | join(", ")) + "_")}}] else [] end)
+                  + [
+                    {type: "section", text: {type: "mrkdwn", text: ("*Unblocked when:* " + (if $uw == "" then "(unknown)" else $uw | cut(1000) end))}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
+                    {type: "section", text: {type: "mrkdwn", text: "To answer: reply on the issue with your decision and a line that is exactly `/unblock`."}}
+                  ])}'
             ;;
 
         feature_closure_confirmation)
