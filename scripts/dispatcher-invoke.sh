@@ -1318,11 +1318,7 @@ usage_limit_comment() {
     else
         head="/$step was not started for #$ISSUE_NUMBER: USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more, so nothing starts."
     fi
-    if [[ "$step" == "merge" ]]; then
-        tail="The story stays in \"In merge\". A later dispatcher run tries /merge again; nothing is needed from you."
-    else
-        tail="The story stays at its current step. Nothing restarts it automatically until #316; run /$step by hand after the reset time."
-    fi
+    tail="The story stays at its current step. Nothing restarts it automatically until #316; run /$step by hand after the reset time."
     printf '## Usage limit\n\n%s\n\n%s\n' "$head" "$tail"
 }
 

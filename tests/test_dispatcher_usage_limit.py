@@ -346,3 +346,12 @@ def test_an_invalid_limit_before_cleanup_still_notifies_the_closure(tmp_path):
     assert "[USAGE LIMIT ERROR]" in proc.stderr
     assert d.sessions == []
     assert "Feature #50: all 1 stories Done." in proc.stdout
+
+
+def test_docs_say_the_script_only_phases_are_not_counted_or_stopped():
+    # /merge and /cleanup start no model session since #264 (Codex review of #341).
+    doc = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
+    section = doc.split("## Usage limit", 1)[1].split("\n## ", 1)[0]
+    assert "script-only phases" in section
+    assert "`/review`, `/merge` and `/cleanup`" not in section
+    assert "before `/review`, `/merge` or `/cleanup`" not in section
