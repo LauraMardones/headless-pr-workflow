@@ -714,7 +714,7 @@ test_decision_blocker_wired_passes_fields() {
         REPO='owner/repo'
         source '$REPO_ROOT/scripts/lib/decision-blocker.sh'
         gh() { jq -n '[{body: \"## Blocked Declaration\nType: decision\nQuestion: Q?\nOptions:\nA) a — x\nB) b — y\nRecommendation: A: ok\nUnblocked when: soon\"}]'; }
-        notify_slack() { echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'; }
+        register_actionable_event() { echo \"SLACK_CALLED: \$1 \$4\" >> '$call_log'; }
         $fn
         check_and_notify_decision_blocker 42 'Story'
     " 2>&1 || true

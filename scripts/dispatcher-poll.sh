@@ -69,6 +69,9 @@
 #       from empty state; if it is unreadable or malformed it also warns. Either
 #       way each issue currently in "Ready for refinement" may be notified once
 #       more.
+#       The same state directory also holds actionable-events, the retry state
+#       for the notifications that need PO action; that file is owned by
+#       scripts/dispatcher-notify-retry.sh (issue #295), not by this poll.
 #   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
 #       independently. Acceptable at current scale; future refactor can share
 #       the query result.

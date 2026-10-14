@@ -196,7 +196,23 @@ It prints `Status: #<n> <old> -> <new>` (or `already <new>`) and exits `0` only 
 
 ## Slack Notifications
 
-The dispatcher sends Slack notifications for key events (story dispatched, blocked, error, closed) via `scripts/slack-notify.sh`. To enable notifications, add `SLACK_WEBHOOK_URL` as a **repository secret** (not a variable):
+The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for these events. There are no "story dispatched" or "closed" events: normal transitions are not notified.
+
+| Event | Sent when | Retried |
+|---|---|---|
+| `decision_blocker` | a session left a `Type: decision` blocker | yes |
+| `feature_closure_confirmation` | all stories of a Feature are Done | yes |
+| `epic_closure_approval` | all Features of an Epic are Done | yes |
+| `ready_for_refinement` | an issue enters "Ready for refinement" | yes, by the poll (issue #257) |
+| `red_flow_health` | the board health is Red | re-sent on every poll while Red |
+| `budget_cap_reached` | every ready story is budget-blocked | no |
+| `dispatcher_error` | the invoke run exited unexpectedly | no: the failing run is itself red |
+
+**Retry of notifications that need PO action (issue #295).** `dispatcher-invoke.sh` only queues `decision_blocker`, `feature_closure_confirmation` and `epic_closure_approval` in `$DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events` (restored and saved by the same `actions/cache` steps as the refinement state). The workflow step **Retry actionable Slack notifications** (`scripts/dispatcher-notify-retry.sh run`) runs on every cycle, also when no story is ready or resumable, sends each undelivered event and records it as delivered only after `slack-notify.sh` exits 0. A delivered event is not sent again while it stays unresolved. An event stops being retried, even if it was never delivered, when it is resolved: a decision blocker by a `/unblock` line from the PO or by closing the issue, a closure event by closing the Feature or Epic. A new decision blocker on the same issue is a new event. Before `dispatcher-invoke.sh` chains to the next story it makes one extra delivery attempt (`run --drain`), so an alert is not held back by the chained sessions; that attempt records a success but never counts a failure. If the state file cannot be written, `register` delivers the event synchronously instead and exits non-zero when that fails too, and the retry step ends the run red with an `[NOTIFY] Error:` line.
+
+**Bound and red run.** A failed delivery never aborts the dispatcher; the step exits 0 and retries on the next cycle. After 3 failed cycles in a row (about 15 minutes) the step exits 1, so the run ends red, and one comment is posted on the affected issue naming the event and the first failed attempt. Later failing cycles stay red but add no comment, and Slack still receives the message when it recovers. Missing or unreadable state warns and is treated as empty; in a malformed state file only the malformed lines are dropped and valid records are kept. At most one extra notification. Under `--dry-run` nothing is sent, recorded or commented. A manual run on a non-default ref only reports what it would send; an event queued in such a run is not saved and is not delivered.
+
+To enable notifications, add `SLACK_WEBHOOK_URL` as a **repository secret** (not a variable):
 
 `https://github.com/<owner>/<repo>/settings/secrets/actions`
 
@@ -206,7 +222,7 @@ The dispatcher sends Slack notifications for key events (story dispatched, block
 
 The dispatcher workflow passes this secret to the shell environment automatically — no changes to workflow files are needed beyond what is already wired.
 
-**If the secret is absent or invalid**, `slack-notify.sh` exits with code 1, but `dispatcher-invoke.sh` wraps the call in `|| true` so a missing webhook never aborts the workflow. Notifications silently fail; the dispatch run continues normally.
+**If the secret is absent or invalid**, `slack-notify.sh` exits with code 1 and a missing webhook never aborts the dispatch work. The non-retried notifications (`budget_cap_reached`, `dispatcher_error`) fail silently and the run continues normally. The retried actionable events stay queued: after 3 failed cycles in a row the **Retry actionable Slack notifications** step turns the run red and comments once on the affected issue, until the secret is fixed.
 
 `.github/workflows/codex-review-bookkeeping.yml` also reads `SLACK_WEBHOOK_URL`, in its notify step only, to send a `dispatcher_error` message when a bookkeeping run fails (at most one a day while the failure lasts; see `HEADLESS-PR-WORKFLOW.md` → "Codex review loop"). A missing secret there is a warning, not a failure of its own.
 

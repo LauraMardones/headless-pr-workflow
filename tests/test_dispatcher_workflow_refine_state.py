@@ -22,6 +22,8 @@ RESTORE = "Restore refinement notification state"
 POLL = "Run dispatcher poll"
 SAVE = "Save refinement notification state"
 INVOKE = "Run dispatcher invoke"
+RETRY = "Retry actionable Slack notifications"
+EARLY_SAVE = "Save poll notification state"
 
 
 def _workflow() -> str:
@@ -52,11 +54,49 @@ def _field(block: str, key: str) -> str:
     return match.group(1).strip()
 
 
-def test_restore_before_poll_and_save_after_poll_before_invoke():
+def test_restore_before_poll_and_save_after_invoke_and_retry():
+    """Issue #295: invoke queues events and the retry step records delivery, so
+    the state is saved after both, not right after the poll."""
     names = [name for name, _ in _steps()]
-    for name in (RESTORE, POLL, SAVE, INVOKE):
+    for name in (RESTORE, POLL, INVOKE, RETRY, SAVE):
         assert name in names, f"missing step {name!r}"
-    assert names.index(RESTORE) < names.index(POLL) < names.index(SAVE) < names.index(INVOKE)
+    assert names.index(RESTORE) < names.index(POLL) < names.index(INVOKE)
+    assert names.index(INVOKE) < names.index(RETRY) < names.index(SAVE)
+
+
+def test_retry_step_runs_every_enabled_cycle_even_without_work():
+    """Issue #295: the main failure case is a blocked story with nothing ready
+    or resumable, where the invoke step is skipped. The retry step must not be
+    gated on the poll outputs or on the invoke step succeeding."""
+    block = _step(RETRY)
+    condition = _field(block, "if")
+    assert "steps.guard.outputs.enabled == 'true'" in condition
+    assert "!cancelled()" in condition
+    assert "issue_number" not in condition
+    assert "resumable" not in condition
+    assert "steps.invoke" not in condition
+    assert "dispatcher-notify-retry.sh" in block
+    assert re.search(
+        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
+        r"\s+RETRY_ARGS\+=\(--dry-run\)",
+        block,
+    ), "non-default-ref runs must not send or record"
+
+
+def test_retry_does_not_record_delivery_when_state_will_not_be_saved():
+    """Codex finding on #295: the save requires a successful poll, so the retry
+    step must require it too; otherwise a delivery recorded after a failed poll
+    is never persisted and the next cycle sends it again."""
+    retry_condition = _field(_step(RETRY), "if")
+    save_condition = _field(_step(SAVE), "if")
+    assert "steps.poll.outcome == 'success'" in save_condition
+    assert "steps.poll.outcome == 'success'" in retry_condition
+
+
+def test_state_is_saved_even_when_invoke_or_retry_fails():
+    condition = _field(_step(SAVE), "if")
+    assert "!cancelled()" in condition
+    assert "steps.poll.outcome == 'success'" in condition
 
 
 def test_state_steps_run_on_every_enabled_poll_regardless_of_issue_number():
@@ -64,7 +104,7 @@ def test_state_steps_run_on_every_enabled_poll_regardless_of_issue_number():
         condition = _field(_step(name), "if")
         assert "steps.guard.outputs.enabled == 'true'" in condition
         assert "issue_number" not in condition
-        assert "always()" not in condition, "save must not run after a failed poll"
+        assert "always()" not in condition
 
 
 def test_only_default_branch_runs_write_state():
@@ -145,3 +185,24 @@ def test_poll_script_default_state_dir_matches_cached_path():
 def test_state_dir_is_gitignored():
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".dispatcher-state/" in ignored
+
+
+def test_poll_state_is_saved_before_the_cancellable_invoke_step():
+    """Codex finding on #295: the invoke step can run for hours and be
+    cancelled, which skips the final save and re-sends a ready_for_refinement
+    alert already sent by the poll. The poll's state is saved right after it."""
+    names = [name for name, _ in _steps()]
+    assert names.index(POLL) < names.index(EARLY_SAVE) < names.index(INVOKE)
+    early = _step(EARLY_SAVE)
+    condition = _field(early, "if")
+    assert "steps.poll.outcome == 'success'" in condition
+    assert "steps.scope.outputs.state_writer == 'true'" in condition
+    assert "uses: actions/cache/save@" in early
+    assert _field(early, "path") == ".dispatcher-state"
+    early_key = _field(early, "key")
+    final_key = _field(_step(SAVE), "key")
+    # Cache entries are immutable, so the two saves need different keys, and
+    # both must match the restore prefix.
+    assert early_key != final_key
+    assert early_key.startswith("dispatcher-state-")
+    assert "${{ github.run_id }}" in early_key

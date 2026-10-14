@@ -23,6 +23,13 @@
 # Workflow-level concurrency serializes scheduled and manual runs so two runs
 # never read the same snapshot and race to write it. Interim until #259.
 #
+# 2026-10-14 (issue #295): notifications that need PO action are queued in the
+# same .dispatcher-state/ by dispatcher-invoke.sh and sent, retried and bounded
+# by the "Retry actionable Slack notifications" step, which runs every cycle
+# even when the invoke step is skipped. The state is saved right after the poll
+# and again after that step, so a cancelled invoke step cannot lose the poll's
+# state.
+#
 # 2026-10-13 (issue #293): the invoke step also runs when the poll reports a
 # story "In merge" or "In implementation", so the dispatcher can resume a story
 # after the Codex review loop answered. With no story ready for implementation
@@ -116,15 +123,16 @@ jobs:
           RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // [])) | length > 0')
           echo "resumable=$RESUMABLE" >> "$GITHUB_OUTPUT"
 
-      # Saved on every successful enabled default-branch poll, not only when an
-      # issue is ready for implementation. Cache entries are immutable, so each
-      # run writes a new unique key that the next run's prefix restore picks up.
-      - name: Save refinement notification state
-        if: steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true'
+      # Saved right after the poll (issue #295), before the invoke step, which
+      # can run for hours and be cancelled: the poll's own state (a sent
+      # ready_for_refinement alert) must survive that. The final save below
+      # writes a newer snapshot, which the prefix restore prefers.
+      - name: Save poll notification state
+        if: ${{ steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: .dispatcher-state
-          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}
+          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}-poll
 
       - name: Set cache date
         if: steps.guard.outputs.enabled == 'true'
@@ -209,3 +217,33 @@ jobs:
             .dispatcher-usage
             .dispatcher-allowance
           key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Issue #295: delivers and retries the Slack notifications that need PO
+      # action (decision blocker, Feature closure, Epic closure). It runs on
+      # every enabled cycle, including when no story is ready or resumable and
+      # the invoke step is skipped, and even after the invoke step failed, but
+      # not after a failed poll: the state is saved only after a successful poll,
+      # so a delivery recorded then would be lost and sent again. A
+      # failed delivery does not fail the step until it has failed for 3 cycles
+      # in a row, then the run is red. A non-default ref only reports what it
+      # would send (--dry-run), like the poll.
+      - name: Retry actionable Slack notifications
+        if: ${{ !cancelled() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' }}
+        run: |
+          RETRY_ARGS=(run --repo "${{ github.repository }}")
+          if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
+            RETRY_ARGS+=(--dry-run)
+          fi
+          bash scripts/dispatcher-notify-retry.sh "${RETRY_ARGS[@]}"
+
+      # Saved on every enabled default-branch run, after the invoke and retry
+      # steps (issue #295), so state they changed survives even when one of them
+      # fails. Not only when an issue is ready for implementation. Cache entries
+      # are immutable, so each run writes a new unique key that the next run's
+      # prefix restore picks up.
+      - name: Save refinement notification state
+        if: ${{ !cancelled() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .dispatcher-state
+          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}
