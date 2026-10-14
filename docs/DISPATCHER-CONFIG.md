@@ -18,7 +18,7 @@ The PO caps how many autonomous sessions the dispatcher starts per UTC day with 
 
 **Where.** `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` checks the limit first and the allowance second, so no probe turn is spent when the limit already stops the session. `scripts/dispatcher-usage-limit.sh` holds the count (`check`, `record`, `status`, `notify-due`, `mark-notified`).
 
-**UTC-day reset.** `.dispatcher-usage/sessions` holds `YYYY-MM-DD:<count>`; a file dated another day reads as 0, and the cache key `session-state-YYYY-MM-DD-<run id>` changes each UTC day. The entry also holds the allowance hold. A lost or evicted cache entry reads as a count of 0, so the limit can be exceeded after a cache loss. The workflow's "Save session state cache" step runs with `always()`, so a failed invoke step is still counted.
+**UTC-day reset.** `.dispatcher-usage/sessions` holds `YYYY-MM-DD:<count>`; a file dated another day reads as 0, and the cache key `session-state-YYYY-MM-DD-<run id>` changes each UTC day. The entry also holds the allowance hold. A lost or evicted cache entry reads as a count of 0, so the limit can be exceeded after a cache loss. The workflow's "Save session state cache" step runs with `always()`, so a failed invoke step is still counted. Caches are scoped by ref, so only scheduled runs and manual runs on the default branch start sessions: a manual `workflow_dispatch` on any other ref runs `dispatcher-invoke.sh` with `--dry-run`, so it neither starts nor counts a session that the scheduled runs could not see.
 
 **Log lines.**
 

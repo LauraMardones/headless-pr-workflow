@@ -165,10 +165,17 @@ jobs:
         run: |
           # Resumable work is handled first in both forms; --resume is the run
           # with no story ready for implementation (issue #293).
+          # Issue #320: the session count is saved to this ref's cache scope, so
+          # a run on a non-default ref is read-only (--dry-run) and cannot start
+          # sessions the next scheduled default-branch run would not see.
+          INVOKE_ARGS=(--repo "${{ github.repository }}")
+          if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
+            INVOKE_ARGS+=(--dry-run)
+          fi
           if [ -n "$NEXT_ISSUE" ]; then
-            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --issue "$NEXT_ISSUE"
+            bash scripts/dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --issue "$NEXT_ISSUE"
           else
-            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --resume
+            bash scripts/dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --resume
           fi
 
       # Issue #320: sent in the run in which the limit stopped a session. The
