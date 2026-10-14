@@ -32,10 +32,12 @@ def should_notify(history: Sequence[Mapping[str, Any]], now: datetime) -> bool:
 
     `history` lists the earlier runs, newest first. Only runs that finished as
     a success or a failure count; cancelled, skipped and unfinished ones are
-    ignored.
+    ignored, and so are manual (`workflow_dispatch`) runs, which never notify.
     """
 
     for run in history:
+        if run.get("event") == "workflow_dispatch":
+            continue
         conclusion = run.get("conclusion")
         if conclusion == "success":
             return True
@@ -83,7 +85,7 @@ def fetch_history(repo: str, env: Mapping[str, str]) -> list[dict[str, Any]]:
     # ref, not the default branch, and they belong to the streak too.
     result = subprocess.run(
         ["gh", "run", "list", "--repo", repo, "--workflow", WORKFLOW_FILE,
-         "--limit", str(HISTORY_LIMIT), "--json", "conclusion,createdAt"],
+         "--limit", str(HISTORY_LIMIT), "--json", "conclusion,createdAt,event"],
         capture_output=True, text=True, check=False, env=dict(env),
     )
     if result.returncode != 0:

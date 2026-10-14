@@ -15,8 +15,8 @@ TODAY = "2026-10-14T03:00:00Z"
 YESTERDAY = "2026-10-13T23:59:00Z"
 
 
-def run(conclusion, created=TODAY):
-    return {"conclusion": conclusion, "createdAt": created}
+def run(conclusion, created=TODAY, event="schedule"):
+    return {"conclusion": conclusion, "createdAt": created, "event": event}
 
 
 @pytest.mark.parametrize(
@@ -31,6 +31,9 @@ def run(conclusion, created=TODAY):
         ([run("skipped"), run(""), run("failure", YESTERDAY)], True),
         ([run("failure", f"2026-10-14T{h:02d}:00:00Z") for h in range(11, 0, -1)], False),
         ([run("failure", TODAY), run("success", YESTERDAY)], False),
+        ([run("failure", event="workflow_dispatch")], True),
+        ([run("success", event="workflow_dispatch"), run("failure")], False),
+        ([run("failure", event="workflow_dispatch"), run("failure", YESTERDAY)], True),
     ],
 )
 def test_repeat_rule(history, expected):
@@ -146,3 +149,4 @@ def test_history_covers_runs_of_every_ref(monkeypatch):
     monkeypatch.setattr(notice.subprocess, "run", fake_run)
     notice.fetch_history("o/r", {})
     assert "--branch" not in seen["cmd"]
+    assert "conclusion,createdAt,event" in seen["cmd"]
