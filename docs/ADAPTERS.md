@@ -95,7 +95,7 @@ An executor with a row in neither table stops with a mid-cycle blocker after `/i
 
 **Claude-implemented stories (Codex review loop).** Each Claude-implemented head is reviewed once, by Codex Cloud (ADR-006). `/implement` posts the review request, and the `codex-review-bookkeeping` workflow reads the answer and moves the story. The dispatcher's part is:
 
-1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and adds nothing to a review budget. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
+1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and counts no review session. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
 2. **Resume at `In merge`.** On a later run, a story in `In merge` gets `/merge`, then `Done` and `/cleanup`, both as scripts (see Script-only phases below). This applies to every story, whatever its executor. There is one `/merge` attempt per PR head.
 3. **Fix round.** A story back in `In implementation`, for which the bookkeeping job recorded findings on the PR's current head, gets `/implement` again on the same PR. After that the hand-off applies again. The number of fix rounds per PR is limited by the repository variable `CODEX_FIX_ROUND_MAX` (default `3`).
 
@@ -158,7 +158,7 @@ Routing logic must read declared profiles, not branch on executor names. This is
 
 **Chosen:** Do not add `executor:claude-code-fable` now. The Claude Model Tiers table above stays at three tiers (Haiku, Sonnet, Opus). Revisit only if a concrete story needs Fable-level capability that Opus can't handle.
 
-**Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, new `BUDGET_DAILY_FABLE` budget variable). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
+**Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, a per-tier daily cap). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
 
 ## Cross-Reference
 

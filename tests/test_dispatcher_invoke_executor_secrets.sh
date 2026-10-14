@@ -183,6 +183,8 @@ TABLES_AND_FUNC="$GLOBAL_TMP/extracted.sh"
     # The subscription allowance check (issue #317) is covered by
     # tests/test_dispatcher_allowance*.py; this test isolates the start path.
     echo 'check_subscription_allowance() { :; }'
+    echo 'check_usage_limit() { :; }'
+    echo 'record_session_start() { :; }'
 } > "$TABLES_AND_FUNC"
 
 for fn in invoke_executor_command run_claude_code_session _claude_code_session run_openai_agent; do

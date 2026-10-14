@@ -27,7 +27,7 @@ def assert_zero_model_footprint(d, proc):
     assert d.claude_calls == []
     assert not [line for line in d._log("curl.log") if "openai" in line]
     assert d.allowance_calls == 0
-    assert list((d.mock / "budget").iterdir()) == []  # no executor budget increment
+    assert list((d.mock / "usage").iterdir()) == []  # no session counted (#320)
     assert d.sessions == []
     assert "Subscription allowance" not in "".join(d.posted(STORY))
 
@@ -63,8 +63,7 @@ def test_paired_codex_run_has_two_sessions_then_two_scripts(tmp_path):
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     assert d.allowance_calls == 2
     assert d.board_writes[-2:] == [f"{STORY}=In merge", f"{STORY}=Done"]
-    increments = re.findall(r"\[BUDGET\] Increment: (\w+)", proc.stdout)
-    assert increments == ["codex", "opus"]  # /implement and /review only
+    assert d.usage_count == 2  # /implement and /review only; the scripts count nothing
 
 
 def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_path):

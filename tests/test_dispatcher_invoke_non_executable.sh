@@ -14,19 +14,19 @@
 # Scenarios covered:
 #   1. Incident reproduction, live: type:epic first, valid Story second ->
 #      one warning for the Epic, executor invoked for the Story only, Epic
-#      never reselected, exit 0, no all_budget_blocked
+#      never reselected, exit 0
 #   2. Same as 1 with type:feature, under --dry-run -> same skip decision,
 #      no executor call, no GitHub mutation
 #   3. All ready items non-executable (Epic + Feature) -> exit 0, no
-#      executor call, no all_budget_blocked, one warning each
+#      executor call, one warning each
 #   4. Missing type metadata -> warning says the type is missing
 #   5. Unsupported type label -> warning says the type is unsupported
 #   6. Native GitHub issue type used only as a fallback (no type: label)
 #   7. Executable Story with no executor: label -> still fatal (exit 1),
 #      with a readable "Add one of:" hint
 #   8. Executable Story with an unrecognised executor: label -> still fatal
-#   9. Earlier budget skip + trailing non-executable item -> all_budget_blocked
-#      reflects only the budget-blocked executable story
+#   9. Usage limit stops the Story -> the run ends there; the trailing
+#      non-executable item is never looked at
 #  10. format_executor_hint() output shape
 #
 # Usage: bash tests/test_dispatcher_invoke_non_executable.sh
@@ -206,7 +206,7 @@ new_env() {
     : > "$d/curl.log"
     : > "$d/claude.log"
     : > "$d/github_output"
-    mkdir -p "$d/budget"
+    mkdir -p "$d/usage"
     jq -n '{items: [], options: {
         "Ready for implementation": "OPT_READY", "In implementation": "OPT_IMPL",
         "In review": "OPT_REVIEW", "In merge": "OPT_MERGE", "Done": "OPT_DONE"}}' \
@@ -243,9 +243,8 @@ run_dispatcher() {
         MOCK_DIR="$d" GH_TOKEN="fake-token" GITHUB_OUTPUT="$d/github_output" \
         CLAUDE_CODE_OAUTH_TOKEN="fake-subscription-token" CLAUDE_BIN="$FAKE_BIN/claude" \
         OPENAI_API_KEY_CODEX="fake-openai" \
-        BUDGET_COUNTER_DIR="$d/budget" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
-        BUDGET_DAILY_HAIKU="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_SONNET="${BUDGET_DAILY:-10000000}" \
-        BUDGET_DAILY_OPUS="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_CODEX="${BUDGET_DAILY:-10000000}" \
+        USAGE_LIMIT_STATE_DIR="$d/usage" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
+        USAGE_LIMIT_SESSIONS_PER_DAY="${USAGE_LIMIT:-1000}" \
         AGENT_MAX_TURNS=3 AGENT_MAX_WALLCLOCK_SECONDS=600 \
         timeout 120 bash "$DISPATCHER_SCRIPT" --repo "o/r" "$@" \
         > "$d/stdout" 2> "$d/stderr" || RUN_RC=$?
@@ -276,7 +275,6 @@ assert_not_contains "no /implement for the Epic" "$RUN_OUT" "E1: /implement #160
 assert_contains "Claude Code was started" "$(cat "$E/claude.log")" "model=sonnet"
 assert_not_contains "Epic board item never mutated" "$(cat "$E/gh.log")" "MUTATION item=ITEM_160"
 assert_contains "loop exited cleanly after the Story" "$RUN_OUT" "No more \"Ready for implementation\" stories."
-assert_not_contains "all_budget_blocked not set" "$(cat "$E/github_output")" "all_budget_blocked"
 
 # ─── 2. Feature first, Story second (--dry-run) ───────────────────────────────
 
@@ -314,7 +312,6 @@ assert_eq "one warning for #11" "$(count_matches "$RUN_ERR" "Warning: #11 ")" "1
 assert_contains "clean exit message" "$RUN_OUT" "No more executable \"Ready for implementation\" stories after non-executable skip."
 assert_eq "no executor API call" "$(cat "$E/curl.log")" ""
 assert_not_contains "no board mutation" "$(cat "$E/gh.log")" "MUTATION"
-assert_not_contains "all_budget_blocked not set" "$(cat "$E/github_output")" "all_budget_blocked"
 
 # ─── 4. Missing type ──────────────────────────────────────────────────────────
 
@@ -383,21 +380,21 @@ run_dispatcher "$E" --issue 60
 assert_eq "exit 1" "$RUN_RC" "1"
 assert_contains "unrecognised executor error" "$RUN_ERR" "Error: Unrecognised executor label 'executor:mystery' on #60."
 
-# ─── 9. Budget skip followed by a non-executable item ─────────────────────────
+# ─── 9. Usage limit stop followed by a non-executable item ────────────────────
 
 echo ""
-echo "9. Budget-blocked Story, then only a non-executable item remains"
+echo "9. Story stopped by the usage limit, then a non-executable item"
 E=$(new_env)
 add_item "$E" 70 "$READY" "" type:story executor:claude-code-sonnet
 add_item "$E" 71 "$READY" "" type:epic
-# Pre-seed today's sonnet usage above the cap so the budget check reports it reached.
-echo "$(date -u +%Y-%m-%d):5" > "$E/budget/budget-sonnet"
-BUDGET_DAILY=1 run_dispatcher "$E" --issue 70
+# Pre-seed today's count at the limit so the check refuses.
+echo "$(date -u +%Y-%m-%d):1" > "$E/usage/sessions"
+USAGE_LIMIT=1 run_dispatcher "$E" --issue 70
 
 assert_eq "exit 0" "$RUN_RC" "0"
-assert_contains "Story was budget-skipped" "$RUN_OUT" "[BUDGET SKIP] #70"
-assert_contains "Epic skipped as non-executable" "$RUN_ERR" "Warning: #71 is not an executable"
-assert_contains "all_budget_blocked reflects the budget-blocked Story" "$(cat "$E/github_output")" "all_budget_blocked=true"
+assert_contains "Story was stopped by the limit" "$RUN_OUT" "[USAGE LIMIT SKIP] #70"
+assert_not_contains "run does not go on to the Epic" "$RUN_ERR" "Warning: #71 is not an executable"
+assert_contains "notification is due" "$(cat "$E/github_output")" "usage_limit_reached=true"
 assert_eq "no executor API call" "$(cat "$E/curl.log")" ""
 
 # ─── 10. format_executor_hint() ───────────────────────────────────────────────

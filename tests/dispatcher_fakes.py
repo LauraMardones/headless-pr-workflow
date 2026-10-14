@@ -267,7 +267,7 @@ class Dispatcher:
             path.chmod(0o755)
         self.mock = tmp / "mock"
         self.mock.mkdir()
-        (self.mock / "budget").mkdir()
+        (self.mock / "usage").mkdir()
         self._write("state.json", {})
         self._write("pulls.json", [])
         self._write("board.json", {"items": [], "options": options or BOARD_OPTIONS})
@@ -363,9 +363,8 @@ class Dispatcher:
             "CLAUDE_BIN": (self.bin / "claude").as_posix(),
             "OPENAI_API_KEY_CODEX": "fake-openai",
             "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
-            "BUDGET_COUNTER_DIR": (self.mock / "budget").as_posix(),
-            "BUDGET_DAILY_HAIKU": "10000000", "BUDGET_DAILY_SONNET": "10000000",
-            "BUDGET_DAILY_OPUS": "10000000", "BUDGET_DAILY_CODEX": "10000000",
+            "USAGE_LIMIT_STATE_DIR": (self.mock / "usage").as_posix(),
+            "USAGE_LIMIT_SESSIONS_PER_DAY": "1000",
             "AGENT_MAX_TURNS": "3", "AGENT_MAX_WALLCLOCK_SECONDS": "600",
             "ALLOWANCE_SCRIPT": (self.bin / "allowance.sh").as_posix(),
             "ALLOWANCE_SEQ": seq,
@@ -435,6 +434,16 @@ class Dispatcher:
     def allowance_calls(self) -> int:
         path = self.mock / "allowance.count"
         return int(path.read_text()) if path.exists() else 0
+
+    @property
+    def usage_count(self) -> int:
+        """Sessions counted today by the usage limit."""
+        path = self.mock / "usage" / "sessions"
+        return int(path.read_text().strip().split(":")[1]) if path.exists() else 0
+
+    @property
+    def usage_output(self) -> str:
+        return (self.mock / "github_output").read_text()
 
     @property
     def board_writes(self) -> list[str]:

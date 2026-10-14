@@ -130,16 +130,16 @@ jobs:
         if: steps.guard.outputs.enabled == 'true'
         run: echo "TODAY=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
 
-      - name: Restore budget state cache
+      - name: Restore session state cache
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         uses: actions/cache/restore@v4
         with:
           path: |
-            .dispatcher-budget
+            .dispatcher-usage
             .dispatcher-allowance
-          key: budget-${{ env.TODAY }}-${{ github.run_id }}
+          key: session-state-${{ env.TODAY }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            budget-${{ env.TODAY }}-
+            session-state-${{ env.TODAY }}-
 
       # Issue #317: the subscription allowance check (scripts/dispatcher-allowance.sh)
       # runs one Claude Code turn before each session start, and every Claude
@@ -155,10 +155,7 @@ jobs:
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         id: invoke
         env:
-          BUDGET_DAILY_HAIKU: ${{ vars.BUDGET_DAILY_HAIKU }}
-          BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
-          BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
-          BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
+          USAGE_LIMIT_SESSIONS_PER_DAY: ${{ vars.USAGE_LIMIT_SESSIONS_PER_DAY }}
           OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
@@ -168,34 +165,47 @@ jobs:
         run: |
           # Resumable work is handled first in both forms; --resume is the run
           # with no story ready for implementation (issue #293).
+          # Issue #320: the session count is saved to this ref's cache scope, so
+          # a run on a non-default ref is read-only (--dry-run) and cannot start
+          # sessions the next scheduled default-branch run would not see.
+          INVOKE_ARGS=(--repo "${{ github.repository }}")
+          if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
+            INVOKE_ARGS+=(--dry-run)
+          fi
           if [ -n "$NEXT_ISSUE" ]; then
-            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --issue "$NEXT_ISSUE"
+            bash scripts/dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --issue "$NEXT_ISSUE"
           else
-            bash scripts/dispatcher-invoke.sh --repo "${{ github.repository }}" --resume
+            bash scripts/dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --resume
           fi
 
-      - name: Save budget state cache
-        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+      # Issue #320: sent in the run in which the limit stopped a session. The
+      # marker is written only after a send without an error, so a failed
+      # delivery is tried again on the next run. The save step below
+      # keeps it in the day's cache entry.
+      - name: Notify usage limit reached
+        if: steps.guard.outputs.enabled == 'true' && steps.invoke.outputs.usage_limit_reached == 'true'
+        env:
+          USAGE_LIMIT_SESSIONS_PER_DAY: ${{ vars.USAGE_LIMIT_SESSIONS_PER_DAY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "[USAGE LIMIT NOTIFY] Sending usage_limit_reached Slack notification"
+          context_json=$(bash scripts/dispatcher-usage-limit.sh status | jq -c --arg settings_url "https://github.com/${{ github.repository }}/settings/variables/actions" '. + {settings_url: $settings_url}')
+          bash scripts/slack-notify.sh usage_limit_reached "$context_json"
+          bash scripts/dispatcher-usage-limit.sh mark-notified
+
+      # Issue #320: runs even when the invoke step failed, so a session that
+      # failed is still counted and a loop of failing restarts reaches the limit.
+      # The counter is dated by the day each session started, which can be
+      # later than the day this run began; save under the day it ends on.
+      - name: Set cache save date
+        if: always() && steps.guard.outputs.enabled == 'true'
+        run: echo "SAVE_DAY=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Save session state cache
+        if: always() && steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         uses: actions/cache/save@v4
         with:
           path: |
-            .dispatcher-budget
+            .dispatcher-usage
             .dispatcher-allowance
-          key: budget-${{ env.TODAY }}-${{ github.run_id }}
-
-      - name: Notify budget cap reached
-        if: steps.guard.outputs.enabled == 'true' && steps.invoke.outputs.all_budget_blocked == 'true'
-        env:
-          BUDGET_DAILY_HAIKU: ${{ vars.BUDGET_DAILY_HAIKU }}
-          BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
-          BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
-          BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          echo "[BUDGET NOTIFY] Sending budget_cap_reached Slack notification"
-          remaining_haiku=$(bash scripts/dispatcher-budget.sh check haiku || true)
-          remaining_sonnet=$(bash scripts/dispatcher-budget.sh check sonnet || true)
-          remaining_opus=$(bash scripts/dispatcher-budget.sh check opus || true)
-          remaining_codex=$(bash scripts/dispatcher-budget.sh check codex || true)
-          context_json=$(jq -n --arg remaining_haiku "$remaining_haiku" --arg remaining_sonnet "$remaining_sonnet" --arg remaining_opus "$remaining_opus" --arg remaining_codex "$remaining_codex" --arg settings_url "https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions" '{remaining_haiku: $remaining_haiku, remaining_sonnet: $remaining_sonnet, remaining_opus: $remaining_opus, remaining_codex: $remaining_codex, settings_url: $settings_url}')
-          bash scripts/slack-notify.sh budget_cap_reached "$context_json"
+          key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}
