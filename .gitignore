@@ -9,7 +9,7 @@ build/
 *.egg-info/
 .claude/*
 !.claude/commands/
-.dispatcher-budget/
+.dispatcher-usage/
 .dispatcher-allowance/
 .dispatcher-state/
 .env

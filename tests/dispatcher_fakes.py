@@ -233,6 +233,18 @@ exit "$rc"
 """
 
 
+# Stand-ins for scripts/dispatcher-merge.sh and dispatcher-cleanup.sh (issue
+# #264), on MERGE_SCRIPT / CLEANUP_SCRIPT. They log "<phase> <target>" to
+# phases.log and fail when $MOCK_DIR/fail_<phase> exists. $1 is the flag, $2
+# the PR (merge) or issue (cleanup) number.
+FAKE_PHASE = r"""#!/usr/bin/env bash
+echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
+[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
+[[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
+exit 0
+"""
+
+
 def bookkeeping_marker(action: str, head: str) -> str:
     """The marker as the codex-review-bookkeeping job writes it (built by the job's own function)."""
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -247,17 +259,19 @@ class Dispatcher:
         self.bin = tmp / "bin"
         self.bin.mkdir()
         for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL), ("claude", FAKE_CLAUDE),
-                           ("allowance.sh", FAKE_ALLOWANCE)):
+                           ("allowance.sh", FAKE_ALLOWANCE),
+                           ("merge.sh", FAKE_PHASE.replace("PHASE_NAME", "merge")),
+                           ("cleanup.sh", FAKE_PHASE.replace("PHASE_NAME", "cleanup"))):
             path = self.bin / name
             path.write_text(text, encoding="utf-8", newline="\n")
             path.chmod(0o755)
         self.mock = tmp / "mock"
         self.mock.mkdir()
-        (self.mock / "budget").mkdir()
+        (self.mock / "usage").mkdir()
         self._write("state.json", {})
         self._write("pulls.json", [])
         self._write("board.json", {"items": [], "options": options or BOARD_OPTIONS})
-        for name in ("gh.log", "curl.log", "sessions.log", "github_output", "mutations.log"):
+        for name in ("gh.log", "curl.log", "sessions.log", "phases.log", "github_output", "mutations.log"):
             (self.mock / name).write_text("")
 
     # ── fake GitHub state ───────────────────────────────────────────────────
@@ -319,6 +333,7 @@ class Dispatcher:
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
     def fail(self, command: str, failing: bool = True) -> None:
+        """Make a /implement or /review session, or the /merge or /cleanup script, fail."""
         path = self.mock / f"fail_{command}"
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
@@ -349,12 +364,13 @@ class Dispatcher:
             "OPENAI_API_KEY_CODEX": "fake-openai",
             "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
             "DISPATCHER_STATE_DIR": (self.mock / "state").as_posix(),
-            "BUDGET_COUNTER_DIR": (self.mock / "budget").as_posix(),
-            "BUDGET_DAILY_HAIKU": "10000000", "BUDGET_DAILY_SONNET": "10000000",
-            "BUDGET_DAILY_OPUS": "10000000", "BUDGET_DAILY_CODEX": "10000000",
+            "USAGE_LIMIT_STATE_DIR": (self.mock / "usage").as_posix(),
+            "USAGE_LIMIT_SESSIONS_PER_DAY": "1000",
             "AGENT_MAX_TURNS": "3", "AGENT_MAX_WALLCLOCK_SECONDS": "600",
             "ALLOWANCE_SCRIPT": (self.bin / "allowance.sh").as_posix(),
             "ALLOWANCE_SEQ": seq,
+            "MERGE_SCRIPT": (self.bin / "merge.sh").as_posix(),
+            "CLEANUP_SCRIPT": (self.bin / "cleanup.sh").as_posix(),
         }
         if os.name == "nt":  # Git Bash: keep the host PATH (jq, coreutils) behind the fakes
             full_env["PATH"] = os.pathsep.join([str(self.bin), os.environ["PATH"]])
@@ -382,6 +398,11 @@ class Dispatcher:
     def sessions(self) -> list[str]:
         """Sessions started, in order, as ``"<command> <target>"``."""
         return [" ".join(line.split()[1:3]) for line in self._log("sessions.log")]
+
+    @property
+    def phases(self) -> list[str]:
+        """Script-only phases run (issue #264), in order, as ``"<merge|cleanup> <target>"``."""
+        return self._log("phases.log")
 
     @property
     def session_providers(self) -> list[str]:
@@ -422,6 +443,16 @@ class Dispatcher:
     def allowance_calls(self) -> int:
         path = self.mock / "allowance.count"
         return int(path.read_text()) if path.exists() else 0
+
+    @property
+    def usage_count(self) -> int:
+        """Sessions counted today by the usage limit."""
+        path = self.mock / "usage" / "sessions"
+        return int(path.read_text().strip().split(":")[1]) if path.exists() else 0
+
+    @property
+    def usage_output(self) -> str:
+        return (self.mock / "github_output").read_text()
 
     @property
     def board_writes(self) -> list[str]:

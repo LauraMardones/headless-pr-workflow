@@ -193,7 +193,7 @@ test_invoke_drains_before_every_chained_exec() {
     while IFS=: read -r ln _; do
         sed -n "$((ln - 1))p" "$f" | grep -q 'drain_actionable_events' || bad=1
     done < <(grep -n '^ *exec bash "\$0"' "$f")
-    check "invoke has chained exec sites" $(( n >= 3 ? 0 : 1 ))
+    check "invoke has chained exec sites" $(( n >= 2 ? 0 : 1 ))
     check "each chained exec is preceded by drain_actionable_events" $bad
 }
 

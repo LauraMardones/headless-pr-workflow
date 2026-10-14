@@ -100,7 +100,7 @@ def test_review_of_a_codex_story_runs_on_opus(tmp_path):
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.session_providers == ["implement openai", "review claude-code", "merge openai", "cleanup openai"]
+    assert d.session_providers == ["implement openai", "review claude-code"]
     calls = d.claude_calls
     assert len(calls) == 1
     assert calls[0]["argv"] == expected_argv("opus")
@@ -309,5 +309,6 @@ jq '. + {{"ITEM_{STORY}": "In review"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.t
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.session_providers == ["merge claude-code", "cleanup claude-code", "implement claude-code"]
-    assert [call["argv"] for call in d.claude_calls] == [expected_argv("sonnet")] * 3
+    assert d.session_providers == ["implement claude-code"]  # /merge and /cleanup start no session (#264)
+    assert d.phases == ["merge 960", "cleanup 600"]
+    assert [call["argv"] for call in d.claude_calls] == [expected_argv("sonnet")]

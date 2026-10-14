@@ -95,26 +95,28 @@ An executor with a row in neither table stops with a mid-cycle blocker after `/i
 
 **Claude-implemented stories (Codex review loop).** Each Claude-implemented head is reviewed once, by Codex Cloud (ADR-006). `/implement` posts the review request, and the `codex-review-bookkeeping` workflow reads the answer and moves the story. The dispatcher's part is:
 
-1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and adds nothing to a review budget. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
-2. **Resume at `In merge`.** On a later run, a story in `In merge` gets `/merge`, then `Done` and `/cleanup`. This applies to every story, whatever its executor. There is one `/merge` attempt per PR head.
+1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and counts no review session. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
+2. **Resume at `In merge`.** On a later run, a story in `In merge` gets `/merge`, then `Done` and `/cleanup`, both as scripts (see Script-only phases below). This applies to every story, whatever its executor. There is one `/merge` attempt per PR head.
 3. **Fix round.** A story back in `In implementation`, for which the bookkeeping job recorded findings on the PR's current head, gets `/implement` again on the same PR. After that the hand-off applies again. The number of fix rounds per PR is limited by the repository variable `CODEX_FIX_ROUND_MAX` (default `3`).
 
 Each run handles resumable work before new work: stories in `In merge`, then fix rounds, then **Ready for implementation**. The rules, bounds and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#codex-review-loop-hand-off-and-resume).
 
-**Codex-implemented stories (paired session).** `/review` runs in the same dispatcher run, under Claude Opus, followed by `/merge` and `/cleanup`.
+**Codex-implemented stories (paired session).** `/review` runs in the same dispatcher run, under Claude Opus, followed by the script-only `/merge` and `/cleanup`.
+
+**Script-only phases: `/merge` and `/cleanup` (issue #264).** No executor tier applies to these two phases. The dispatcher starts no model session for them: no Claude Code session, no OpenAI call, no subscription-allowance check and no executor budget increment. `run_merge_or_block()` and `finish_story()` in `scripts/dispatcher-invoke.sh` run `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh`, which reuse `scripts/merge-gate-summary` and the `hpw` helpers. This holds in every path: the Claude-tier cycle, the paired `executor:codex` run and the resume pass at `In merge`. A step the scripts cannot judge (for example a dirty file that is neither clearly a stale copy of the merged PR nor clearly unrelated) is kept and reported, never forced. The step-by-step map from `merge.md` and `cleanup.md` to the scripts and their tests is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md). A manually run `/merge` or `/cleanup` still follows `.claude/commands/merge.md` and `cleanup.md`, which are unchanged; a later edit to either file needs the matching script change. ADR-012's session-start mechanism does not cover these two phases.
 
 This applies only to the dispatcher's own invocation path in `scripts/dispatcher-invoke.sh`. A human or interactive session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
 
 ### Executor Invocation
 
-The dispatcher starts every session through `invoke_executor_command()` in `scripts/dispatcher-invoke.sh`. The provider comes from the `EXECUTOR_PROVIDER` table, keyed by the executor label, so no executor name is branched on elsewhere. The task prompt is always `.claude/commands/<command>.md` with `$ARGUMENTS` substituted.
+The dispatcher starts every model session (`/implement` and `/review`) through `invoke_executor_command()` in `scripts/dispatcher-invoke.sh`. The provider comes from the `EXECUTOR_PROVIDER` table, keyed by the executor label, so no executor name is branched on elsewhere. The task prompt is always `.claude/commands/<command>.md` with `$ARGUMENTS` substituted.
 
 | Executor labels | Provider | How the session starts |
 |---|---|---|
 | `executor:claude-code-haiku`, `-sonnet`, `-opus` | `claude-code` | Claude Code (`claude -p`) on the GitHub Actions runner, signed in with the PO's subscription token `CLAUDE_CODE_OAUTH_TOKEN`, with the model alias `haiku`, `sonnet` or `opus` (ADR-012, issue #314) |
 | `executor:codex` | `openai` | A bounded tool-use loop against the OpenAI API with a single `bash` tool (issue #254), until #315 |
 
-Every Claude session runs this way: `/implement` and its fix rounds, `/review` of a Codex-implemented story, and `/merge` and `/cleanup`. No metered Anthropic API key is used. The command line, bounds, result handling and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#executor-invocation-mechanism).
+Every Claude session runs this way: `/implement` and its fix rounds, and `/review` of a Codex-implemented story. `/merge` and `/cleanup` are script-only phases and start no session. No metered Anthropic API key is used. The command line, bounds, result handling and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#executor-invocation-mechanism).
 
 ### Claude Model Tiers (Claude Code)
 
@@ -156,7 +158,7 @@ Routing logic must read declared profiles, not branch on executor names. This is
 
 **Chosen:** Do not add `executor:claude-code-fable` now. The Claude Model Tiers table above stays at three tiers (Haiku, Sonnet, Opus). Revisit only if a concrete story needs Fable-level capability that Opus can't handle.
 
-**Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, new `BUDGET_DAILY_FABLE` budget variable). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
+**Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, a per-tier daily cap). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
 
 ## Cross-Reference
 

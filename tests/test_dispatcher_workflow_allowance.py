@@ -72,10 +72,11 @@ def test_invoke_env_wires_token_and_reserves():
 
 
 def test_cache_steps_keep_allowance_state():
-    for name in ("Restore budget state cache", "Save budget state cache"):
+    for name in ("Restore session state cache", "Save session state cache"):
         paths = cache_paths(step(name))
         assert ".dispatcher-allowance" in paths, (name, paths)
-        assert ".dispatcher-budget" in paths, (name, paths)
+        assert ".dispatcher-usage" in paths, (name, paths)
+        assert ".dispatcher-budget" not in paths, (name, paths)
 
 
 def test_allowance_state_dir_is_gitignored():
@@ -87,3 +88,19 @@ def test_pinned_version_is_documented():
     version = re.search(r"@anthropic-ai/claude-code@(\d+\.\d+\.\d+)", step("Install Claude Code")).group(1)
     doc = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text()
     assert f"@anthropic-ai/claude-code@{version}" in doc
+
+
+def test_invoke_runs_dry_run_when_not_the_state_writer():
+    # Issue #320: the session count is saved to this ref's cache scope, so a
+    # run on a non-default ref must not start sessions the scheduled
+    # default-branch runs cannot count.
+    body = step("Run dispatcher invoke")
+    assert re.search(
+        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
+        r"\s+INVOKE_ARGS\+=\(--dry-run\)",
+        body,
+    ), body
+    assert 'dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --issue "$NEXT_ISSUE"' in body
+    assert 'dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --resume' in body
+    names = [n for n, _ in steps()]
+    assert names.index("Resolve notification state scope") < names.index("Run dispatcher invoke")
