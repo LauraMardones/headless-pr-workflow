@@ -303,7 +303,8 @@ def test_forged_dispatcher_markers_are_ignored(d):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == ["merge 960", "cleanup 600", f"implement {STORY}"]
+    assert d.phases == ["merge 960", "cleanup 600"]
+    assert d.sessions == [f"implement {STORY}"]
     assert "[RESUME SKIP]" not in proc.stdout
 
 
@@ -351,8 +352,9 @@ def test_ac4_codex_story_keeps_the_paired_review_session(d):
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"implement {STORY}", f"review {PR}", f"merge {PR}", f"cleanup {STORY}"]
-    assert d.session_providers == ["implement openai", "review claude-code", "merge openai", "cleanup openai"]
+    assert d.sessions == [f"implement {STORY}", f"review {PR}"]  # /merge and /cleanup start no session (#264)
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+    assert d.session_providers == ["implement openai", "review claude-code"]
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
                               f"{STORY}=In merge", f"{STORY}=Done"]
     assert "Review executor: Claude Opus" in proc.stdout
@@ -425,7 +427,8 @@ def test_ac6_in_merge_story_with_open_pr_is_merged_and_cleaned_up(d, executor):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"merge {PR}", f"cleanup {STORY}"]
+    assert d.sessions == [] and d.claude_calls == []
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     assert d.board_writes == [f"{STORY}=Done"]
     assert d.posted(STORY) == []
     assert f"[RESUME] #{STORY}: /merge PR #{PR}" in proc.stdout
@@ -439,7 +442,8 @@ def test_ac7_in_merge_story_with_merged_pr_is_finished_without_merge(d):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"cleanup {STORY}"]
+    assert d.sessions == []
+    assert d.phases == [f"cleanup {STORY}"]
     assert d.board_writes == [f"{STORY}=Done"]
     assert d.posted(STORY) == []
 
@@ -472,7 +476,7 @@ def test_ac9_one_merge_attempt_per_head(d):
 
     first = d.resume()
     assert first.returncode == 1
-    assert d.sessions == [f"merge {PR}"]
+    assert d.phases == [f"merge {PR}"]
     blockers = d.posted(STORY)
     assert len(blockers) == 1 and "/merge completes successfully" in blockers[0]
     assert f"pr={PR} head={HEAD}" in blockers[0]
@@ -481,7 +485,7 @@ def test_ac9_one_merge_attempt_per_head(d):
     # Same head: no session, no comment.
     second = d.resume()
     assert second.returncode == 0, second.stdout + second.stderr
-    assert d.sessions == [f"merge {PR}"]
+    assert d.phases == [f"merge {PR}"]
     assert len(d.posted(STORY)) == 1
     assert f"[RESUME SKIP] #{STORY}: /merge was already tried on PR #{PR}" in second.stdout
 
@@ -489,25 +493,25 @@ def test_ac9_one_merge_attempt_per_head(d):
     d.add_comment(STORY, "please /unblock this", login=PO)
     d.add_comment(STORY, "/unblock", login="someone-else")
     assert d.resume().returncode == 0
-    assert d.sessions == [f"merge {PR}"]
+    assert d.phases == [f"merge {PR}"]
 
     # A standalone /unblock line from the PO after the blocker: one more try.
     d.add_comment(STORY, "Fixed the thread.\n/unblock", login=PO)
     third = d.resume()
     assert third.returncode == 1
-    assert d.sessions == [f"merge {PR}"] * 2
+    assert d.phases == [f"merge {PR}"] * 2
     assert len(d.posted(STORY)) == 2
 
     # The new blocker is newer than the /unblock: skipped again.
     assert d.resume().returncode == 0
-    assert d.sessions == [f"merge {PR}"] * 2
+    assert d.phases == [f"merge {PR}"] * 2
 
     # A new head: tried again, and this time it merges.
     d.add_pr(PR, STORY, head=NEW_HEAD)
     d.fail("merge", False)
     fourth = d.resume()
     assert fourth.returncode == 0, fourth.stdout + fourth.stderr
-    assert d.sessions == [f"merge {PR}"] * 3 + [f"cleanup {STORY}"]
+    assert d.phases == [f"merge {PR}"] * 3 + [f"cleanup {STORY}"]
     assert d.status(STORY) == "Done"
     assert len(d.posted(STORY)) == 2
 
@@ -750,7 +754,8 @@ def test_ac13_in_merge_then_fix_round_then_ready_story(d):
     proc = d.run_issue(700)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == ["merge 960", "cleanup 600", f"implement {STORY}", "implement 700"]
+    assert d.phases == ["merge 960", "cleanup 600"]
+    assert d.sessions == [f"implement {STORY}", "implement 700"]
     assert d.board_writes == ["600=Done", "700=In implementation", "700=In review"]
 
 
@@ -766,7 +771,7 @@ def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_res
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
+    assert d.phases == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
     assert proc.stdout.count("Feature #50: all 3 stories Done.") == 1
     assert len(d.slack_calls) == 1
 
@@ -781,7 +786,7 @@ def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == ["merge 960", "cleanup 600"]
+    assert d.phases == ["merge 960", "cleanup 600"]
     assert "all 2 stories Done" not in proc.stdout and d.slack_calls == []
 
 
@@ -848,27 +853,16 @@ def test_ac15_missing_board_option_stops_the_run_before_any_session(tmp_path, mi
 
 
 @needs_tools
-def test_ac15_allowance_refusal_at_a_resume_entry_comments_once(d):
+def test_ac15_allowance_never_holds_the_script_only_merge_at_a_resume_entry(d):
     d.add_story(STORY, "In merge")
     d.add_pr(PR, STORY)
 
-    first = d.resume(seq="1")
-    second = d.resume(seq="1")
+    proc = d.resume(seq="1")  # a refusing allowance is never consulted for /merge or /cleanup (#264)
 
-    assert first.returncode == 0 and second.returncode == 0, first.stderr + second.stderr
-    assert d.sessions == [] and d.status(STORY) == "In merge"
-    comments = d.posted(STORY)
-    assert len(comments) == 1 and "/merge was not started" in comments[0]
-    assert "already the newest comment" in second.stdout
-
-    # Once another comment is newer, a further refusal is reported again.
-    d.add_comment(STORY, "noted", login=PO)
-    assert d.resume(seq="1").returncode == 0
-    assert len(d.posted(STORY)) == 2
-
-    # With allowance back, the story is merged.
-    assert d.resume().returncode == 0
-    assert d.sessions == [f"merge {PR}", f"cleanup {STORY}"]
+    assert proc.returncode == 0, proc.stderr
+    assert d.allowance_calls == 0 and d.sessions == []
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+    assert d.status(STORY) == "Done" and d.posted(STORY) == []
 
 
 # ── Contracts with the bookkeeping job and the workflow ─────────────────────

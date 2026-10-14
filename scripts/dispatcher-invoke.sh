@@ -31,6 +31,9 @@
 #             issue #317 (subscription allowance check before each session start:
 #                         scripts/dispatcher-allowance.sh, called at the top of
 #                         invoke_executor_command(); see docs/DISPATCHER-CONFIG.md)
+#             issue #264 (/merge and /cleanup are scripts, not model sessions:
+#                         scripts/dispatcher-merge.sh and dispatcher-cleanup.sh;
+#                         no allowance check, no executor budget)
 #             issue #293 (hand-off to the Codex review loop after /implement, and
 #                         the two resume entries: "In merge" and fix rounds)
 #             issue #314 (every Claude session runs Claude Code on the runner,
@@ -150,9 +153,9 @@
 set -euo pipefail
 
 # ─── Job-level wall-clock deadline (ADR-003) — survives recursive exec ────────
-# One story's cycle calls invoke_executor_command() up to four times
-# (/implement, /review, /merge, /cleanup), the resume pass adds sessions for
-# other stories, and the tail-call
+# One story's cycle calls invoke_executor_command() up to two times
+# (/implement and /review; /merge and /cleanup start no session, issue #264),
+# the resume pass adds sessions for other stories, and the tail-call
 # `exec bash "$0" ...` used to move to the next ready story replaces this
 # process without starting a new Actions job — so all of that shares one
 # 6-hour job ceiling. DISPATCH_JOB_START_TS must therefore be set ONCE, at the
@@ -345,6 +348,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
+MERGE_SCRIPT="${MERGE_SCRIPT:-$SCRIPT_DIR/dispatcher-merge.sh}"          # /merge without a session (#264); overridable for tests
+CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-$SCRIPT_DIR/dispatcher-cleanup.sh}"    # /cleanup without a session (#264); overridable for tests
 COMMANDS_DIR="$REPO_ROOT/.claude/commands"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)
 # Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
@@ -1209,7 +1214,7 @@ run_openai_agent() {
 #                     [RESERVE SKIP] and write nothing. The story keeps its
 #                     place in "In implementation" and the resume pass tries
 #                     the fix round again on a later run.
-#                     Before /review, /merge or /cleanup: one comment on the
+#                     Before /review: one comment on the
 #                     story naming the step, the window, the share left, the
 #                     reserve and the reset time; exit 0. Resuming is #316.
 #   exit 2 (error)  — log [ALLOWANCE ERROR] and fail the job without a
@@ -1236,10 +1241,7 @@ allowance_comment() {
         | ["## Subscription allowance check", "", $head, ""]
           + (if ($lines | length) > 0 then $lines + [""] else [] end)
           + ["Reason: \($d.reason)", "",
-             (if $step == "merge"
-              then "The story stays in \"In merge\". A later dispatcher run tries /merge again; nothing is needed from you."
-              else "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."
-              end)]
+             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
         | join("\n")' <<< "$decision_json"
 }
 
@@ -1313,7 +1315,8 @@ check_subscription_allowance() {
 # under a *different* executor label than the story's own $EXECUTOR_LABEL —
 # used by Step E2 to run /review under the cross-provider review-pairing
 # result instead of the /implement label. It defaults to $EXECUTOR_LABEL, so
-# every other call site (implement/merge/cleanup) is unaffected.
+# every other call site (/implement) is unaffected. /merge and /cleanup never
+# come through here (issue #264).
 
 invoke_executor_command() {
     local slash_command="$1"
@@ -1782,6 +1785,21 @@ increment_implement_budget() {
 # standalone `/unblock` line after the blocker. Without this a blocked merge
 # would start a model session on every poll.
 
+# /merge and /cleanup start no model session (issue #264): the scripts decide
+# from GitHub and git facts alone, so there is no allowance check, no executor
+# budget increment and no executor tier. Their step-by-step parity with
+# .claude/commands/merge.md and cleanup.md is in
+# docs/DISPATCHER-MERGE-CLEANUP-MAP.md.
+run_phase_script() {
+    local script="$1" label="$2"
+    shift 2
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would run $(basename "$script") $* --repo $REPO ($label, no model session)"
+        return 0
+    fi
+    bash "$script" "$@" --repo "$REPO"
+}
+
 merge_attempt_marker() {
     dispatcher_marker "action=merge-attempt pr=$1 head=$2"
 }
@@ -1789,8 +1807,8 @@ merge_attempt_marker() {
 run_merge_or_block() {
     local pr_number="$1" head_sha="$2" marker=""
     [[ -n "$head_sha" ]] && marker=$(merge_attempt_marker "$pr_number" "$head_sha")
-    LAST_ACTION="invoking /merge for PR #$pr_number"
-    if ! invoke_executor_command "merge" "$pr_number"; then
+    LAST_ACTION="running the merge script for PR #$pr_number"
+    if ! run_phase_script "$MERGE_SCRIPT" "/merge" --pr "$pr_number"; then
         post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
         DISPATCH_HANDLED=true
         exit 1
@@ -1804,7 +1822,7 @@ finish_story() {
     echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
     set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
     # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
-    if ! invoke_executor_command "cleanup" "$ISSUE_NUMBER"; then
+    if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
         echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
     fi
     echo "✓ Story #$ISSUE_NUMBER completed (Done)."
