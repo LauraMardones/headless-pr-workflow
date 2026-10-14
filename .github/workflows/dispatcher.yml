@@ -5,10 +5,14 @@
 # and Aug 9, despite the workflow remaining active and no config change).
 #
 # 2026-08-10 (issue #252): the "Run dispatcher invoke" step never wired any
-# executor secret (Anthropic or OpenAI) into its env:, so no dispatcher-driven
-# /implement invocation could ever authenticate regardless of what was
-# configured in repository Settings. ANTHROPIC_API_KEY and
-# OPENAI_API_KEY_CODEX are now explicitly referenced below.
+# executor secret into its env:, so no dispatcher-driven /implement invocation
+# could ever authenticate regardless of what was configured in repository
+# Settings. The executor secrets are now explicitly referenced below.
+#
+# 2026-10-14 (issue #314, ADR-012): every Claude session runs Claude Code on
+# the runner, signed in with CLAUDE_CODE_OAUTH_TOKEN (the PO's subscription).
+# The metered Anthropic key is no longer wired in and must not be added back;
+# OPENAI_API_KEY_CODEX stays for the Codex tier until #315.
 #
 # 2026-09-27 (issue #257): ready_for_refinement de-duplication state now
 # survives ephemeral runners. .dispatcher-state/ is restored from
@@ -138,9 +142,11 @@ jobs:
             budget-${{ env.TODAY }}-
 
       # Issue #317: the subscription allowance check (scripts/dispatcher-allowance.sh)
-      # runs one Claude Code turn before each session start. Pinned so the
-      # undocumented rate_limit_event shape changes only on a deliberate bump;
-      # see docs/DISPATCHER-CONFIG.md → "Subscription allowance and reserve".
+      # runs one Claude Code turn before each session start, and every Claude
+      # session runs on this same install (issue #314). Pinned so the
+      # undocumented rate_limit_event shape, the session flags and what the
+      # model aliases mean change only on a deliberate bump; see
+      # docs/DISPATCHER-CONFIG.md → "Subscription allowance and reserve".
       - name: Install Claude Code
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         run: npm install -g @anthropic-ai/claude-code@2.1.296
@@ -153,7 +159,6 @@ jobs:
           BUDGET_DAILY_SONNET: ${{ vars.BUDGET_DAILY_SONNET }}
           BUDGET_DAILY_OPUS: ${{ vars.BUDGET_DAILY_OPUS }}
           BUDGET_DAILY_CODEX: ${{ vars.BUDGET_DAILY_CODEX }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}

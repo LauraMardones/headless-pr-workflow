@@ -352,7 +352,7 @@ def test_ac4_codex_story_keeps_the_paired_review_session(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}", f"review {PR}", f"merge {PR}", f"cleanup {STORY}"]
-    assert d.session_providers == ["implement openai", "review anthropic", "merge openai", "cleanup openai"]
+    assert d.session_providers == ["implement openai", "review claude-code", "merge openai", "cleanup openai"]
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
                               f"{STORY}=In merge", f"{STORY}=Done"]
     assert "Review executor: Claude Opus" in proc.stdout

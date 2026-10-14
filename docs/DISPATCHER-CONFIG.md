@@ -39,32 +39,81 @@ To raise or lower a cap, update the corresponding repository variable. Changes t
 
 ---
 
-## Executor Secrets — `ANTHROPIC_API_KEY` and `OPENAI_API_KEY_CODEX`
+## Executor Secrets — `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY_CODEX`
 
-The dispatcher needs credentials to invoke `/implement` (and the rest of the story cycle) via direct calls to the Anthropic and OpenAI APIs — no CLI binary is installed on the runner, and none is required (issue #254). There are exactly **two** required secrets, not one per `executor:` tier:
+The dispatcher needs credentials to start the sessions of the story cycle. There are exactly **two** required secrets, not one per `executor:` tier:
 
 | Secret | Type | Covers |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Repository secret | All three Claude tiers: `executor:claude-code-haiku`, `executor:claude-code-sonnet`, `executor:claude-code-opus` |
-| `OPENAI_API_KEY_CODEX` | Repository secret | `executor:codex` |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Repository secret | All three Claude tiers (`executor:claude-code-haiku`, `-sonnet`, `-opus`): every Claude session runs Claude Code signed in with the PO's subscription (issue #314, ADR-012). The same secret signs in the allowance probe; see [Subscription token](#subscription-token--claude_code_oauth_token). |
+| `OPENAI_API_KEY_CODEX` | Repository secret | `executor:codex`, through the direct OpenAI API loop, until #315 |
 
-A single Anthropic API key authenticates calls to any Claude model — Haiku, Sonnet, and Opus are model selections made per request, not separate credential scopes. There is no functional reason to provision three separate Anthropic secrets, and doing so previously blocked every dispatcher-driven invocation regardless of tier (issue #252). Per-tier **budget** enforcement (`BUDGET_DAILY_HAIKU`/`_SONNET`/`_OPUS`/`_CODEX`, see above) is a separate, already-correct mechanism — it stays per-tier and is unaffected by this consolidation.
+One subscription token serves every Claude tier — Haiku, Sonnet and Opus are model aliases chosen per session, not separate credentials (issue #252 removed the per-tier secrets). Per-tier **budget** enforcement (`BUDGET_DAILY_HAIKU`/`_SONNET`/`_OPUS`/`_CODEX`, see above) is a separate mechanism and stays per-tier.
+
+The metered Anthropic API key is no longer used. Since issue #314 it is not read by any script and not wired into the workflow; delete the repository secret and revoke the key at the provider (#308 → PO steps). Every `ANTHROPIC_*` variable is removed from the environment Claude Code runs in, so a metered key can never be used even if one is set again.
 
 Provision both secrets at:
 
 `https://github.com/<owner>/<repo>/settings/secrets/actions`
 
-Both secrets must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}` and `OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}`. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
+Both secrets must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}` and `OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}`. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
 
-**If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before making any API call, and the dispatcher posts a mid-cycle blocker comment on the story issue.
+**If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before starting the session, and the dispatcher posts a mid-cycle blocker comment on the story issue. A `CLAUDE_CODE_OAUTH_TOKEN` that is empty after whitespace removal counts as absent.
 
 ### Executor invocation mechanism
 
-`invoke_executor_command()` calls the Anthropic Messages API (Claude tiers) or the OpenAI Chat Completions API (Codex tier) directly, per ADR-002's documented architecture ("invokes executors ... via API calls"). No `claude` or `codex` CLI binary is installed on the `ubuntu-latest` runner, and `.github/workflows/dispatcher.yml` has no step that installs one — issue #254 replaced the prior CLI shell-out (which failed on every run with `env: 'claude': No such file or directory`, since neither binary was ever installed) with this direct-API path.
+`invoke_executor_command()` resolves the provider and model from the `EXECUTOR_PROVIDER` and `EXECUTOR_MODEL` tables in `scripts/dispatcher-invoke.sh` (data-driven, same pattern as `EXECUTOR_ROUTING`) and loads the task prompt: the `.claude/commands/<slash_command>.md` file with `$ARGUMENTS` substituted — the same instructions a manually-run command follows. Then it starts the session by provider:
 
-Each call drives a bounded tool-use loop against the resolved provider (`run_anthropic_agent()` / `run_openai_agent()`) that gives the model a single `bash` tool scoped to the repository checkout. The task prompt is the corresponding `.claude/commands/<slash_command>.md` file with `$ARGUMENTS` substituted — the same instructions a manually-run command follows. The loop ends when the model responds without requesting a further tool call, or fails closed (non-zero return, no board mutation) on an HTTP error, a malformed API response, exceeding the per-invocation turn cap, or exceeding the total wall-clock budget. The model, per `executor:` tier, is declared in the `EXECUTOR_MODEL` table in `scripts/dispatcher-invoke.sh`'s header comment (data-driven, same pattern as `EXECUTOR_ROUTING`).
+| Provider | Executor labels | Session |
+|---|---|---|
+| `claude-code` | `claude-code-haiku`, `-sonnet`, `-opus` | Claude Code on the runner, on the subscription (ADR-012, issue #314) |
+| `openai` | `codex` | Bounded tool-use loop against the OpenAI Chat Completions API with a single `bash` tool (issue #254), until #315 |
 
-See [ADR-003](decisions/ADR-003-interim-executor-session-boundary.md) for why this loop runs inside the GitHub Actions job at all (an explicit, temporary exception to ADR-002, pending migration to owned infrastructure — #259) and why `AGENT_MAX_WALLCLOCK_SECONDS` specifically — not the per-turn caps alone — is what keeps a run from ever approaching GitHub Actions' 6-hour job ceiling.
+This covers every Claude session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass), `/review` of a Codex-implemented story (under `claude-code-opus`), and `/merge` and `/cleanup` of a Claude-tier story (also from the resume pass at `In merge`).
+
+#### Claude Code sessions
+
+The session runs in the repository checkout with `GH_TOKEN` inherited, so `git`, `gh` and the repository scripts work as in a manual session. It uses the Claude Code version pinned in the workflow (see [Pinned Claude Code version](#pinned-claude-code-version)), the same install the allowance probe uses. The exact command line, with the task prompt on stdin:
+
+```
+claude -p --output-format stream-json --verbose --permission-mode bypassPermissions \
+  --strict-mcp-config --model <alias> --max-turns "$AGENT_MAX_TURNS"
+```
+
+- **Model aliases.** `EXECUTOR_MODEL` names `haiku`, `sonnet` and `opus`. The pinned Claude Code version decides which model each alias means, so a model change is a deliberate version bump.
+- **Never `--bare`.** Bare mode ignores the OAuth token (ADR-012 → Candidate B).
+- **Flags.** Checked on 2026-10-14 against Claude Code 2.1.295, one patch below the pin; the AC19 proof run on the pinned 2.1.296 confirms them. `--max-turns` is no longer listed in `claude --help` but is still accepted. No flag changed from the issue's command line.
+- **Token and environment.** `scripts/lib/claude-session.sh`, shared with the allowance probe, removes every whitespace character from `CLAUDE_CODE_OAUTH_TOKEN` and every variable whose name starts with `ANTHROPIC_` from Claude Code's environment.
+- **Bounds.** `--max-turns` is `AGENT_MAX_TURNS`. The session runs under `timeout` set to the time left of `AGENT_MAX_WALLCLOCK_SECONDS` since `DISPATCH_JOB_START_TS`. When no time is left, the session does not start.
+- **Tools.** `--permission-mode bypassPermissions` allows any command, as the API loop's `bash` tool did. Isolation comes from the fresh GitHub-hosted runner (ADR-012 → Consequences).
+
+The stream-json output is written to a temporary file, parsed by message type (not line order) after the session ends, and deleted before the step returns. The step succeeds only when the stream has a `result` message with `subtype` `success` and `is_error` `false`, and Claude Code exited 0; the `result` text then goes to stdout. Every other outcome fails closed (non-zero return, then the existing mid-cycle blocker or decision-blocker path):
+
+| Outcome | Log line (stderr) |
+|---|---|
+| Wall clock used up before the start | `[SESSION ERROR] /<command> #<n> not started: no time left of AGENT_MAX_WALLCLOCK_SECONDS ...` |
+| `timeout` stopped the session | `[SESSION ERROR] /<command> #<n> stopped by the wall-clock bound ...` |
+| Token rejected (`401`) | `[SESSION ERROR] /<command> #<n>: the subscription token was rejected (401). Run 'claude setup-token' again and save the CLAUDE_CODE_OAUTH_TOKEN secret with nothing before or after the token` |
+| `init` reports an `apiKeySource` other than `none` (or none at all) | `[SESSION ERROR] apiKeySource=<value>; only the subscription token may be used` |
+| A provider usage limit (`rate_limit`) | `[SESSION RATE LIMIT] /<command> #<n> stopped at a provider usage limit; resume is #316` |
+| Claude Code exits non-zero | `[SESSION ERROR] /<command> #<n>: Claude Code exited with code <rc>`, then the last five lines of its stderr |
+| No `result` message | `[SESSION ERROR] /<command> #<n>: the stream has no result message` |
+| `subtype` other than `success` (for example `error_max_turns`), or `is_error` `true` | `[SESSION ERROR] /<command> #<n>: result subtype <subtype>, is_error <bool>; not treating as success` |
+
+After every session the job log also has one line per tool call and, when the stream has a `result`, one summary line:
+
+```
+[session tool] Bash: git status
+[SESSION] /implement #314 on opus: success, 11 turns, 45 s, apiKeySource none, input 120345 / output 8123 tokens
+```
+
+- A tool line shows the tool name and the first 200 characters of its input: the `command` for `Bash`, the input as JSON for other tools, line breaks replaced by spaces.
+- `input` is the sum of `input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens` from the result's `usage`; `output` is `output_tokens`.
+- The token, the full stream and the `init` message (which carries account fields) are never printed. The token value is masked as `[redacted]` in tool lines, in the result text and in the stderr lines shown after a failed exit.
+
+Under `--dry-run` a Claude-provider call logs `[DRY RUN] Would start Claude Code (<alias>) on the subscription for /<command> <target>` and starts nothing.
+
+See [ADR-012](decisions/ADR-012-session-start-mechanism.md) for why sessions start this way: Claude Code on the GitHub Actions runner, signed in with the PO's subscription token, in place of the embedded API loop.
 
 ### Review path (issues #263 and #293)
 
@@ -85,15 +134,16 @@ The path is computed from the story's existing `executor:` label and is never wr
 
 This is specific to the dispatcher's own invocation path. The manually-invoked `/review` command (`.claude/commands/review.md`, run by a human or an interactive session) reads neither table and its reviewer choice is unchanged.
 
-Loop tuning is overridable via environment variables (defaults shown), primarily for tests:
+Session tuning is overridable via environment variables (defaults shown), primarily for tests:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_MAX_TURNS` | `60` | Tool-use round-trips before failing closed |
-| `AGENT_MAX_TOKENS` | `16384` | `max_tokens` requested per API turn |
-| `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run |
-| `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take |
-| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review`/`/merge`/`/cleanup` and any chained stories via `DISPATCH_JOB_START_TS`, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003) |
+| `AGENT_MAX_TURNS` | `60` | Turns before failing closed: Claude Code's `--max-turns`, and the OpenAI loop's turn cap |
+| `AGENT_MAX_TOKENS` | `16384` | `max_tokens` requested per API turn (OpenAI loop only, until #315) |
+| `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run (OpenAI loop only, until #315) |
+| `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take (OpenAI loop only, until #315) |
+| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review`/`/merge`/`/cleanup` and any chained stories via `DISPATCH_JOB_START_TS`, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
+| `CLAUDE_BIN` | `claude` | The Claude Code binary, for the sessions and the allowance probe (test hook) |
 
 ---
 
@@ -400,7 +450,7 @@ Set these as repository variables under **Settings → Secrets and variables →
 
 The probe signs in with the repository secret `CLAUDE_CODE_OAUTH_TOKEN`, an OAuth token for the PO's subscription created with `claude setup-token`.
 
-- Save the secret with nothing before or after the token. The script removes every space, tab, carriage return and line feed before use, but a token with stray characters inside it is rejected with `401 OAuth access token is invalid`, which does not name the cause.
+- Save the secret with nothing before or after the token. The scripts remove every whitespace character before use, but a token with stray characters inside it is rejected with `401 OAuth access token is invalid`, which does not name the cause.
 - The current token was created on 2026-10-08 and lasts one year. Renew it before 2027-10-08 by running `claude setup-token` again and replacing the secret.
 - The script and the dispatcher log only the token's presence and its length after whitespace removal, never its value.
 
@@ -414,7 +464,7 @@ claude -p "Reply with the single word OK." --model haiku --tools "" --strict-mcp
 ```
 
 - `--bare` is never used: bare mode ignores the OAuth token (ADR-012 → Candidate B).
-- `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed from the probe's environment. If the init message does not report `apiKeySource: "none"`, the result is an error, so the probe can never bill a metered key.
+- Every variable whose name starts with `ANTHROPIC_` is removed from the probe's environment by `scripts/lib/claude-session.sh`, the helper the sessions use too (issue #314). If the init message does not report `apiKeySource: "none"`, the result is an error, so the probe can never bill a metered key.
 - The probe times out after 120 seconds (override with `ALLOWANCE_PROBE_TIMEOUT`).
 - The script reads `rate_limit_info.unifiedWindows.five_hour` and `.seven_day` (`utilization`, `resetsAt`) and `rate_limit_info.overageStatus` from the `rate_limit_event` line. Anthropic does not document `unifiedWindows`.
 
@@ -426,7 +476,7 @@ claude -p "Reply with the single word OK." --model haiku --tools "" --strict-mcp
 npm install -g @anthropic-ai/claude-code@2.1.296
 ```
 
-The pin keeps the undocumented event shape stable. To change the version, edit that step, then run the dispatcher once with `workflow_dispatch` and check that the `[RESERVE]` line still shows both windows. `tests/test_dispatcher_workflow_allowance.py` checks that the version here matches the workflow.
+The pin keeps the undocumented event shape stable. Every Claude session runs on the same install (issue #314), so the pin also fixes the session flags and what the model aliases mean. To change the version, edit that step, then run the dispatcher once with `workflow_dispatch` and check that the `[RESERVE]` line still shows both windows and the `[SESSION]` line shows `success` and `apiKeySource none`. `tests/test_dispatcher_workflow_allowance.py` checks that the version here matches the workflow.
 
 ### Outcomes and log lines
 

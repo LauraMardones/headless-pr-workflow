@@ -105,9 +105,20 @@ Each run handles resumable work before new work: stories in `In merge`, then fix
 
 This applies only to the dispatcher's own invocation path in `scripts/dispatcher-invoke.sh`. A human or interactive session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
 
+### Executor Invocation
+
+The dispatcher starts every session through `invoke_executor_command()` in `scripts/dispatcher-invoke.sh`. The provider comes from the `EXECUTOR_PROVIDER` table, keyed by the executor label, so no executor name is branched on elsewhere. The task prompt is always `.claude/commands/<command>.md` with `$ARGUMENTS` substituted.
+
+| Executor labels | Provider | How the session starts |
+|---|---|---|
+| `executor:claude-code-haiku`, `-sonnet`, `-opus` | `claude-code` | Claude Code (`claude -p`) on the GitHub Actions runner, signed in with the PO's subscription token `CLAUDE_CODE_OAUTH_TOKEN`, with the model alias `haiku`, `sonnet` or `opus` (ADR-012, issue #314) |
+| `executor:codex` | `openai` | A bounded tool-use loop against the OpenAI API with a single `bash` tool (issue #254), until #315 |
+
+Every Claude session runs this way: `/implement` and its fix rounds, `/review` of a Codex-implemented story, and `/merge` and `/cleanup`. No metered Anthropic API key is used. The command line, bounds, result handling and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#executor-invocation-mechanism).
+
 ### Claude Model Tiers (Claude Code)
 
-> Advisory only, current as of 2026-08-09 — for human calibration when choosing an `executor:` label. Routing does not depend on these values: `scripts/dispatcher-invoke.sh` routes purely off `executor:` label suffixes, never off the model names or versions in this table.
+> Advisory only, current as of 2026-08-09 — for human calibration when choosing an `executor:` label. Routing does not depend on these values: `scripts/dispatcher-invoke.sh` routes purely off `executor:` label suffixes, never off the model names or versions in this table. Since issue #314 the dispatcher starts each tier with the Claude Code alias (`haiku`, `sonnet`, `opus`); the Claude Code version pinned in `.github/workflows/dispatcher.yml` decides which model each alias means.
 
 | Label | Model | Appropriate task types |
 |---|---|---|

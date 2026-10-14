@@ -151,7 +151,7 @@ EOF
 chmod +x "$FAKE_BIN/gh"
 
 # Fake curl: never touches the network. Logs the URL and returns a
-# single-turn "task complete" response for either provider.
+# single-turn "task complete" response from the OpenAI API (Codex tier).
 cat > "$FAKE_BIN/curl" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -166,14 +166,25 @@ while [[ $i -lt ${#args[@]} ]]; do
     i=$((i+1))
 done
 echo "url=$url" >> "$MOCK_DIR/curl.log"
-if [[ "$url" == *anthropic* ]]; then
-    printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-else
-    printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}' > "$outfile"
-fi
+printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}' > "$outfile"
 echo -n "200"
 EOF
 chmod +x "$FAKE_BIN/curl"
+
+# Fake Claude Code (issue #314): logs the model and reports a successful session.
+cat > "$FAKE_BIN/claude" << 'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+model=""
+while [[ $# -gt 0 ]]; do
+    [[ "$1" == "--model" ]] && model="$2"
+    shift
+done
+echo "model=$model" >> "$MOCK_DIR/claude.log"
+echo '{"type":"system","subtype":"init","apiKeySource":"none"}'
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":1000,"result":"done","usage":{"input_tokens":1,"output_tokens":1}}'
+EOF
+chmod +x "$FAKE_BIN/claude"
 
 # Allowance check stub (issue #317): always "start", so this test exercises
 # selection only. The check itself is covered by tests/test_dispatcher_allowance*.py.
@@ -193,6 +204,7 @@ new_env() {
     echo '[]' > "$d/pulls.json"
     : > "$d/gh.log"
     : > "$d/curl.log"
+    : > "$d/claude.log"
     : > "$d/github_output"
     mkdir -p "$d/budget"
     jq -n '{items: [], options: {
@@ -229,7 +241,8 @@ run_dispatcher() {
     RUN_RC=0
     env -i HOME="$HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
         MOCK_DIR="$d" GH_TOKEN="fake-token" GITHUB_OUTPUT="$d/github_output" \
-        ANTHROPIC_API_KEY="fake-anthropic" OPENAI_API_KEY_CODEX="fake-openai" \
+        CLAUDE_CODE_OAUTH_TOKEN="fake-subscription-token" CLAUDE_BIN="$FAKE_BIN/claude" \
+        OPENAI_API_KEY_CODEX="fake-openai" \
         BUDGET_COUNTER_DIR="$d/budget" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
         BUDGET_DAILY_HAIKU="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_SONNET="${BUDGET_DAILY:-10000000}" \
         BUDGET_DAILY_OPUS="${BUDGET_DAILY:-10000000}" BUDGET_DAILY_CODEX="${BUDGET_DAILY:-10000000}" \
@@ -260,7 +273,7 @@ assert_not_contains "no executor-label error for the Epic" "$RUN_ERR" "No execut
 assert_contains "Story #161 went through /implement" "$RUN_OUT" "E1: /implement #161"
 assert_contains "Story #161 reached Done" "$RUN_OUT" "Story #161 completed (Done)."
 assert_not_contains "no /implement for the Epic" "$RUN_OUT" "E1: /implement #160"
-assert_contains "executor API was called" "$(cat "$E/curl.log")" "url=https://api.anthropic.com"
+assert_contains "Claude Code was started" "$(cat "$E/claude.log")" "model=sonnet"
 assert_not_contains "Epic board item never mutated" "$(cat "$E/gh.log")" "MUTATION item=ITEM_160"
 assert_contains "loop exited cleanly after the Story" "$RUN_OUT" "No more \"Ready for implementation\" stories."
 assert_not_contains "all_budget_blocked not set" "$(cat "$E/github_output")" "all_budget_blocked"
@@ -278,9 +291,10 @@ run_dispatcher "$E" --issue 231 --dry-run
 assert_eq "exit 0" "$RUN_RC" "0"
 assert_contains "warning names type:feature" "$RUN_ERR" "Warning: #231 is not an executable Story, Task, or Bug (detected type: type:feature)"
 assert_eq "exactly one warning for #231" "$(count_matches "$RUN_ERR" "Warning: #231")" "1"
-assert_contains "dry-run reports the Story's executor invocation" "$RUN_OUT" "[DRY RUN] Would invoke anthropic (claude-sonnet-5) directly via API for /implement 232"
+assert_contains "dry-run reports the Story's executor invocation" "$RUN_OUT" "[DRY RUN] Would start Claude Code (sonnet) on the subscription for /implement 232"
 assert_not_contains "dry-run: no invocation for the Feature" "$RUN_OUT" "/implement 231"
 assert_eq "dry-run: no executor API call" "$(cat "$E/curl.log")" ""
+assert_eq "dry-run: Claude Code not started" "$(cat "$E/claude.log")" ""
 assert_not_contains "dry-run: no board mutation" "$(cat "$E/gh.log")" "MUTATION"
 assert_not_contains "dry-run: no comment posted" "$(cat "$E/gh.log")" "POST "
 assert_not_contains "dry-run: loop does not reselect #231" "$RUN_OUT" "--issue 231"
