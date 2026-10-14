@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import headless_pr_workflow.merge_pr as merge_pr_module
 from headless_pr_workflow import cli
 from headless_pr_workflow.github import GHCommandError, RequiredStatusChecks
@@ -276,6 +278,21 @@ def test_merge_pr_json_output_ready(monkeypatch, capsys):
     assert output["approval_review_source"]["approval_source"] == "formal"
     assert output["readiness"]["hard_gate_passed"] is True
     assert output["blocking_reasons"] == []
+
+
+def test_merge_pr_expect_head_refuses_a_different_head_without_merging(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_pr_context", lambda target, repo=None: scenario_current_approval(head_sha="head123"))
+    monkeypatch.setattr(cli, "fetch_repo_default_branch", lambda repo=None: "main")
+    monkeypatch.setattr(cli, "fetch_required_status_check_context", lambda repo, branch: RequiredStatusChecks(names=(), status="not_configured"))
+    monkeypatch.setattr(cli, "fetch_review_threads_for_context", lambda context, repo=None: ())
+    monkeypatch.setattr(cli, "run_github_merge", lambda **kwargs: pytest.fail("must not merge a head that was not evaluated"))
+
+    exit_code = cli.main(["merge-pr", "123", "--repo", "owner/repo", "--execute", "--expect-head", "other-head", "--json"])
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["merged"] is False
+    assert "not the expected head other-head" in output["blocking_reasons"][0]
 
 
 def test_merge_pr_human_output_ready_names_dry_run_facts(monkeypatch, capsys):

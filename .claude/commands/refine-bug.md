@@ -34,7 +34,7 @@ Use these statuses consistently:
 
 When starting refinement:
 
-- Move the GitHub Project/status field to `In refinement`.
+- Move the GitHub Project/status field to `In refinement` with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`.
 - If the real GitHub Project status cannot be updated but issue-body edits are possible, update the issue body with:
   `PO status: In refinement`
 - Report clearly if the real Project status could not be changed.

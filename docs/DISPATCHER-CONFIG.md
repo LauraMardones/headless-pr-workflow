@@ -68,7 +68,7 @@ Both secrets must also be explicitly wired into `.github/workflows/dispatcher.ym
 | `claude-code` | `claude-code-haiku`, `-sonnet`, `-opus` | Claude Code on the runner, on the subscription (ADR-012, issue #314) |
 | `openai` | `codex` | Bounded tool-use loop against the OpenAI Chat Completions API with a single `bash` tool (issue #254), until #315 |
 
-This covers every Claude session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass), `/review` of a Codex-implemented story (under `claude-code-opus`), and `/merge` and `/cleanup` of a Claude-tier story (also from the resume pass at `In merge`).
+This covers every model session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass) and `/review` of a Codex-implemented story (under `claude-code-opus`). `/merge` and `/cleanup` are **script-only phases** (issue #264): the dispatcher runs `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh` and starts no session for them, in the Claude-tier cycle, the paired `executor:codex` run and the resume pass at `In merge`. They have no executor tier, no allowance check, no executor budget, and no wall-clock session bound. ADR-012's session-start mechanism does not cover them. The step-by-step map to `merge.md` and `cleanup.md` is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md).
 
 #### Claude Code sessions
 
@@ -141,7 +141,7 @@ Session tuning is overridable via environment variables (defaults shown), primar
 | `AGENT_MAX_TOKENS` | `16384` | `max_tokens` requested per API turn (OpenAI loop only, until #315) |
 | `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run (OpenAI loop only, until #315) |
 | `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take (OpenAI loop only, until #315) |
-| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review`/`/merge`/`/cleanup` and any chained stories via `DISPATCH_JOB_START_TS`, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
+| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review` sessions and any chained stories via `DISPATCH_JOB_START_TS`; the script-only `/merge` and `/cleanup` start no session and are not bounded by it, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
 | `CLAUDE_BIN` | `claude` | The Claude Code binary, for the sessions and the allowance probe (test hook) |
 
 ---
@@ -166,6 +166,27 @@ This table is the only list of the token's scopes. Other documents and comments 
 Both workflows map the secret to the `GH_TOKEN` environment variable (`GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}`), which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
 
 The Codex review bookkeeping job resolves review threads with this token (`resolveReviewThread`, see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop)). GitHub's GraphQL reference for the mutation names the classic `repo` scope (`public_repo` for a public repository), which the table already lists, so no scope is added. This was confirmed from that reference, not by a live call: the first run with a thread to resolve is the live confirmation, and a refused call exits non-zero naming the missing scope.
+
+### Token of each step in a dispatcher-started session
+
+The token of a dispatcher-started session is `PROJECT_TOKEN`: the workflow sets `GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}` and `scripts/lib/claude-session.sh` removes only the variables whose names start with `ANTHROPIC_`, so the session keeps it (pinned by `tests/test_set_project_status.py`). The four steps that need `gh` with GraphQL all use it (issue #318):
+
+| Step | Token | Scope that matters | Evidence |
+|---|---|---|---|
+| Board status write (`scripts/set-project-status`) | `PROJECT_TOKEN` | `project` | Pending: live proof run of #318 |
+| `scripts/ac-summary.sh` | `PROJECT_TOKEN` | `repo` | Pending: live proof run of #318 |
+| Review-thread resolution (`resolveReviewThread`) | `PROJECT_TOKEN` | `repo` | Bookkeeping job (Actions); session proof pending |
+| `scripts/merge-gate-summary` | `PROJECT_TOKEN` | `repo`, `read:org`, and **admin access** to read branch protection | Pending: live proof run of #318 |
+
+The merge gate reads `repos/<repo>/branches/main/protection`, which GitHub allows only with admin access to the repository. A token without it makes the gate report `checks=fail(required-unavailable)` and `/merge` stops. The built-in `GITHUB_TOKEN` of a job does not have it. If the proof run shows that `PROJECT_TOKEN` cannot read it, the PO picks the token that can (for example a fine-grained token with "Administration: read"); the gate is not weakened.
+
+**Writing a story's board status.** A session writes a status with one command, not with hand-written GraphQL:
+
+```
+scripts/set-project-status --issue <n> --status "<Status name>" --repo <owner/repo> [--dry-run]
+```
+
+It prints `Status: #<n> <old> -> <new>` (or `already <new>`) and exits `0` only after it has read the status back from the board. It exits `1`, with one line on stderr naming the failed step, when there is no token, GraphQL refuses the call (the line names the missing scope and points to this section), the issue is not on the board, the status is not an option, or the read-back disagrees; `2` for invalid arguments. The commands keep the best-effort rule: a non-zero exit is recorded in the Session Summary with `--deviation`. The trial of ADR-012 skipped a write because no such command existed (the session reported "I found no script in this run that writes board status"), not because GraphQL or the token failed.
 
 **If the secret is absent**, the `gh` CLI fails to authenticate, the workflow exits with an error on the first API call and no story is dispatched.
 
@@ -304,7 +325,7 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 
 ### Resume at `In merge`
 
-A story in `In merge` is taken up at `/merge`, whatever its executor. The board status is not trusted on its own: the merge gates inside `/merge` decide whether the PR merges.
+A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` and `/cleanup` here are the script-only phases (issue #264): no session starts and no allowance is checked. The board status is not trusted on its own: the merge gates inside `scripts/dispatcher-merge.sh` decide whether the PR merges.
 
 | Facts | What the dispatcher does |
 |---|---|
@@ -312,7 +333,7 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. The board 
 | No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
 | Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
 
-**One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs start no session for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
+**One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs do not run the merge script for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
 
 ### Fix round
 
@@ -372,7 +393,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 ### Known limits
 
-- A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
+- A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself; `scripts/dispatcher-merge.sh` exits 0 only after `hpw merge-pr` confirmed the merge (or GitHub already reported it merged).
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
@@ -381,7 +402,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 ## Subscription allowance and reserve
 
-Before every model session start (`/implement`, `/review`, `/merge` and `/cleanup`), the dispatcher runs `scripts/dispatcher-allowance.sh` (issue #317, ADR-012). The script reads how much of the PO's five-hour and weekly Claude subscription allowance is left. A session starts only when **both** windows are at or above the reserve the PO has set. When the allowance cannot be read, nothing starts.
+Before every model session start (`/implement` and `/review`), the dispatcher runs `scripts/dispatcher-allowance.sh` (issue #317, ADR-012). The script reads how much of the PO's five-hour and weekly Claude subscription allowance is left. A session starts only when **both** windows are at or above the reserve the PO has set. When the allowance cannot be read, nothing starts.
 
 ### Reserve variables
 
@@ -436,12 +457,12 @@ The pin keeps the undocumented event shape stable. Every Claude session runs on 
 | Exit | Decision | Log line (stderr of the script) | Dispatcher behavior |
 |---|---|---|---|
 | `0` | `start` | `[RESERVE] five-hour 79% left (reserve 10%), weekly 71% left (reserve 20%) — start` | The session starts. |
-| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`, `/merge` or `/cleanup`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. The comment is not posted again while it is already the story's newest comment for that step. |
+| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. The comment is not posted again while it is already the story's newest comment for that step. |
 | `2` | `error` | `[ALLOWANCE ERROR] <reason> — starting nothing` | No session. The job fails, without a `dispatcher_error` Slack message. After `/implement`, the story gets the same comment with the reason. |
 
 A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
 
-A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is tried again by the resume entry on a later run (issue #293). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` and `/cleanup` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is not affected: its `/merge` is a script and never checks the allowance (issues #293, #264). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. `/merge` and `/cleanup` are script-only and are never refused or held by the allowance (issue #264). Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
 
 The script prints exactly one JSON object on stdout in every exit path:
 
@@ -468,3 +489,9 @@ The hold lives in the same `actions/cache` entry as the usage limit's session co
 ### A repeated `[ALLOWANCE ERROR]`
 
 An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumented `rate_limit_event` shape has changed, or the token has expired. Each such run fails visibly in Actions (and in GitHub's failed-run email) but sends no Slack message. The remedy is to set `DISPATCHER_ENABLED=false`, read the reason in the log, and either renew the token or revisit ADR-012.
+
+## The dispatcher script is read completely before any session starts
+
+bash reads a script from the file in pieces, so a session that rewrites `scripts/dispatcher-invoke.sh` while the run waits for it (any story that changes the dispatcher does) could make the run resume in the middle of a line (issue #345). The whole body of the script is therefore one brace group closed by `}; exit $?` on a single line: bash parses it completely before the first session starts, and nothing is read from the file afterwards. Keep it that way: no code after the group.
+
+The `exec bash "$0"` tail calls start a new process on purpose, so the next story runs the code that was just merged. The other files are safe: `scripts/lib/claude-session.sh` and `scripts/lib/decision-blocker.sh` are sourced once at start, and `dispatcher-usage-limit.sh`, `dispatcher-allowance.sh`, `slack-notify.sh`, `dispatcher-change-check.sh` and `session-summary.sh` run as separate processes that read the file at call time. Any new script the dispatcher sources after a session, or runs for the length of a session, needs the same treatment; check `dispatcher-merge.sh` and `dispatcher-cleanup.sh` (#264) when they land.
