@@ -540,3 +540,9 @@ The hold lives in the same `actions/cache` entry as the budget counters, whose k
 ### A repeated `[ALLOWANCE ERROR]`
 
 An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumented `rate_limit_event` shape has changed, or the token has expired. Each such run fails visibly in Actions (and in GitHub's failed-run email) but sends no Slack message. The remedy is to set `DISPATCHER_ENABLED=false`, read the reason in the log, and either renew the token or revisit ADR-012.
+
+## The dispatcher script is read completely before any session starts
+
+bash reads a script from the file in pieces, so a session that rewrites `scripts/dispatcher-invoke.sh` while the run waits for it (any story that changes the dispatcher does) could make the run resume in the middle of a line (issue #345). The whole body of the script is therefore one brace group closed by `}; exit $?` on a single line: bash parses it completely before the first session starts, and nothing is read from the file afterwards. Keep it that way: no code after the group.
+
+The `exec bash "$0"` tail calls start a new process on purpose, so the next story runs the code that was just merged. The other files are safe: `scripts/lib/claude-session.sh` and `scripts/lib/decision-blocker.sh` are sourced once at start, and `dispatcher-budget.sh`, `dispatcher-allowance.sh`, `slack-notify.sh`, `dispatcher-change-check.sh` and `session-summary.sh` run as separate processes that read the file at call time. Any new script the dispatcher sources after a session, or runs for the length of a session, needs the same treatment; check `dispatcher-merge.sh` and `dispatcher-cleanup.sh` (#264) when they land.
