@@ -13,7 +13,7 @@
 #   bash scripts/dispatcher-allowance.sh        (no arguments)
 #
 # Environment:
-#   CLAUDE_CODE_OAUTH_TOKEN    required; every space, tab, CR and LF is removed
+#   CLAUDE_CODE_OAUTH_TOKEN    required; every whitespace character is removed
 #   RESERVE_FIVE_HOUR_PERCENT  optional, whole number 0-100, default 10 (empty = unset)
 #   RESERVE_WEEKLY_PERCENT     optional, whole number 0-100, default 20 (empty = unset)
 #   ALLOWANCE_STATE_DIR        optional, default <repo-root>/.dispatcher-allowance
@@ -43,6 +43,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Token cleaning and the ANTHROPIC_* scrub, shared with the sessions (#314).
+# shellcheck source=scripts/lib/claude-session.sh
+source "$SCRIPT_DIR/lib/claude-session.sh"
 
 STATE_DIR="${ALLOWANCE_STATE_DIR:-$REPO_ROOT/.dispatcher-allowance}"
 HOLD_FILE="$STATE_DIR/hold.json"
@@ -127,7 +130,7 @@ fi
 
 # ─── 2. Token (AC7, AC11, AC21) ──────────────────────────────────────────────
 
-CLEAN_TOKEN=$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | tr -d ' \t\r\n')
+CLEAN_TOKEN=$(claude_clean_token "${CLAUDE_CODE_OAUTH_TOKEN:-}")
 if [[ -z "$CLEAN_TOKEN" ]]; then
     fail "CLAUDE_CODE_OAUTH_TOKEN is missing or empty after whitespace removal"
 fi
@@ -164,9 +167,8 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 PROBE_RC=0
 # Run from an empty directory so no project instructions are loaded into the
-# probe, with every metered credential removed from its environment.
-( cd "$WORK" && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
-      CLAUDE_CODE_OAUTH_TOKEN="$CLEAN_TOKEN" \
+# probe, with every ANTHROPIC_* variable removed from its environment.
+( cd "$WORK" && claude_scrubbed_exec "$CLEAN_TOKEN" \
       timeout "$PROBE_TIMEOUT" "$CLAUDE_BIN" "${PROBE_ARGS[@]}" \
       > "$WORK/stream.jsonl" 2> "$WORK/stderr.txt" < /dev/null ) || PROBE_RC=$?
 

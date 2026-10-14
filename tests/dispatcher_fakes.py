@@ -1,16 +1,20 @@
 """Fakes for tests that drive the real ``scripts/dispatcher-invoke.sh`` end to end.
 
-A fake ``gh`` (board, issues, pull requests, comments), a fake ``curl``
-(executor API and Slack webhook) and a stub allowance script on
+A fake ``gh`` (board, issues, pull requests, comments), a fake ``claude``
+on ``CLAUDE_BIN`` (Claude sessions, issue #314), a fake ``curl`` (the OpenAI
+API of the Codex tier and the Slack webhook) and a stub allowance script on
 ``ALLOWANCE_SCRIPT``. All state lives in files under ``MOCK_DIR``, so a test
 can run the dispatcher several times against the same GitHub state. Issues and
 PRs carry a fixed old activity date, so a story "In implementation" is always
 past the stale threshold.
 
-The fake ``curl`` reads the command a session was started for from the task
-prompt (the first line of ``.claude/commands/<command>.md``) and logs it. A
-test can make a command fail (``fail``) or give it a side effect on the fake
-GitHub state (``on_session``), such as a new PR head.
+Both fake executors read the command a session was started for from the task
+prompt (the first line of ``.claude/commands/<command>.md``) and log it to
+``sessions.log`` with the provider (``claude-code`` or ``openai``). A test can
+make a command fail (``fail``) or give it a side effect on the fake GitHub
+state (``on_session``), such as a new PR head. The fake ``claude`` also keeps
+the argv, stdin and environment of every call (``claude_calls``), and
+``claude_stream`` replaces its default stream-json output.
 """
 
 from __future__ import annotations
@@ -143,12 +147,11 @@ while [[ $i -lt ${#args[@]} ]]; do
     esac
     i=$((i+1))
 done
-if [[ "$url" != *anthropic* && "$url" != *openai* ]]; then
+if [[ "$url" != *openai* ]]; then
     echo "other $url" >> "$MOCK_DIR/curl.log"
     exit 0
 fi
-provider=anthropic
-[[ "$url" == *openai* ]] && provider=openai
+provider=openai
 # The task prompt is the last user message; its first line names the command.
 first_line=$(jq -r '[.messages[] | select(.role == "user") | .content | strings] | (first // "") | split("\n")[0] // ""' "$data")
 case "$first_line" in
@@ -159,19 +162,56 @@ case "$first_line" in
     *)                    command=unknown ;;
 esac
 target=$(sed -E 's/^[^#]*#([0-9]+).*/\1/' <<< "$first_line")
-echo "session $command $target $provider" >> "$MOCK_DIR/curl.log"
+echo "session $command $target $provider" >> "$MOCK_DIR/sessions.log"
 if [[ -f "$MOCK_DIR/fail_$command" ]]; then
     printf '%s' '{"error":"forced failure"}' > "$outfile"
     echo -n "500"
     exit 0
 fi
 [[ -f "$MOCK_DIR/on_$command.sh" ]] && bash "$MOCK_DIR/on_$command.sh"
-if [[ "$provider" == anthropic ]]; then
-    printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-else
-    printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}' > "$outfile"
-fi
+printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}' > "$outfile"
 echo -n "200"
+"""
+
+# Claude Code on CLAUDE_BIN (issue #314). Call n keeps its argv (one per line),
+# stdin and environment in $MOCK_DIR/claude_<n>.{argv,stdin,env}. Output is
+# $MOCK_DIR/claude_stream.jsonl with exit code $MOCK_DIR/claude_exit when the
+# test wrote one, else a successful session with one tool call. A command
+# marked failing ends with an error result and exit 1.
+FAKE_CLAUDE = r"""#!/usr/bin/env bash
+set -uo pipefail
+n=$(cat "$MOCK_DIR/claude.count" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$MOCK_DIR/claude.count"
+printf '%s\n' "$@" > "$MOCK_DIR/claude_$n.argv"
+cat > "$MOCK_DIR/claude_$n.stdin"
+env > "$MOCK_DIR/claude_$n.env"
+first_line=$(head -n 1 "$MOCK_DIR/claude_$n.stdin")
+case "$first_line" in
+    "Implement issue #"*) command=implement ;;
+    "Review PR #"*)       command=review ;;
+    "Merge PR #"*)        command=merge ;;
+    "Clean up"*)          command=cleanup ;;
+    *)                    command=unknown ;;
+esac
+target=$(sed -E 's/^[^#]*#([0-9]+).*/\1/' <<< "$first_line")
+echo "session $command $target claude-code" >> "$MOCK_DIR/sessions.log"
+if [[ -f "$MOCK_DIR/claude_sleep" ]]; then
+    sleep "$(cat "$MOCK_DIR/claude_sleep")"
+fi
+if [[ -f "$MOCK_DIR/fail_$command" ]]; then
+    echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+    echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"duration_ms":1000,"usage":{"input_tokens":1,"output_tokens":1}}'
+    exit 1
+fi
+[[ -f "$MOCK_DIR/on_$command.sh" ]] && bash "$MOCK_DIR/on_$command.sh"
+if [[ -f "$MOCK_DIR/claude_stream.jsonl" ]]; then
+    cat "$MOCK_DIR/claude_stream.jsonl"
+    exit "$(cat "$MOCK_DIR/claude_exit" 2>/dev/null || echo 0)"
+fi
+echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git status"}}]}}'
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":3000,"result":"done","usage":{"input_tokens":10,"output_tokens":5}}'
 """
 
 # Exit codes come from $ALLOWANCE_SEQ (comma-separated), one per call; the
@@ -206,7 +246,8 @@ class Dispatcher:
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir()
-        for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL), ("allowance.sh", FAKE_ALLOWANCE)):
+        for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL), ("claude", FAKE_CLAUDE),
+                           ("allowance.sh", FAKE_ALLOWANCE)):
             path = self.bin / name
             path.write_text(text, encoding="utf-8", newline="\n")
             path.chmod(0o755)
@@ -216,7 +257,7 @@ class Dispatcher:
         self._write("state.json", {})
         self._write("pulls.json", [])
         self._write("board.json", {"items": [], "options": options or BOARD_OPTIONS})
-        for name in ("gh.log", "curl.log", "github_output", "mutations.log"):
+        for name in ("gh.log", "curl.log", "sessions.log", "github_output", "mutations.log"):
             (self.mock / name).write_text("")
 
     # ── fake GitHub state ───────────────────────────────────────────────────
@@ -266,7 +307,7 @@ class Dispatcher:
         self._write("state.json", state)
 
     def on_session(self, command: str, script: str) -> None:
-        """Bash run by the fake executor when a ``command`` session starts (``$MOCK_DIR`` is set)."""
+        """Bash run by the fake executors when a ``command`` session starts (``$MOCK_DIR`` is set)."""
         (self.mock / f"on_{command}.sh").write_text(script, encoding="utf-8", newline="\n")
 
     def session_sets_status(self, command: str, number: int, status: str) -> None:
@@ -281,6 +322,16 @@ class Dispatcher:
         path = self.mock / f"fail_{command}"
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
+    def claude_stream(self, *events, exit_code: int = 0) -> None:
+        """Make the fake ``claude`` print these stream-json lines (dicts or raw strings) and exit."""
+        lines = [e if isinstance(e, str) else json.dumps(e) for e in events]
+        (self.mock / "claude_stream.jsonl").write_text("".join(f"{line}\n" for line in lines),
+                                                       encoding="utf-8", newline="\n")
+        (self.mock / "claude_exit").write_text(str(exit_code))
+
+    def claude_sleeps(self, seconds: int) -> None:
+        (self.mock / "claude_sleep").write_text(str(seconds))
+
     # ── running ─────────────────────────────────────────────────────────────
 
     def run(self, *args: str, seq: str = "0", env: dict[str, str] | None = None):
@@ -293,7 +344,8 @@ class Dispatcher:
             "LC_ALL": "C.UTF-8",  # grep -P in the dispatcher needs a UTF-8 or unibyte locale
             "GH_TOKEN": "fake-token",
             "GITHUB_OUTPUT": (self.mock / "github_output").as_posix(),
-            "ANTHROPIC_API_KEY": "fake-anthropic",
+            "CLAUDE_CODE_OAUTH_TOKEN": "fake-subscription-token",
+            "CLAUDE_BIN": (self.bin / "claude").as_posix(),
             "OPENAI_API_KEY_CODEX": "fake-openai",
             "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
             "BUDGET_COUNTER_DIR": (self.mock / "budget").as_posix(),
@@ -328,11 +380,30 @@ class Dispatcher:
     @property
     def sessions(self) -> list[str]:
         """Sessions started, in order, as ``"<command> <target>"``."""
-        return [" ".join(line.split()[1:3]) for line in self._log("curl.log") if line.startswith("session ")]
+        return [" ".join(line.split()[1:3]) for line in self._log("sessions.log")]
 
     @property
     def session_providers(self) -> list[str]:
-        return [" ".join(line.split()[1::2]) for line in self._log("curl.log") if line.startswith("session ")]
+        """Sessions started, in order, as ``"<command> <provider>"``."""
+        return [" ".join(line.split()[1::2]) for line in self._log("sessions.log")]
+
+    @property
+    def claude_calls(self) -> list[dict]:
+        """Every fake ``claude`` call, in order: ``argv`` (list), ``stdin`` and ``env`` (dict)."""
+        calls = []
+        count = int((self.mock / "claude.count").read_text()) if (self.mock / "claude.count").exists() else 0
+        for n in range(1, count + 1):
+            env = {}
+            for line in (self.mock / f"claude_{n}.env").read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    env[key] = value
+            calls.append({
+                "argv": (self.mock / f"claude_{n}.argv").read_text(encoding="utf-8").splitlines(),
+                "stdin": (self.mock / f"claude_{n}.stdin").read_bytes().decode("utf-8"),
+                "env": env,
+            })
+        return calls
 
     @property
     def slack_calls(self) -> list[str]:

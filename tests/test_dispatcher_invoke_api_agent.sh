@@ -5,20 +5,22 @@
 # used to shell out to a locally-installed CLI binary ("$cli" --dangerously-
 # skip-permissions -p "/$slash_command $target_arg") that is never installed on
 # the GitHub Actions runner, so every dispatcher-driven /implement invocation
-# failed immediately with `env: 'claude': No such file or directory`. This test
-# proves, against the real EXECUTOR_PROVIDER/EXECUTOR_MODEL tables and the real
-# invoke_executor_command()/run_anthropic_agent()/run_openai_agent()/_curl_json()
-# implementations:
+# failed immediately with `env: 'claude': No such file or directory`.
+#
+# Since issue #314 the Claude tiers run Claude Code on the subscription token;
+# that path is covered by tests/test_dispatcher_claude_session.py. This test
+# keeps the direct API path of the Codex tier (OpenAI, until #315) and proves,
+# against the real EXECUTOR_PROVIDER/EXECUTOR_MODEL tables and the real
+# invoke_executor_command()/run_openai_agent()/_curl_json() implementations:
 #
 #   1. The defect no longer reproduces: a dispatcher invocation completes
 #      successfully with PATH containing no `claude` or `codex` executable at
 #      all — every call reaches the target provider through curl only.
 #   2. A multi-turn tool-use conversation (the model requests a bash-tool call,
-#      then returns a final answer) round-trips correctly end-to-end for both
-#      providers, using the real .claude/commands/implement.md file as the task
-#      prompt with $ARGUMENTS correctly substituted.
-#   3. Each executor tier resolves to its own distinct API model ID
-#      (EXECUTOR_MODEL), for both the Anthropic and OpenAI request shapes.
+#      then returns a final answer) round-trips correctly end-to-end, using the
+#      real .claude/commands/implement.md file as the task prompt with
+#      $ARGUMENTS correctly substituted.
+#   3. The Codex tier sends its API model ID (EXECUTOR_MODEL).
 #   4. Failure-mode / fail-closed coverage, matching the old CLI-missing case's
 #      contract (non-zero exit, no work silently swallowed):
 #        - a malformed API response (missing the expected content field)
@@ -28,7 +30,7 @@
 #          AGENT_MAX_TURNS alone does not bound wall-clock time under GitHub
 #          Actions' 6h job ceiling; this is the enforced bound that does)
 #      all return non-zero from invoke_executor_command() with a clear stderr
-#      message, for both providers where applicable.
+#      message.
 #   4b. AGENT_MAX_WALLCLOCK_SECONDS is a JOB deadline (DISPATCH_JOB_START_TS),
 #       not a per-phase one: it is shared, unreset, across separate
 #       invoke_executor_command() calls the way exec's inherited environment
@@ -73,7 +75,6 @@ TABLES_AND_FUNC="$GLOBAL_TMP/extracted.sh"
     awk '/^declare -A EXECUTOR_MODEL=\($/{p=1} p{print} p && /^\)$/{exit}' "$INVOKE_SCRIPT"
     awk '/^_curl_json\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     awk '/^_run_agent_bash_tool\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
-    awk '/^run_anthropic_agent\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     awk '/^run_openai_agent\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     awk '/^invoke_executor_command\(\) \{$/{p=1} p{print} p && /^}$/{exit}' "$INVOKE_SCRIPT"
     # The subscription allowance check (issue #317) is covered by
@@ -81,7 +82,7 @@ TABLES_AND_FUNC="$GLOBAL_TMP/extracted.sh"
     echo 'check_subscription_allowance() { :; }'
 } > "$TABLES_AND_FUNC"
 
-for fn in _curl_json _run_agent_bash_tool run_anthropic_agent run_openai_agent invoke_executor_command; do
+for fn in _curl_json _run_agent_bash_tool run_openai_agent invoke_executor_command; do
     if ! grep -q "^${fn}() {" "$TABLES_AND_FUNC"; then
         echo "FAIL: could not extract ${fn}() from $INVOKE_SCRIPT (renamed or removed?)"
         exit 1
@@ -121,18 +122,10 @@ echo "$url" >> "$STATE_DIR/urls.log"
 
 case "$FAKE_CURL_MODE" in
   two_turn)
-    if [[ "$url" == *anthropic* ]]; then
-        if [[ $count -eq 1 ]]; then
-            printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"echo probe"}}],"usage":{"input_tokens":10,"output_tokens":5}}' > "$outfile"
-        else
-            printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"anthropic-agent-done"}],"usage":{"input_tokens":5,"output_tokens":3}}' > "$outfile"
-        fi
+    if [[ $count -eq 1 ]]; then
+        printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"echo probe\"}"}}]}}]}' > "$outfile"
     else
-        if [[ $count -eq 1 ]]; then
-            printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"echo probe\"}"}}]}}]}' > "$outfile"
-        else
-            printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"openai-agent-done"}}]}' > "$outfile"
-        fi
+        printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"openai-agent-done"}}]}' > "$outfile"
     fi
     echo -n "200"
     ;;
@@ -145,30 +138,18 @@ case "$FAKE_CURL_MODE" in
     echo -n "403"
     ;;
   never_ends)
-    if [[ "$url" == *anthropic* ]]; then
-        printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"loop","name":"bash","input":{"command":"true"}}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-    else
-        printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"loop","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]}}]}' > "$outfile"
-    fi
+    printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"loop","function":{"name":"bash","arguments":"{\"command\":\"true\"}"}}]}}]}' > "$outfile"
     echo -n "200"
     ;;
   timeout_tool)
     # Turn 1: request a tool call that will be killed by AGENT_TOOL_TIMEOUT
     # with zero output — reproduces the live run 31423828727 failure
-    # (Anthropic 400: tool_result content cannot be empty if is_error=true).
+    # (HTTP 400: tool_result content cannot be empty if is_error=true).
     # Turn 2: final answer, only reachable if the fix sends non-empty content.
-    if [[ "$url" == *anthropic* ]]; then
-        if [[ $count -eq 1 ]]; then
-            printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"slow1","name":"bash","input":{"command":"sleep 5"}}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-        else
-            printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"recovered-after-timeout"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-        fi
+    if [[ $count -eq 1 ]]; then
+        printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"slow1","function":{"name":"bash","arguments":"{\"command\":\"sleep 5\"}"}}]}}]}' > "$outfile"
     else
-        if [[ $count -eq 1 ]]; then
-            printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"slow1","function":{"name":"bash","arguments":"{\"command\":\"sleep 5\"}"}}]}}]}' > "$outfile"
-        else
-            printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered-after-timeout"}}]}' > "$outfile"
-        fi
+        printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered-after-timeout"}}]}' > "$outfile"
     fi
     echo -n "200"
     ;;
@@ -177,11 +158,7 @@ case "$FAKE_CURL_MODE" in
     # the live run 31425063548 failure: the agent had created a branch and
     # was mid-investigation when it hit the token limit, and the dispatcher
     # logged "/implement completed" with no commit and no PR ever made.
-    if [[ "$url" == *anthropic* ]]; then
-        printf '%s' '{"stop_reason":"max_tokens","content":[{"type":"text","text":"I created a branch and was about to..."}],"usage":{"input_tokens":1,"output_tokens":8192}}' > "$outfile"
-    else
-        printf '%s' '{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"I created a branch and was about to..."}}]}' > "$outfile"
-    fi
+    printf '%s' '{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"I created a branch and was about to..."}}]}' > "$outfile"
     echo -n "200"
     ;;
   large_history)
@@ -196,17 +173,9 @@ case "$FAKE_CURL_MODE" in
     # still builds correctly end to end once that history is file-based.
     gen_cmd="printf 'x%.0s' \$(seq 1 15000)"
     if [[ $count -le 15 ]]; then
-        if [[ "$url" == *anthropic* ]]; then
-            printf '%s' '{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"big'"$count"'","name":"bash","input":{"command":"'"$gen_cmd"'"}}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-        else
-            printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"big'"$count"'","function":{"name":"bash","arguments":"{\"command\":\"'"$gen_cmd"'\"}"}}]}}]}' > "$outfile"
-        fi
+        printf '%s' '{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"big'"$count"'","function":{"name":"bash","arguments":"{\"command\":\"'"$gen_cmd"'\"}"}}]}}]}' > "$outfile"
     else
-        if [[ "$url" == *anthropic* ]]; then
-            printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"done-with-large-history"}],"usage":{"input_tokens":1,"output_tokens":1}}' > "$outfile"
-        else
-            printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done-with-large-history"}}]}' > "$outfile"
-        fi
+        printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done-with-large-history"}}]}' > "$outfile"
     fi
     echo -n "200"
     ;;
@@ -241,11 +210,9 @@ run_invoke() {
         AGENT_API_TIMEOUT=30
         AGENT_MAX_WALLCLOCK_SECONDS='"$wallclock"'
         DISPATCH_JOB_START_TS='"$job_start"'
-        ANTHROPIC_API_URL="https://api.anthropic.com/v1/messages"
         OPENAI_API_URL="https://api.openai.com/v1/chat/completions"
         COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
 
-        export ANTHROPIC_API_KEY="fake-anthropic-key"
         export OPENAI_API_KEY_CODEX="fake-codex-key"
         # No claude/codex CLI binary anywhere on PATH — only the fake curl and
         # the base system. Reproduces the exact runner shape from issue #254
@@ -260,8 +227,8 @@ run_invoke() {
 
 # ─── 1. Defect no longer reproduces: full success with no CLI on PATH ────────
 
-echo "Checking a full multi-turn cycle succeeds for every executor tier with no CLI on PATH..."
-for label in claude-code-haiku claude-code-sonnet claude-code-opus codex; do
+echo "Checking a full multi-turn cycle succeeds for the Codex tier with no CLI on PATH..."
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" two_turn 10 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -eq 0 ]]; then
@@ -291,17 +258,14 @@ for label in claude-code-haiku claude-code-sonnet claude-code-opus codex; do
     fi
 done
 
-# ─── 2. Each tier resolves to its own distinct model ID ──────────────────────
+# ─── 2. The Codex tier resolves to its model ID ──────────────────────────────
 
 echo ""
-echo "Checking each executor tier sends its own distinct model ID..."
+echo "Checking the Codex tier sends its model ID..."
 declare -A EXPECT_MODEL=(
-    ["claude-code-haiku"]="claude-haiku-4-5-20251001"
-    ["claude-code-sonnet"]="claude-sonnet-5"
-    ["claude-code-opus"]="claude-opus-5"
     ["codex"]="gpt-5-codex"
 )
-for label in claude-code-haiku claude-code-sonnet claude-code-opus codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-$label"  # reuse from step 1
     got_model=$(jq -r '.model' "$state_dir/req_1.json")
     if [[ "$got_model" == "${EXPECT_MODEL[$label]}" ]]; then
@@ -314,8 +278,8 @@ done
 # ─── 3. Fail-closed: malformed response ───────────────────────────────────────
 
 echo ""
-echo "Checking a malformed API response fails closed for both providers..."
-for label in claude-code-sonnet codex; do
+echo "Checking a malformed API response fails closed..."
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-malformed-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" malformed 10 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "malformed"; then
@@ -329,8 +293,8 @@ done
 # ─── 4. Fail-closed: non-2xx HTTP status ──────────────────────────────────────
 
 echo ""
-echo "Checking a non-2xx HTTP status fails closed for both providers..."
-for label in claude-code-sonnet codex; do
+echo "Checking a non-2xx HTTP status fails closed..."
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-httperr-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" http_error 10 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -ne 0 ]] && echo "$out" | grep -qF "HTTP 403"; then
@@ -348,7 +312,7 @@ done
 
 echo ""
 echo "Checking the agent loop fails closed after exceeding AGENT_MAX_TURNS..."
-for label in claude-code-sonnet codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-maxturns-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" never_ends 3 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "exceeded AGENT_MAX_TURNS"; then
@@ -374,7 +338,7 @@ done
 
 echo ""
 echo "Checking the agent loop fails closed when AGENT_MAX_WALLCLOCK_SECONDS is exceeded..."
-for label in claude-code-sonnet codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-wallclock-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" never_ends 60 "$state_dir" 0) && rc=0 || rc=$?
     if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "exceeded AGENT_MAX_WALLCLOCK_SECONDS"; then
@@ -409,7 +373,7 @@ echo ""
 echo "Checking the wall-clock budget is shared across separate invoke_executor_command() calls, not reset per phase..."
 job_start=$(date +%s)
 state_dir="$GLOBAL_TMP/state-jobdeadline-implement"; mkdir -p "$state_dir"
-out=$(run_invoke "claude-code-sonnet" two_turn 60 "$state_dir" 2 "$job_start") && rc=0 || rc=$?
+out=$(run_invoke "codex" two_turn 60 "$state_dir" 2 "$job_start") && rc=0 || rc=$?
 if [[ $rc -eq 0 ]]; then
     assert "simulated /implement: succeeds near job start (budget not yet spent)" 0
 else
@@ -420,7 +384,7 @@ fi
 sleep 2
 
 state_dir2="$GLOBAL_TMP/state-jobdeadline-review"; mkdir -p "$state_dir2"
-out=$(run_invoke "claude-code-sonnet" two_turn 60 "$state_dir2" 2 "$job_start") && rc=0 || rc=$?
+out=$(run_invoke "codex" two_turn 60 "$state_dir2" 2 "$job_start") && rc=0 || rc=$?
 if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "exceeded AGENT_MAX_WALLCLOCK_SECONDS"; then
     assert "simulated /review: fails closed on the SAME job deadline the earlier phase used" 0
 else
@@ -450,7 +414,7 @@ fi
 # ─── 5e. A tool call that fails with no output never sends empty error content ─
 # Confirmed live on run 31423828727 (PR #255, head 7461610): a bash-tool
 # command killed by AGENT_TOOL_TIMEOUT after producing zero output caused
-# Anthropic to reject the next request with HTTP 400 ("tool_result content
+# the provider to reject the next request with HTTP 400 ("tool_result content
 # cannot be empty if is_error is true"), aborting a real /implement mid-task.
 
 echo ""
@@ -494,7 +458,7 @@ check_tool_output "failure WITH output is preserved, not overwritten" "echo real
 
 echo ""
 echo "Checking the actual API request never carries empty tool_result content after a timeout..."
-for label in claude-code-sonnet codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-timeouttool-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" timeout_tool 60 "$state_dir" 999999 "" 1) && rc=0 || rc=$?
     if [[ $rc -eq 0 ]] && echo "$out" | grep -qF "recovered-after-timeout"; then
@@ -523,7 +487,7 @@ done
 
 echo ""
 echo "Checking a truncated (max_tokens / length) response fails closed instead of reporting success..."
-for label in claude-code-sonnet codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-truncated-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" truncated 60 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -ne 0 ]] && echo "$out" | grep -qi "not a genuine completion"; then
@@ -561,7 +525,7 @@ fi
 
 echo ""
 echo "Checking a large, genuinely-accumulated message history still builds and sends correctly..."
-for label in claude-code-sonnet codex; do
+for label in codex; do
     state_dir="$GLOBAL_TMP/state-largehistory-$label"; mkdir -p "$state_dir"
     out=$(run_invoke "$label" large_history 60 "$state_dir") && rc=0 || rc=$?
     if [[ $rc -eq 0 ]] && echo "$out" | grep -qF "done-with-large-history"; then
@@ -593,13 +557,13 @@ state_dir="$GLOBAL_TMP/state-dryrun"; mkdir -p "$state_dir"
 out=$(bash -c '
     set -euo pipefail
     source "'"$TABLES_AND_FUNC"'"
-    EXECUTOR_LABEL="claude-code-sonnet"
+    EXECUTOR_LABEL="codex"
     ROUTING_VALUE="${EXECUTOR_ROUTING[$EXECUTOR_LABEL]}"
     EXECUTOR_SECRET="${ROUTING_VALUE##*:}"
     DRY_RUN=true
     AGENT_MAX_TURNS=10
     COMMANDS_DIR="'"$REPO_ROOT"'/.claude/commands"
-    export ANTHROPIC_API_KEY="fake-anthropic-key"
+    export OPENAI_API_KEY_CODEX="fake-codex-key"
     export PATH="'"$FAKE_BIN"':/usr/bin:/bin"
     export FAKE_CURL_STATE_DIR="'"$state_dir"'"
     export FAKE_CURL_MODE="two_turn"

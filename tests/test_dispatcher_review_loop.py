@@ -352,7 +352,7 @@ def test_ac4_codex_story_keeps_the_paired_review_session(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}", f"review {PR}", f"merge {PR}", f"cleanup {STORY}"]
-    assert d.session_providers == ["implement openai", "review anthropic", "merge openai", "cleanup openai"]
+    assert d.session_providers == ["implement openai", "review claude-code", "merge openai", "cleanup openai"]
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
                               f"{STORY}=In merge", f"{STORY}=Done"]
     assert "Review executor: Claude Opus" in proc.stdout
@@ -389,6 +389,10 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
     row = '    ["claude-code-haiku"]="Codex Cloud"\n'
     assert row in text
     (scripts / "dispatcher-invoke.sh").write_text(text.replace(row, ""), encoding="utf-8", newline="\n")
+    (scripts / "lib").mkdir()
+    (scripts / "lib" / "claude-session.sh").write_text(  # sourced by the script (issue #314)
+        (REPO_ROOT / "scripts" / "lib" / "claude-session.sh").read_text(encoding="utf-8"),
+        encoding="utf-8", newline="\n")
     commands = tmp_path / "repo" / ".claude" / "commands"
     commands.mkdir(parents=True)
     for name in ("implement", "review", "merge", "cleanup"):

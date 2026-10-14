@@ -21,7 +21,8 @@
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
-#             issue #254 (direct Anthropic/OpenAI API invocation — no CLI, no install step)
+#             issue #254 (direct provider API invocation — today the OpenAI
+#                         path only; the Claude path was replaced by #314)
 #             issue #262 (comment-triggered resume for decision blockers, alongside the
 #                         existing time-based stale-recovery loop — see Step 4 below)
 #             issue #263 (cross-provider /review pairing — no new executor: label)
@@ -32,6 +33,8 @@
 #                         invoke_executor_command(); see docs/DISPATCHER-CONFIG.md)
 #             issue #293 (hand-off to the Codex review loop after /implement, and
 #                         the two resume entries: "In merge" and fix rounds)
+#             issue #314 (every Claude session runs Claude Code on the runner,
+#                         signed in with the PO's subscription token; ADR-012)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -55,7 +58,8 @@
 #        Also a missing "In review" / "In merge" board option or an invalid
 #        CODEX_FIX_ROUND_MAX, with no blocker.
 #
-# Requirements: bash 4+, gh (GitHub CLI), jq, curl
+# Requirements: bash 4+, gh (GitHub CLI), jq, curl, timeout (coreutils), and
+#   Claude Code (`claude`, installed and pinned by .github/workflows/dispatcher.yml)
 #
 # ─── Executor routing table ───────────────────────────────────────────────────
 #
@@ -63,20 +67,20 @@
 # GitHub Secret. Do not add executor-specific conditional logic elsewhere
 # (OSS compatibility invariant: routing is data-driven, not logic-driven).
 #
-# | executor: label             | Executor type  | GitHub Secret name         | Provider   | API model ID               |
-# |-----------------------------|----------------|----------------------------|------------|-----------------------------|
-# | executor:claude-code-haiku  | Claude Haiku   | ANTHROPIC_API_KEY          | anthropic  | claude-haiku-4-5-20251001  |
-# | executor:claude-code-sonnet | Claude Sonnet  | ANTHROPIC_API_KEY          | anthropic  | claude-sonnet-5             |
-# | executor:claude-code-opus   | Claude Opus    | ANTHROPIC_API_KEY          | anthropic  | claude-opus-5               |
-# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | openai     | gpt-5-codex                 |
+# | executor: label             | Executor type  | GitHub Secret name         | Provider    | Model        |
+# |-----------------------------|----------------|----------------------------|-------------|--------------|
+# | executor:claude-code-haiku  | Claude Haiku   | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | haiku        |
+# | executor:claude-code-sonnet | Claude Sonnet  | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | sonnet       |
+# | executor:claude-code-opus   | Claude Opus    | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | opus         |
+# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | openai      | gpt-5-codex  |
 #
-# All three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY): a single
-# Anthropic API key authenticates calls to any Claude model, so per-tier
-# secrets (formerly ANTHROPIC_API_KEY_HAIKU/_SONNET/_OPUS) were redundant
-# credential-provisioning overhead with no functional benefit (issue #252).
-# Per-tier daily token *budgets* remain separate (see EXECUTOR_BUDGET_TYPE
-# below and dispatcher-budget.sh) — that mechanism is independent of which
-# secret authenticates the call.
+# All three Claude tiers run Claude Code on the runner, signed in with one
+# subscription token (CLAUDE_CODE_OAUTH_TOKEN; ADR-012, issue #314). Their
+# model is a Claude Code alias: the Claude Code version the workflow pins
+# decides which model each alias means, so a model change is a deliberate
+# version bump. Per-tier daily token *budgets* remain separate (see
+# EXECUTOR_BUDGET_TYPE below and dispatcher-budget.sh) — that mechanism is
+# independent of which credential signs the session in.
 #
 # ─── Review path (issue #263, issue #293, ADR-006) ────────────────────────────
 #
@@ -94,35 +98,39 @@
 # computed from the story's existing `executor:` label — no new label value is
 # introduced or persisted on the issue.
 #
-# ─── Executor invocation mechanism (issue #254) ───────────────────────────────
+# ─── Executor invocation mechanism (issue #314, ADR-012) ──────────────────────
 #
-# invoke_executor_command() calls the Anthropic Messages API (Claude tiers) or
-# the OpenAI Chat Completions API (Codex tier) directly via curl — there is no
-# CLI binary (`claude`/`codex`) and no runner install step, per ADR-002's
-# documented architecture ("invokes executors ... via API calls"). Each call
-# drives a bounded tool-use loop (run_anthropic_agent / run_openai_agent) that
-# gives the model a single `bash` tool scoped to this repository checkout; the
-# task prompt is the corresponding .claude/commands/<slash_command>.md file
-# with $ARGUMENTS substituted, so the API-invoked agent follows the exact same
-# instructions a manually-run command would. The loop ends when the model
-# responds without requesting another tool call, or fails closed (non-zero
-# return, no Blocked Declaration posted by the caller of invoke_executor_command
-# happens one level up) on an HTTP error, a malformed API response, or hitting
-# the per-invocation turn cap (AGENT_MAX_TURNS).
+# invoke_executor_command() resolves the provider and model from the tables
+# below and loads the task prompt: .claude/commands/<slash_command>.md with
+# $ARGUMENTS substituted, so a dispatcher session follows the same
+# instructions as a manually-run command. Then, by provider:
+#   claude-code (the Claude tiers) — run_claude_code_session() starts Claude
+#     Code on the runner (`claude -p`, prompt on stdin, in this checkout),
+#     signed in with the subscription token. It is bounded by --max-turns
+#     (AGENT_MAX_TURNS) and a `timeout` of the wall-clock time left
+#     (AGENT_MAX_WALLCLOCK_SECONDS since DISPATCH_JOB_START_TS). It succeeds
+#     only when the stream-json output ends with a `result` whose subtype is
+#     "success" and is_error is false, and Claude Code exits 0. Never pass
+#     --bare: bare mode ignores the OAuth token.
+#   openai (the Codex tier, until #315) — run_openai_agent() drives a bounded
+#     tool-use loop against the OpenAI Chat Completions API via curl, with a
+#     single `bash` tool scoped to this checkout.
+# Any other outcome returns non-zero, and the caller posts the blocker.
 #
 # Authentication:
 #   GH_TOKEN (or GITHUB_TOKEN) — GitHub personal access token or Actions token.
 #   In GitHub Actions, the workflow sets GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}.
 #   PROJECT_TOKEN must be a classic PAT. Its scopes, each with its reason, are
 #   listed only in docs/DISPATCHER-CONFIG.md -> "GitHub Token — `PROJECT_TOKEN`".
-#   ANTHROPIC_API_KEY and OPENAI_API_KEY_CODEX must be set as GitHub Secrets
-#   and wired into .github/workflows/dispatcher.yml's env: block for the
-#   "Run dispatcher invoke" step (or the job-level env: block) — GitHub
-#   Actions never auto-injects a secret; it must be explicitly referenced as
-#   ${{ secrets.NAME }} in the workflow YAML or the script never sees it.
-#   Do not hardcode any token or API key in this script. Both secrets
-#   authenticate direct API calls only (issue #254) — neither is passed to a
-#   locally-installed CLI, because none is installed or required.
+#   CLAUDE_CODE_OAUTH_TOKEN (the Claude tiers) and OPENAI_API_KEY_CODEX (the
+#   Codex tier, until #315) must be set as GitHub Secrets and wired into
+#   .github/workflows/dispatcher.yml's env: block for the "Run dispatcher
+#   invoke" step — GitHub Actions never auto-injects a secret; it must be
+#   explicitly referenced as ${{ secrets.NAME }} in the workflow YAML or the
+#   script never sees it. Do not hardcode any token or API key in this script.
+#   scripts/lib/claude-session.sh removes every whitespace character from the
+#   subscription token and every ANTHROPIC_* variable from the session's
+#   environment, so a session can only run on the subscription.
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
 #
@@ -159,46 +167,42 @@ export DISPATCH_JOB_START_TS
 
 # ─── Executor routing table (data-driven) ─────────────────────────────────────
 # Format: ["<label-suffix>"]="<DisplayName>:<SECRET_NAME>"
-# The three Claude tiers share one GitHub Secret (ANTHROPIC_API_KEY) — see
-# header comment above (issue #252).
+# The three Claude tiers share the PO's subscription token — see header
+# comment above (issue #314, ADR-012).
 declare -A EXECUTOR_ROUTING=(
-    ["claude-code-haiku"]="Claude Haiku:ANTHROPIC_API_KEY"
-    ["claude-code-sonnet"]="Claude Sonnet:ANTHROPIC_API_KEY"
-    ["claude-code-opus"]="Claude Opus:ANTHROPIC_API_KEY"
+    ["claude-code-haiku"]="Claude Haiku:CLAUDE_CODE_OAUTH_TOKEN"
+    ["claude-code-sonnet"]="Claude Sonnet:CLAUDE_CODE_OAUTH_TOKEN"
+    ["claude-code-opus"]="Claude Opus:CLAUDE_CODE_OAUTH_TOKEN"
     ["codex"]="Codex:OPENAI_API_KEY_CODEX"
 )
 
-# ─── Executor provider + model routing table (data-driven, issue #254) ────────
-# Maps executor label suffix to the provider whose API invoke_executor_command()
-# calls directly (no CLI binary, no install step) and the model ID sent in that
-# call. Add a new row to both tables when adding a new executor tier (OSS
-# invariant: data-driven, not logic-driven — do not branch on EXECUTOR_LABEL
-# anywhere else in this script).
+# ─── Executor provider + model routing table (data-driven, #254, #314) ────────
+# Maps executor label suffix to how invoke_executor_command() starts the
+# session — "claude-code" (Claude Code on the subscription) or "openai" (the
+# direct API loop, until #315) — and the model: a Claude Code alias, or the
+# model ID sent in the API call. Add a new row to both tables when adding a
+# new executor tier (OSS invariant: data-driven, not logic-driven — do not
+# branch on EXECUTOR_LABEL anywhere else in this script).
 declare -A EXECUTOR_PROVIDER=(
-    ["claude-code-haiku"]="anthropic"
-    ["claude-code-sonnet"]="anthropic"
-    ["claude-code-opus"]="anthropic"
+    ["claude-code-haiku"]="claude-code"
+    ["claude-code-sonnet"]="claude-code"
+    ["claude-code-opus"]="claude-code"
     ["codex"]="openai"
 )
 
 declare -A EXECUTOR_MODEL=(
-    ["claude-code-haiku"]="claude-haiku-4-5-20251001"
-    ["claude-code-sonnet"]="claude-sonnet-5"
-    ["claude-code-opus"]="claude-opus-5"
+    ["claude-code-haiku"]="haiku"
+    ["claude-code-sonnet"]="sonnet"
+    ["claude-code-opus"]="opus"
     ["codex"]="gpt-5-codex"
 )
 
 # ─── Executor API key env-var table (data-driven) ─────────────────────────────
 # Historically named the env-var a locally-installed CLI expected for auth.
-# That CLI-invocation path was removed by issue #254 in favor of direct
-# provider API calls (see EXECUTOR_PROVIDER/EXECUTOR_MODEL above), so this
-# table is not read by invoke_executor_command() today — kept as-is per issue
-# #254's scope decision (unaffected by this change) and left available for any
-# future consumer that still needs the CLI-style env-var name per tier.
+# Not read by invoke_executor_command(). The Claude rows were removed by
+# issue #314: Claude Code signs in with the subscription token only, and a
+# metered key in its environment is scrubbed, never used.
 declare -A EXECUTOR_API_KEY_ENV=(
-    ["claude-code-haiku"]="ANTHROPIC_API_KEY"
-    ["claude-code-sonnet"]="ANTHROPIC_API_KEY"
-    ["claude-code-opus"]="ANTHROPIC_API_KEY"
     ["codex"]="OPENAI_API_KEY"
 )
 
@@ -337,13 +341,21 @@ BOOKKEEPING_FIX_MARKER="<!-- hpw:codex-review-bookkeeping action=move-in-impleme
 CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUDGET_SCRIPT="$SCRIPT_DIR/dispatcher-budget.sh"
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
-COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
+COMMANDS_DIR="$REPO_ROOT/.claude/commands"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)
+# Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
+# shellcheck source=scripts/lib/claude-session.sh
+source "$SCRIPT_DIR/lib/claude-session.sh"
 
-# ─── Executor agent loop tuning (issue #254 / ADR-003) — overridable for tests ─
-# AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound, checked inside the
-# loop on every turn. AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)
+# ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
+# AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
+# session runs under a `timeout` of the time left, and the OpenAI loop checks
+# it on every turn. AGENT_MAX_TURNS is Claude Code's --max-turns and the
+# OpenAI loop's turn cap. For the OpenAI loop (until #315),
+# AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)
 # alone is NOT a safe bound — at the defaults below that product is 60 x 900s =
 # 54000s (15h), which exceeds GitHub Actions' 6h job ceiling. Relying on the
 # platform to force-kill an over-budget job is not acceptable: an abrupt kill
@@ -351,7 +363,9 @@ COMMANDS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.claude/commands"
 # Declaration. AGENT_MAX_WALLCLOCK_SECONDS makes the script fail closed through
 # its own normal exit path, comfortably before that platform kill could ever
 # fire (see ADR-003).
-AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # tool-use round-trips before failing closed
+AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # turns before failing closed (Claude Code --max-turns)
+# AGENT_MAX_TOKENS, AGENT_TOOL_TIMEOUT and AGENT_API_TIMEOUT apply to the
+# OpenAI loop only (until #315); a Claude Code session does not read them.
 # 8192 was the original default and was too tight for real usage: run
 # 31426452350 (PR #255, head f351a1f, live /implement of #240) hit
 # stop_reason=max_tokens on turn 14 of a documentation-synthesis story that
@@ -363,7 +377,6 @@ AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-16384}"     # max_tokens requested per API
 AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool command may run
 AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
 AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per Actions job, shared job-wide via DISPATCH_JOB_START_TS — enforced, not incidental
-ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
@@ -965,8 +978,8 @@ _run_agent_bash_tool() {
         out="${out:0:16000}
 ... [output truncated: ${#out} bytes total, showing first 16000]"
     elif [[ -z "$out" && $rc -ne 0 ]]; then
-        # A tool_result with is_error=true and empty content is rejected by
-        # the Anthropic API (HTTP 400) — confirmed live: a command killed by
+        # A tool result with an error and empty content was rejected by
+        # the provider API (HTTP 400) — confirmed live: a command killed by
         # `timeout` after producing zero output hit exactly this. Every
         # error path must give the model something to react to.
         if [[ $rc -eq 124 ]]; then
@@ -979,110 +992,132 @@ _run_agent_bash_tool() {
     AGENT_TOOL_LAST_RC="$rc"
 }
 
-# ─── Utility: bounded tool-use loop against the Anthropic Messages API ───────
-# Drives the model through repeated bash-tool turns until it responds without
-# requesting a further tool call (task complete) or AGENT_MAX_TURNS is hit
-# (fails closed). Returns 0 with the model's final message on stdout, or
-# non-zero on any transport/HTTP error, malformed response, or turn-cap.
+# ─── Utility: start a Claude Code session on the subscription (#314, ADR-012) ─
+# Runs Claude Code on the runner in this checkout with the task prompt on
+# stdin, signed in with the cleaned subscription token and with every
+# ANTHROPIC_* variable removed (scripts/lib/claude-session.sh). Bounded by
+# --max-turns AGENT_MAX_TURNS and a `timeout` of the wall-clock time left of
+# AGENT_MAX_WALLCLOCK_SECONDS since DISPATCH_JOB_START_TS.
+#
+# After the session ends, logs one "[session tool]" line per tool call and one
+# "[SESSION]" summary line (stderr). Returns 0 with the result text on stdout
+# only when the stream has a `result` with subtype "success" and is_error
+# false, and Claude Code exited 0. Every other outcome returns non-zero with a
+# "[SESSION ERROR]" or "[SESSION RATE LIMIT]" line on stderr. The stream is
+# parsed by message type, not line order, and kept in a temporary directory
+# that is removed before returning. The token, the full stream and the init
+# message are never printed; the token is also masked in the lines that are.
 
-run_anthropic_agent() {
-    local model="$1" api_key="$2" task_prompt="$3"
-    local system='You are an autonomous software delivery agent running inside a GitHub Actions checkout of this repository. You have exactly one tool, "bash", which runs a shell command in the repository working directory and returns its combined stdout/stderr. Use it to read files, edit files, run tests, and drive git and the gh CLI (already authenticated via GH_TOKEN) to commit, push, and open or update pull requests, following the instructions below exactly. When the task is completely finished, reply with a final plain-text message and do not request any further tool call.'
-    local tools='[{"name":"bash","description":"Execute a bash command in the repository working directory. Returns combined stdout+stderr.","input_schema":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run."}},"required":["command"]}}]'
-    local messages
-    messages=$(jq -n --arg t "$task_prompt" '[{role:"user", content:$t}]')
-    local -a headers=(-H "x-api-key: $api_key" -H "anthropic-version: 2023-06-01" -H "content-type: application/json")
+CLAUDE_SESSION_ARGS=(-p --output-format stream-json --verbose
+                     --permission-mode bypassPermissions --strict-mcp-config)
 
-    local turn=0 response stop_reason assistant_content
-    local elapsed
-    while (( turn < AGENT_MAX_TURNS )); do
-        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
-        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
-            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
-            return 1
-        fi
-        turn=$(( turn + 1 ))
-        local request tmp_messages
-        # $messages grows every turn (tool outputs, file contents, PR bodies
-        # this session wrote) and is NOT safe to pass via --argjson on the
-        # command line — confirmed live (run 31425632706, PR #255, head
-        # d845ece): by turn 17 it exceeded the OS argument-length limit
-        # ("jq: Argument list too long"), and because this call sits inside a
-        # function invoked as an `if` condition, `set -e` did not catch the
-        # failure — $request was silently left empty and posted as an empty
-        # body, surfacing as a confusing "invalid JSON" error from the API
-        # instead of a clear one here. Same root cause already fixed once in
-        # this codebase for board-data pagination (issue #251); --slurpfile
-        # reads the large value from disk instead of argv, with no such limit.
-        tmp_messages="$(mktemp)"
-        printf '%s' "$messages" > "$tmp_messages"
-        local jq_rc=0
-        request=$(jq -n --arg model "$model" --arg system "$system" \
-            --argjson max_tokens "$AGENT_MAX_TOKENS" \
-            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
-            '{model:$model, max_tokens:$max_tokens, system:$system, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
-        rm -f "$tmp_messages"
-        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
-            echo "Error: failed to build the Anthropic API request (jq exit $jq_rc)." >&2
-            return 1
-        fi
+run_claude_code_session() {
+    local alias="$1" token="$2" task_prompt="$3" slash_command="$4" target_arg="$5"
+    local work rc=0
+    work=$(mktemp -d)
+    _claude_code_session "$work" "$alias" "$token" "$task_prompt" "$slash_command" "$target_arg" || rc=$?
+    rm -rf "$work"
+    return "$rc"
+}
 
-        response=$(_curl_json "$ANTHROPIC_API_URL" "$request" "${headers[@]}") || return 1
+_claude_code_session() {
+    local work="$1" alias="$2" token="$3" task_prompt="$4" slash_command="$5" target_arg="$6"
+    local label="/$slash_command #$target_arg"
+    local elapsed remaining
+    elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
+    remaining=$(( AGENT_MAX_WALLCLOCK_SECONDS - elapsed ))
+    if (( remaining <= 0 )); then
+        echo "[SESSION ERROR] $label not started: no time left of AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)" >&2
+        return 1
+    fi
 
-        echo "$response" | jq -e '.content | type == "array"' >/dev/null 2>&1 || {
-            echo "Error: malformed Anthropic API response (no .content array)." >&2
-            echo "$response" >&2
-            return 1
-        }
+    printf '%s' "$task_prompt" > "$work/prompt.md"
+    echo "Starting Claude Code ($alias) for $label; at most $AGENT_MAX_TURNS turns and ${remaining}s" >&2
+    local session_rc=0
+    # stdout and stderr go to files, not a pipe: a process the session leaves
+    # running cannot hold the step open.
+    ( cd "$REPO_ROOT" && claude_scrubbed_exec "$token" \
+          timeout "$remaining" "$CLAUDE_BIN" "${CLAUDE_SESSION_ARGS[@]}" \
+          --model "$alias" --max-turns "$AGENT_MAX_TURNS" \
+          < "$work/prompt.md" > "$work/stream.jsonl" 2> "$work/stderr.txt" ) || session_rc=$?
 
-        stop_reason=$(echo "$response" | jq -r '.stop_reason // empty')
-        assistant_content=$(echo "$response" | jq -c '.content')
-        messages=$(echo "$messages" | jq -c --argjson c "$assistant_content" '. + [{role:"assistant", content:$c}]')
-        echo "[agent turn $turn/$AGENT_MAX_TURNS] stop_reason=$stop_reason" >&2
+    jq -cR 'fromjson? // empty | select(type == "object")' "$work/stream.jsonl" > "$work/events.jsonl" 2>/dev/null || : > "$work/events.jsonl"
 
-        if [[ "$stop_reason" == "end_turn" || "$stop_reason" == "stop_sequence" ]]; then
-            echo "$response" | jq -r '[.content[] | select(.type=="text") | .text] | join("\n")'
-            return 0
-        fi
+    # One line per tool call, the input cut to 200 characters.
+    jq -r --arg tok "$token" '
+        select(.type == "assistant") | .message.content[]? | select(type == "object" and .type == "tool_use")
+        | (if (.input | type) == "object" and (.input.command | type) == "string"
+           then .input.command else (.input | tojson) end) as $in
+        | "[session tool] \(.name // "unknown"): \($in | split($tok) | join("[redacted]") | gsub("[\r\n]+"; " ") | .[0:200])"
+        ' "$work/events.jsonl" >&2 2>/dev/null || true
 
-        if [[ "$stop_reason" != "tool_use" ]]; then
-            # Confirmed live (run 31425063548, PR #255): stop_reason=max_tokens
-            # means the response was cut off mid-generation, not that the task
-            # finished — treating it as success previously caused /implement
-            # to report "completed" with no commit and no PR ever created.
-            # Any stop_reason that isn't a genuine completion or a tool
-            # request fails closed instead of being assumed to mean success.
-            echo "Error: agent stopped with stop_reason='$stop_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
-            return 1
-        fi
+    local init result api_key_source
+    init=$(jq -c 'select(.type == "system" and .subtype == "init")' "$work/events.jsonl" | tail -1)
+    result=$(jq -c 'select(.type == "result")' "$work/events.jsonl" | tail -1)
+    api_key_source=$(jq -r '(.apiKeySource // "missing") | tostring' <<< "${init:-null}")
 
-        local tool_results='[]' block tool_id tool_cmd
-        while IFS= read -r block; do
-            [[ -z "$block" ]] && continue
-            tool_id=$(echo "$block" | jq -r '.id')
-            tool_cmd=$(echo "$block" | jq -r '.input.command // empty')
-            echo "[agent bash] $tool_cmd" >&2
-            _run_agent_bash_tool "$tool_cmd"
-            tool_results=$(echo "$tool_results" | jq -c \
-                --arg id "$tool_id" --arg out "$AGENT_TOOL_LAST_OUTPUT" --argjson rc "$AGENT_TOOL_LAST_RC" \
-                '. + [{type:"tool_result", tool_use_id:$id, content:$out, is_error:($rc != 0)}]')
-        done < <(echo "$response" | jq -c '.content[] | select(.type=="tool_use")')
+    if [[ -n "$result" ]]; then
+        jq -r --arg label "$label" --arg alias "$alias" --arg aks "$api_key_source" '
+            (.usage // {}) as $u
+            | "[SESSION] \($label) on \($alias): \(.subtype // "unknown"), \(.num_turns // "?") turns, "
+              + "\(((.duration_ms // 0) / 1000) | round) s, apiKeySource \($aks), "
+              + "input \(($u.input_tokens // 0) + ($u.cache_creation_input_tokens // 0) + ($u.cache_read_input_tokens // 0)) / output \($u.output_tokens // 0) tokens"
+            ' <<< "$result" >&2
+    fi
 
-        if [[ "$(echo "$tool_results" | jq 'length')" -eq 0 ]]; then
-            echo "Error: Anthropic response had stop_reason=tool_use but no tool_use content blocks." >&2
-            return 1
-        fi
+    if [[ $session_rc -eq 124 ]]; then
+        echo "[SESSION ERROR] $label stopped by the wall-clock bound after ${remaining}s (AGENT_MAX_WALLCLOCK_SECONDS=${AGENT_MAX_WALLCLOCK_SECONDS})" >&2
+        return 1
+    fi
 
-        messages=$(echo "$messages" | jq -c --argjson tr "$tool_results" '. + [{role:"user", content:$tr}]')
-    done
+    # 401: the token was rejected. Same checks and wording as the allowance
+    # probe (#317 AC8).
+    local result_text
+    result_text=$(jq -r '[.result, .error] | map(strings) | join(" ")' <<< "${result:-null}" 2>/dev/null || true)
+    if jq -e '.api_error_status == 401' <<< "${result:-null}" >/dev/null 2>&1 \
+        || grep -qE 'API Error: 401|401 Unauthorized|OAuth access token is invalid|authentication_error' \
+            <<< "$result_text"$'\n'"$(cat "$work/stderr.txt")"; then
+        echo "[SESSION ERROR] $label: the subscription token was rejected (401). Run 'claude setup-token' again and save the CLAUDE_CODE_OAUTH_TOKEN secret with nothing before or after the token" >&2
+        return 1
+    fi
 
-    echo "Error: agent exceeded AGENT_MAX_TURNS ($AGENT_MAX_TURNS) without completing the task." >&2
-    return 1
+    if [[ -n "$init" || $session_rc -eq 0 ]] && [[ "$api_key_source" != "none" ]]; then
+        echo "[SESSION ERROR] apiKeySource=$api_key_source; only the subscription token may be used" >&2
+        return 1
+    fi
+
+    if [[ -n "$result" ]] && jq -e '
+            (.is_error == true or .subtype != "success")
+            and (([.error, .subtype, .error_type, .error_category]
+                   | any(. == "rate_limit" or . == "rate_limit_error"))
+                 or .api_error_status == 429)' <<< "$result" >/dev/null 2>&1; then
+        echo "[SESSION RATE LIMIT] $label stopped at a provider usage limit; resume is #316" >&2
+        return 1
+    fi
+
+    if [[ $session_rc -ne 0 ]]; then
+        echo "[SESSION ERROR] $label: Claude Code exited with code $session_rc" >&2
+        tail -n 5 "$work/stderr.txt" | jq -rR --arg tok "$token" 'split($tok) | join("[redacted]")' >&2 2>/dev/null || true
+        return 1
+    fi
+    if [[ -z "$result" ]]; then
+        echo "[SESSION ERROR] $label: the stream has no result message" >&2
+        return 1
+    fi
+    if ! jq -e '.subtype == "success" and .is_error == false' <<< "$result" >/dev/null 2>&1; then
+        echo "[SESSION ERROR] $label: result $(jq -r '"subtype \(.subtype // "missing"), is_error \(.is_error)"' <<< "$result"); not treating as success" >&2
+        return 1
+    fi
+
+    jq -r --arg tok "$token" '(.result // "") | tostring | split($tok) | join("[redacted]")' <<< "$result"
 }
 
 # ─── Utility: bounded tool-use loop against the OpenAI Chat Completions API ──
-# Same contract as run_anthropic_agent, adapted to OpenAI's function-calling
-# message/tool_call shape (Codex tier).
+# Drives the model through repeated bash-tool turns until it responds without
+# requesting a further tool call (task complete) or AGENT_MAX_TURNS is hit
+# (fails closed). Returns 0 with the model's final message on stdout, or
+# non-zero on any transport/HTTP error, malformed response, turn cap or
+# wall-clock bound. Codex tier only, until #315.
 
 run_openai_agent() {
     local model="$1" api_key="$2" task_prompt="$3"
@@ -1103,11 +1138,13 @@ run_openai_agent() {
         fi
         turn=$(( turn + 1 ))
         local request tmp_messages
-        # See the matching comment in run_anthropic_agent() — $messages must
-        # never be passed via --argjson on the command line; it grows every
-        # turn and this exact failure mode (jq "Argument list too long",
-        # silently swallowed because set -e doesn't reach here) was confirmed
-        # live on run 31425632706 (PR #255, head d845ece).
+        # $messages grows every turn (tool outputs, file contents, PR bodies
+        # this session wrote) and must never be passed via --argjson on the
+        # command line: by turn 17 it exceeded the OS argument-length limit
+        # ("jq: Argument list too long"), and because this call sits inside a
+        # function invoked as an `if` condition, `set -e` did not catch it —
+        # the request was silently left empty (run 31425632706, PR #255, head
+        # d845ece). --slurpfile reads the value from disk instead of argv.
         tmp_messages="$(mktemp)"
         printf '%s' "$messages" > "$tmp_messages"
         local jq_rc=0
@@ -1142,9 +1179,11 @@ run_openai_agent() {
         fi
 
         if [[ "$finish_reason" != "tool_calls" || "$has_tool_calls" -eq 0 ]]; then
-            # Mirrors the Anthropic fix: finish_reason="length" (OpenAI's
-            # max_tokens truncation) or anything else that isn't a genuine
-            # "stop" or a tool request must not be read as task completion.
+            # finish_reason="length" (OpenAI's max_tokens truncation) or
+            # anything else that isn't a genuine "stop" or a tool request must
+            # not be read as task completion: a truncated response once made
+            # /implement report "completed" with no commit and no PR (run
+            # 31425063548, PR #255).
             echo "Error: agent stopped with finish_reason='$finish_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
             return 1
         fi
@@ -1268,12 +1307,13 @@ check_subscription_allowance() {
     exit 1
 }
 
-# ─── Utility: invoke an executor command via a direct provider API call ──────
-# Issue #254: no CLI binary, no install step. Resolves provider/model from the
-# data-driven tables above, loads the corresponding .claude/commands/*.md file
-# as the task prompt — the same instructions a manually-run command follows —
-# substitutes $ARGUMENTS, and drives a bounded tool-use loop against that
-# provider's API (run_anthropic_agent / run_openai_agent).
+# ─── Utility: invoke an executor command (issue #254, issue #314) ────────────
+# Resolves provider/model from the data-driven tables above, loads the
+# corresponding .claude/commands/*.md file as the task prompt — the same
+# instructions a manually-run command follows — substitutes $ARGUMENTS, and
+# starts the session: Claude Code on the subscription for the "claude-code"
+# provider (run_claude_code_session), or the OpenAI API loop for "openai"
+# (run_openai_agent, until #315).
 #
 # The optional third argument (issue #263) lets a caller invoke a command
 # under a *different* executor label than the story's own $EXECUTOR_LABEL —
@@ -1288,16 +1328,21 @@ invoke_executor_command() {
 
     check_subscription_allowance "$slash_command"
 
+    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
+    local model="${EXECUTOR_MODEL[$executor_label]:-}"
     local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
     local executor_secret="${routing_value##*:}"
-    local api_key_value="${!executor_secret:-}"
-    if [[ -z "$executor_secret" || -z "$api_key_value" ]]; then
+    local secret_value=""
+    [[ -n "$executor_secret" ]] && secret_value="${!executor_secret:-}"
+    if [[ "$provider" == "claude-code" ]]; then
+        # A secret saved with stray whitespace fails with a 401 (ADR-012 trial).
+        secret_value=$(claude_clean_token "$secret_value")
+    fi
+    if [[ -z "$executor_secret" || -z "$secret_value" ]]; then
         echo "Error: Secret '$executor_secret' is not set in the environment." >&2
         return 1
     fi
 
-    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
-    local model="${EXECUTOR_MODEL[$executor_label]:-}"
     if [[ -z "$provider" || -z "$model" ]]; then
         echo "Error: No provider/model entry for executor '$executor_label' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
         return 1
@@ -1313,19 +1358,23 @@ invoke_executor_command() {
     task_prompt=$(sed "s/\$ARGUMENTS/$target_arg/g" "$command_file")
 
     if $DRY_RUN; then
-        echo "[DRY RUN] Would invoke $provider ($model) directly via API for /$slash_command $target_arg — no CLI, no install step"
+        if [[ "$provider" == "claude-code" ]]; then
+            echo "[DRY RUN] Would start Claude Code ($model) on the subscription for /$slash_command $target_arg"
+        else
+            echo "[DRY RUN] Would invoke $provider ($model) directly via API for /$slash_command $target_arg — no CLI, no install step"
+        fi
         return 0
     fi
 
     case "$provider" in
-        anthropic)
-            run_anthropic_agent "$model" "$api_key_value" "$task_prompt"
+        claude-code)
+            run_claude_code_session "$model" "$secret_value" "$task_prompt" "$slash_command" "$target_arg"
             ;;
         openai)
-            run_openai_agent "$model" "$api_key_value" "$task_prompt"
+            run_openai_agent "$model" "$secret_value" "$task_prompt"
             ;;
         *)
-            echo "Error: Unknown provider '$provider' for executor '$EXECUTOR_LABEL'." >&2
+            echo "Error: Unknown provider '$provider' for executor '$executor_label'." >&2
             return 1
             ;;
     esac
