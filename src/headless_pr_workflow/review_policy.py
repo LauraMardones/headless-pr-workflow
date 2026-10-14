@@ -518,6 +518,12 @@ def is_codex_review_request(event: TimelineEvent) -> bool:
     return bool(lines) and lines[0].strip().lower() == CODEX_REVIEW_TRIGGER_PHRASE
 
 
+def is_codex_actor(login: str | None, actor_type: str | None) -> bool:
+    """True for the Codex bot account: type `Bot` and its login, with or without `[bot]`."""
+
+    return _is_codex_actor(login, actor_type)
+
+
 def _is_codex_actor(login: str | None, actor_type: str | None) -> bool:
     if actor_type != "Bot" or not login:
         return False

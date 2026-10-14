@@ -28,6 +28,7 @@ from .github import (
     fetch_required_status_check_context,
 )
 from .github.pr_context import _gh_env
+from .github.review_threads import fetch_review_threads_for_context, summarize_review_threads
 from .review_policy import (
     CLAUDE_EXECUTOR_LABEL_PREFIX,
     CODEX_REVIEW_TRIGGER_PHRASE,
@@ -35,6 +36,7 @@ from .review_policy import (
     classify_codex_event,
     codex_reviewed_commit,
     evaluate_codex_review,
+    is_codex_actor,
     is_codex_review_request,
     summarize_review_policy,
 )
@@ -112,6 +114,21 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
   }) { projectV2Item { id } }
 }
 """
+RESOLVE_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
+}
+"""
+
+# Why the job did not resolve an unresolved review thread.
+THREAD_NOT_CODEX = "not-codex"
+THREAD_CURRENT_HEAD = "current-head"
+THREAD_UNKNOWN_COMMIT = "unknown-commit"
+THREAD_REASON_TEXT = {
+    THREAD_NOT_CODEX: "opened by an account other than the Codex bot",
+    THREAD_CURRENT_HEAD: "opened by Codex in a review of the current head",
+    THREAD_UNKNOWN_COMMIT: "the commit of the Codex review that opened it could not be read",
+}
 
 
 class BookkeepingError(RuntimeError):
@@ -207,6 +224,60 @@ class StoryBoard:
 
 
 @dataclass(frozen=True)
+class ReviewThreadFact:
+    """One review thread as the job needs it: who opened it, in a review of which commit, and its state."""
+
+    id: str
+    url: str | None
+    is_resolved: bool
+    is_outdated: bool
+    opener: str | None
+    opener_is_codex: bool
+    review_commit: str | None
+
+    @property
+    def blocks_gate(self) -> bool:
+        """The review-thread gate blocks on unresolved threads that are not outdated."""
+
+        return not self.is_resolved and not self.is_outdated
+
+
+@dataclass(frozen=True)
+class ResolvedThread:
+    id: str
+    url: str | None
+    review_commit: str
+    superseded_by: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "url": self.url,
+            "review_commit": self.review_commit,
+            "superseded_by": self.superseded_by,
+        }
+
+
+@dataclass(frozen=True)
+class RemainingThread:
+    id: str
+    url: str | None
+    opener: str | None
+    review_commit: str | None
+    reason: str
+    blocks_gate: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "url": self.url,
+            "opener": self.opener,
+            "review_commit": self.review_commit,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class Decision:
     pr: int
     head_sha: str
@@ -223,6 +294,13 @@ class Decision:
     summary_checks: str | None = None
     summary_blockers: str | None = None
     blocker_unblocked_when: str | None = None
+    blocker_detail: str | None = None
+    # Review threads: read only on a clean result that the approval gate and the required checks accept.
+    threads_read: bool = False
+    threads_resolved: tuple[ResolvedThread, ...] = ()
+    threads_remaining: tuple[RemainingThread, ...] = ()
+    # Superseded Codex threads that were already resolved before this run (an earlier run or a person).
+    threads_already_resolved: tuple[ResolvedThread, ...] = ()
 
     @property
     def summary_next(self) -> str | None:
@@ -252,13 +330,20 @@ class Outcome:
             "requests_posted": decision.requests_posted,
             "max_requests": decision.max_requests,
             "applied": {"state": self.applied, "comment_urls": list(self.comment_urls)},
+            "threads_resolved": [thread.to_dict() for thread in decision.threads_resolved],
+            "threads_remaining": [thread.to_dict() for thread in decision.threads_remaining],
         }
 
     def to_line(self) -> str:
         decision = self.decision
+        counts = ""
+        if decision.threads_read and decision.action == ACTION_MOVE_IN_MERGE:
+            counts = f" threads_resolved={len(decision.threads_resolved)}"
+        elif decision.threads_read and decision.action == ACTION_BLOCKER_EXTERNAL:
+            counts = f" threads_remaining={len(decision.threads_remaining)}"
         return (
             f"PR #{decision.pr}: result={decision.codex_result} action={decision.action} "
-            f"applied={self.applied} - {decision.reason}"
+            f"applied={self.applied}{counts} - {decision.reason}"
         )
 
 
@@ -272,6 +357,10 @@ class GitHubGateway(Protocol):
     def fetch_story(self, number: int) -> StoryBoard: ...
 
     def fetch_issue_comments(self, number: int) -> tuple[str, ...]: ...
+
+    def fetch_review_threads(self, context: PullRequestContext) -> tuple[ReviewThreadFact, ...]: ...
+
+    def resolve_review_thread(self, thread_id: str) -> None: ...
 
     def post_comment(self, number: int, body: str) -> str: ...
 
@@ -326,11 +415,17 @@ def decide(
     ci: CiSummary | None,
     now: datetime,
     config: BookkeepingConfig = BookkeepingConfig(),
+    threads: tuple[ReviewThreadFact, ...] | None = None,
 ) -> Decision:
     """Decide the one action for a PR from GitHub facts and the current time.
 
     Raises `BookkeepingError` when the facts are incomplete, so the job never
     acts on a partial read.
+
+    `threads` are the PR's review threads. They are read only for a clean result
+    that the approval gate and the required checks accept, so `None` there
+    yields the preliminary `move-in-merge` that `_read` completes with the
+    threads before anything is applied.
     """
 
     if context.review_evidence_error:
@@ -402,7 +497,7 @@ def decide(
                 codex_url,
                 f"Codex found no major issues, but the approval gate does not pass: {policy.blocking_reason}",
             )
-        return _clean_decision(context, ci, result, codex_url)
+        return _clean_decision(context, ci, result, codex_url, threads)
 
     if codex_result == "findings":
         return result(
@@ -512,7 +607,11 @@ def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingC
             ci = github.fetch_ci(context)
             story_comments = github.fetch_issue_comments(linked.number)
 
-    decision = decide(context, story_status=story.status if story else None, ci=ci, now=now, config=config)
+    status = story.status if story else None
+    decision = decide(context, story_status=status, ci=ci, now=now, config=config)
+    if decision.action == ACTION_MOVE_IN_MERGE and decision.codex_result == "clean":
+        threads = github.fetch_review_threads(context)
+        decision = decide(context, story_status=status, ci=ci, now=now, config=config, threads=threads)
     return _Reading(decision, context, story, story_comments)
 
 
@@ -534,6 +633,9 @@ def _apply(reading: _Reading, *, confirm: Any, github: GitHubGateway, dry_run: b
         if dry_run:
             return Outcome(decision, DRY_RUN)
         confirm()
+        # Order of mutations: resolve the threads, post the summary that lists them, move the story.
+        for thread in decision.threads_resolved:
+            github.resolve_review_thread(thread.id)
         urls: tuple[str, ...] = ()
         if not summary_present:
             summary = github.session_summary(_session_summary_arguments(decision))
@@ -568,7 +670,7 @@ def blocker_body(decision: Decision, story: StoryBoard) -> str:
         f"Unblocked when: {decision.blocker_unblocked_when}\n"
         f"Owner: {BLOCKER_OWNER}\n"
         f"State of in-progress work: PR #{decision.pr} at head {decision.head_sha}; "
-        f"the story stays in `{STATUS_IN_REVIEW}`. {decision.reason}\n"
+        f"the story stays in `{STATUS_IN_REVIEW}`. {decision.blocker_detail or decision.reason}\n"
         "Resume instruction: n/a\n"
         f"{decision.marker}\n"
     )
@@ -587,20 +689,69 @@ def _session_summary_arguments(decision: Decision) -> tuple[str, ...]:
     )  # fmt: skip
 
 
-def _clean_decision(context: PullRequestContext, ci: CiSummary | None, result: Any, codex_url: str | None) -> Decision:
+def _clean_decision(
+    context: PullRequestContext,
+    ci: CiSummary | None,
+    result: Any,
+    codex_url: str | None,
+    threads: tuple[ReviewThreadFact, ...] | None = None,
+) -> Decision:
     if ci is None:
         raise BookkeepingError("read required checks", "required check state was not read")
     status = ci.required_check_status
     names = ", ".join(ci.required_checks.names) or "none configured"
     if ci.required_checks_satisfied or status == "not_configured":
+        head_sha = context.head_ref_oid
+        checks = f"Codex review of the current head: clean ({codex_url}); required checks: {status} ({names})"
+        merge_reason = "Codex found no major issues on the current head and the required checks are green."
+        merge_marker = action_marker(ACTION_MOVE_IN_MERGE, head_sha, source=codex_url)
+        if threads is None:
+            return result(
+                ACTION_MOVE_IN_MERGE,
+                "clean",
+                codex_url,
+                merge_reason,
+                marker=merge_marker,
+                summary_checks=checks,
+                summary_blockers="none",
+            )
+        resolvable, remaining, already = classify_threads(threads, head_sha=head_sha, clean_url=codex_url)
+        blocking = [thread for thread in remaining if thread.blocks_gate]
+        if blocking:
+            count = len(blocking)
+            listing = "; ".join(f"{thread.url} ({thread.reason})" for thread in blocking)
+            detail = "; ".join(f"{thread.url} - {THREAD_REASON_TEXT[thread.reason]}" for thread in blocking)
+            return result(
+                ACTION_BLOCKER_EXTERNAL,
+                "clean",
+                codex_url,
+                f"Codex found no major issues, but {count} review thread(s) may not be resolved by the job: {listing}.",
+                marker=action_marker(ACTION_BLOCKER_EXTERNAL, head_sha, source="review-threads"),
+                blocker_unblocked_when=(
+                    f"the listed threads are resolved on GitHub, or a new head is pushed to PR #{context.number}"
+                ),
+                blocker_detail=(
+                    f"Codex found no major issues on this head, but {count} unresolved review thread(s) that the "
+                    f"job may not resolve would fail the review-thread gate of the merge. Nothing was resolved. "
+                    f"Threads: {detail}."
+                ),
+                threads_read=True,
+                threads_remaining=remaining,
+                threads_already_resolved=already,
+            )
+        resolved_note = f" {len(resolvable)} superseded Codex review thread(s) are resolved first." if resolvable else ""
         return result(
             ACTION_MOVE_IN_MERGE,
             "clean",
             codex_url,
-            "Codex found no major issues on the current head and the required checks are green.",
-            marker=action_marker(ACTION_MOVE_IN_MERGE, context.head_ref_oid, source=codex_url),
-            summary_checks=f"Codex review of the current head: clean ({codex_url}); required checks: {status} ({names})",
+            merge_reason + resolved_note,
+            marker=merge_marker,
+            summary_checks=f"{checks}; {_threads_summary(resolvable, already)}",
             summary_blockers="none",
+            threads_read=True,
+            threads_resolved=resolvable,
+            threads_remaining=remaining,
+            threads_already_resolved=already,
         )
     if status in {"pending", "missing"}:
         return result(
@@ -623,6 +774,56 @@ def _clean_decision(context: PullRequestContext, ci: CiSummary | None, result: A
         )
     detail = "; ".join(ci.messages) or status
     raise BookkeepingError("read required checks", f"required check state is `{status}`: {detail}")
+
+
+def classify_threads(
+    threads: tuple[ReviewThreadFact, ...], *, head_sha: str, clean_url: str | None
+) -> tuple[tuple[ResolvedThread, ...], tuple[RemainingThread, ...], tuple[ResolvedThread, ...]]:
+    """Split the review threads into those to resolve, those that remain and those already resolved.
+
+    Only an unresolved thread opened by the Codex bot in a review of a known
+    commit other than the current head is resolvable. A reply never changes who
+    opened a thread, and a thread whose opener or review commit is unknown stays.
+    """
+
+    head = head_sha.lower()
+    resolvable: list[ResolvedThread] = []
+    remaining: list[RemainingThread] = []
+    already: list[ResolvedThread] = []
+    for thread in threads:
+        commit = (thread.review_commit or "").lower() or None
+        superseded = thread.opener_is_codex and commit is not None and commit != head
+        if thread.is_resolved:
+            if superseded:
+                already.append(ResolvedThread(thread.id, thread.url, commit, clean_url))
+            continue
+        if superseded:
+            resolvable.append(ResolvedThread(thread.id, thread.url, commit, clean_url))
+            continue
+        if not thread.opener_is_codex:
+            reason = THREAD_NOT_CODEX
+        elif commit is None:
+            reason = THREAD_UNKNOWN_COMMIT
+        else:
+            reason = THREAD_CURRENT_HEAD
+        remaining.append(RemainingThread(thread.id, thread.url, thread.opener, commit, reason, thread.blocks_gate))
+    return tuple(resolvable), tuple(remaining), tuple(already)
+
+
+def _threads_summary(resolved: tuple[ResolvedThread, ...], already: tuple[ResolvedThread, ...]) -> str:
+    if resolved:
+        items = ", ".join(
+            f"{thread.url} (opened in the Codex review of {thread.review_commit}, "
+            f"superseded by the clean Codex result {thread.superseded_by})"
+            for thread in resolved
+        )
+        text = f"Codex threads resolved by the job: {items}"
+    else:
+        text = "no Codex threads resolved"
+    if already:
+        items = ", ".join(f"{thread.url} (review of {thread.review_commit})" for thread in already)
+        text += f"; superseded Codex threads already resolved before this run: {items}"
+    return text
 
 
 def _current_head_events(context: PullRequestContext) -> tuple[TimelineEvent, ...]:
@@ -748,6 +949,40 @@ class GhCliGateway:
             except (json.JSONDecodeError, AttributeError):
                 raise BookkeepingError(step, "GitHub returned a comment that could not be parsed") from None
         return tuple(bodies)
+
+    def fetch_review_threads(self, context: PullRequestContext) -> tuple[ReviewThreadFact, ...]:
+        step = "read review threads"
+        try:
+            raw = fetch_review_threads_for_context(context, repo=self.repo)
+        except GHCommandError as error:
+            raise _gh_failure(step, str(error), str(error)) from error
+        facts: list[ReviewThreadFact] = []
+        for summary in summarize_review_threads(context, raw).threads:
+            if not summary.id:
+                raise BookkeepingError(step, "GitHub returned a review thread without an id")
+            opening = summary.comments[0] if summary.comments else None
+            facts.append(
+                ReviewThreadFact(
+                    id=summary.id,
+                    url=opening.url if opening else None,
+                    is_resolved=summary.is_resolved,
+                    is_outdated=summary.is_outdated,
+                    opener=opening.author if opening else None,
+                    opener_is_codex=opening is not None and is_codex_actor(opening.author, opening.author_type),
+                    review_commit=opening.review_commit_oid if opening else None,
+                )
+            )
+        return tuple(facts)
+
+    def resolve_review_thread(self, thread_id: str) -> None:
+        step = "resolve review thread"
+        payload = self._json(
+            step,
+            ["api", "graphql", "-f", f"query={RESOLVE_THREAD_MUTATION}", "-f", f"threadId={thread_id}"],
+        )
+        thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get("thread") or {}
+        if payload.get("errors") or thread.get("id") != thread_id or thread.get("isResolved") is not True:
+            raise BookkeepingError(step, f"GitHub did not confirm that review thread {thread_id} is resolved")
 
     def post_comment(self, number: int, body: str) -> str:
         step = f"post comment on #{number}"

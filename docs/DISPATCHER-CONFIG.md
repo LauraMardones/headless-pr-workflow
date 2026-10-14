@@ -109,12 +109,14 @@ This table is the only list of the token's scopes. Other documents and comments 
 
 | Scope | Reason |
 |---|---|
-| `repo` | Read and write access to repository contents, issues and pull requests: every `gh` read, comment, PR update and merge. |
+| `repo` | Read and write access to repository contents, issues and pull requests: every `gh` read, comment, PR update and merge, and the `resolveReviewThread` mutation with which the Codex review bookkeeping job resolves superseded Codex review threads. |
 | `project` | Read and write access to the Projects v2 board. The full scope is needed because story status is written with `updateProjectV2ItemFieldValue`; read-only project access cannot move a board item. |
 | `workflow` | GitHub refuses a merge or push from a classic PAT without this scope when the change touches a file under `.github/workflows/`. Dispatcher-started sessions run `gh` with this token. |
 | `read:org` | Needed by the PR read of every `hpw` command (`fetch_pr_context()` in `src/headless_pr_workflow/github/pr_context.py`), including `hpw codex-review-bookkeeping` and `scripts/merge-gate-summary`. The read asks `gh pr view --json` for `reviewRequests`, and for that field `gh` requests a team's `name` and `slug` and its organisation's `login`. GitHub checks the token for this scope even when the PR has no team review request and the repository belongs to a user account. |
 
 Both workflows map the secret to the `GH_TOKEN` environment variable (`GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}`), which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+
+The Codex review bookkeeping job resolves review threads with this token (`resolveReviewThread`, see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop)). GitHub's GraphQL reference for the mutation names the classic `repo` scope (`public_repo` for a public repository), which the table already lists, so no scope is added. This was confirmed from that reference, not by a live call: the first run with a thread to resolve is the live confirmation, and a refused call exits non-zero naming the missing scope.
 
 **If the secret is absent**, the `gh` CLI fails to authenticate, the workflow exits with an error on the first API call and no story is dispatched.
 
@@ -347,7 +349,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 ### Known limits
 
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
-- The bookkeeping job can move a story to `In merge` while Codex review threads on the same head are still unresolved. `/merge` then fails on the unresolved-thread gate, and the one-attempt rule leaves the story in `In merge` with a blocker until the PO acts.
+- The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 

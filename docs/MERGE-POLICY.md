@@ -99,6 +99,8 @@ Path 1 fails closed, with the stated `codex_review.status`, when:
 
 Unresolved Codex finding threads keep blocking through the review-thread gate, independently of this path.
 
+For a Claude-implemented story, the `codex-review-bookkeeping` job resolves a Codex-opened finding thread from an older head when Codex's clean result on the current head is accepted by the approval gate and the required checks are green, and lists the thread in its Session Summary. This is a resolution on the reviewer's own later evidence, not a waiver: the merge gate is unchanged and an unresolved thread still blocks. The job never resolves a thread opened by anyone other than the Codex bot, a Codex thread from a review of the current head, or a thread whose review commit it cannot read. When such a thread remains, the job does not move the story to `In merge`; it posts a `Type: external` blocker naming the threads (see [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop)).
+
 ### Path 2: Separate-Session Review
 
 A separate-session review counts only when all conditions are true:
@@ -140,7 +142,7 @@ Review-evidence tooling may inspect normalized review data from GraphQL surfaces
 
 A formal GitHub approval on the current head SHA satisfies the gate. A formal approval recorded on an earlier head is stale and does not count. Path 3 does not depend on the PR timeline or linked stories.
 
-No path waives any other merge condition: required checks, unresolved review threads, draft state, mergeability and the fresh refresh before merge apply unchanged.
+No path waives any other merge condition: required checks, unresolved review threads, draft state, mergeability and the fresh refresh before merge apply unchanged. The only resolution of a review thread by automation is the one described under Path 1: a superseded Codex thread, on Codex's own later clean result.
 
 ## SHA-Bound Approval
 
