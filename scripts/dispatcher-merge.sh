@@ -111,7 +111,7 @@ if [[ -z "$gate_head" || "${head_sha:0:7}" != "${gate_head,,}" ]]; then
 fi
 
 # The merge. hpw merge-pr re-reads readiness and merges only the verified head.
-merge_json=$("$HPW_BIN" merge-pr "$PR" --repo "$REPO" --method "$METHOD" --execute --json 2>/dev/null)
+merge_json=$("$HPW_BIN" merge-pr "$PR" --repo "$REPO" --method "$METHOD" --execute --expect-head "$head_sha" --json 2>/dev/null)
 merge_rc=$?
 if [[ $merge_rc -ne 0 ]] || [[ "$(jq -r '.merged // false' <<< "$merge_json" 2>/dev/null)" != "true" ]]; then
     reasons=$(jq -r '(.blocking_reasons // []) | join("; ")' <<< "$merge_json" 2>/dev/null)

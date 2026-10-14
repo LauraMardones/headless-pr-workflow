@@ -135,6 +135,13 @@ def test_branch_cleanup_report_with_ok_false_is_a_failure(h):
     assert "git branch -d claude/issue-12-x" in proc.stdout  # the safe command is still reported
 
 
+def test_post_merge_sync_error_report_is_a_failure(h):
+    h.set("hpw_post-merge-sync.json", json.dumps({"ok": False, "error": "gh-command-failed", "message": "boom"}))
+    h.set("hpw_post-merge-sync.rc", "1")
+    proc = run(h)
+    assert proc.returncode == 1 and "post-merge-sync produced no report: gh-command-failed" in proc.stdout
+
+
 def test_helper_without_a_report_is_a_failure(h):
     h.set("hpw_branch-cleanup.json", "not json")
     h.set("hpw_branch-cleanup.rc", "2")

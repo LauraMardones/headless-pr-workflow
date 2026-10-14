@@ -60,8 +60,9 @@ did=()
 
 # Steps 2-6: the local base branch (stale copy of the PR, fast-forward, verify).
 sync_json=$("$HPW_BIN" post-merge-sync "$PR" --repo "$REPO" --execute --json 2>/dev/null)
-if ! jq -e . >/dev/null 2>&1 <<< "$sync_json"; then
-    failed+=("post-merge-sync produced no report")
+if ! jq -e '(.classification // null) != null and (has("error") | not)' >/dev/null 2>&1 <<< "$sync_json"; then
+    # No JSON, or an error report such as {"ok":false,"error":"gh-command-failed"}.
+    failed+=("post-merge-sync produced no report: $(jq -r '.error // empty' <<< "$sync_json" 2>/dev/null)")
 else
     classification=$(jq -r '.classification' <<< "$sync_json")
     failed_step=$(jq -r '.execution.failed_step // empty' <<< "$sync_json")

@@ -71,10 +71,20 @@ def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_p
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "Ready for implementation", executor="codex")
     d.add_pr(PR, STORY)
+    d.on_session("implement", """jq 'map(.head.sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+""")
     proc = d.run_issue(STORY, seq="0,0,1,1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     owner = [b for b in d.posted(PR) if "action=merge-owner" in b]
     assert len(owner) == 1 and re.fullmatch(rf"<!-- hpw:dispatcher action=merge-owner pr={PR} head=\S+ -->", owner[0])
+
+
+def test_no_owner_marker_when_implement_pushed_no_new_head(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_pr(PR, STORY)  # the PR already has its head; the fake session pushes nothing
+    d.run_issue(STORY, seq="0,0,1,1")
+    assert [b for b in d.posted(PR) if "action=merge-owner" in b] == []
 
 
 def test_merge_script_failure_posts_the_marker_blocker_and_keeps_in_merge(tmp_path):

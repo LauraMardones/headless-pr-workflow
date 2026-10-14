@@ -1810,12 +1810,16 @@ merge_owner_marker() {
 }
 
 record_merge_owner() {
-    local issue_num="$1" pr_json pr_number head_sha
+    local issue_num="$1" head_before="${2:-}" pr_json pr_number head_sha
     pr_json=$(find_linked_pr_json "$issue_num" 2>/dev/null) || pr_json=""
     pr_number=$(jq -r '.number // empty' <<< "$pr_json" 2>/dev/null)
     head_sha=$(jq -r '.head.sha // empty' <<< "$pr_json" 2>/dev/null)
     if [[ -z "$pr_number" || -z "$head_sha" ]]; then
         echo "Warning: no linked PR head for #$issue_num; merge ownership not recorded (the merge will block)." >&2
+        return 0
+    fi
+    if [[ -n "$head_before" && "$head_sha" == "$head_before" ]]; then
+        echo "Note: /implement pushed no new head on PR #$pr_number; merge ownership not recorded for $head_sha." >&2
         return 0
     fi
     post_comment "$pr_number" "$(merge_owner_marker "$pr_number" "$head_sha")" \
@@ -2192,7 +2196,7 @@ resume_fix_round() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
-    record_merge_owner "$issue_num"
+    record_merge_owner "$issue_num" "$pr_head"
     increment_implement_budget
     hand_off_to_codex_review_loop "$pr_head"
 }
@@ -2730,7 +2734,7 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
-record_merge_owner "$ISSUE_NUMBER"
+record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT"
 
 # Budget increment after successful /implement (issue #203)
 increment_implement_budget

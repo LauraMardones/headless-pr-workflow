@@ -87,7 +87,7 @@ def test_graphql_preflight_failure_makes_no_mutation(h):
 def test_gate_exit_0_merges_and_comments(h):
     proc = run(h)
     assert proc.returncode == 0, proc.stderr
-    assert merge_calls(h) == [f"hpw merge-pr {PR} --repo {REPO} --method squash --execute --json"]
+    assert merge_calls(h) == [f"hpw merge-pr {PR} --repo {REPO} --method squash --execute --expect-head {HEAD} --json"]
     assert h.posts == [f"POST repos/{REPO}/issues/{PR}/comments"]
     body = h.body(f"repos/{REPO}/issues/{PR}/comments")
     assert body.startswith(GATE + "\n\n## Session Summary\n")  # exact line, outside the generated block
