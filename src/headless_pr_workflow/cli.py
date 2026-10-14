@@ -99,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Merge method to use for dry-run or live execution.",
             )
             command_parser.add_argument(
+                "--expect-head",
+                help="Refuse (exit 1, no merge) unless the freshly read PR head SHA equals this SHA.",
+            )
+            command_parser.add_argument(
                 "--execute",
                 action="store_true",
                 help=(
@@ -582,11 +586,21 @@ def _print_merge_owner(target: str | None, *, repo: str | None, args: argparse.N
     return 0 if summary.hard_gate_passed else 1
 
 
-def _print_merge_pr(target: str | None, *, repo: str | None, method: str, execute: bool, as_json: bool) -> int:
+def _print_merge_pr(
+    target: str | None, *, repo: str | None, method: str, execute: bool, as_json: bool, expect_head: str | None = None
+) -> int:
     try:
         pre_merge = _fetch_pre_merge_summary(target, repo=repo)
     except GHCommandError as error:
         return _print_gh_error(error, as_json=as_json)
+
+    if expect_head and pre_merge.head_ref_oid != expect_head:
+        reason = f"PR head {pre_merge.head_ref_oid} is not the expected head {expect_head}; nothing was merged."
+        if as_json:
+            print(json.dumps({"command": "merge-pr", "ok": False, "merged": False, "head_sha": pre_merge.head_ref_oid, "blocking_reasons": [reason]}, indent=2))
+        else:
+            print(reason)
+        return 1
 
     mode = "execute" if execute else "dry_run"
     summary = summarize_merge_pr(pre_merge, method=method, mode=mode)
@@ -1329,7 +1343,10 @@ def main(argv: list[str] | None = None) -> int:
         return _print_merge_owner(args.target, repo=args.repo, args=args)
 
     if args.command == "merge-pr":
-        return _print_merge_pr(args.target, repo=args.repo, method=args.method, execute=args.execute, as_json=args.json)
+        return _print_merge_pr(
+            args.target, repo=args.repo, method=args.method, execute=args.execute, as_json=args.json,
+            expect_head=args.expect_head,
+        )
 
     if args.command == "unresolved-review-threads":
         return _print_unresolved_review_threads(args.target, repo=args.repo, as_json=args.json)

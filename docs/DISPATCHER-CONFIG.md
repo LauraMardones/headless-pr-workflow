@@ -69,7 +69,7 @@ Both secrets must also be explicitly wired into `.github/workflows/dispatcher.ym
 | `claude-code` | `claude-code-haiku`, `-sonnet`, `-opus` | Claude Code on the runner, on the subscription (ADR-012, issue #314) |
 | `openai` | `codex` | Bounded tool-use loop against the OpenAI Chat Completions API with a single `bash` tool (issue #254), until #315 |
 
-This covers every Claude session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass), `/review` of a Codex-implemented story (under `claude-code-opus`), and `/merge` and `/cleanup` of a Claude-tier story (also from the resume pass at `In merge`).
+This covers every model session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass) and `/review` of a Codex-implemented story (under `claude-code-opus`). `/merge` and `/cleanup` are **script-only phases** (issue #264): the dispatcher runs `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh` and starts no session for them, in the Claude-tier cycle, the paired `executor:codex` run and the resume pass at `In merge`. They have no executor tier, no allowance check, no executor budget, and no wall-clock session bound. ADR-012's session-start mechanism does not cover them. The step-by-step map to `merge.md` and `cleanup.md` is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md).
 
 #### Claude Code sessions
 
@@ -142,7 +142,7 @@ Session tuning is overridable via environment variables (defaults shown), primar
 | `AGENT_MAX_TOKENS` | `16384` | `max_tokens` requested per API turn (OpenAI loop only, until #315) |
 | `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run (OpenAI loop only, until #315) |
 | `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take (OpenAI loop only, until #315) |
-| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review`/`/merge`/`/cleanup` and any chained stories via `DISPATCH_JOB_START_TS`, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
+| `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review` sessions and any chained stories via `DISPATCH_JOB_START_TS`; the script-only `/merge` and `/cleanup` start no session and are not bounded by it, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
 | `CLAUDE_BIN` | `claude` | The Claude Code binary, for the sessions and the allowance probe (test hook) |
 
 ---
@@ -353,7 +353,7 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 
 ### Resume at `In merge`
 
-A story in `In merge` is taken up at `/merge`, whatever its executor. The board status is not trusted on its own: the merge gates inside `/merge` decide whether the PR merges.
+A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` and `/cleanup` here are the script-only phases (issue #264): no session starts and no allowance is checked. The board status is not trusted on its own: the merge gates inside `scripts/dispatcher-merge.sh` decide whether the PR merges.
 
 | Facts | What the dispatcher does |
 |---|---|
@@ -361,7 +361,7 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. The board 
 | No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
 | Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
 
-**One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs start no session for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
+**One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs do not run the merge script for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
 
 ### Fix round
 
@@ -421,7 +421,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 ### Known limits
 
-- A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself, as it did before this change.
+- A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself; `scripts/dispatcher-merge.sh` exits 0 only after `hpw merge-pr` confirmed the merge (or GitHub already reported it merged).
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
@@ -453,7 +453,7 @@ No manual reset, cron job, or scheduled cleanup is required.
 
 ## Subscription allowance and reserve
 
-Before every model session start (`/implement`, `/review`, `/merge` and `/cleanup`), the dispatcher runs `scripts/dispatcher-allowance.sh` (issue #317, ADR-012). The script reads how much of the PO's five-hour and weekly Claude subscription allowance is left. A session starts only when **both** windows are at or above the reserve the PO has set. When the allowance cannot be read, nothing starts.
+Before every model session start (`/implement` and `/review`), the dispatcher runs `scripts/dispatcher-allowance.sh` (issue #317, ADR-012). The script reads how much of the PO's five-hour and weekly Claude subscription allowance is left. A session starts only when **both** windows are at or above the reserve the PO has set. When the allowance cannot be read, nothing starts.
 
 ### Reserve variables
 
@@ -508,12 +508,12 @@ The pin keeps the undocumented event shape stable. Every Claude session runs on 
 | Exit | Decision | Log line (stderr of the script) | Dispatcher behavior |
 |---|---|---|---|
 | `0` | `start` | `[RESERVE] five-hour 79% left (reserve 10%), weekly 71% left (reserve 20%) — start` | The session starts. |
-| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`, `/merge` or `/cleanup`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. The comment is not posted again while it is already the story's newest comment for that step. |
+| `1` | `refuse` | `[RESERVE SKIP] weekly 15% left, below reserve 20%; resets 2026-10-14T08:00Z` or `[RESERVE HOLD] below reserve until 2026-10-14T08:00Z; not probing` | Before `/implement`: no session, no comment, the story goes back to "Ready for implementation" for a later poll, and the run exits 0. Before `/review`: no session, one comment on the story that names the step, the window, the share left, the reserve and the reset time, and the run exits 0. The comment is not posted again while it is already the story's newest comment for that step. |
 | `2` | `error` | `[ALLOWANCE ERROR] <reason> — starting nothing` | No session. The job fails, without a `dispatcher_error` Slack message. After `/implement`, the story gets the same comment with the reason. |
 
 A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
 
-A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is tried again by the resume entry on a later run (issue #293). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` and `/cleanup` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is not affected: its `/merge` is a script and never checks the allowance (issues #293, #264). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. `/merge` and `/cleanup` are script-only and are never refused or held by the allowance (issue #264). Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
 
 The script prints exactly one JSON object on stdout in every exit path:
 

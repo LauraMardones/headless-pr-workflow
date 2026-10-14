@@ -5,8 +5,8 @@ Drives the real ``scripts/dispatcher-invoke.sh`` end to end with the fakes in
 (executor API and Slack webhook) and a stub allowance script on
 ``ALLOWANCE_SCRIPT`` whose exit codes follow a sequence, one per session start.
 
-A Codex-implemented story runs four sessions in one run (/implement, /review,
-/merge, /cleanup). A Claude-implemented story runs one, then is handed to the
+A Codex-implemented story runs two sessions in one run (/implement, /review),
+then the script-only /merge and /cleanup (issue #264), which check no allowance. A Claude-implemented story runs one, then is handed to the
 Codex review loop (issue #293); tests/test_dispatcher_review_loop.py covers
 the allowance check at its resume entries.
 """
@@ -35,8 +35,9 @@ def d(tmp_path):
 def test_start_runs_every_session(d):
     proc = d.run_issue(ISSUE, seq="0,0,0,0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.allowance_calls == 4  # /implement, /review, /merge, /cleanup
-    assert len(d.sessions) == 4
+    assert d.allowance_calls == 2  # /implement and /review; /merge and /cleanup start no session (#264)
+    assert len(d.sessions) == 2
+    assert d.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
     assert d.posted(ISSUE) == []
     assert f"Story #{ISSUE} completed (Done)." in proc.stdout
 
@@ -77,13 +78,13 @@ def test_refuse_before_review_comments_once(d):
     assert d.slack_calls == []
 
 
-@pytest.mark.parametrize("seq,step", [("0,0,1", "merge"), ("0,0,0,1", "cleanup")])
-def test_refuse_before_merge_or_cleanup_comments_once(d, seq, step):
-    proc = d.run_issue(ISSUE, seq=seq)
+def test_merge_and_cleanup_never_consult_the_allowance(d):
+    proc = d.run_issue(ISSUE, seq="0,0,1,1")  # a refusal after /review would block a session
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    comments = d.posted(ISSUE)
-    assert len(comments) == 1
-    assert f"/{step} was not started" in comments[0]
+    assert d.allowance_calls == 2
+    assert d.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
+    assert d.posted(ISSUE) == []
+    assert d.status(ISSUE) == "Done"
 
 
 def test_error_before_implement_fails_without_slack(d):
