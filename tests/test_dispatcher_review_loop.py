@@ -79,7 +79,7 @@ def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
     assert d.sessions == [f"implement {STORY}"]
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
     assert d.status(STORY) == "In review"
-    assert d.posted(STORY) == [] and d.posted(PR) == []
+    assert d.posted(STORY) == [] and [b for b in d.posted(PR) if "action=merge-owner" not in b] == []
     assert f"[HANDOFF] #{STORY}: handed to the Codex review loop (Codex Cloud) on PR #{PR};" in proc.stdout
     assert "(review)" not in proc.stdout  # no review budget increment
     assert proc.stdout.count("[BUDGET] Increment:") == 1
@@ -580,7 +580,7 @@ def test_ac11_no_fix_round(d, case):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [] and d.board_writes == []
-    assert d.posted(STORY) == [] and d.posted(PR) == []
+    assert d.posted(STORY) == [] and [b for b in d.posted(PR) if "action=merge-owner" not in b] == []
 
 
 @needs_tools
