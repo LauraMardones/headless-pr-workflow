@@ -78,9 +78,11 @@ def load_errors(path: str | None) -> tuple[bool, list[dict[str, Any]]]:
         return False, []
 
 
-def fetch_history(repo: str, branch: str, env: Mapping[str, str]) -> list[dict[str, Any]]:
+def fetch_history(repo: str, env: Mapping[str, str]) -> list[dict[str, Any]]:
+    # No --branch filter: pull_request_review runs are recorded under the PR's
+    # ref, not the default branch, and they belong to the streak too.
     result = subprocess.run(
-        ["gh", "run", "list", "--repo", repo, "--workflow", WORKFLOW_FILE, "--branch", branch,
+        ["gh", "run", "list", "--repo", repo, "--workflow", WORKFLOW_FILE,
          "--limit", str(HISTORY_LIMIT), "--json", "conclusion,createdAt"],
         capture_output=True, text=True, check=False, env=dict(env),
     )
@@ -93,7 +95,7 @@ def notify(
     env: Mapping[str, str],
     *,
     now: datetime | None = None,
-    history_reader: Callable[[str, str, Mapping[str, str]], list[dict[str, Any]]] = fetch_history,
+    history_reader: Callable[[str, Mapping[str, str]], list[dict[str, Any]]] = fetch_history,
 ) -> int:
     """Send the message when the repeat rule says so. Never fails the run."""
 
@@ -102,7 +104,7 @@ def notify(
     if dry_run:
         return 0
     try:
-        send = should_notify(history_reader(env.get("REPOSITORY", ""), env.get("DEFAULT_BRANCH", "main"), env), now)
+        send = should_notify(history_reader(env.get("REPOSITORY", ""), env), now)
     except (RuntimeError, ValueError, OSError):
         send = True
         print("::warning::The run history could not be read, so the once-a-day rule was not applied.")

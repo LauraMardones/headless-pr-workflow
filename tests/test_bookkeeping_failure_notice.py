@@ -134,3 +134,15 @@ def test_missing_slack_script_warns(tmp_path, capsys):
     env = env_for(tmp_path, tmp_path / "absent.sh", ERR)
     assert notice.notify(env, now=NOW, history_reader=lambda *a: []) == 0
     assert "The PO was not notified" in capsys.readouterr().out
+
+
+def test_history_covers_runs_of_every_ref(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "[]"})()
+
+    monkeypatch.setattr(notice.subprocess, "run", fake_run)
+    notice.fetch_history("o/r", {})
+    assert "--branch" not in seen["cmd"]

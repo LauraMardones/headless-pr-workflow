@@ -89,11 +89,18 @@ jobs:
             echo "::notice::The default branch has no codex-review-bookkeeping command yet; nothing to do."
             exit 0
           fi
+          # A pull_request_review run uses this branch's workflow file but the
+          # default branch's hpw. Pass --errors-file only when that hpw has it.
+          if sh scripts/hpw codex-review-bookkeeping --help 2>&1 | grep -q -e '--errors-file'; then
+            set -- --errors-file "$ERRORS_FILE"
+          else
+            set --
+          fi
           status=0
           if [ -n "$PR_NUMBER" ]; then
-            sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" --errors-file "$ERRORS_FILE" || status=$?
+            sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" "$@" || status=$?
           else
-            sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" --errors-file "$ERRORS_FILE" || status=$?
+            sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" "$@" || status=$?
           fi
           # Exit 3: a PR changed during the run, nothing was done, the next run decides again.
           if [ "$status" -eq 3 ]; then
@@ -109,7 +116,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           REPOSITORY: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           ERRORS_FILE: ${{ runner.temp }}/bookkeeping-errors.json
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

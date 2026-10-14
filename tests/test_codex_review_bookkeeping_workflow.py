@@ -116,6 +116,17 @@ def test_exit_code_3_is_a_warning_and_a_green_run():
     assert 'exit "$status"' in script
 
 
+def test_errors_file_is_passed_only_when_the_default_branch_hpw_has_it():
+    script = _step("Run Codex review bookkeeping")
+
+    probe = script.index("--help")
+    assert "grep -q -e '--errors-file'" in script
+    assert script.index("set -- --errors-file") > probe
+    assert script.index("set --\n") > probe
+    # Never hard-wired onto the command lines, which main's hpw may not accept.
+    assert not re.search(r"hpw codex-review-bookkeeping [^\n]*--repo[^\n]*--errors-file", script)
+
+
 def test_project_token_is_the_only_secret_and_no_model_is_referenced():
     text = _workflow()
 
@@ -136,8 +147,8 @@ def test_event_payload_reaches_the_script_only_through_the_environment():
     assert "${{" not in script
     assert len(re.findall(r"^\s+run:", code, re.MULTILINE)) == 2  # the command step and the notify step
     assert "PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number }}" in code
-    assert 'sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" --errors-file "$ERRORS_FILE"' in script
-    assert 'sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" --errors-file "$ERRORS_FILE"' in script
+    assert 'sh scripts/hpw codex-review-bookkeeping "$PR_NUMBER" --repo "$REPOSITORY" "$@"' in script
+    assert 'sh scripts/hpw codex-review-bookkeeping --all --repo "$REPOSITORY" "$@"' in script
     # A failing command must fail the run: no `|| true`, no `continue-on-error`.
     assert "|| true" not in code and "continue-on-error" not in code
 
