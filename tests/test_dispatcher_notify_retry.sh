@@ -195,6 +195,17 @@ test_bad_state_warns_and_continues() {
     check "missing state: exit 0, no warning" $(( rc + $(grep -c Warning "$T/stderr") ))
 }
 
+test_malformed_line_keeps_pending_record() {
+    setup
+    reg_decision 7 2026-10-14T10:00:00Z
+    printf '{"key":"trunc\n' >> "$(STATE)"
+    retry run --repo o/r; rc=$?
+    check "pending record next to a malformed line: exit 0" $(( rc ))
+    check "pending record next to a malformed line: still delivered" $(( $(slack_count) == 1 ? 0 : 1 ))
+    check "pending record next to a malformed line: warns" $(grep -q 'Warning' "$T/stderr"; echo $?)
+    check "pending record next to a malformed line: recorded delivered" $(( $(jq -s '[.[]|select(.delivered)]|length' "$(STATE)") == 1 ? 0 : 1 ))
+}
+
 test_dry_run_sends_nothing() {
     setup
     reg_decision 7 2026-10-14T10:00:00Z
@@ -217,6 +228,7 @@ test_closed_issue_stops_retry
 test_new_blocker_after_resolved_one_notifies_once
 test_persistent_failure_is_red_and_comments_once
 test_bad_state_warns_and_continues
+test_malformed_line_keeps_pending_record
 test_dry_run_sends_nothing
 
 echo ""
