@@ -110,8 +110,9 @@ def seed(d, count, day=None):
 def test_ac2_every_session_kind_counts_once(d):
     proc = d.run_issue(ISSUE, seq="0,0,0,0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert len(d.sessions) == 4
-    assert d.usage_count == 4
+    # /merge and /cleanup are scripts since #264: they start no model session and count nothing.
+    assert d.sessions == [f"implement {ISSUE}", f"review {PR}"]
+    assert d.usage_count == 2
 
 
 def fix_round_due(d):
@@ -215,7 +216,8 @@ def test_ac11_leading_zero_allows_eight(d):
     assert "[USAGE LIMIT SKIP]" in proc.stdout  # the second session sees 8 of 8
 
 
-@pytest.mark.parametrize("count,step_name", [(1, "review"), (2, "merge"), (3, "cleanup")])
+# /merge and /cleanup are scripts since #264: no model session, so the limit never stops them.
+@pytest.mark.parametrize("count,step_name", [(1, "review")])
 def test_ac12_stop_before_later_steps_comments_once_and_ends_the_run(d, count, step_name):
     limit = str(count)
     proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": limit})
@@ -325,17 +327,6 @@ def test_a_counter_that_cannot_be_written_starts_nothing(d):
     proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_STATE_DIR": "/dev/null/usage"})
     assert d.sessions == []
     assert "[USAGE LIMIT ERROR] could not record the session start" in proc.stderr
-
-
-def test_a_limit_stop_before_cleanup_still_notifies_the_closure(tmp_path):
-    d = Dispatcher(tmp_path)
-    d.add_story(ISSUE, "Ready for implementation", executor="codex",
-                body="Feature group: #50 Feature: something")
-    d.add_pr(PR, ISSUE)
-    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": "3"})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"implement {ISSUE}", f"review {PR}", f"merge {PR}"]
-    assert "Feature #50: all 1 stories Done." in proc.stdout
 
 
 def test_cache_keys_differ_per_attempt_and_the_save_uses_the_day_it_ends_on():

@@ -357,7 +357,7 @@ def test_ac4_codex_story_keeps_the_paired_review_session(d):
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
                               f"{STORY}=In merge", f"{STORY}=Done"]
     assert "Review executor: Claude Opus" in proc.stdout
-    assert d.usage_count == 4
+    assert d.usage_count == 2  # the two model sessions; /merge and /cleanup are scripts (#264)
 
 
 def test_ac5_review_path_tables():

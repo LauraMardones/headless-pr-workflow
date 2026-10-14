@@ -58,7 +58,7 @@ def test_post_session_steps_run_when_the_session_rewrites_the_script(d):
     assert (d.mock / "rewritten").exists()  # the session did rewrite the running script
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "No such file" not in proc.stderr and "command not found" not in proc.stderr
-    assert proc.stdout.count("[BUDGET] Increment:") == 1
+    assert d.usage_count == 1
     assert f"[HANDOFF] #{STORY}: handed to the Codex review loop" in proc.stdout
 
 
@@ -74,6 +74,6 @@ def test_tail_call_starts_the_rewritten_script(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}", f"implement {NEXT_STORY}"]
-    assert proc.stdout.count("[BUDGET] Increment:") == 2
+    assert d.usage_count == 2
     # The first process ran the original code; only the process the tail call started ran the marker.
     assert (d.mock / "versions.log").read_text().splitlines() == ["started"]

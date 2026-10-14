@@ -1365,8 +1365,6 @@ check_usage_limit() {
         if bash "$USAGE_LIMIT_SCRIPT" notify-due && [[ -n "${GITHUB_OUTPUT:-}" ]]; then
             echo "usage_limit_reached=true" >> "$GITHUB_OUTPUT"
         fi
-        # The story is already Done; the closure notification is not a session.
-        [[ "$step" == "cleanup" ]] && { notify_closure_if_complete "$ISSUE_NUMBER" || true; }
         DISPATCH_HANDLED=true
         exit 0
     fi
@@ -1378,8 +1376,6 @@ check_usage_limit() {
     else
         post_usage_limit_comment "$step" "" ""
     fi
-    # The story is already Done; the closure notification is not a session.
-    [[ "$step" == "cleanup" ]] && { notify_closure_if_complete "$ISSUE_NUMBER" || true; }
     DISPATCH_HANDLED=true
     exit 1
 }
