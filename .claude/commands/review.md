@@ -31,7 +31,7 @@ Important:
 Workflow status goals:
 - If blockers are found: "In review" -> "In implementation"
 - If no blockers remain for the current head SHA: "In review" -> "In merge"
-- Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In merge"`).
+- Write a board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` (exit `0` only after it read the status back; non-zero with the reason on stderr otherwise). Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In merge"`).
 
 Required behavior:
 1. Refresh PR state from GitHub before reviewing.

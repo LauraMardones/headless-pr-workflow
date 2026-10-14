@@ -168,6 +168,27 @@ Both workflows map the secret to the `GH_TOKEN` environment variable (`GH_TOKEN:
 
 The Codex review bookkeeping job resolves review threads with this token (`resolveReviewThread`, see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop)). GitHub's GraphQL reference for the mutation names the classic `repo` scope (`public_repo` for a public repository), which the table already lists, so no scope is added. This was confirmed from that reference, not by a live call: the first run with a thread to resolve is the live confirmation, and a refused call exits non-zero naming the missing scope.
 
+### Token of each step in a dispatcher-started session
+
+The token of a dispatcher-started session is `PROJECT_TOKEN`: the workflow sets `GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}` and `scripts/lib/claude-session.sh` removes only the variables whose names start with `ANTHROPIC_`, so the session keeps it (pinned by `tests/test_set_project_status.py`). The four steps that need `gh` with GraphQL all use it (issue #318):
+
+| Step | Token | Scope that matters | Evidence |
+|---|---|---|---|
+| Board status write (`scripts/set-project-status`) | `PROJECT_TOKEN` | `project` | Pending: live proof run of #318 |
+| `scripts/ac-summary.sh` | `PROJECT_TOKEN` | `repo` | Pending: live proof run of #318 |
+| Review-thread resolution (`resolveReviewThread`) | `PROJECT_TOKEN` | `repo` | Bookkeeping job (Actions); session proof pending |
+| `scripts/merge-gate-summary` | `PROJECT_TOKEN` | `repo`, `read:org`, and **admin access** to read branch protection | Pending: live proof run of #318 |
+
+The merge gate reads `repos/<repo>/branches/main/protection`, which GitHub allows only with admin access to the repository. A token without it makes the gate report `checks=fail(required-unavailable)` and `/merge` stops. The built-in `GITHUB_TOKEN` of a job does not have it. If the proof run shows that `PROJECT_TOKEN` cannot read it, the PO picks the token that can (for example a fine-grained token with "Administration: read"); the gate is not weakened.
+
+**Writing a story's board status.** A session writes a status with one command, not with hand-written GraphQL:
+
+```
+scripts/set-project-status --issue <n> --status "<Status name>" --repo <owner/repo> [--dry-run]
+```
+
+It prints `Status: #<n> <old> -> <new>` (or `already <new>`) and exits `0` only after it has read the status back from the board. It exits `1`, with one line on stderr naming the failed step, when there is no token, GraphQL refuses the call (the line names the missing scope and points to this section), the issue is not on the board, the status is not an option, or the read-back disagrees; `2` for invalid arguments. The commands keep the best-effort rule: a non-zero exit is recorded in the Session Summary with `--deviation`. The trial of ADR-012 skipped a write because no such command existed (the session reported "I found no script in this run that writes board status"), not because GraphQL or the token failed.
+
 **If the secret is absent**, the `gh` CLI fails to authenticate, the workflow exits with an error on the first API call and no story is dispatched.
 
 **If a scope is missing**, GitHub refuses the query that needs it. `hpw codex-review-bookkeeping` then exits non-zero and its error names the failed step, the missing scope and this section (see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop) → Failure).
