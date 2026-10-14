@@ -143,3 +143,23 @@ def test_bounds_come_from_repository_variables_and_no_state_is_kept_on_the_runne
     assert f"{RETRY_HOURS_ENV}: ${{{{ vars.{RETRY_HOURS_ENV} }}}}" in code
     assert f"{MAX_REQUESTS_ENV}: ${{{{ vars.{MAX_REQUESTS_ENV} }}}}" in code
     assert "actions/cache" not in code and "upload-artifact" not in code
+
+
+def test_merge_policy_states_the_thread_rule_and_keeps_the_blocking_sentence():
+    policy = (REPO_ROOT / "docs" / "MERGE-POLICY.md").read_text(encoding="utf-8")
+
+    assert "Unresolved Codex finding threads keep blocking through the review-thread gate" in policy
+    assert "resolves a Codex-opened finding thread from an older head" in policy
+    assert "not a waiver" in policy
+    for never in ("other than the Codex bot", "review of the current head", "cannot read"):
+        assert never in policy
+
+
+def test_workflow_doc_and_known_limits_describe_the_same_rule():
+    loop = (REPO_ROOT / "docs" / "HEADLESS-PR-WORKFLOW.md").read_text(encoding="utf-8")
+    config = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
+
+    assert "resolve the threads, post the Session Summary, move the story" in loop
+    assert "`Type: external` blocker on the story naming each remaining thread" in loop
+    assert "can move a story to `In merge` while Codex review threads" not in config
+    assert "`resolveReviewThread`" in config
