@@ -513,6 +513,18 @@ register_actionable_event() {
         || echo "Warning: could not register $event_type for #$issue_num; it will not be delivered" >&2
 }
 
+# Delivers queued actionable events before the script replaces itself with the
+# run for the next story, whose sessions can take hours (issue #295). Never
+# counts a failure toward the bound and never aborts; the workflow's retry step
+# still runs once per cycle.
+drain_actionable_events() {
+    $DRY_RUN && return 0
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    bash "$script_dir/dispatcher-notify-retry.sh" run --repo "$REPO" --drain \
+        || echo "Warning: could not deliver queued notifications before the next story" >&2
+}
+
 # ─── Utility: detect decision-type blocker and notify Slack (issue #179) ─────
 # Called after an executor fails mid-cycle. Scans recent issue comments for a
 # ## Blocked Declaration with Type: decision (posted by the executor). Fires
@@ -2299,6 +2311,7 @@ if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TY
     [[ -n "$SKIPPED_ISSUES" ]] && _NEXT_ARGS+=(--skipped-issues "$SKIPPED_ISSUES")
     $DRY_RUN && _NEXT_ARGS+=(--dry-run)
     DISPATCH_HANDLED=true
+    drain_actionable_events
     exec bash "$0" "${_NEXT_ARGS[@]}"
 fi
 echo "Issue type: $ISSUE_TYPE_DETAIL (executable)"
@@ -2653,7 +2666,8 @@ if [[ -n "$BUDGET_TYPE" && -f "$BUDGET_SCRIPT" ]]; then
             [[ -n "$NON_EXECUTABLE_ISSUES" ]] && _NEXT_ARGS+=(--non-executable-issues "$NON_EXECUTABLE_ISSUES")
             $DRY_RUN && _NEXT_ARGS+=(--dry-run)
             DISPATCH_HANDLED=true
-            exec bash "$0" "${_NEXT_ARGS[@]}"
+            drain_actionable_events
+    exec bash "$0" "${_NEXT_ARGS[@]}"
         fi
     fi
 fi
@@ -2694,6 +2708,7 @@ continue_with_next_ready_story() {
     fi
 
     DISPATCH_HANDLED=true
+    drain_actionable_events
     exec bash "$0" "${_NEXT_ARGS[@]}"
 }
 
