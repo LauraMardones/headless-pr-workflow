@@ -24,6 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"
 MERGE_GATE_SCRIPT="${MERGE_GATE_SCRIPT:-$SCRIPT_DIR/merge-gate-summary}"
 SESSION_SUMMARY_SCRIPT="${SESSION_SUMMARY_SCRIPT:-$SCRIPT_DIR/session-summary.sh}"
+# shellcheck source=scripts/lib/evidence-pending.sh
+source "$SCRIPT_DIR/lib/evidence-pending.sh"
 
 PR="" REPO="" METHOD="squash"
 while [[ $# -gt 0 ]]; do
@@ -123,7 +125,9 @@ echo "✓ PR #$PR merged at head ${merged_head:0:7}"
 
 # Merge confirmation comment: the exact gate line, then the generated summary.
 # It is durable evidence and the merged PR is never merged again, so a failure to
-# post it (after retries) fails the phase; the full text goes to the log.
+# post it (after retries) fails the phase; the full text goes to the log. The
+# exact text is also left on the PR as an evidence-pending comment (issue #348),
+# so a later dispatcher run posts it once, even though the PR is already merged.
 summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command merge --pr "$PR" --head "$merged_head" \
         --checks "merge gate pass (scripts/merge-gate-summary), hpw merge-pr --execute ($METHOD)" \
         --blockers none --next cleanup) \
@@ -137,8 +141,13 @@ for attempt in 1 2 3; do
     sleep "${COMMENT_RETRY_DELAY:-2}"
 done
 if ! $posted; then
-    echo "PR #$PR is merged, but the merge confirmation comment could not be posted after 3 attempts. Post it manually:" >&2
+    echo "PR #$PR is merged, but the merge confirmation comment could not be posted after 3 attempts. A later dispatcher run posts it; or post it manually:" >&2
     echo "$confirmation" >&2
+    pending=$(evidence_pending_comment "merge-confirmation" "$merged_head" "$confirmation")
+    for attempt in 1 2 3; do
+        gh api "repos/$REPO/issues/$PR/comments" -X POST -f body="$pending" >/dev/null && break
+        sleep "${COMMENT_RETRY_DELAY:-2}"
+    done
     exit 1
 fi
 

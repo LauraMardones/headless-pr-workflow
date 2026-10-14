@@ -350,6 +350,8 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests 
 source "$SCRIPT_DIR/lib/claude-session.sh"
 # shellcheck source=scripts/lib/decision-blocker.sh
 source "$SCRIPT_DIR/lib/decision-blocker.sh"
+# shellcheck source=scripts/lib/evidence-pending.sh
+source "$SCRIPT_DIR/lib/evidence-pending.sh"
 
 # ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
 # AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
@@ -950,6 +952,139 @@ Owner: PO (@LauraMardones)
 State of in-progress work: $state
 
 $marker"
+}
+
+# ─── Utility: retry a required comment that could not be written (#348) ──────
+# The merge-owner marker, the merge confirmation and the cleanup closing
+# summary are durable evidence. When a write of one fails, the writer leaves an
+# evidence-pending comment (scripts/lib/evidence-pending.sh) whose hidden
+# payload is the exact text. evidence_retry posts that text once, on a later
+# run, and counts the runs that failed on hidden markers on the story, never on
+# the runner: after EVIDENCE_RETRY_MAX failed runs it posts one blocker, sends
+# one dispatcher_error, and stops retrying until the PO posts `/unblock`.
+# Every marker is honoured only on a comment of the dispatcher's own account.
+
+EVIDENCE_RETRY_MAX="${EVIDENCE_RETRY_MAX:-3}"
+
+evidence_failed_marker() {
+    dispatcher_marker "action=evidence-retry-failed item=$1 ref=$2"
+}
+
+evidence_gave_up_marker() {
+    dispatcher_marker "action=evidence-gave-up item=$1 ref=$2"
+}
+
+# bot_comments_json <issue-or-pr> — the comments of the dispatcher's own account
+# as one JSON array; fails when they cannot be read.
+bot_comments_json() {
+    local number="$1" comments
+    resolve_dispatcher_login || return 1
+    comments=$(gh api --paginate "repos/$REPO/issues/$number/comments?per_page=100" | jq -s 'add // []') || return 1
+    jq -c --arg bot "$DISPATCHER_LOGIN" '[.[] | select((.user.login // "") == $bot)]' <<< "$comments"
+}
+
+# evidence_failure_count <story> <item> <ref> — failed runs recorded since the
+# last give-up marker for the item.
+evidence_failure_count() {
+    local story="$1" item="$2" ref="$3" own
+    own=$(bot_comments_json "$story") || { echo 0; return 0; }
+    jq -r --arg failed "$(evidence_failed_marker "$item" "$ref")" \
+          --arg gave "$(evidence_gave_up_marker "$item" "$ref")" '
+        ([.[] | select((.body // "") | contains($gave)) | .created_at] | max // "") as $since
+        | [.[] | select(((.body // "") | contains($failed)) and .created_at > $since)] | length' <<< "$own"
+}
+
+# evidence_record_failure <story> <title> <item> <ref> <what> — records one
+# failed run. Returns 1 while retries remain, 2 when this run is the last one.
+evidence_record_failure() {
+    local story="$1" title="$2" item="$3" ref="$4" what="$5" count run
+    count=$(evidence_failure_count "$story" "$item" "$ref")
+    run=$(( count + 1 ))
+    post_comment "$story" "Dispatcher: $what could not be written to GitHub (failed run $run of $EVIDENCE_RETRY_MAX). It is retried on the next run.
+
+$(evidence_failed_marker "$item" "$ref")" || true
+    if [[ $run -lt $EVIDENCE_RETRY_MAX ]]; then
+        return 1
+    fi
+    if ! marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
+        post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
+            "the evidence ($what) is posted by hand, then the PO posts /unblock" \
+            "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue."
+        notify_slack "dispatcher_error" \
+            "$(jq -n --arg desc "The dispatcher could not write $what after $EVIDENCE_RETRY_MAX runs (#$story); it stopped retrying" \
+                     --arg action "retrying $what for #$story" \
+                     '{error_description: $desc, last_action: $action}')"
+    fi
+    return 2
+}
+
+# evidence_retry <target> <item> <ref> <story> <title> [<expected-head>]
+# Posts the pending evidence of <item> on <target> (a PR or an issue) once.
+#   0  nothing is pending, it is stale, or the evidence is posted (now or earlier)
+#   1  still missing: this run's write failed, or a read failed; retries remain
+#   2  still missing and retrying has stopped (blocker posted, or /unblock needed)
+# With <expected-head>, evidence recorded for another head is never posted.
+evidence_retry() {
+    local target="$1" item="$2" ref="$3" story="$4" title="$5" expected_head="${6:-}"
+    local own pending head b64 payload
+    own=$(bot_comments_json "$target") || {
+        echo "Warning: could not read the comments on #$target; the $item evidence is not retried in this run." >&2
+        return 1
+    }
+    pending=$(jq -r --arg m "action=evidence-pending item=$item " \
+        '[.[] | select((.body // "") | contains($m))] | last | .body // empty' <<< "$own")
+    [[ -n "$pending" ]] || return 0
+    if [[ "$pending" =~ head=([^[:space:]]+)[[:space:]]payload=([A-Za-z0-9+/=]*) ]]; then
+        head="${BASH_REMATCH[1]}"; b64="${BASH_REMATCH[2]}"
+    else
+        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence-pending comment on #$target is malformed; ignored" >&2
+        return 0
+    fi
+    if [[ -n "$expected_head" && "${head,,}" != "${expected_head,,}" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is for head ${head:0:7}, not ${expected_head:0:7}; not posted"
+        return 0
+    fi
+    payload=$(printf '%s' "$b64" | base64 -d 2>/dev/null) || payload=""
+    if [[ -z "$payload" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence payload on #$target could not be decoded; ignored" >&2
+        return 0
+    fi
+    if jq -e --arg p "$payload" '
+            def trim: gsub("^\\s+|\\s+$"; "");
+            any(.[]; ((.body // "") | contains("action=evidence-pending") | not)
+                     and ((.body // "") | trim | contains($p | trim)))' <<< "$own" >/dev/null; then
+        return 0
+    fi
+    if marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is still missing; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
+        return 2
+    fi
+    echo "${LOG_PREFIX}[RESUME] #$story: posting the missing $item evidence on #$target"
+    if post_comment "$target" "$payload"; then
+        return 0
+    fi
+    echo "Warning: the $item evidence on #$target could not be posted; retried on the next run." >&2
+    evidence_record_failure "$story" "$title" "$item" "$ref" "the $item evidence on #$target"
+}
+
+# retry_pending_cleanup_summaries — the cleanup closing summary is written on a
+# story that is already Done, so no board state leads back to it. One repo-wide
+# read of the newest comments (last 7 days) finds the stories whose closing
+# summary is pending. Never stops the run: other stories are not blocked by it.
+retry_pending_cleanup_summaries() {
+    local since comments issues n title
+    resolve_dispatcher_login || return 0
+    since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 0
+    comments=$(gh api "repos/$REPO/issues/comments?sort=created&direction=desc&since=$since&per_page=100" 2>/dev/null) || return 0
+    issues=$(jq -r --arg bot "$DISPATCHER_LOGIN" '
+        [.[] | select((.user.login // "") == $bot
+                      and ((.body // "") | contains("action=evidence-pending item=cleanup-summary ")))
+             | (.issue_url | split("/") | last)] | unique | .[]' <<< "$comments" 2>/dev/null) || return 0
+    for n in $issues; do
+        title=$(gh api "repos/$REPO/issues/$n" --jq '.title' 2>/dev/null) || title=""
+        evidence_retry "$n" "cleanup-summary" "issue$n" "$n" "$title" || true
+    done
+    return 0
 }
 
 # ─── Utility: POST JSON to a URL, fail closed on transport/HTTP error ────────
@@ -1911,8 +2046,41 @@ record_merge_owner() {
         echo "Note: /implement pushed no new head on PR #$pr_number; merge ownership not recorded for $head_sha." >&2
         return 0
     fi
-    post_comment "$pr_number" "$(merge_owner_marker "$pr_number" "$head_sha")" \
-        || echo "Warning: could not record merge ownership on PR #$pr_number; the merge will block." >&2
+    local marker attempt
+    marker=$(merge_owner_marker "$pr_number" "$head_sha")
+    for attempt in 1 2 3; do
+        post_comment "$pr_number" "$marker" && return 0
+        sleep "${COMMENT_RETRY_DELAY:-2}"
+    done
+    # Issue #348: leave the marker as an evidence-pending comment, so a later run
+    # posts it for exactly this head before the merge (ensure_merge_owner).
+    echo "Warning: could not record merge ownership on PR #$pr_number; recording it as pending for head ${head_sha:0:7}." >&2
+    post_comment "$pr_number" "$(evidence_pending_comment "merge-owner" "$head_sha" "$marker")" \
+        || echo "Warning: could not record the pending merge ownership on PR #$pr_number either; the merge will block." >&2
+}
+
+# ensure_merge_owner <pr> <head> — before a merge: posts a pending owner marker
+# for exactly this head (issue #348). 0: go on to the merge script, which still
+# decides; 1: the marker is still missing, do not merge in this run.
+ensure_merge_owner() {
+    local pr_number="$1" head_sha="$2"
+    [[ -n "$head_sha" ]] || return 0
+    evidence_retry "$pr_number" "merge-owner" "pr$pr_number-${head_sha:0:7}" "$ISSUE_NUMBER" "$TARGET_TITLE" "$head_sha"
+    [[ $? -eq 0 ]]
+}
+
+# settle_merge_confirmation <pr> — after a completed merge: posts a pending
+# confirmation once. 0: cleanup may follow (also when retrying has stopped,
+# the blocker then stands); 1: the confirmation is still missing, retry next run.
+settle_merge_confirmation() {
+    local pr_number="$1" rc
+    evidence_retry "$pr_number" "merge-confirmation" "pr$pr_number" "$ISSUE_NUMBER" "$TARGET_TITLE"
+    rc=$?
+    [[ $rc -ne 1 ]]
+}
+
+pr_is_merged() {
+    [[ "$(gh api "repos/$REPO/pulls/$1" --jq '(.merged_at != null) | tostring' 2>/dev/null)" == "true" ]]
 }
 
 merge_attempt_marker() {
@@ -1924,6 +2092,13 @@ run_merge_or_block() {
     [[ -n "$head_sha" ]] && marker=$(merge_attempt_marker "$pr_number" "$head_sha")
     LAST_ACTION="running the merge script for PR #$pr_number"
     if ! run_phase_script "$MERGE_SCRIPT" "/merge" --pr "$pr_number"; then
+        # The script exits 1 after a completed merge only when the confirmation
+        # comment was not posted. That is not a merge blocker (#348): the
+        # evidence-pending comment it left is retried by settle_merge_confirmation.
+        if pr_is_merged "$pr_number"; then
+            echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: PR #$pr_number is merged but its confirmation comment was not posted; retried on a later run"
+            return 0
+        fi
         post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
         DISPATCH_HANDLED=true
         exit 1
@@ -2199,11 +2374,16 @@ resume_in_merge_story() {
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /merge was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
             return 0
         fi
+        if ! ensure_merge_owner "$pr_number" "$pr_head"; then
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the merge owner marker for PR #$pr_number at head ${pr_head:0:7} is still missing; /merge waits for the retry"
+            return 0
+        fi
         echo ""
         echo "${LOG_PREFIX}[RESUME] #$issue_num: /merge PR #$pr_number"
         RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
         run_merge_or_block "$pr_number" "$pr_head"
         refresh_board_after_resumed_story
+        settle_merge_confirmation "$pr_number" || return 0
         finish_story
         return 0
     fi
@@ -2215,6 +2395,7 @@ resume_in_merge_story() {
             echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$merged_pr is already merged; Done and /cleanup"
             RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
             refresh_board_after_resumed_story
+            settle_merge_confirmation "$merged_pr" || return 0
             finish_story
             return 0
         fi
@@ -2314,6 +2495,7 @@ refresh_board_after_resumed_story() {
 
 run_resume_pass() {
     local items count i
+    retry_pending_cleanup_summaries
     items=$(board_items_in_status "In merge")
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
@@ -2821,7 +3003,15 @@ echo ""
 echo "── E3: /merge PR #$PR_NUMBER ────────────────────────────────────────────"
 PR_HEAD_SHA=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"
+if ! ensure_merge_owner "$PR_NUMBER" "$PR_HEAD_SHA"; then
+    echo "#$ISSUE_NUMBER: the merge owner marker is still missing; the \"In merge\" resume retries it. Moving on."
+    continue_with_next_ready_story
+fi
 run_merge_or_block "$PR_NUMBER" "$PR_HEAD_SHA"
+if ! settle_merge_confirmation "$PR_NUMBER"; then
+    echo "#$ISSUE_NUMBER: the merge confirmation is still missing; the \"In merge\" resume retries it. Moving on."
+    continue_with_next_ready_story
+fi
 
 # ─── Step E4: /cleanup, then the feature/epic closure check (issue #179) ──────
 
