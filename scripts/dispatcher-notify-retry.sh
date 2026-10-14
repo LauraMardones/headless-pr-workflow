@@ -118,6 +118,14 @@ load_state() {
 # treats an event as recorded when it exists only in the temporary copy.
 save_state() {
     $DRY_RUN && return 0
+    # mv would move the temporary file into a directory-valued state path and
+    # report success while every later load still fails; set such a path aside.
+    if [[ -e "$STATE_FILE" && ! -f "$STATE_FILE" ]]; then
+        rm -rf "$STATE_FILE.unreadable" 2>/dev/null || true
+        if mv -f "$STATE_FILE" "$STATE_FILE.unreadable" 2>/dev/null; then
+            echo "[NOTIFY] Warning: $STATE_FILE is not a regular file; moved aside to $STATE_FILE.unreadable" >&2
+        fi
+    fi
     if ! { mkdir -p "$(dirname "$STATE_FILE")" \
             && cp "$EVENTS" "$STATE_FILE.tmp.$$" \
             && mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"; } 2>/dev/null; then

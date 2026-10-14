@@ -247,6 +247,17 @@ test_unwritable_state_is_observable() {
     check "unwritable state: run logs an error" $(grep -q 'could not be saved' "$T/stderr"; echo $?)
 }
 
+test_directory_valued_state_path_is_replaced() {
+    setup
+    mkdir -p "$(STATE)"   # the state path is a directory
+    reg_decision 7 2026-10-14T10:00:00Z; rc=$?
+    check "directory state path: register exits 0" $(( rc ))
+    check "directory state path: state is now a regular file" $([[ -f "$(STATE)" ]]; echo $?)
+    check "directory state path: the record is kept" $(( $(jq -s 'length' "$(STATE)") == 1 ? 0 : 1 ))
+    retry run --repo o/r; rc=$?
+    check "directory state path: next run delivers once" $(( rc + ($(slack_count) == 1 ? 0 : 1) ))
+}
+
 test_dry_run_sends_nothing() {
     setup
     reg_decision 7 2026-10-14T10:00:00Z
@@ -273,6 +284,7 @@ test_invoke_drains_before_every_chained_exec
 test_bad_state_warns_and_continues
 test_malformed_line_keeps_pending_record
 test_unwritable_state_is_observable
+test_directory_valued_state_path_is_replaced
 test_dry_run_sends_nothing
 
 echo ""

@@ -23,6 +23,7 @@ POLL = "Run dispatcher poll"
 SAVE = "Save refinement notification state"
 INVOKE = "Run dispatcher invoke"
 RETRY = "Retry actionable Slack notifications"
+EARLY_SAVE = "Save poll notification state"
 
 
 def _workflow() -> str:
@@ -184,3 +185,24 @@ def test_poll_script_default_state_dir_matches_cached_path():
 def test_state_dir_is_gitignored():
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".dispatcher-state/" in ignored
+
+
+def test_poll_state_is_saved_before_the_cancellable_invoke_step():
+    """Codex finding on #295: the invoke step can run for hours and be
+    cancelled, which skips the final save and re-sends a ready_for_refinement
+    alert already sent by the poll. The poll's state is saved right after it."""
+    names = [name for name, _ in _steps()]
+    assert names.index(POLL) < names.index(EARLY_SAVE) < names.index(INVOKE)
+    early = _step(EARLY_SAVE)
+    condition = _field(early, "if")
+    assert "steps.poll.outcome == 'success'" in condition
+    assert "steps.scope.outputs.state_writer == 'true'" in condition
+    assert "uses: actions/cache/save@" in early
+    assert _field(early, "path") == ".dispatcher-state"
+    early_key = _field(early, "key")
+    final_key = _field(_step(SAVE), "key")
+    # Cache entries are immutable, so the two saves need different keys, and
+    # both must match the restore prefix.
+    assert early_key != final_key
+    assert early_key.startswith("dispatcher-state-")
+    assert "${{ github.run_id }}" in early_key

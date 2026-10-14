@@ -26,7 +26,9 @@
 # 2026-10-14 (issue #295): notifications that need PO action are queued in the
 # same .dispatcher-state/ by dispatcher-invoke.sh and sent, retried and bounded
 # by the "Retry actionable Slack notifications" step, which runs every cycle
-# even when the invoke step is skipped. The state save moved after that step.
+# even when the invoke step is skipped. The state is saved right after the poll
+# and again after that step, so a cancelled invoke step cannot lose the poll's
+# state.
 #
 # 2026-10-13 (issue #293): the invoke step also runs when the poll reports a
 # story "In merge" or "In implementation", so the dispatcher can resume a story
@@ -120,6 +122,17 @@ jobs:
           # ready for implementation.
           RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // [])) | length > 0')
           echo "resumable=$RESUMABLE" >> "$GITHUB_OUTPUT"
+
+      # Saved right after the poll (issue #295), before the invoke step, which
+      # can run for hours and be cancelled: the poll's own state (a sent
+      # ready_for_refinement alert) must survive that. The final save below
+      # writes a newer snapshot, which the prefix restore prefers.
+      - name: Save poll notification state
+        if: ${{ steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .dispatcher-state
+          key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}-poll
 
       - name: Set cache date
         if: steps.guard.outputs.enabled == 'true'
