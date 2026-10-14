@@ -767,7 +767,10 @@ def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_res
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
     assert proc.stdout.count("Feature #50: all 3 stories Done.") == 1
-    assert len(d.slack_calls) == 1
+    # Issue #295: invoke queues the event; the retry step delivers it.
+    assert d.slack_calls == []
+    assert [(e["event"], e["issue"], e["delivered"]) for e in d.queued_events] == [
+        ("feature_closure_confirmation", 50, False)]
 
 
 @needs_tools

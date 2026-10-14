@@ -140,7 +140,10 @@
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
 #
-# Notification calls are guarded with || true; adapter failure never aborts the loop.
+# Notification adapter failure never aborts the loop: dispatcher_error is guarded
+# with || true, and the three events that need PO action are only queued here
+# (register_actionable_event) and delivered and retried by
+# scripts/dispatcher-notify-retry.sh (issue #295).
 # Under --dry-run, calls are suppressed and logged instead.
 # Conflict and dependency blockers (WIP overflow, file overlap) do NOT fire decision_blocker.
 #
@@ -456,8 +459,10 @@ post_comment() {
 }
 
 # ─── Utility: send a Slack notification via slack-notify.sh (issue #179) ─────
-# All calls use || true so adapter failure never aborts the invoke loop.
-# Under --dry-run, calls are suppressed and logged.
+# Used for events that are not retried (dispatcher_error). The call is guarded
+# with || true so adapter failure never aborts the invoke loop. Under --dry-run,
+# calls are suppressed and logged. The three events that need PO action go
+# through register_actionable_event() instead (issue #295).
 
 notify_slack() {
     local event_type="$1"
@@ -488,6 +493,23 @@ _dispatcher_exit_hook() {
 }
 trap _dispatcher_exit_hook EXIT
 
+# ─── Utility: queue an event that needs PO action (issue #295) ───────────────
+# decision_blocker, feature_closure_confirmation and epic_closure_approval are
+# recorded in the notification state and delivered, retried and bounded by
+# scripts/dispatcher-notify-retry.sh run, which the workflow runs on every
+# cycle. A registration failure only warns and never aborts the invoke loop.
+
+register_actionable_event() {
+    local event_type="$1" issue_num="$2" since="$3" context_json="$4"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local args=(register --repo "$REPO" --event "$event_type" --issue "$issue_num"
+                --since "$since" --context "$context_json")
+    $DRY_RUN && args+=(--dry-run)
+    bash "$script_dir/dispatcher-notify-retry.sh" "${args[@]}" \
+        || echo "Warning: could not register $event_type for #$issue_num; it will not be delivered" >&2
+}
+
 # ─── Utility: detect decision-type blocker and notify Slack (issue #179) ─────
 # Called after an executor fails mid-cycle. Scans recent issue comments for a
 # ## Blocked Declaration with Type: decision (posted by the executor). Fires
@@ -497,17 +519,19 @@ trap _dispatcher_exit_hook EXIT
 check_and_notify_decision_blocker() {
     local issue_num="$1"
     local issue_title="$2"
-    local blocker_body
-    blocker_body=$(gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
-        | jq -r '[.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
-                  | last | .body // empty' 2>/dev/null || true)
-    [[ -z "$blocker_body" ]] && return 0
+    local blocker_json blocker_body blocker_since
+    blocker_json=$(gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
+        | jq -c '[.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
+                  | last // empty' 2>/dev/null || true)
+    [[ -z "$blocker_json" ]] && return 0
+    blocker_body=$(jq -r '.body // ""' <<< "$blocker_json")
+    blocker_since=$(jq -r '.created_at // ""' <<< "$blocker_json")
     local unblocked_when issue_url
     unblocked_when=$(echo "$blocker_body" \
         | grep -oP '(?<=Unblocked when: ).*' | head -1 \
         | sed 's/[[:space:]]*$//' || echo "condition to be determined by PO")
     issue_url="https://github.com/$REPO/issues/$issue_num"
-    notify_slack "decision_blocker" \
+    register_actionable_event "decision_blocker" "$issue_num" "$blocker_since" \
         "$(jq -n \
                --arg st "$issue_title" \
                --arg iu "$issue_url" \
@@ -695,8 +719,8 @@ notify_closure_if_complete() {
     feature_title=$(gh api "repos/$REPO/issues/$feature_num" --jq '.title' 2>/dev/null \
                     || echo "Feature #$feature_num")
     feature_url="https://github.com/$REPO/issues/$feature_num"
-    echo "Feature #$feature_num: all $feature_total stories Done. Notifying Slack (feature_closure_confirmation)."
-    notify_slack "feature_closure_confirmation" \
+    echo "Feature #$feature_num: all $feature_total stories Done. Queuing Slack notification (feature_closure_confirmation)."
+    register_actionable_event "feature_closure_confirmation" "$feature_num" "" \
         "$(jq -n \
                --arg ft "$feature_title" \
                --arg su "$feature_url" \
@@ -763,8 +787,8 @@ notify_closure_if_complete() {
     epic_title=$(gh api "repos/$REPO/issues/$epic_num" --jq '.title' 2>/dev/null \
                  || echo "Epic #$epic_num")
     epic_url="https://github.com/$REPO/issues/$epic_num"
-    echo "Epic #$epic_num: all features complete. Notifying Slack (epic_closure_approval)."
-    notify_slack "epic_closure_approval" \
+    echo "Epic #$epic_num: all features complete. Queuing Slack notification (epic_closure_approval)."
+    register_actionable_event "epic_closure_approval" "$epic_num" "" \
         "$(jq -n \
                --arg et "$epic_title" \
                --arg su "$epic_url" \

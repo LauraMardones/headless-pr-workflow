@@ -348,6 +348,7 @@ class Dispatcher:
             "CLAUDE_BIN": (self.bin / "claude").as_posix(),
             "OPENAI_API_KEY_CODEX": "fake-openai",
             "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
+            "DISPATCHER_STATE_DIR": (self.mock / "state").as_posix(),
             "BUDGET_COUNTER_DIR": (self.mock / "budget").as_posix(),
             "BUDGET_DAILY_HAIKU": "10000000", "BUDGET_DAILY_SONNET": "10000000",
             "BUDGET_DAILY_OPUS": "10000000", "BUDGET_DAILY_CODEX": "10000000",
@@ -404,6 +405,14 @@ class Dispatcher:
                 "env": env,
             })
         return calls
+
+    @property
+    def queued_events(self) -> list[dict]:
+        """Actionable notifications queued for scripts/dispatcher-notify-retry.sh (issue #295)."""
+        path = self.mock / "state" / "o" / "r" / "actionable-events"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
     @property
     def slack_calls(self) -> list[str]:
