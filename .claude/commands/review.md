@@ -93,8 +93,9 @@ Required behavior:
    - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
    - an Out of scope finding is reported with a proposed follow-up issue (title and one-line reason) or a link to an existing issue
-   - it is not listed in `--blockers`, does not by itself cause `REQUEST_CHANGES` or `--next implementation`, and is recorded with a `--deviation` line
+   - it is not listed in `--blockers`, does not by itself cause `REQUEST_CHANGES`, and is recorded with a `--deviation` line
    - the PR stays unmergeable until the PO waives it (`Type: decision` blocker), so do not set the story to "In merge" or use `--next merge` while one is unwaived
+   - when the only findings are unwaived Out of scope ones, submit the review with event `COMMENT` (neither `APPROVE` nor `REQUEST_CHANGES`), use `--blockers none` and `--next implementation` (the only other value the script accepts; the `/implement` fix round then links the follow-up issues and declares the decision blocker), and name the findings and follow-up issues in the `--deviation` line
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 
 Do not rely on chat-only feedback as workflow-authoritative if it is not also recorded on GitHub.

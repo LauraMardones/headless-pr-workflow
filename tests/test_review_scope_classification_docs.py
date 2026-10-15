@@ -28,6 +28,8 @@ def test_review_command_classifies_findings_against_story_scope() -> None:
             "not listed in `--blockers`",
             "`--deviation`",
             "`Type: decision`",
+            "event `COMMENT`",
+            "`--blockers none` and `--next implementation`",
         ],
     )
 
@@ -47,6 +49,7 @@ def test_implement_fix_round_classifies_before_changing_code() -> None:
             "`/unblock`",
             'return the story to "In review" and post exactly one new review request for the current head',
             "only the PO waives",
+            "the waived thread is resolved by the PO",
         ],
     )
 
@@ -62,7 +65,7 @@ def test_agents_review_guidelines_mark_findings() -> None:
 def test_workflow_docs_describe_classification_and_waiver() -> None:
     assert_all(
         "docs/HEADLESS-PR-WORKFLOW.md",
-        ["Out of scope", "Only the PO waives", "not a waiver", "follow-up issue"],
+        ["Out of scope", "Only the PO waives", "not a waiver", "follow-up issue", "PO also resolves each waived thread"],
     )
     assert_all(
         "docs/MERGE-POLICY.md",
