@@ -69,7 +69,7 @@ def test_implement_requires_green_current_head_pytest_before_review_handoff() ->
     assert "run focused local tests before the final push" in command
     assert "read the required `pytest` check for that exact head SHA" in command
     assert "older-head result never does" in command
-    assert "keep the PR Draft and the story \"In implementation\"" in command
+    assert "keep the PR Draft (re-draft it if it is Ready for review) and the story \"In implementation\"" in command
     assert "re-reads the PR head and check" in command
     assert "keep this session alive and poll the current head's `pytest` check" in command
     assert command.index("keep this session alive and poll") < command.index(
@@ -94,3 +94,11 @@ def test_project_status_limits_ci_gate_to_implement_handoff() -> None:
     assert "binds the implementing session only" in status
     assert "does not read checks" in status
     assert "In review" in read("scripts/project-status-sync.sh")
+
+
+def test_implement_redrafts_ready_pr_until_current_head_pytest_is_green() -> None:
+    command = read(".claude/commands/implement.md")
+
+    assert "convert it back to Draft before pushing" in command
+    assert "gh pr ready <pr> --undo" in command
+    assert command.count("re-draft it if it is Ready for review") == 2
