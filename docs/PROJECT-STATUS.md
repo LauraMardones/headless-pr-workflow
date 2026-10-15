@@ -116,7 +116,7 @@ All transitions and their triggering events are listed below. Transitions not li
 | Refined | Ready for implementation | All hard dependencies are resolved |
 | Refined | Blocked | A blocking condition is declared on this item |
 | Ready for implementation | In implementation | An executor pulls the item and begins work (branch created, draft PR opened) |
-| In implementation | In review | Executor submits PR for review (PR marked ready for review) |
+| In implementation | In review | Executor submits PR for review (PR marked ready for review) after the required `pytest` check is green for the current PR head SHA; a failed, pending, absent, unreadable, or older-head result keeps the item In implementation |
 | In implementation | Blocked | A blocking condition is declared while implementation is underway |
 | In review | Ready to merge | The approval gate is satisfied (ADR-007) and all required checks pass |
 | In review | Needs rework | Reviewer requests changes; PR is returned to the implementer |
@@ -130,6 +130,8 @@ All transitions and their triggering events are listed below. Transitions not li
 | Any | Blocked | A blocking condition is declared at any point from Refined onward |
 
 ### Notes on specific transitions
+
+**In implementation → In review**: The green current-head `pytest` condition is the `/implement` handoff rule. It binds the implementing session only; `scripts/project-status-sync.sh` reconciles `In review` from PR state (an open non-draft PR) and does not read checks, and `/review` does not gate on it. Merge stays gated by the required checks in `docs/MERGE-POLICY.md`, unchanged.
 
 **In review → Ready to merge**: Both conditions must be true simultaneously — the approval gate is satisfied (ADR-007) for the current PR head SHA, and all required CI checks are passing. `docs/MERGE-POLICY.md` → Approval Gate: Independent Review lists the evidence that satisfies the gate.
 
