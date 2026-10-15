@@ -38,6 +38,40 @@ The PO caps how many autonomous sessions the dispatcher starts per UTC day with 
 
 ---
 
+## WIP and queue limits
+
+The PO sets every WIP and queue limit in repository variables (issue #358). No script holds a number or a default for them, so the dispatcher, the flow review and the docs cannot disagree.
+
+| Variable | Valid values | Suggested value | Read by |
+|---|---|---|---|
+| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories in "In implementation" at the same time. | `2` | `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
+| `READY_BUFFER_MIN` | A whole number of zero or more. The fewest stories kept in "Ready for implementation". | `3` | the shared check; the #306 scheduler will use it |
+| `READY_BUFFER_MAX` | A whole number, `READY_BUFFER_MIN` or more. The most stories kept in "Ready for implementation". | `5` | the shared check; the #306 scheduler will use it |
+
+**Change them** under **Settings → Secrets and variables → Actions → Variables** (`https://github.com/<owner>/<repo>/settings/variables/actions`). No code change is needed; the new value applies on the next run. The workflow passes all three to the "Run dispatcher poll" step (the poll runs `flow-review.sh`) and the "Run dispatcher invoke" step.
+
+**Board column limits are only visual.** A limit set on a column of the project board is read by nothing. The PO sets it by hand to match the variable.
+
+**The shared check.** `scripts/lib/limits.sh` (`load_limits`) checks all three variables and is sourced by `dispatcher-invoke.sh` and `flow-review.sh`, so a missing or invalid buffer value is found on the first run, not when the #306 scheduler starts reading it. Any script that reads a limit uses it instead of its own check.
+
+**Log lines.**
+
+```
+Active WIP count: 2 (limit: 3)
+FAIL: WIP limit reached (3 >= 3)
+WIP count: 2/3
+[LIMITS ERROR] <VARIABLE> is not set or is empty — starting nothing
+[LIMITS ERROR] <VARIABLE> is not a whole number (value: "<value>") — starting nothing
+[LIMITS ERROR] WIP_LIMIT_IMPLEMENTATION must be 1 or more (value: "<value>") — starting nothing
+[LIMITS ERROR] READY_BUFFER_MIN (<min>) is greater than READY_BUFFER_MAX (<max>) — starting nothing
+```
+
+**Unset or invalid value.** There is no fallback to `2`, `3` or `5`. When any of the three is unset, empty or invalid (`abc`, `0` for the WIP limit, `-1`, `2.5`, or a minimum above the maximum), `dispatcher-invoke.sh` starts nothing before it reads the board: no board status is written, no blocker comment is posted and no `dispatcher_error` Slack message is sent; the job fails with the `[LIMITS ERROR]` line, like `[USAGE LIMIT ERROR]`. `flow-review.sh` prints the error to stderr, exits `2` and prints no report or status. `dispatcher-poll.sh` does not hide it: it exits `2`. The dispatcher therefore stops until the PO sets all three variables.
+
+**When the WIP limit is reached** the dispatcher posts a conflict blocker whose "Unblocked when" line names the configured limit (`Fewer than <limit> stories are in "In implementation"…`).
+
+---
+
 ## Executor Secrets — `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY_CODEX`
 
 The dispatcher needs credentials to start the sessions of the story cycle. There are exactly **two** required secrets, not one per `executor:` tier:

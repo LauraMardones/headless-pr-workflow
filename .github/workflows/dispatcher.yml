@@ -109,6 +109,10 @@ jobs:
       - name: Run dispatcher poll
         if: steps.guard.outputs.enabled == 'true'
         id: poll
+        env:
+          WIP_LIMIT_IMPLEMENTATION: ${{ vars.WIP_LIMIT_IMPLEMENTATION }}
+          READY_BUFFER_MIN: ${{ vars.READY_BUFFER_MIN }}
+          READY_BUFFER_MAX: ${{ vars.READY_BUFFER_MAX }}
         run: |
           POLL_ARGS=(--repo "${{ github.repository }}")
           if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
@@ -169,6 +173,9 @@ jobs:
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         id: invoke
         env:
+          WIP_LIMIT_IMPLEMENTATION: ${{ vars.WIP_LIMIT_IMPLEMENTATION }}
+          READY_BUFFER_MIN: ${{ vars.READY_BUFFER_MIN }}
+          READY_BUFFER_MAX: ${{ vars.READY_BUFFER_MAX }}
           USAGE_LIMIT_SESSIONS_PER_DAY: ${{ vars.USAGE_LIMIT_SESSIONS_PER_DAY }}
           OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

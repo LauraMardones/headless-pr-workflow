@@ -98,6 +98,13 @@ if [[ -z "$SINCE" ]]; then
 fi
 
 SINCE_TS="${SINCE}T00:00:00Z"
+
+# The WIP limit comes from the repository variables only (issue #358). An unset
+# or invalid value is an error, not a status.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/limits.sh
+source "$SCRIPT_DIR/lib/limits.sh"
+load_limits || exit 2
 STALE_2H_TS=$((NOW_TS - 7200))
 
 # ─── API helpers ──────────────────────────────────────────────────────────────
@@ -268,7 +275,7 @@ done
 
 WIP_COUNT="${#IN_IMPL_NUMS[@]}"
 WIP_VIOLATION=false
-if [[ "$WIP_COUNT" -gt 2 ]]; then
+if [[ "$WIP_COUNT" -gt "$WIP_LIMIT_IMPLEMENTATION" ]]; then
     WIP_VIOLATION=true
 fi
 
@@ -282,13 +289,13 @@ done
 
 READY_COUNT="${#READY_NUMS[@]}"
 
-# Red: WIP > 2 OR any blocker > 7 days OR (ready queue = 0 AND WIP >= 2)
-# Yellow: WIP = 2 OR any blocker 3–7 days OR ready queue = 0
+# Red: WIP > limit OR any blocker > 7 days OR (ready queue = 0 AND WIP >= limit)
+# Yellow: WIP = limit OR any blocker 3–7 days OR ready queue = 0
 # Green: all else
 FLOW_HEALTH="Green"
-if $WIP_VIOLATION || $BLOCKED_STALE_GT7 || [[ "$READY_COUNT" -eq 0 && "$WIP_COUNT" -ge 2 ]]; then
+if $WIP_VIOLATION || $BLOCKED_STALE_GT7 || [[ "$READY_COUNT" -eq 0 && "$WIP_COUNT" -ge "$WIP_LIMIT_IMPLEMENTATION" ]]; then
     FLOW_HEALTH="Red"
-elif [[ "$WIP_COUNT" -eq 2 ]] || $BLOCKED_STALE_GT3 || [[ "$READY_COUNT" -eq 0 ]]; then
+elif [[ "$WIP_COUNT" -eq "$WIP_LIMIT_IMPLEMENTATION" ]] || $BLOCKED_STALE_GT3 || [[ "$READY_COUNT" -eq 0 ]]; then
     FLOW_HEALTH="Yellow"
 fi
 
@@ -322,7 +329,7 @@ else
         fi
     done
 fi
-WIP_LINE="WIP count: ${WIP_COUNT}/2"
+WIP_LINE="WIP count: ${WIP_COUNT}/${WIP_LIMIT_IMPLEMENTATION}"
 if $WIP_VIOLATION; then WIP_LINE+=" ⚠ WIP limit exceeded"; fi
 REPORT+="${WIP_LINE}"$'\n'
 REPORT+=""$'\n'

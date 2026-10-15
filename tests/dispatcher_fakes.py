@@ -95,9 +95,9 @@ if [[ "$endpoint" == "graphql" ]]; then
                 pageInfo: {hasNextPage: false, endCursor: null},
                 nodes: [$b.items[] | {
                     id: .id,
-                    updatedAt: "2026-09-27T00:00:00Z",
+                    updatedAt: (.updatedAt // "2026-09-27T00:00:00Z"),
                     content: {number: .number, title: .title, body: (.body // ""),
-                              updatedAt: "2026-09-27T00:00:00Z"},
+                              updatedAt: (.updatedAt // "2026-09-27T00:00:00Z")},
                     fieldValues: {nodes: [{name: ($st[0][.id] // .status),
                                            field: {name: "Status"}}]}
                 }]
@@ -422,6 +422,7 @@ class Dispatcher:
             "DISPATCHER_STATE_DIR": (self.mock / "state").as_posix(),
             "USAGE_LIMIT_STATE_DIR": (self.mock / "usage").as_posix(),
             "USAGE_LIMIT_SESSIONS_PER_DAY": "1000",
+            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5",
             "AGENT_MAX_TURNS": "3", "AGENT_MAX_WALLCLOCK_SECONDS": "600",
             "ALLOWANCE_SCRIPT": (self.bin / "allowance.sh").as_posix(),
             "ALLOWANCE_SEQ": seq,
