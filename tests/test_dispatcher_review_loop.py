@@ -1118,6 +1118,21 @@ def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blo
 
 
 @needs_tools
+def test_348_merge_script_failing_after_a_merge_without_pending_evidence_still_blocks(d):
+    """A failure that left no pending confirmation (e.g. summary generation) must not be treated as retryable."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.add_comment(PR, OWNER_MARKER)
+
+    proc = d.resume()
+
+    assert any("Blocked Declaration" in b for b in d.posted(STORY)), proc.stdout + proc.stderr
+    assert d.phases == [f"merge {PR}"] and d.status(STORY) != "Done"
+
+
+@needs_tools
 def test_348_ac3_pending_cleanup_summary_is_posted_once_on_a_done_story(d):
     d.add_story(STORY, "Done")
     d.add_comment(STORY, pending("cleanup-summary", CLOSING))

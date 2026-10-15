@@ -1075,7 +1075,7 @@ retry_pending_cleanup_summaries() {
     local since comments issues n title
     resolve_dispatcher_login || return 0
     since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 0
-    comments=$(gh api "repos/$REPO/issues/comments?sort=created&direction=desc&since=$since&per_page=100" 2>/dev/null) || return 0
+    comments=$(gh api --paginate "repos/$REPO/issues/comments?sort=created&direction=desc&since=$since&per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) || return 0
     issues=$(jq -r --arg bot "$DISPATCHER_LOGIN" '
         [.[] | select((.user.login // "") == $bot
                       and ((.body // "") | contains("action=evidence-pending item=cleanup-summary ")))
@@ -2078,6 +2078,15 @@ settle_merge_confirmation() {
     evidence_retry "$pr_number" "merge-confirmation" "pr$pr_number" "$ISSUE_NUMBER" "$TARGET_TITLE"
 }
 
+# evidence_is_pending <target> <item> — 0 when the dispatcher's own account left
+# an evidence-pending comment for <item> on <target>.
+evidence_is_pending() {
+    local own
+    own=$(bot_comments_json "$1") || return 1
+    jq -e --arg m "action=evidence-pending item=$2 " \
+        'any(.[]; (.body // "") | contains($m))' <<< "$own" >/dev/null
+}
+
 pr_is_merged() {
     [[ "$(gh api "repos/$REPO/pulls/$1" --jq '(.merged_at != null) | tostring' 2>/dev/null)" == "true" ]]
 }
@@ -2094,7 +2103,9 @@ run_merge_or_block() {
         # The script exits 1 after a completed merge only when the confirmation
         # comment was not posted. That is not a merge blocker (#348): the
         # evidence-pending comment it left is retried by settle_merge_confirmation.
-        if pr_is_merged "$pr_number"; then
+        # Only when the script left the pending comment: a failure before it
+        # (for example the summary generation) must still block.
+        if pr_is_merged "$pr_number" && evidence_is_pending "$pr_number" "merge-confirmation"; then
             echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: PR #$pr_number is merged but its confirmation comment was not posted; retried on a later run"
             return 0
         fi
