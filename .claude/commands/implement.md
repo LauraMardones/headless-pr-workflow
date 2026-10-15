@@ -78,7 +78,8 @@ Required behavior:
    - confirm the current PR head SHA from GitHub
    - read the required `pytest` check for that exact head SHA; only a successful result for the current head counts, and a failed, pending, absent, unreadable, or older-head result never does
    - if the `pytest` check failed: keep the PR Draft and the story "In implementation", inspect the failures, fix the implementation or tests, rerun the affected local tests, push a new head, and wait for that head's check
-   - if the `pytest` check is pending, absent, or unreadable: do not claim completion, keep the PR Draft and the story "In implementation", and report the state or blocker truthfully; a later continuation re-reads the PR head and check instead of trusting an earlier result
+   - while the check is pending, keep this session alive and poll the current head's `pytest` check (for example `gh pr checks <pr> --repo LauraMardones/headless-pr-workflow --watch`, or re-read it at intervals) until it completes; the check normally reports within minutes, so do not stop on the first pending read, and re-read the PR head SHA before each poll so a newer head restarts the wait
+   - if the `pytest` check is still pending after waiting as long as the session allows, or is absent or unreadable: do not claim completion, keep the PR Draft and the story "In implementation", and report the state or blocker truthfully; a later continuation re-reads the PR head and check instead of trusting an earlier result
    - only when the current head's `pytest` check is green, continue with the steps below (Ready for review, "In review", Codex review request, completion handoff with `--next review`); until then do not use `--next review`
    - mark the PR Ready for review, or explicitly request review if Ready for review is unavailable
    - set the story status to "In review" (best-effort, as described under Workflow status goals)
