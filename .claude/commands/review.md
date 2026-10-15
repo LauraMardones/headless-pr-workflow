@@ -51,7 +51,7 @@ Required behavior:
      - **Out of scope**: a valid observation the story does not own: behaviour the PR did not add or change, an edge case outside the story's acceptance criteria, or an Epic/Feature requirement the story did not take on
      - when in doubt, a finding is a Blocker
      - classifying is not a waiver: only the PO waives a finding, with a PR comment that names it and its follow-up issue
-   - do not report again a finding the PO already waived on the PR
+   - do not report again an Out of scope finding the PO already waived on the PR; a PO comment that names a Blocker is not a waiver, because a Blocker is fixed in the PR and is never waived, so keep reporting it
 6. If blockers are found:
    - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
    - only if no documented answer exists, declare the decision blocker with the Blocked Status Protocol's required `Checked:` line naming what was searched

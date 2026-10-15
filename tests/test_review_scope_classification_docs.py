@@ -74,3 +74,15 @@ def test_workflow_docs_describe_classification_and_waiver() -> None:
         "docs/MERGE-POLICY.md",
         ["Out of scope", "Only the PO waives", "not a waiver", "follow-up issue"],
     )
+
+
+def test_waiver_suppression_is_limited_to_out_of_scope_findings() -> None:
+    assert_all(".claude/commands/review.md", ["a PO comment that names a Blocker is not a waiver"])
+    assert_all("AGENTS.md", ["a Blocker is never waived"])
+
+
+def test_mixed_round_defers_review_request_until_waiver() -> None:
+    assert_all(
+        ".claude/commands/implement.md",
+        ["when the round also leaves an Out of scope finding unwaived, post no review request after the push"],
+    )

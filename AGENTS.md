@@ -120,8 +120,8 @@ reproduction case or failing input. Mark each finding `Blocker` or
 `Out of scope`, with the reason, against the linked issue's acceptance
 criteria, scope and out-of-scope sections: a `Blocker` breaks or does not meet
 them or is a defect the PR introduced; `Out of scope` is a valid observation
-the story does not own. When in doubt, mark it `Blocker`. Do not report again a
-finding the PO waived on the PR (a PO comment naming it). Report only P0/P1 issues; do not comment on
+the story does not own. When in doubt, mark it `Blocker`. Do not report again an
+`Out of scope` finding the PO waived on the PR (a PO comment naming it); a Blocker is never waived, so keep reporting it. Report only P0/P1 issues; do not comment on
 style, naming, or formatting. If you find no P0/P1 issues, say so explicitly
 and name the head commit you reviewed.
 
