@@ -59,11 +59,23 @@ The sandbox workspace may be initialized from an older checkout and `git fetch` 
 
 ## Running Tests
 
-Run the test suite with:
+Run a single test or file serially, without `-n`, when debugging:
 
 ```
-python -m pytest
+python -m pytest tests/path.py::test_name
 ```
+
+Run the complete suite serially with `python -m pytest`, or in parallel with
+`pytest-xdist` (installed by the `dev` extra) using:
+
+```
+python -m pytest -n auto
+```
+
+CI runs the full suite with `-n auto`. Parallel execution is not a pytest default
+(no `addopts`), so targeted runs stay serial. On the Windows Codex fallback use
+`py -3.12 -m pytest` and `py -3.12 -m pytest -n auto`. Each xdist worker gets its own
+`popen-gwN` directory under the temp base below, so workers do not share temp trees.
 
 The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail.
 
