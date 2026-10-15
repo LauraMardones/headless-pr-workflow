@@ -86,3 +86,29 @@ def test_mixed_round_defers_review_request_until_waiver() -> None:
         ".claude/commands/implement.md",
         ["when the round also leaves an Out of scope finding unwaived, post no review request after the push"],
     )
+
+
+def test_implement_fix_round_searches_the_defect_class() -> None:
+    assert_all(
+        ".claude/commands/implement.md",
+        [
+            "fix the defect class, not only the reported line",
+            "name the class in one phrase",
+            "search the PR's own change for every other instance of that class",
+            "`git diff <base>...HEAD`",
+            "that the changed code calls or that call it",
+            "fix every instance that lies in code or text the PR added or changed, in the same round, before pushing",
+            "found only in code the PR did not add or change is **Out of scope**",
+            "not a reason to widen the PR",
+            "one `--deviation` line per Blocker finding",
+            '`Class check <finding link>: class "<class>"; checked <locations>; also fixed <locations | none>; out of scope <follow-up link | none>`',
+            "also fixed none",
+        ],
+    )
+
+
+def test_workflow_doc_describes_the_class_wide_search() -> None:
+    assert_all(
+        "docs/HEADLESS-PR-WORKFLOW.md",
+        ["Fix round fixes the class", "searches the PR's own change", "Class check", "defect class", "in unchanged code is Out of scope"],
+    )
