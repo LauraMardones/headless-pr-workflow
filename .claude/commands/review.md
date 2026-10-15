@@ -46,6 +46,12 @@ Required behavior:
    - unresolved blockers
    - review/implementation separation
    - whether any new commit has made earlier approval stale
+   - classify every finding against the linked story's `## Acceptance Criteria`, `## Scope`, `## Out of Scope` and the documented policy (`docs/MERGE-POLICY.md`, accepted ADRs, `AGENTS.md`):
+     - **Blocker**: the change breaks or does not meet the story's acceptance criteria, its documented scope or documented policy, or the change itself introduces a defect (a bug in code the PR added or changed)
+     - **Out of scope**: a valid observation the story does not own: behaviour the PR did not add or change, an edge case outside the story's acceptance criteria, or an Epic/Feature requirement the story did not take on
+     - when in doubt, a finding is a Blocker
+     - classifying is not a waiver: only the PO waives a finding, with a PR comment that names it and its follow-up issue
+   - do not report again a finding the PO already waived on the PR
 6. If blockers are found:
    - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
    - only if no documented answer exists, declare the decision blocker with the Blocked Status Protocol's required `Checked:` line naming what was searched
@@ -86,6 +92,9 @@ Required behavior:
    - if `hpw approval-check` cannot be run in the session, say so with `--deviation`; the verbatim-template rule still applies
    - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
+   - an Out of scope finding is reported with a proposed follow-up issue (title and one-line reason) or a link to an existing issue
+   - it is not listed in `--blockers`, does not by itself cause `REQUEST_CHANGES` or `--next implementation`, and is recorded with a `--deviation` line
+   - the PR stays unmergeable until the PO waives it (`Type: decision` blocker), so do not set the story to "In merge" or use `--next merge` while one is unwaived
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 
 Do not rely on chat-only feedback as workflow-authoritative if it is not also recorded on GitHub.

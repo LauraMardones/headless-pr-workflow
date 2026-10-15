@@ -89,7 +89,13 @@ Required behavior:
    - treat any earlier approval as stale once a new commit is pushed
    - never leave the story in "In merge" after a new implementation commit
    - return the story to "In review" only when the new head SHA is ready for review
-   - after a round of fixes for Codex findings on an `executor:claude-code-*` story, post exactly one new review request (a PR conversation comment whose first line is the same trigger phrase), after the round's last push and after the story is back in "In review"
+   - before changing code, classify every unresolved finding on the current head as **Blocker** or **Out of scope** against the linked story's `## Acceptance Criteria`, `## Scope`, `## Out of Scope` and the documented policy: a Blocker breaks or does not meet those, or is a defect the PR itself introduced; an Out of scope finding is a valid observation the story does not own (behaviour the PR did not add or change, an edge case outside the acceptance criteria, or an Epic/Feature requirement the story did not take on); when in doubt it is a Blocker
+   - classifying is not a waiver: only the PO waives a finding; never resolve the thread of an Out of scope finding
+   - for each Out of scope finding, do not start a fix and make no commit for it: link an existing open follow-up issue that covers it, or create one draft follow-up issue (`type:story` or `type:bug`, body with `Origin:` linking the finding, `PO status: Backlog`, no `executor:` label); reply on the finding thread with the classification, the reason and the follow-up link, without resolving it
+   - when the round leaves at least one Out of scope finding unwaived, declare one `Type: decision` blocker on the story (Question: waive the listed findings for this PR; Options: A) waive and track in the follow-up issues, B) bring them into this story's scope and fix them here; Recommendation: A); name the Out of scope findings and follow-up issues in a `--deviation` line of the Session Summary, not in `--blockers`
+   - fix Blockers as usual; after a round of fixes for Codex findings on an `executor:claude-code-*` story, post exactly one new review request (a PR conversation comment whose first line is the same trigger phrase), after the round's last push and after the story is back in "In review"
+   - when the round has only Out of scope findings, push nothing and post no review request; the story waits for the PO's decision
+   - after a PO waiver (a PR comment naming each waived finding and its follow-up issue) and `/unblock` on the story, there is nothing left to fix: return the story to "In review" and post exactly one new review request for the current head
 
 Do not merge the PR.
 Do not perform review approval.
