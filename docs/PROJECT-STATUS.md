@@ -131,6 +131,8 @@ All transitions and their triggering events are listed below. Transitions not li
 
 ### Notes on specific transitions
 
+**In implementation → In review**: The green current-head `pytest` condition is the `/implement` handoff rule. It binds the implementing session only; `scripts/project-status-sync.sh` reconciles `In review` from PR state (an open non-draft PR) and does not read checks, and `/review` does not gate on it. Merge stays gated by the required checks in `docs/MERGE-POLICY.md`, unchanged.
+
 **In review → Ready to merge**: Both conditions must be true simultaneously — the approval gate is satisfied (ADR-007) for the current PR head SHA, and all required CI checks are passing. `docs/MERGE-POLICY.md` → Approval Gate: Independent Review lists the evidence that satisfies the gate.
 
 **Ready to merge → In review**: If a new commit is pushed to the PR after approval (for example, to address a last-minute issue), the approval is stale. The item returns to In review and must be re-reviewed.
