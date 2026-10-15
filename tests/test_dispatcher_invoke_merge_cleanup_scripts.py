@@ -106,6 +106,8 @@ def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
     d.add_story(501, "In merge")
     d.add_pr(PR, STORY)
     d.add_pr(PR + 1, 501)
+    for story in (STORY, 501):  # the closing summary is on the story: only other steps failed
+        d.add_comment(story, "## Session Summary\nCommand: cleanup\nIssue/PR: #1 / #2")
     d.fail("cleanup")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -113,6 +115,74 @@ def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
     assert d.status(STORY) == "Done" and d.status(501) == "Done"
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}", f"merge {PR + 1}", f"cleanup 501"]  # the loop continued
     assert d.posted(STORY) == []
+
+
+def test_348_cleanup_that_left_no_evidence_on_the_story_goes_back_to_in_merge(tmp_path):
+    """Neither the closing summary nor its pending copy is on GitHub: nothing else would revisit the story."""
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("cleanup")
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In merge"
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+    d.fail("cleanup", False)  # the next run reruns cleanup
+    assert d.resume().returncode == 0
+    assert d.status(STORY) == "Done" and d.phases[-1] == f"cleanup {STORY}"
+
+
+def test_348_cleanup_without_evidence_gives_up_after_three_runs_and_stays_done(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("cleanup")
+    for _ in range(3):
+        assert d.resume().returncode == 0
+    assert d.status(STORY) == "Done"
+    assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
+    assert len(d.slack_calls) == 1
+
+
+def test_348_merged_pr_without_any_confirmation_does_not_reach_cleanup(tmp_path):
+    """A merge script that failed before writing the confirmation or a pending copy must not be skipped."""
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.resume()
+    d.fail("merge", False)
+    for _ in range(3):  # later runs find the merged PR with no confirmation
+        assert d.resume().returncode == 0
+    assert d.status(STORY) != "Done" and not any(p.startswith("cleanup") for p in d.phases)
+    assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) >= 1
+
+
+def test_348_missing_confirmation_records_no_failure_after_the_give_up_blocker(tmp_path):
+    """After the give-up blocker, later runs wait for /unblock instead of starting a new count every poll."""
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.resume()
+    d.fail("merge", False)
+    for _ in range(3):
+        assert d.resume().returncode == 0
+    gave_up = "action=evidence-gave-up item=merge-confirmation-missing"
+    failed = "action=evidence-retry-failed item=merge-confirmation-missing"
+    assert len([b for b in d.posted(STORY) if gave_up in b]) == 1
+    posted, slack = len(d.posted(STORY)), len(d.slack_calls)
+
+    for _ in range(2):
+        proc = d.resume()
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "waiting for a PO /unblock line" in proc.stdout
+
+    assert len(d.posted(STORY)) == posted and len(d.slack_calls) == slack
+    assert len([b for b in d.posted(STORY) if failed in b]) == 3
+    assert d.status(STORY) == "In merge" and not any(p.startswith("cleanup") for p in d.phases)
 
 
 def test_dry_run_runs_no_script(tmp_path):

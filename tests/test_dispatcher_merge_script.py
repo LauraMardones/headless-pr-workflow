@@ -6,7 +6,9 @@ docs/DISPATCHER-MERGE-CLEANUP-MAP.md.
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 
 import pytest
 
@@ -146,7 +148,7 @@ def test_confirmation_comment_failure_fails_the_phase_with_the_text_logged(h):
     proc = run(h)
     assert proc.returncode == 1
     assert "could not be posted after 3 attempts" in proc.stderr and GATE in proc.stderr
-    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 3
+    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 6  # 3 confirmation + 3 pending attempts
 
 
 @pytest.mark.parametrize("rc", [1, 2])
@@ -239,3 +241,25 @@ def test_dirty_checkout_keeps_the_local_branch(h):
 @pytest.mark.parametrize("args", [["--pr", "x", "--repo", REPO], ["--pr", "1", "--repo", "bad"], ["--pr", "1", "--repo", REPO, "--method", "ff"]])
 def test_invalid_invocation_exits_2(h, args):
     assert h.run("dispatcher-merge.sh", *args).returncode == 2
+
+
+def pending_payload(body):
+    match = re.search(r"action=evidence-pending item=merge-confirmation head=(\S+) payload=([A-Za-z0-9+/=]*) -->", body)
+    assert match, body
+    return match.group(1), base64.b64decode(match.group(2)).decode("utf-8")
+
+
+def test_failed_confirmation_leaves_the_exact_text_as_a_pending_comment(h):
+    h.set("post_fail_times", "3")  # the three confirmation attempts fail, the pending comment is written
+    proc = run(h)
+    assert proc.returncode == 1 and "A later dispatcher run posts it" in proc.stderr
+    assert h.posts == [f"POST repos/{REPO}/issues/{PR}/comments"]
+    head, payload = pending_payload(h.body(f"repos/{REPO}/issues/{PR}/comments"))
+    assert head == HEAD
+    assert payload.startswith(GATE + "\n\n## Session Summary\n") and "Command: merge" in payload
+    assert "Merge gate:" not in h.body(f"repos/{REPO}/issues/{PR}/comments").split("<!--")[0]  # never mistaken for the evidence
+
+
+def test_confirmation_that_posts_first_time_leaves_no_pending_comment(h):
+    assert run(h).returncode == 0
+    assert "evidence-pending" not in h.body(f"repos/{REPO}/issues/{PR}/comments")
