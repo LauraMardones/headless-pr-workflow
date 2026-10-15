@@ -2055,8 +2055,17 @@ record_merge_owner() {
     # Issue #348: leave the marker as an evidence-pending comment, so a later run
     # posts it for exactly this head before the merge (ensure_merge_owner).
     echo "Warning: could not record merge ownership on PR #$pr_number; recording it as pending for head ${head_sha:0:7}." >&2
-    post_comment "$pr_number" "$(evidence_pending_comment "merge-owner" "$head_sha" "$marker")" \
-        || echo "Warning: could not record the pending merge ownership on PR #$pr_number either; the merge will block." >&2
+    local pending
+    pending=$(evidence_pending_comment "merge-owner" "$head_sha" "$marker")
+    for attempt in 1 2 3; do
+        post_comment "$pr_number" "$pending" && return 0
+        sleep "${COMMENT_RETRY_DELAY:-2}"
+    done
+    # Neither form is on GitHub, so no later run could tell that this head is
+    # the session's own. Fail the run (an unexpected exit, so the dispatcher
+    # sends its dispatcher_error) instead of advancing without ownership.
+    echo "Error: could not record merge ownership or its pending copy on PR #$pr_number; stopping before the hand-off so the story does not advance without it." >&2
+    return 1
 }
 
 # ensure_merge_owner <pr> <head> — before a merge: posts a pending owner marker
@@ -2521,7 +2530,7 @@ resume_fix_round() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
-    record_merge_owner "$issue_num" "$pr_head"
+    record_merge_owner "$issue_num" "$pr_head" || exit 1
     hand_off_to_codex_review_loop "$pr_head"
 }
 
@@ -3000,7 +3009,7 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
-record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT"
+record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT" || exit 1
 
 # ─── Review path (issue #293) ─────────────────────────────────────────────────
 # Table lookup, not a branch on an executor name: a story whose executor has a

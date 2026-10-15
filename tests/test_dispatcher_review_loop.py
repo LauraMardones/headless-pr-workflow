@@ -999,6 +999,21 @@ def count_of(d: Dispatcher, target: int, text: str) -> int:
 
 
 @needs_tools
+def test_348_owner_marker_and_pending_copy_both_failing_stops_before_the_hand_off(d):
+    """No durable record exists: the run fails loudly and the story does not advance to review."""
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    new_head_on_implement(d)
+    d.fail_comment_writes(PR, 6)  # three marker attempts and three pending attempts
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "could not record merge ownership or its pending copy" in proc.stderr
+    assert d.posted(PR) == [] and d.posted(STORY) == []  # no hand-off was recorded
+
+
+@needs_tools
 def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_session_produced(d):
     d.add_story(STORY, "Ready for implementation")
     d.add_pr(PR, STORY)
