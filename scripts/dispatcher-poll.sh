@@ -382,7 +382,11 @@ fi
 
 # D7: flow-review.sh makes an independent board query; || true ensures a
 # transient API failure does not abort the poll loop under set -euo pipefail.
-FLOW_JSON=$(bash "$(dirname "$0")/flow-review.sh" --repo "$REPO" --json) || true
+# Exit 2 is a missing or invalid limit variable (issue #358): that error is not
+# hidden; flow-review.sh has logged it, and the poll fails like the usage limit.
+FLOW_RC=0
+FLOW_JSON=$(bash "$(dirname "$0")/flow-review.sh" --repo "$REPO" --json) || FLOW_RC=$?
+[[ $FLOW_RC -ne 2 ]] || exit 2
 FLOW_HEALTH=$(printf '%s' "$FLOW_JSON" | jq -r '.flow_health // ""' 2>/dev/null) || FLOW_HEALTH=""
 
 if [[ "$FLOW_HEALTH" == "Red" ]]; then

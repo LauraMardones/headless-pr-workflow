@@ -317,7 +317,6 @@ REPO_NAME="${REPO##*/}"
 DECLARED_BY="dispatcher"
 NOW_TS=$(date -u +%s)
 STALE_THRESHOLD=7200   # 2 hours in seconds
-WIP_LIMIT=2
 
 # Most fix rounds the dispatcher starts per PR (issue #293). Set from the
 # repository variable of the same name; GitHub passes an unset variable as an
@@ -348,6 +347,9 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests 
 # Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
 # shellcheck source=scripts/lib/claude-session.sh
 source "$SCRIPT_DIR/lib/claude-session.sh"
+# The WIP and queue limits come from repository variables only (issue #358).
+# shellcheck source=scripts/lib/limits.sh
+source "$SCRIPT_DIR/lib/limits.sh"
 # shellcheck source=scripts/lib/decision-blocker.sh
 source "$SCRIPT_DIR/lib/decision-blocker.sh"
 # shellcheck source=scripts/lib/evidence-pending.sh
@@ -381,6 +383,12 @@ AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool c
 AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
 AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per Actions job, shared job-wide via DISPATCH_JOB_START_TS — enforced, not incidental
 OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
+
+# A missing or invalid limit variable stops the run before anything is read or
+# written: no board status, no comment, no Slack dispatcher_error (issue #358).
+# The EXIT trap below is not installed yet, so this exit sends no notification.
+load_limits || exit 1
+WIP_LIMIT="$WIP_LIMIT_IMPLEMENTATION"
 
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
@@ -2920,7 +2928,8 @@ if [[ $(( STALE_COUNT + RESUME_COUNT )) -gt 0 && $DRY_RUN == false ]]; then
 fi
 
 # ─── Step 5: WIP limit check ──────────────────────────────────────────────────
-# Policy: max 2 parallel stories In implementation (docs/PROJECT-STATUS.md)
+# Policy: at most WIP_LIMIT_IMPLEMENTATION parallel stories In implementation
+# (docs/PROJECT-STATUS.md, docs/DISPATCHER-CONFIG.md)
 
 LAST_ACTION="WIP limit check"
 echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"

@@ -245,6 +245,7 @@ run_dispatcher() {
         OPENAI_API_KEY_CODEX="fake-openai" \
         USAGE_LIMIT_STATE_DIR="$d/usage" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
         USAGE_LIMIT_SESSIONS_PER_DAY="${USAGE_LIMIT:-1000}" \
+        WIP_LIMIT_IMPLEMENTATION=2 READY_BUFFER_MIN=3 READY_BUFFER_MAX=5 \
         AGENT_MAX_TURNS=3 AGENT_MAX_WALLCLOCK_SECONDS=600 \
         timeout 120 bash "$DISPATCHER_SCRIPT" --repo "o/r" "$@" \
         > "$d/stdout" 2> "$d/stderr" || RUN_RC=$?

@@ -475,14 +475,14 @@ The pre-flight check is:
 4. Count active **In implementation** stories.
 5. Compare file lists for overlap with the candidate story.
 
-The WIP limit is **maximum 2 parallel stories**. Parallel implementation is allowed only when both of these conditions are true:
+The WIP limit is the repository variable `WIP_LIMIT_IMPLEMENTATION` (see [WIP and queue limits](DISPATCHER-CONFIG.md#wip-and-queue-limits)); the current value is **2 parallel stories**. The dispatcher and the flow review read the variable, so the number is not stated anywhere else as a source of truth. Parallel implementation is allowed only when both of these conditions are true:
 
-- Fewer than 2 stories are already **In implementation**.
+- Fewer than `WIP_LIMIT_IMPLEMENTATION` stories are already **In implementation**.
 - The candidate story's declared files do not overlap with any active **In implementation** story.
 
-If 2 or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
+If `WIP_LIMIT_IMPLEMENTATION` or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
 
-If no overlap exists and the WIP count is below 2, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
+If no overlap exists and the WIP count is below `WIP_LIMIT_IMPLEMENTATION`, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
 
 This pre-flight logic is part of the workflow contract. Model-specific commands, prompts, and adapter files must reference this contract instead of redefining incompatible rules.
 
