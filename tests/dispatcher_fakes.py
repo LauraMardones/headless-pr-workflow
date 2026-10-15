@@ -58,6 +58,7 @@ while [[ $# -gt 0 ]]; do
                 optionId=*) option_id="${2#optionId=}" ;;
                 body=*)     body="${2#body=}" ;;
                 labels\[\]=*) label_value="${2#*=}" ;;
+                name=*)     label_value="${2#name=}" ;;
             esac
             shift 2 ;;
         -X) method="$2"; shift 2 ;;
@@ -146,10 +147,20 @@ case "$path" in
             jq --arg l "$name" '.labels |= map(select(.name != $l))' "$file" > "$file.tmp"
         else
             name="${label_value:-}"
+            # as GitHub: adding a label the repository does not have is a 404
+            grep -qxF "$name" "$MOCK_DIR/repo_labels" 2>/dev/null \
+                || { echo "fake gh: HTTP 404: label $name not found" >&2; exit 1; }
             jq --arg l "$name" '.labels |= ((. // []) + [{name: $l}] | unique_by(.name))' "$file" > "$file.tmp"
         fi
         mv "$file.tmp" "$file"
         echo '[]' ;;
+    repos/*/labels)  # create a repository label; 422 when it already exists (issue #348)
+        echo "$method $path $label_value" >> "$MOCK_DIR/labels.log"
+        if grep -qxF "$label_value" "$MOCK_DIR/repo_labels" 2>/dev/null; then
+            echo "fake gh: HTTP 422: label already exists" >&2; exit 1
+        fi
+        echo "$label_value" >> "$MOCK_DIR/repo_labels"
+        echo '{}' ;;
     repos/*/issues/*)
         n="${path##*/}"
         [[ -f "$MOCK_DIR/issue_$n.json" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }

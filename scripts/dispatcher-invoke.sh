@@ -1081,6 +1081,10 @@ label_pending_cleanup() {
         echo "[DRY RUN] Would add the $EVIDENCE_PENDING_LABEL label to #$1"
         return 0
     fi
+    # Adding a label the repository does not have fails with 404, so create it
+    # first; a label that already exists answers 422, which is fine.
+    gh api "repos/$REPO/labels" -X POST -f "name=$EVIDENCE_PENDING_LABEL" -f "color=d93f0b" \
+        -f "description=Dispatcher: a cleanup closing summary is still to be posted (#348)" >/dev/null 2>&1 || true
     gh api "repos/$REPO/issues/$1/labels" -X POST -f "labels[]=$EVIDENCE_PENDING_LABEL" >/dev/null
 }
 

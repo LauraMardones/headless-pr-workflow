@@ -1242,9 +1242,12 @@ def test_348_ac3_pending_cleanup_summary_of_another_account_is_ignored(d):
 
 
 @needs_tools
-def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_later_run(d):
+@pytest.mark.parametrize("label_exists", [False, True])  # GitHub answers 404 when adding a label the repo lacks
+def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_later_run(d, label_exists):
     d.add_story(STORY, "In merge")
     d.add_pr(PR, STORY, state="closed", merged=True)
+    if label_exists:
+        (d.mock / "repo_labels").write_text("evidence:pending\n", encoding="utf-8", newline="\n")
     leave_pending_cleanup_summary(d)
     d.fail("cleanup")
 
@@ -1252,6 +1255,7 @@ def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.status(STORY) == "Done" and "evidence:pending" in labels_of(d, STORY)
+    assert (d.mock / "repo_labels").read_text(encoding="utf-8").splitlines() == ["evidence:pending"]
     assert d.posted(STORY) == []
 
     d.fail("cleanup", False)
