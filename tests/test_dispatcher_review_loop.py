@@ -1147,9 +1147,24 @@ def test_348_merge_script_failing_after_a_merge_without_pending_evidence_still_b
     assert d.phases == [f"merge {PR}"] and d.status(STORY) != "Done"
 
 
+LABELLED = ["type:story", "executor:claude-code-sonnet", "evidence:pending"]
+
+
+def labels_of(d: Dispatcher, number: int) -> list[str]:
+    return [label["name"] for label in d._read(f"issue_{number}.json")["labels"]]
+
+
+def leave_pending_cleanup_summary(d: Dispatcher) -> None:
+    """The cleanup script could not post the closing summary and left its pending copy on the story."""
+    (d.mock / "pending_body").write_text(pending("cleanup-summary", CLOSING), encoding="utf-8", newline="\n")
+    d.on_session("cleanup", f"""f="$MOCK_DIR/comments_{STORY}.json"; [[ -f "$f" ]] || echo '[]' > "$f"
+jq --arg u "$MOCK_BOT" --rawfile b "$MOCK_DIR/pending_body" '. + [{{user: {{login: $u}}, body: $b, created_at: "2026-10-13T11:00:00Z"}}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+""")
+
+
 @needs_tools
 def test_348_ac3_pending_cleanup_summary_is_posted_once_on_a_done_story(d):
-    d.add_story(STORY, "Done")
+    d.add_story(STORY, "Done", labels=LABELLED)
     d.add_comment(STORY, pending("cleanup-summary", CLOSING))
 
     proc = d.resume()
@@ -1158,17 +1173,73 @@ def test_348_ac3_pending_cleanup_summary_is_posted_once_on_a_done_story(d):
     assert d.posted(STORY) == [CLOSING]
     assert d.phases == [] and d.sessions == []
 
+    assert "evidence:pending" not in labels_of(d, STORY)
+
     assert d.resume().returncode == 0
     assert d.posted(STORY) == [CLOSING]  # nothing posted twice
 
 
 @needs_tools
+def test_348_ac3_pending_cleanup_summary_is_recovered_however_old_it_is(d):
+    """No dispatcher run for months after /cleanup left the pending copy: the label still leads back to it."""
+    d.add_story(STORY, "Done", labels=LABELLED)
+    d._write(f"comments_{STORY}.json", [{"user": {"login": BOT}, "created_at": "2026-01-02T00:00:00Z",
+                                          "body": pending("cleanup-summary", CLOSING)}])
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+
+@needs_tools
 def test_348_ac3_pending_cleanup_summary_of_another_account_is_ignored(d):
-    d.add_story(STORY, "Done")
+    d.add_story(STORY, "Done", labels=LABELLED)
     d.add_comment(STORY, pending("cleanup-summary", CLOSING), login="someone-else")
 
     assert d.resume().returncode == 0
     assert d.posted(STORY) == []
+    assert "evidence:pending" not in labels_of(d, STORY)  # nothing of the dispatcher's own is pending
+
+
+@needs_tools
+def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_later_run(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    leave_pending_cleanup_summary(d)
+    d.fail("cleanup")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "Done" and "evidence:pending" in labels_of(d, STORY)
+    assert d.posted(STORY) == []
+
+    d.fail("cleanup", False)
+    (d.mock / "on_cleanup.sh").unlink()
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert d.phases == [f"cleanup {STORY}"]  # the story is Done: cleanup is not run again
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+
+@needs_tools
+def test_348_ac3_pending_copy_without_the_label_goes_back_to_in_merge(d):
+    """The label write failed too: nothing would lead a later run back to the Done story."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    leave_pending_cleanup_summary(d)
+    d.fail("cleanup")
+    (d.mock / "fail_labels").write_text("")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In merge"
+    assert "evidence:pending" not in labels_of(d, STORY)
 
 
 @needs_tools

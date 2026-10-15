@@ -1067,22 +1067,45 @@ evidence_retry() {
     evidence_record_failure "$story" "$title" "$item" "$ref" "the $item evidence on #$target"
 }
 
-# retry_pending_cleanup_summaries — the cleanup closing summary is written on a
-# story that is already Done, so no board state leads back to it. One repo-wide
-# read of the newest comments (last 7 days) finds the stories whose closing
-# summary is pending. Never stops the run: other stories are not blocked by it.
+# The cleanup closing summary is written on a story that is already Done, so no
+# board state leads back to it. When only its pending copy is on the story, the
+# story also carries this label; one listing of the label finds every such
+# story, however old. The label is only an index: what is posted is still read
+# from the dispatcher's own evidence-pending comment.
+EVIDENCE_PENDING_LABEL="evidence:pending"
+EVIDENCE_PENDING_LABEL_PATH="evidence%3Apending"
+
+# label_pending_cleanup <issue> — 0 when the story now carries the label.
+label_pending_cleanup() {
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would add the $EVIDENCE_PENDING_LABEL label to #$1"
+        return 0
+    fi
+    gh api "repos/$REPO/issues/$1/labels" -X POST -f "labels[]=$EVIDENCE_PENDING_LABEL" >/dev/null
+}
+
+# retry_pending_cleanup_summaries — posts the pending closing summary of every
+# story that carries the label, and removes the label once nothing is pending.
+# Never stops the run: other stories are not blocked by it.
 retry_pending_cleanup_summaries() {
-    local since comments issues n title
+    local issues n title rc
     resolve_dispatcher_login || return 0
-    since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 0
-    comments=$(gh api --paginate "repos/$REPO/issues/comments?sort=created&direction=desc&since=$since&per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) || return 0
-    issues=$(jq -r --arg bot "$DISPATCHER_LOGIN" '
-        [.[] | select((.user.login // "") == $bot
-                      and ((.body // "") | contains("action=evidence-pending item=cleanup-summary ")))
-             | (.issue_url | split("/") | last)] | unique | .[]' <<< "$comments" 2>/dev/null) || return 0
+    issues=$(gh api --paginate "repos/$REPO/issues?state=all&labels=$EVIDENCE_PENDING_LABEL_PATH&per_page=100" \
+        --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null) || {
+        echo "Warning: could not list the issues labelled $EVIDENCE_PENDING_LABEL; pending cleanup summaries are retried on a later run." >&2
+        return 0
+    }
     for n in $issues; do
         title=$(gh api "repos/$REPO/issues/$n" --jq '.title' 2>/dev/null) || title=""
-        evidence_retry "$n" "cleanup-summary" "issue$n" "$n" "$title" || true
+        rc=0
+        evidence_retry "$n" "cleanup-summary" "issue$n" "$n" "$title" || rc=$?
+        # 0: posted now or earlier, or nothing of the dispatcher's own is pending.
+        [[ $rc -eq 0 ]] || continue
+        if $DRY_RUN; then
+            echo "[DRY RUN] Would remove the $EVIDENCE_PENDING_LABEL label from #$n"
+        elif ! gh api "repos/$REPO/issues/$n/labels/$EVIDENCE_PENDING_LABEL_PATH" -X DELETE >/dev/null 2>&1; then
+            echo "Warning: could not remove the $EVIDENCE_PENDING_LABEL label from #$n; removed on a later run." >&2
+        fi
     done
     return 0
 }
@@ -2150,12 +2173,16 @@ run_merge_or_block() {
 }
 
 # cleanup_evidence_recorded <issue> — 0 when the dispatcher's own account left
-# the cleanup closing summary or its pending copy on the story.
+# the cleanup closing summary on the story, or left its pending copy and the
+# story carries the label that leads a later run back to it.
 cleanup_evidence_recorded() {
     local own
     own=$(bot_comments_json "$1") || return 1
-    jq -e 'any(.[]; (.body // "") | (contains("action=evidence-pending item=cleanup-summary ")
-                                     or test("(^|\n)Command: cleanup\n")))' <<< "$own" >/dev/null
+    if jq -e 'any(.[]; (.body // "") | test("(^|\n)Command: cleanup\n"))' <<< "$own" >/dev/null; then
+        return 0
+    fi
+    jq -e 'any(.[]; (.body // "") | contains("action=evidence-pending item=cleanup-summary "))' <<< "$own" >/dev/null \
+        && label_pending_cleanup "$1"
 }
 
 finish_story() {
@@ -2166,9 +2193,10 @@ finish_story() {
     # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
     if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
         echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
-        # Issue #348: when neither the closing summary nor its pending text is on
-        # the story, nothing leads a later run back to it. Put the story back to
-        # "In merge" (the merged-PR resume reruns cleanup) until the give-up limit.
+        # Issue #348: when neither the closing summary nor its labelled pending
+        # text is on the story, nothing leads a later run back to it. Put the
+        # story back to "In merge" (the merged-PR resume reruns cleanup) until
+        # the give-up limit.
         if ! cleanup_evidence_recorded "$ISSUE_NUMBER"; then
             local rc=0
             evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "cleanup-summary-unrecorded" "issue$ISSUE_NUMBER" \

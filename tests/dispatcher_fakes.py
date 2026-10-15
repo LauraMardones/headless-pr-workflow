@@ -49,7 +49,7 @@ set -euo pipefail
 echo "gh $*" >> "$MOCK_DIR/gh.log"
 [[ "${1:-}" == "api" ]] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
 shift
-endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body=""
+endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body="" label_value=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f) case "$2" in
@@ -57,6 +57,7 @@ while [[ $# -gt 0 ]]; do
                 itemId=*)   item_id="${2#itemId=}" ;;
                 optionId=*) option_id="${2#optionId=}" ;;
                 body=*)     body="${2#body=}" ;;
+                labels\[\]=*) label_value="${2#*=}" ;;
             esac
             shift 2 ;;
         -X) method="$2"; shift 2 ;;
@@ -108,12 +109,6 @@ path="${endpoint%%\?*}"
 case "$path" in
     user)
         echo "{\"login\": \"$MOCK_BOT\"}" ;;
-    repos/*/issues/comments)  # every comment of the repository, as GET /repos/{r}/issues/comments
-        for f in "$MOCK_DIR"/comments_*.json; do
-            [[ -f "$f" ]] || continue
-            n="${f##*/comments_}"; n="${n%.json}"
-            jq --arg n "$n" 'map(. + {issue_url: ("https://api.github.com/repos/o/r/issues/" + $n)})' "$f"
-        done | jq -s 'add // []' ;;
     repos/*/issues/*/comments)
         n="${path%/comments}"; n="${n##*/}"
         file="$MOCK_DIR/comments_$n.json"
@@ -140,10 +135,29 @@ case "$path" in
         pr=$(jq --argjson n "$n" '.[] | select(.number == $n)' "$MOCK_DIR/pulls.json")
         [[ -n "$pr" ]] || { echo "fake gh: no pull request $n" >&2; exit 1; }
         if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$pr"; else echo "$pr"; fi ;;
+    repos/*/issues/*/labels|repos/*/issues/*/labels/*)  # add or remove one label (issue #348)
+        n="${path#*/issues/}"; n="${n%%/*}"
+        file="$MOCK_DIR/issue_$n.json"
+        [[ -f "$file" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
+        [[ -f "$MOCK_DIR/fail_labels" ]] && { echo "fake gh: forced label write failure" >&2; exit 1; }
+        echo "$method $path" >> "$MOCK_DIR/labels.log"
+        if [[ "$method" == "DELETE" ]]; then
+            name="${path##*/labels/}"; name="${name//%3A/:}"
+            jq --arg l "$name" '.labels |= map(select(.name != $l))' "$file" > "$file.tmp"
+        else
+            name="${label_value:-}"
+            jq --arg l "$name" '.labels |= ((. // []) + [{name: $l}] | unique_by(.name))' "$file" > "$file.tmp"
+        fi
+        mv "$file.tmp" "$file"
+        echo '[]' ;;
     repos/*/issues/*)
         n="${path##*/}"
         [[ -f "$MOCK_DIR/issue_$n.json" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
         cat "$MOCK_DIR/issue_$n.json" ;;
+    repos/*/issues)  # GET /repos/{r}/issues?labels=<one label>, with --jq applied as the real gh does
+        want=$(sed -E 's/.*[?&]labels=([^&]*).*/\1/; s/%3A/:/g' <<< "$endpoint")
+        all=$(for f in "$MOCK_DIR"/issue_*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -s --arg l "$want" '[.[] | select(any(.labels[]?; .name == $l))]')
+        if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$all"; else echo "$all"; fi ;;
     repos/*/pulls)
         if [[ "$endpoint" == *state=closed* ]]; then
             jq '[.[] | select(.state == "closed")]' "$MOCK_DIR/pulls.json"
