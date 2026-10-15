@@ -96,7 +96,7 @@ Required behavior:
    - fix Blockers as usual; after a round of fixes for Codex findings on an `executor:claude-code-*` story, post exactly one new review request (a PR conversation comment whose first line is the same trigger phrase), after the round's last push and after the story is back in "In review"
    - when the round has only Out of scope findings, push nothing and post no review request; the story waits for the PO's decision
    - the waived thread is resolved by the PO, not by this session: the PO's waiver names the finding and its follow-up issue, and the PO resolves that thread on GitHub (a Codex thread on the current head is not superseded by a later review of the same head, so it stays unresolved until the PO resolves it)
-   - after a PO waiver (a PR comment naming each waived finding and its follow-up issue) and `/unblock` on the story, there is nothing left to fix: return the story to "In review" and post exactly one new review request for the current head; if a waived thread is still unresolved, record in a `--deviation` line that the PO must resolve it before merge
+   - after a PO waiver (a PR comment naming each waived finding and its follow-up issue) and `/unblock` on the story, there is nothing left to fix: return the story to "In review"; for an `executor:claude-code-*` story post exactly one new review request for the current head, and for an `executor:codex` story post none (step 16 forbids it) because its paired Claude `/review` session reviews the head; if a waived thread is still unresolved, record in a `--deviation` line that the PO must resolve it before merge
 
 Do not merge the PR.
 Do not perform review approval.

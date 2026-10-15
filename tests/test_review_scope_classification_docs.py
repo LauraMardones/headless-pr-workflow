@@ -30,6 +30,8 @@ def test_review_command_classifies_findings_against_story_scope() -> None:
             "`Type: decision`",
             "event `COMMENT`",
             "`--blockers none` and `--next implementation`",
+            "this session records them itself and does not rely on a later `/implement` round",
+            "keep `/merge` from succeeding",
         ],
     )
 
@@ -47,7 +49,8 @@ def test_implement_fix_round_classifies_before_changing_code() -> None:
             "`--deviation`",
             "push nothing and post no review request",
             "`/unblock`",
-            'return the story to "In review" and post exactly one new review request for the current head',
+            'return the story to "In review"; for an `executor:claude-code-*` story post exactly one new review request for the current head',
+            "for an `executor:codex` story post none",
             "only the PO waives",
             "the waived thread is resolved by the PO",
         ],
