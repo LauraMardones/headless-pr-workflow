@@ -83,10 +83,11 @@ Refinement is complete when the issue has:
 
 Every refined Story carries a `## Epic and Feature Requirements Mapping` section, so the implementer builds and the reviewer judges the same scope.
 
-- Read the parent Epic's issue body and its `specs/<n>-*/spec.md` (success criteria, requirements) when present, and the parent Feature's issue body.
+- Read the parent Epic's merged `specs/<n>-*/spec.md` (success criteria, requirements) as the approved scope (ADR-008), and the parent Feature's issue body. Use the Epic issue body only as a legacy fallback when the Epic has no spec; never take requirements from it when a spec exists, because it is only an index.
 - List each Epic or Feature requirement that applies to the story, each as exactly one of:
   - covered by an acceptance criterion: reference the criterion's number (`AC 2`);
   - an entry under `Not in this story` with a reason: `deferred to #N` when another issue will deliver it, or `not applicable` with the reason.
+- Trace both ways (ADR-009): every acceptance criterion of the story must appear in the mapping and name the Feature criterion it serves (`F1.1`); a story criterion without a Feature parent, or mapped directly to an Epic criterion, adds scope and is not allowed. Epic criteria are reached through the Feature criteria.
 - Point to the requirement in one line; do not restate the Epic spec in the story.
 - Record a deliberately uncovered Epic requirement under `Not in this story`, so a reviewer does not rediscover it as a blocker.
 - A deferred requirement must link an existing follow-up issue (`deferred to #N`). If none exists, create the follow-up issue; if you cannot, list it under Open Questions. The follow-up issue must be linked before the story moves to `Ready for implementation`.
@@ -196,7 +197,8 @@ As a ..., I want ..., so that ...
 
 ## Epic and Feature Requirements Mapping
 
-- {Epic or Feature requirement, one line} → AC {n}
+- {Feature criterion or requirement, one line} → AC {n}
+- AC {n} serves {Feature criterion, e.g. F1.1} (every AC is listed)
 
 Not in this story:
 
