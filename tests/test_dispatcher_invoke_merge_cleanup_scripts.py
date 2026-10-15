@@ -159,6 +159,32 @@ def test_348_merged_pr_without_any_confirmation_does_not_reach_cleanup(tmp_path)
     assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) >= 1
 
 
+def test_348_missing_confirmation_records_no_failure_after_the_give_up_blocker(tmp_path):
+    """After the give-up blocker, later runs wait for /unblock instead of starting a new count every poll."""
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.resume()
+    d.fail("merge", False)
+    for _ in range(3):
+        assert d.resume().returncode == 0
+    gave_up = "action=evidence-gave-up item=merge-confirmation-missing"
+    failed = "action=evidence-retry-failed item=merge-confirmation-missing"
+    assert len([b for b in d.posted(STORY) if gave_up in b]) == 1
+    posted, slack = len(d.posted(STORY)), len(d.slack_calls)
+
+    for _ in range(2):
+        proc = d.resume()
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "waiting for a PO /unblock line" in proc.stdout
+
+    assert len(d.posted(STORY)) == posted and len(d.slack_calls) == slack
+    assert len([b for b in d.posted(STORY) if failed in b]) == 3
+    assert d.status(STORY) == "In merge" and not any(p.startswith("cleanup") for p in d.phases)
+
+
 def test_dry_run_runs_no_script(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "In merge")

@@ -2127,6 +2127,11 @@ settle_merge_confirmation() {
         echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the missing merge confirmation on PR #$pr_number was waived with /unblock"
         return 0
     fi
+    # The give-up blocker stands: no further failure is recorded until /unblock.
+    if marker_holds "$ISSUE_NUMBER" "$gave"; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: PR #$pr_number is merged but carries no merge confirmation from the dispatcher; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
+        return 2
+    fi
     echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: PR #$pr_number is merged but carries no merge confirmation from the dispatcher; cleanup waits" >&2
     evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "merge-confirmation-missing" "pr$pr_number" \
         "the merge confirmation on PR #$pr_number (no confirmation and no pending text exist)"
