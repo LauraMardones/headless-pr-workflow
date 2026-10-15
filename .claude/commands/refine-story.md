@@ -65,6 +65,9 @@ Refinement is complete when the issue has:
 - Scope
 - Out of Scope
 - testable Acceptance Criteria
+- Epic and Feature Requirements Mapping (see the section of that name below)
+- time bounds, delivery guarantees and similar statements an executor needs, written in the story itself
+- a recorded `Split decision:` when the story combines a new script, a workflow step and docs
 - Dependencies split into Hard depends on and Soft depends on
 - Assumptions
 - Risks / blockers
@@ -75,6 +78,20 @@ Refinement is complete when the issue has:
 - Definition of Done
 - clear command surface if the issue affects the CLI
 - clear JSON output, human-readable output, and exit-code behavior if it affects a command
+
+## Epic and Feature Requirements Mapping
+
+Every refined Story carries a `## Epic and Feature Requirements Mapping` section, so the implementer builds and the reviewer judges the same scope.
+
+- Read the parent Epic's issue body and its `specs/<n>-*/spec.md` (success criteria, requirements) when present, and the parent Feature's issue body.
+- List each Epic or Feature requirement that applies to the story, each as exactly one of:
+  - covered by an acceptance criterion: reference the criterion's number (`AC 2`);
+  - an entry under `Not in this story` with a reason: `deferred to #N` when another issue will deliver it, or `not applicable` with the reason.
+- Point to the requirement in one line; do not restate the Epic spec in the story.
+- Record a deliberately uncovered Epic requirement under `Not in this story`, so a reviewer does not rediscover it as a blocker.
+- A deferred requirement must link an existing follow-up issue (`deferred to #N`). If none exists, create the follow-up issue; if you cannot, list it under Open Questions. The follow-up issue must be linked before the story moves to `Ready for implementation`.
+- Cross-cutting check: time bounds, delivery guarantees and similar statements an executor needs must be copied into the story's Scope or Acceptance Criteria, not only referenced in the mapping.
+- Split check: when the story adds a new script, a workflow step and docs together, record a `Split decision:` line in `## Decisions` (`Split decision: split into #A, #B` or `Split decision: keep together because ...`).
 
 ## Open Questions Format
 
@@ -177,6 +194,15 @@ As a ..., I want ..., so that ...
 
 - ...
 
+## Epic and Feature Requirements Mapping
+
+- {Epic or Feature requirement, one line} → AC {n}
+
+Not in this story:
+
+- {requirement} — deferred to #N: {reason}
+- {requirement} — not applicable: {reason}
+
 ## Command Surface
 
 If relevant:
@@ -240,6 +266,8 @@ Revalidate after dependency closes: yes/no
 - ...
 
 ## Decisions
+
+Split decision: {split into #A, #B | keep together because ...} (required when the story combines a new script, a workflow step and docs)
 
 ...
 
