@@ -49,7 +49,7 @@ set -euo pipefail
 echo "gh $*" >> "$MOCK_DIR/gh.log"
 [[ "${1:-}" == "api" ]] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
 shift
-endpoint="" query="" item_id="" option_id="" method="GET" body=""
+endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f) case "$2" in
@@ -60,6 +60,7 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2 ;;
         -X) method="$2"; shift 2 ;;
+        --jq) jq_expr="$2"; shift 2 ;;
         --paginate) shift ;;
         *)  [[ -z "$endpoint" ]] && endpoint="$1"; shift ;;
     esac
@@ -107,11 +108,25 @@ path="${endpoint%%\?*}"
 case "$path" in
     user)
         echo "{\"login\": \"$MOCK_BOT\"}" ;;
+    repos/*/issues/comments)  # every comment of the repository, as GET /repos/{r}/issues/comments
+        for f in "$MOCK_DIR"/comments_*.json; do
+            [[ -f "$f" ]] || continue
+            n="${f##*/comments_}"; n="${n%.json}"
+            jq --arg n "$n" 'map(. + {issue_url: ("https://api.github.com/repos/o/r/issues/" + $n)})' "$f"
+        done | jq -s 'add // []' ;;
     repos/*/issues/*/comments)
         n="${path%/comments}"; n="${n##*/}"
         file="$MOCK_DIR/comments_$n.json"
         [[ -f "$file" ]] || echo '[]' > "$file"
         if [[ "$method" == "POST" ]]; then
+            # fail_posts_<n> holds how many comment writes on #<n> still fail (issue #348)
+            if [[ -f "$MOCK_DIR/fail_posts_$n" ]]; then
+                left=$(cat "$MOCK_DIR/fail_posts_$n")
+                if (( left > 0 )); then
+                    echo $((left - 1)) > "$MOCK_DIR/fail_posts_$n"
+                    echo "fake gh: forced comment write failure" >&2; exit 1
+                fi
+            fi
             jq --arg b "$body" --arg t "$(tick)" --arg u "$MOCK_BOT" \
                 '. + [{user: {login: $u}, created_at: $t, body: $b, posted: true}]' "$file" > "$file.tmp"
             mv "$file.tmp" "$file"
@@ -119,6 +134,12 @@ case "$path" in
         else
             cat "$file"
         fi ;;
+    repos/*/pulls/[0-9]*)  # one pull request, with --jq applied as the real gh does
+        n="${path##*/}"
+        [[ "$n" =~ ^[0-9]+$ ]] || { echo '[]'; exit 0; }
+        pr=$(jq --argjson n "$n" '.[] | select(.number == $n)' "$MOCK_DIR/pulls.json")
+        [[ -n "$pr" ]] || { echo "fake gh: no pull request $n" >&2; exit 1; }
+        if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$pr"; else echo "$pr"; fi ;;
     repos/*/issues/*)
         n="${path##*/}"
         [[ -f "$MOCK_DIR/issue_$n.json" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
@@ -239,8 +260,8 @@ exit "$rc"
 # the PR (merge) or issue (cleanup) number.
 FAKE_PHASE = r"""#!/usr/bin/env bash
 echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
-[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
 [[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
+[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
 exit 0
 """
 
@@ -331,6 +352,10 @@ class Dispatcher:
         """Make the board write of ``status`` fail (a GraphQL error)."""
         path = self.mock / f"fail_option_{self._read('board.json')['options'][status]}"
         path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def fail_comment_writes(self, target: int, times: int) -> None:
+        """The next ``times`` comment writes on issue or PR ``target`` fail (an HTTP 500)."""
+        (self.mock / f"fail_posts_{target}").write_text(str(times), encoding="utf-8")
 
     def fail(self, command: str, failing: bool = True) -> None:
         """Make a /implement or /review session, or the /merge or /cleanup script, fail."""

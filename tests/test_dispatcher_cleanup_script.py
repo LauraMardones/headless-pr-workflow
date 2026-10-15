@@ -9,7 +9,9 @@ docs/DISPATCHER-MERGE-CLEANUP-MAP.md.
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 
 import pytest
 
@@ -159,4 +161,17 @@ def test_closing_comment_failure_fails_the_phase_with_the_text_logged(h):
     proc = run(h)
     assert proc.returncode == 1
     assert "could not be posted after 3 attempts" in proc.stderr and "Command: cleanup" in proc.stderr
-    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 3
+    assert len([line for line in h.log("gh.log") if "-X POST" in line]) == 6  # 3 closing + 3 pending attempts
+
+
+def test_failed_closing_comment_leaves_the_exact_text_as_a_pending_comment(h):
+    h.set("post_fail_times", "3")  # the three closing attempts fail, the pending comment is written
+    proc = run(h)
+    assert proc.returncode == 1 and "A later dispatcher run posts it" in proc.stderr
+    assert h.posts == [f"POST {COMMENTS}"]
+    body = h.body(COMMENTS)
+    match = re.search(r"action=evidence-pending item=cleanup-summary head=- payload=([A-Za-z0-9+/=]*) -->", body)
+    assert match, body
+    payload = base64.b64decode(match.group(1)).decode("utf-8")
+    assert payload.startswith("## Session Summary\n") and "Command: cleanup" in payload
+    assert not body.startswith("## Session Summary")  # never mistaken for the evidence

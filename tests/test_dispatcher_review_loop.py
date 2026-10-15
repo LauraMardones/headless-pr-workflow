@@ -393,7 +393,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
-    for lib in ("claude-session.sh", "decision-blocker.sh"):  # sourced by the script (#314, #296)
+    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh"):  # sourced (#314, #296, #348)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -978,3 +978,195 @@ def test_ac16_dispatcher_config_describes_hand_off_and_resume():
     for tier in CLAUDE_TIERS:
         assert re.search(rf"^\| `{tier}` \| Codex review loop", review_table, re.MULTILINE), tier
     assert re.search(r"^\| `codex` \| `/review` session under `claude-code-opus`", review_table, re.MULTILINE)
+
+
+# ── Retryable merge and cleanup evidence (issue #348) ───────────────────────
+
+OWNER_MARKER = f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={HEAD} -->"
+CONFIRMATION = "Merge gate: policy=pass, head=aaaaaaa\n\n## Session Summary\nCommand: merge"
+CLOSING = "## Session Summary\nCommand: cleanup\nNext action: done"
+
+
+def pending(item: str, payload: str, head: str = "-") -> str:
+    """The evidence-pending comment, built by the library the writers use."""
+    return subprocess.run(
+        [BASH, "-c", f'source "{REPO_ROOT}/scripts/lib/evidence-pending.sh"; evidence_pending_comment "$@"',
+         "_", item, head, payload], capture_output=True, text=True, check=True).stdout
+
+
+def count_of(d: Dispatcher, target: int, text: str) -> int:
+    return len([b for b in d.posted(target) if text in b])
+
+
+@needs_tools
+def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_session_produced(d):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    new_head_on_implement(d)
+    d.fail_comment_writes(PR, 3)  # the three marker attempts fail, the pending comment works
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In review"
+    comments = d.posted(PR)
+    assert len(comments) == 1 and f"action=evidence-pending item=merge-owner head={NEW_HEAD} " in comments[0]
+    assert OWNER_MARKER.replace(HEAD, NEW_HEAD) not in comments[0]  # the marker itself is not posted yet
+
+
+@needs_tools
+def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_merge(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == [OWNER_MARKER]
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+
+    # Idempotent: the marker is on the PR now, so a retry posts nothing more.
+    d.set_status(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [OWNER_MARKER]
+
+
+@needs_tools
+def test_348_ac1_pending_owner_marker_for_another_head_is_never_posted(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, head=NEW_HEAD)  # the head moved on after the session
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == []
+    assert f"[RESUME SKIP] #{STORY}: the merge-owner evidence on #{PR} is for head aaaaaaa, not bbbbbbb" in proc.stdout
+
+
+@needs_tools
+def test_348_ac5_pending_comments_of_another_account_are_ignored(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD), login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == []
+
+
+@needs_tools
+def test_348_ac2_pending_merge_confirmation_is_posted_once_before_cleanup(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == [CONFIRMATION]
+    assert d.phases == [f"cleanup {STORY}"]
+    assert d.status(STORY) == "Done"
+
+    # A second retry finds the confirmation and posts nothing.
+    d.set_status(STORY, "In merge")
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [CONFIRMATION]
+
+
+@needs_tools
+def test_348_ac4_confirmation_that_is_already_posted_is_not_posted_again(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.add_comment(PR, CONFIRMATION)  # the first write succeeded although it looked failed
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == []
+    assert d.phases == [f"cleanup {STORY}"]
+
+
+@needs_tools
+def test_348_ac2_confirmation_written_by_another_account_is_not_proof(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.add_comment(PR, CONFIRMATION, login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [CONFIRMATION]
+
+
+@needs_tools
+def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blocker(d):
+    """The script merged, then failed to post the confirmation: the PR is merged and the script exits 1."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.add_comment(PR, OWNER_MARKER)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not any("Blocked Declaration" in b for b in d.posted(STORY))
+    assert d.posted(PR) == [CONFIRMATION]
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.status(STORY) == "Done"
+    assert "its confirmation comment was not posted; retried on a later run" in proc.stdout
+
+
+@needs_tools
+def test_348_ac3_pending_cleanup_summary_is_posted_once_on_a_done_story(d):
+    d.add_story(STORY, "Done")
+    d.add_comment(STORY, pending("cleanup-summary", CLOSING))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert d.phases == [] and d.sessions == []
+
+    assert d.resume().returncode == 0
+    assert d.posted(STORY) == [CLOSING]  # nothing posted twice
+
+
+@needs_tools
+def test_348_ac3_pending_cleanup_summary_of_another_account_is_ignored(d):
+    d.add_story(STORY, "Done")
+    d.add_comment(STORY, pending("cleanup-summary", CLOSING), login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(STORY) == []
+
+
+@needs_tools
+def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_one_blocker(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.fail_comment_writes(PR, 1000)
+
+    for run in (1, 2):
+        proc = d.resume()
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert d.status(STORY) == "In merge" and d.phases == []  # cleanup waits for the evidence
+        assert len(d.slack_calls) == 0 and not any("Blocked Declaration" in b for b in d.posted(STORY))
+    assert count_of(d, STORY, "action=evidence-retry-failed") == 2
+
+    third = d.resume()
+    assert third.returncode == 0, third.stdout + third.stderr
+    blockers = [b for b in d.posted(STORY) if "## Blocked Declaration" in b]
+    assert len(blockers) == 1 and "Type: external" in blockers[0]
+    assert len(d.slack_calls) == 1
+
+    # Retrying has stopped: no further write attempt, no second blocker, no second Slack message.
+    writes = len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])
+    slack = len(d.slack_calls)
+    fourth = d.resume()
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
+    assert len(d.slack_calls) == slack
+    assert "retrying stopped after 3 runs" in fourth.stdout
+    assert writes == len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])

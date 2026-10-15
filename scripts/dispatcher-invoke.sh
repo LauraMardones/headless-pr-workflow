@@ -2070,13 +2070,12 @@ ensure_merge_owner() {
 }
 
 # settle_merge_confirmation <pr> — after a completed merge: posts a pending
-# confirmation once. 0: cleanup may follow (also when retrying has stopped,
-# the blocker then stands); 1: the confirmation is still missing, retry next run.
+# confirmation once. 0: the confirmation is on the PR (or nothing is pending),
+# cleanup may follow; 1: it is still missing. The story then stays "In merge":
+# the next run retries it, and after the give-up blocker it waits for the PO.
 settle_merge_confirmation() {
-    local pr_number="$1" rc
+    local pr_number="$1"
     evidence_retry "$pr_number" "merge-confirmation" "pr$pr_number" "$ISSUE_NUMBER" "$TARGET_TITLE"
-    rc=$?
-    [[ $rc -ne 1 ]]
 }
 
 pr_is_merged() {
