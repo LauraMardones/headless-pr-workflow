@@ -71,6 +71,10 @@ def test_implement_requires_green_current_head_pytest_before_review_handoff() ->
     assert "older-head result never does" in command
     assert "keep the PR Draft and the story \"In implementation\"" in command
     assert "re-reads the PR head and check" in command
+    assert "keep this session alive and poll the current head's `pytest` check" in command
+    assert command.index("keep this session alive and poll") < command.index(
+        "mark the PR Ready for review"
+    )
     assert command.index("read the required `pytest` check") < command.index(
         "mark the PR Ready for review"
     )
