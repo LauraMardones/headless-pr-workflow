@@ -24,6 +24,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"
 SESSION_SUMMARY_SCRIPT="${SESSION_SUMMARY_SCRIPT:-$SCRIPT_DIR/session-summary.sh}"
+# shellcheck source=scripts/lib/evidence-pending.sh
+source "$SCRIPT_DIR/lib/evidence-pending.sh"
 
 ISSUE="" PR="" REPO=""
 while [[ $# -gt 0 ]]; do
@@ -115,8 +117,14 @@ if summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command cleanup --issue "$ISSUE" -
         sleep "${COMMENT_RETRY_DELAY:-2}"
     done
     if ! $posted; then
-        echo "The closing comment on #$ISSUE could not be posted after 3 attempts. Post it manually:" >&2
+        echo "The closing comment on #$ISSUE could not be posted after 3 attempts. A later dispatcher run posts it; or post it manually:" >&2
         echo "$summary" >&2
+        # Issue #348: leave the exact text on the issue so a later run posts it once.
+        pending=$(evidence_pending_comment "cleanup-summary" "-" "$summary")
+        for attempt in 1 2 3; do
+            gh api "repos/$REPO/issues/$ISSUE/comments" -X POST -f body="$pending" >/dev/null && break
+            sleep "${COMMENT_RETRY_DELAY:-2}"
+        done
         failed+=("closing comment not posted")
     fi
 else

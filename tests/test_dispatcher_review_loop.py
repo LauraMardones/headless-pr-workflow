@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import textwrap
 
 import pytest
 
@@ -393,7 +394,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
-    for lib in ("claude-session.sh", "decision-blocker.sh"):  # sourced by the script (#314, #296)
+    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh"):  # sourced (#314, #296, #348)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -935,6 +936,43 @@ def test_ac14_workflow_resumable_expression(poll, expected):
     assert proc.stdout.strip() == expected, proc.stderr
 
 
+def poll_step_resumable(tmp_path, poll: dict, gh_output: str, gh_exit: int = 0) -> tuple[str, str]:
+    """Runs the poll step's lines from RESUMABLE= up to its output, as written, with a fake ``gh``."""
+    body = workflow_step("Run dispatcher poll")
+    start = body.index("          RESUMABLE=")
+    end = body.index('          echo "resumable=$RESUMABLE"')
+    snippet = textwrap.dedent(body[start:end]).replace("${{ github.repository }}", "o/r") + 'echo "$RESUMABLE"\n'
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{(tmp_path / "gh.log").as_posix()}"\n'
+                  f'echo "{gh_output}"\nexit {gh_exit}\n', encoding="utf-8", newline="\n")
+    gh.chmod(0o755)
+    path = f"{bin_dir.as_posix()}:/usr/bin:/bin"
+    if os.name == "nt":
+        path = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+    proc = subprocess.run([BASH, "-c", snippet], env={**os.environ, "PATH": path, "POLL_JSON": json.dumps(poll)},
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    log = (tmp_path / "gh.log").read_text(encoding="utf-8") if (tmp_path / "gh.log").exists() else ""
+    return proc.stdout.strip(), log
+
+
+NOTHING_ON_THE_BOARD = {"ready_for_implementation": [], "in_merge": [], "in_implementation": []}
+
+
+@needs_tools
+@pytest.mark.parametrize("gh_output,gh_exit,expected", [
+    ("true", 0, "true"),    # a Done story carries evidence:pending
+    ("false", 0, "false"),  # nothing to retry
+    ("", 1, "true"),        # the label could not be read: the retry is not skipped
+])
+def test_348_workflow_resumes_for_a_story_labelled_evidence_pending(tmp_path, gh_output, gh_exit, expected):
+    resumable, log = poll_step_resumable(tmp_path, NOTHING_ON_THE_BOARD, gh_output, gh_exit)
+    assert resumable == expected
+    assert "repos/o/r/issues?state=all&labels=evidence%3Apending" in log
+
+
 def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
     body = workflow_step("Run dispatcher invoke")
     env_block, run_block = body.split("        run:", 1)
@@ -978,3 +1016,300 @@ def test_ac16_dispatcher_config_describes_hand_off_and_resume():
     for tier in CLAUDE_TIERS:
         assert re.search(rf"^\| `{tier}` \| Codex review loop", review_table, re.MULTILINE), tier
     assert re.search(r"^\| `codex` \| `/review` session under `claude-code-opus`", review_table, re.MULTILINE)
+
+
+# ── Retryable merge and cleanup evidence (issue #348) ───────────────────────
+
+OWNER_MARKER = f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={HEAD} -->"
+CONFIRMATION = "Merge gate: policy=pass, head=aaaaaaa\n\n## Session Summary\nCommand: merge"
+CLOSING = "## Session Summary\nCommand: cleanup\nNext action: done"
+
+
+def pending(item: str, payload: str, head: str = "-") -> str:
+    """The evidence-pending comment, built by the library the writers use."""
+    return subprocess.run(
+        [BASH, "-c", f'source "{REPO_ROOT}/scripts/lib/evidence-pending.sh"; evidence_pending_comment "$@"',
+         "_", item, head, payload], capture_output=True, text=True, check=True).stdout
+
+
+def count_of(d: Dispatcher, target: int, text: str) -> int:
+    return len([b for b in d.posted(target) if text in b])
+
+
+@needs_tools
+def test_348_owner_marker_and_pending_copy_both_failing_stops_before_the_hand_off(d):
+    """No durable record exists: the run fails loudly and the story does not advance to review."""
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    new_head_on_implement(d)
+    d.fail_comment_writes(PR, 6)  # three marker attempts and three pending attempts
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "could not record merge ownership or its pending copy" in proc.stderr
+    assert d.posted(PR) == [] and d.posted(STORY) == []  # no hand-off was recorded
+
+
+@needs_tools
+def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_session_produced(d):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    new_head_on_implement(d)
+    d.fail_comment_writes(PR, 3)  # the three marker attempts fail, the pending comment works
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In review"
+    comments = d.posted(PR)
+    assert len(comments) == 1 and f"action=evidence-pending item=merge-owner head={NEW_HEAD} " in comments[0]
+    assert OWNER_MARKER.replace(HEAD, NEW_HEAD) not in comments[0]  # the marker itself is not posted yet
+
+
+@needs_tools
+def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_merge(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == [OWNER_MARKER]
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+
+    # Idempotent: the marker is on the PR now, so a retry posts nothing more.
+    d.set_status(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [OWNER_MARKER]
+
+
+@needs_tools
+def test_348_ac1_pending_owner_marker_for_another_head_is_never_posted(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, head=NEW_HEAD)  # the head moved on after the session
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == []
+    assert f"[RESUME SKIP] #{STORY}: the merge-owner evidence on #{PR} is for head aaaaaaa, not bbbbbbb" in proc.stdout
+
+
+@needs_tools
+def test_348_ac5_pending_comments_of_another_account_are_ignored(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD), login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == []
+
+
+@needs_tools
+def test_348_ac2_pending_merge_confirmation_is_posted_once_before_cleanup(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(PR) == [CONFIRMATION]
+    assert d.phases == [f"cleanup {STORY}"]
+    assert d.status(STORY) == "Done"
+
+    # A second retry finds the confirmation and posts nothing.
+    d.set_status(STORY, "In merge")
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [CONFIRMATION]
+
+
+@needs_tools
+def test_348_ac4_confirmation_that_is_already_posted_is_not_posted_again(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.add_comment(PR, CONFIRMATION)  # the first write succeeded although it looked failed
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == []
+    assert d.phases == [f"cleanup {STORY}"]
+
+
+@needs_tools
+def test_348_ac2_confirmation_written_by_another_account_is_not_proof(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.add_comment(PR, CONFIRMATION, login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(PR) == [CONFIRMATION]
+
+
+@needs_tools
+def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blocker(d):
+    """The script merged, then failed to post the confirmation: the PR is merged and the script exits 1."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.add_comment(PR, OWNER_MARKER)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not any("Blocked Declaration" in b for b in d.posted(STORY))
+    assert d.posted(PR) == [CONFIRMATION]
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.status(STORY) == "Done"
+    assert "its confirmation comment was not posted; retried on a later run" in proc.stdout
+
+
+@needs_tools
+def test_348_merge_script_failing_after_a_merge_without_pending_evidence_still_blocks(d):
+    """A failure that left no pending confirmation (e.g. summary generation) must not be treated as retryable."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge")
+    d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
+    d.add_comment(PR, OWNER_MARKER)
+
+    proc = d.resume()
+
+    assert any("Blocked Declaration" in b for b in d.posted(STORY)), proc.stdout + proc.stderr
+    assert d.phases == [f"merge {PR}"] and d.status(STORY) != "Done"
+
+
+LABELLED = ["type:story", "executor:claude-code-sonnet", "evidence:pending"]
+
+
+def labels_of(d: Dispatcher, number: int) -> list[str]:
+    return [label["name"] for label in d._read(f"issue_{number}.json")["labels"]]
+
+
+def leave_pending_cleanup_summary(d: Dispatcher) -> None:
+    """The cleanup script could not post the closing summary and left its pending copy on the story."""
+    (d.mock / "pending_body").write_text(pending("cleanup-summary", CLOSING), encoding="utf-8", newline="\n")
+    d.on_session("cleanup", f"""f="$MOCK_DIR/comments_{STORY}.json"; [[ -f "$f" ]] || echo '[]' > "$f"
+jq --arg u "$MOCK_BOT" --rawfile b "$MOCK_DIR/pending_body" '. + [{{user: {{login: $u}}, body: $b, created_at: "2026-10-13T11:00:00Z"}}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+""")
+
+
+@needs_tools
+def test_348_ac3_pending_cleanup_summary_is_posted_once_on_a_done_story(d):
+    d.add_story(STORY, "Done", labels=LABELLED)
+    d.add_comment(STORY, pending("cleanup-summary", CLOSING))
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert d.phases == [] and d.sessions == []
+
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+    assert d.resume().returncode == 0
+    assert d.posted(STORY) == [CLOSING]  # nothing posted twice
+
+
+@needs_tools
+def test_348_ac3_pending_cleanup_summary_is_recovered_however_old_it_is(d):
+    """No dispatcher run for months after /cleanup left the pending copy: the label still leads back to it."""
+    d.add_story(STORY, "Done", labels=LABELLED)
+    d._write(f"comments_{STORY}.json", [{"user": {"login": BOT}, "created_at": "2026-01-02T00:00:00Z",
+                                          "body": pending("cleanup-summary", CLOSING)}])
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+
+@needs_tools
+def test_348_ac3_pending_cleanup_summary_of_another_account_is_ignored(d):
+    d.add_story(STORY, "Done", labels=LABELLED)
+    d.add_comment(STORY, pending("cleanup-summary", CLOSING), login="someone-else")
+
+    assert d.resume().returncode == 0
+    assert d.posted(STORY) == []
+    assert "evidence:pending" not in labels_of(d, STORY)  # nothing of the dispatcher's own is pending
+
+
+@needs_tools
+@pytest.mark.parametrize("label_exists", [False, True])  # GitHub answers 404 when adding a label the repo lacks
+def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_later_run(d, label_exists):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    if label_exists:
+        (d.mock / "repo_labels").write_text("evidence:pending\n", encoding="utf-8", newline="\n")
+    leave_pending_cleanup_summary(d)
+    d.fail("cleanup")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "Done" and "evidence:pending" in labels_of(d, STORY)
+    assert (d.mock / "repo_labels").read_text(encoding="utf-8").splitlines() == ["evidence:pending"]
+    assert d.posted(STORY) == []
+
+    d.fail("cleanup", False)
+    (d.mock / "on_cleanup.sh").unlink()
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY) == [CLOSING]
+    assert d.phases == [f"cleanup {STORY}"]  # the story is Done: cleanup is not run again
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+
+@needs_tools
+def test_348_ac3_pending_copy_without_the_label_goes_back_to_in_merge(d):
+    """The label write failed too: nothing would lead a later run back to the Done story."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    leave_pending_cleanup_summary(d)
+    d.fail("cleanup")
+    (d.mock / "fail_labels").write_text("")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In merge"
+    assert "evidence:pending" not in labels_of(d, STORY)
+
+
+@needs_tools
+def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_one_blocker(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
+    d.fail_comment_writes(PR, 1000)
+
+    for run in (1, 2):
+        proc = d.resume()
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert d.status(STORY) == "In merge" and d.phases == []  # cleanup waits for the evidence
+        assert len(d.slack_calls) == 0 and not any("Blocked Declaration" in b for b in d.posted(STORY))
+    assert count_of(d, STORY, "action=evidence-retry-failed") == 2
+
+    third = d.resume()
+    assert third.returncode == 0, third.stdout + third.stderr
+    blockers = [b for b in d.posted(STORY) if "## Blocked Declaration" in b]
+    assert len(blockers) == 1 and "Type: external" in blockers[0]
+    assert len(d.slack_calls) == 1
+
+    # Retrying has stopped: no further write attempt, no second blocker, no second Slack message.
+    writes = len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])
+    slack = len(d.slack_calls)
+    fourth = d.resume()
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
+    assert len(d.slack_calls) == slack
+    assert "retrying stopped after 3 runs" in fourth.stdout
+    assert writes == len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])

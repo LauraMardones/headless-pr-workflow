@@ -38,8 +38,13 @@ if [[ "$endpoint" == "graphql" ]]; then
 fi
 if [[ "$method" == "POST" ]]; then
     [[ -f "$MOCK_DIR/post_fail" ]] && { echo "HTTP 500" >&2; exit 1; }
+    if [[ -f "$MOCK_DIR/post_fail_times" ]]; then  # fail the first N posts, then work
+        n=$(cat "$MOCK_DIR/post_fail_times")
+        if (( n > 0 )); then echo $((n - 1)) > "$MOCK_DIR/post_fail_times"; echo "HTTP 500" >&2; exit 1; fi
+    fi
     echo "POST $endpoint" >> "$MOCK_DIR/posts.log"
     printf '%s' "$body" > "$MOCK_DIR/post_$(echo "${endpoint%%\?*}" | tr / _).body"
+    printf '%s\n---\n' "$body" >> "$MOCK_DIR/post_bodies.log"
     exit 0
 fi
 file="$MOCK_DIR/$(echo "${endpoint%%\?*}" | tr / _).json"

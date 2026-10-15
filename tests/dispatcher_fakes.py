@@ -49,7 +49,7 @@ set -euo pipefail
 echo "gh $*" >> "$MOCK_DIR/gh.log"
 [[ "${1:-}" == "api" ]] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
 shift
-endpoint="" query="" item_id="" option_id="" method="GET" body=""
+endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body="" label_value=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f) case "$2" in
@@ -57,9 +57,12 @@ while [[ $# -gt 0 ]]; do
                 itemId=*)   item_id="${2#itemId=}" ;;
                 optionId=*) option_id="${2#optionId=}" ;;
                 body=*)     body="${2#body=}" ;;
+                labels\[\]=*) label_value="${2#*=}" ;;
+                name=*)     label_value="${2#name=}" ;;
             esac
             shift 2 ;;
         -X) method="$2"; shift 2 ;;
+        --jq) jq_expr="$2"; shift 2 ;;
         --paginate) shift ;;
         *)  [[ -z "$endpoint" ]] && endpoint="$1"; shift ;;
     esac
@@ -112,6 +115,14 @@ case "$path" in
         file="$MOCK_DIR/comments_$n.json"
         [[ -f "$file" ]] || echo '[]' > "$file"
         if [[ "$method" == "POST" ]]; then
+            # fail_posts_<n> holds how many comment writes on #<n> still fail (issue #348)
+            if [[ -f "$MOCK_DIR/fail_posts_$n" ]]; then
+                left=$(cat "$MOCK_DIR/fail_posts_$n")
+                if (( left > 0 )); then
+                    echo $((left - 1)) > "$MOCK_DIR/fail_posts_$n"
+                    echo "fake gh: forced comment write failure" >&2; exit 1
+                fi
+            fi
             jq --arg b "$body" --arg t "$(tick)" --arg u "$MOCK_BOT" \
                 '. + [{user: {login: $u}, created_at: $t, body: $b, posted: true}]' "$file" > "$file.tmp"
             mv "$file.tmp" "$file"
@@ -119,10 +130,45 @@ case "$path" in
         else
             cat "$file"
         fi ;;
+    repos/*/pulls/[0-9]*)  # one pull request, with --jq applied as the real gh does
+        n="${path##*/}"
+        [[ "$n" =~ ^[0-9]+$ ]] || { echo '[]'; exit 0; }
+        pr=$(jq --argjson n "$n" '.[] | select(.number == $n)' "$MOCK_DIR/pulls.json")
+        [[ -n "$pr" ]] || { echo "fake gh: no pull request $n" >&2; exit 1; }
+        if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$pr"; else echo "$pr"; fi ;;
+    repos/*/issues/*/labels|repos/*/issues/*/labels/*)  # add or remove one label (issue #348)
+        n="${path#*/issues/}"; n="${n%%/*}"
+        file="$MOCK_DIR/issue_$n.json"
+        [[ -f "$file" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
+        [[ -f "$MOCK_DIR/fail_labels" ]] && { echo "fake gh: forced label write failure" >&2; exit 1; }
+        echo "$method $path" >> "$MOCK_DIR/labels.log"
+        if [[ "$method" == "DELETE" ]]; then
+            name="${path##*/labels/}"; name="${name//%3A/:}"
+            jq --arg l "$name" '.labels |= map(select(.name != $l))' "$file" > "$file.tmp"
+        else
+            name="${label_value:-}"
+            # as GitHub: adding a label the repository does not have is a 404
+            grep -qxF "$name" "$MOCK_DIR/repo_labels" 2>/dev/null \
+                || { echo "fake gh: HTTP 404: label $name not found" >&2; exit 1; }
+            jq --arg l "$name" '.labels |= ((. // []) + [{name: $l}] | unique_by(.name))' "$file" > "$file.tmp"
+        fi
+        mv "$file.tmp" "$file"
+        echo '[]' ;;
+    repos/*/labels)  # create a repository label; 422 when it already exists (issue #348)
+        echo "$method $path $label_value" >> "$MOCK_DIR/labels.log"
+        if grep -qxF "$label_value" "$MOCK_DIR/repo_labels" 2>/dev/null; then
+            echo "fake gh: HTTP 422: label already exists" >&2; exit 1
+        fi
+        echo "$label_value" >> "$MOCK_DIR/repo_labels"
+        echo '{}' ;;
     repos/*/issues/*)
         n="${path##*/}"
         [[ -f "$MOCK_DIR/issue_$n.json" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
         cat "$MOCK_DIR/issue_$n.json" ;;
+    repos/*/issues)  # GET /repos/{r}/issues?labels=<one label>, with --jq applied as the real gh does
+        want=$(sed -E 's/.*[?&]labels=([^&]*).*/\1/; s/%3A/:/g' <<< "$endpoint")
+        all=$(for f in "$MOCK_DIR"/issue_*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -s --arg l "$want" '[.[] | select(any(.labels[]?; .name == $l))]')
+        if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$all"; else echo "$all"; fi ;;
     repos/*/pulls)
         if [[ "$endpoint" == *state=closed* ]]; then
             jq '[.[] | select(.state == "closed")]' "$MOCK_DIR/pulls.json"
@@ -239,8 +285,12 @@ exit "$rc"
 # the PR (merge) or issue (cleanup) number.
 FAKE_PHASE = r"""#!/usr/bin/env bash
 echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
-[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
 [[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
+[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
+if [[ "PHASE_NAME" == merge && ! -f "$MOCK_DIR/no_confirmation" ]]; then  # the confirmation the real script posts
+    f="$MOCK_DIR/comments_$2.json"; [[ -f "$f" ]] || echo '[]' > "$f"
+    jq --arg b "$MOCK_BOT" '. + [{user: {login: $b}, body: "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge", created_at: "2026-10-13T09:31:00Z"}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+fi
 exit 0
 """
 
@@ -301,6 +351,8 @@ class Dispatcher:
                       "merged_at": "2026-10-13T09:30:00Z" if merged else None,
                       "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}})
         self._write("pulls.json", pulls)
+        if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
+            self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 
     def add_comment(self, target: int, body: str, login: str = BOT) -> None:
         tick = int((self.mock / "clock").read_text()) + 1 if (self.mock / "clock").exists() else 1
@@ -331,6 +383,10 @@ class Dispatcher:
         """Make the board write of ``status`` fail (a GraphQL error)."""
         path = self.mock / f"fail_option_{self._read('board.json')['options'][status]}"
         path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def fail_comment_writes(self, target: int, times: int) -> None:
+        """The next ``times`` comment writes on issue or PR ``target`` fail (an HTTP 500)."""
+        (self.mock / f"fail_posts_{target}").write_text(str(times), encoding="utf-8")
 
     def fail(self, command: str, failing: bool = True) -> None:
         """Make a /implement or /review session, or the /merge or /cleanup script, fail."""
