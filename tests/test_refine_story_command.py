@@ -67,3 +67,15 @@ def test_refinement_pipeline_describes_the_same_rules() -> None:
         "Time bounds, delivery guarantees and similar statements an executor needs "
         "must be copied into the story's Scope or Acceptance Criteria"
     ) in documentation
+
+
+def test_refine_story_sources_epic_scope_from_spec_and_traces_every_ac() -> None:
+    command = read(".claude/commands/refine-story.md")
+    documentation = read("docs/REFINEMENT-PIPELINE.md")
+
+    assert "Use the Epic issue body only as a legacy fallback when the Epic has no spec" in command
+    assert "every acceptance criterion of the story must appear in the mapping" in command
+    assert "name the Feature criterion it serves" in command
+    assert "adds scope and is not allowed" in command
+    assert "only as a legacy fallback when no spec exists" in documentation
+    assert "names the Feature criterion it serves (ADR-009)" in documentation
