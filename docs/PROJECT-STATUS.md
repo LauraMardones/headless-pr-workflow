@@ -116,7 +116,7 @@ All transitions and their triggering events are listed below. Transitions not li
 | Refined | Ready for implementation | All hard dependencies are resolved |
 | Refined | Blocked | A blocking condition is declared on this item |
 | Ready for implementation | In implementation | An executor pulls the item and begins work (branch created, draft PR opened) |
-| In implementation | In review | Executor submits PR for review (PR marked ready for review) |
+| In implementation | In review | Executor submits PR for review (PR marked ready for review) after the required `pytest` check is green for the current PR head SHA; a failed, pending, absent, unreadable, or older-head result keeps the item In implementation |
 | In implementation | Blocked | A blocking condition is declared while implementation is underway |
 | In review | Ready to merge | The approval gate is satisfied (ADR-007) and all required checks pass |
 | In review | Needs rework | Reviewer requests changes; PR is returned to the implementer |

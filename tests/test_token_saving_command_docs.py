@@ -50,3 +50,35 @@ def test_refinement_pipeline_documents_compact_safe_handoffs() -> None:
     assert "relevant fresh head SHA" in documentation
     assert "checks, blockers, or next action" in documentation
     assert "must not be inserted as an unsupported field" in documentation
+
+
+def test_agents_guidance_prefers_focused_local_tests_and_full_ci() -> None:
+    agents = read("AGENTS.md")
+
+    assert "Run focused tests locally; the full suite runs in CI." in agents
+    assert "python -m pytest tests/test_example.py" in agents
+    assert "`conftest.py`, `tests/dispatcher_fakes.py`" in agents
+    assert "The full CI suite is mandatory in either case." in agents
+    assert "The complete suite is `python -m pytest`." in agents
+    assert "Run the test suite with:" not in agents
+
+
+def test_implement_requires_green_current_head_pytest_before_review_handoff() -> None:
+    command = read(".claude/commands/implement.md")
+
+    assert "run focused local tests before the final push" in command
+    assert "read the required `pytest` check for that exact head SHA" in command
+    assert "older-head result never does" in command
+    assert "keep the PR Draft and the story \"In implementation\"" in command
+    assert "re-reads the PR head and check" in command
+    assert command.index("read the required `pytest` check") < command.index(
+        "mark the PR Ready for review"
+    )
+
+
+def test_project_status_requires_green_pytest_for_review_submission() -> None:
+    status = read("docs/PROJECT-STATUS.md")
+
+    assert "after the required `pytest` check is green for the current PR head SHA" in status
+    assert "keeps the item In implementation" in status
+    assert "python -m pytest" in read(".github/workflows/tests.yml")
