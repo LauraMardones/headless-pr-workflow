@@ -121,6 +121,12 @@ jobs:
           # round due, is resumed by dispatcher-invoke.sh even when no story is
           # ready for implementation.
           RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // [])) | length > 0')
+          # Issue #348: a story labelled evidence:pending is Done, so no board
+          # state leads back to it, but its cleanup closing summary is still to
+          # be posted by dispatcher-invoke.sh. A failed read counts as pending,
+          # so the retry is never skipped because of it.
+          EVIDENCE_PENDING=$(gh api "repos/${{ github.repository }}/issues?state=all&labels=evidence%3Apending&per_page=1" --jq 'length > 0' 2>/dev/null) || EVIDENCE_PENDING=true
+          if [ "$EVIDENCE_PENDING" = "true" ]; then RESUMABLE=true; fi
           echo "resumable=$RESUMABLE" >> "$GITHUB_OUTPUT"
 
       # Saved right after the poll (issue #295), before the invoke step, which

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import textwrap
 
 import pytest
 
@@ -933,6 +934,43 @@ def test_ac14_workflow_resumable_expression(poll, expected):
     proc = subprocess.run(["jq", "-r", expression.group(1)], input=json.dumps(poll),
                           capture_output=True, text=True)
     assert proc.stdout.strip() == expected, proc.stderr
+
+
+def poll_step_resumable(tmp_path, poll: dict, gh_output: str, gh_exit: int = 0) -> tuple[str, str]:
+    """Runs the poll step's lines from RESUMABLE= up to its output, as written, with a fake ``gh``."""
+    body = workflow_step("Run dispatcher poll")
+    start = body.index("          RESUMABLE=")
+    end = body.index('          echo "resumable=$RESUMABLE"')
+    snippet = textwrap.dedent(body[start:end]).replace("${{ github.repository }}", "o/r") + 'echo "$RESUMABLE"\n'
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{(tmp_path / "gh.log").as_posix()}"\n'
+                  f'echo "{gh_output}"\nexit {gh_exit}\n', encoding="utf-8", newline="\n")
+    gh.chmod(0o755)
+    path = f"{bin_dir.as_posix()}:/usr/bin:/bin"
+    if os.name == "nt":
+        path = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+    proc = subprocess.run([BASH, "-c", snippet], env={**os.environ, "PATH": path, "POLL_JSON": json.dumps(poll)},
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    log = (tmp_path / "gh.log").read_text(encoding="utf-8") if (tmp_path / "gh.log").exists() else ""
+    return proc.stdout.strip(), log
+
+
+NOTHING_ON_THE_BOARD = {"ready_for_implementation": [], "in_merge": [], "in_implementation": []}
+
+
+@needs_tools
+@pytest.mark.parametrize("gh_output,gh_exit,expected", [
+    ("true", 0, "true"),    # a Done story carries evidence:pending
+    ("false", 0, "false"),  # nothing to retry
+    ("", 1, "true"),        # the label could not be read: the retry is not skipped
+])
+def test_348_workflow_resumes_for_a_story_labelled_evidence_pending(tmp_path, gh_output, gh_exit, expected):
+    resumable, log = poll_step_resumable(tmp_path, NOTHING_ON_THE_BOARD, gh_output, gh_exit)
+    assert resumable == expected
+    assert "repos/o/r/issues?state=all&labels=evidence%3Apending" in log
 
 
 def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
