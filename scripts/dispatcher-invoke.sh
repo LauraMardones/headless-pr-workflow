@@ -2074,8 +2074,32 @@ ensure_merge_owner() {
 # cleanup may follow; 1: it is still missing. The story then stays "In merge":
 # the next run retries it, and after the give-up blocker it waits for the PO.
 settle_merge_confirmation() {
-    local pr_number="$1"
+    local pr_number="$1" rc own gave
     evidence_retry "$pr_number" "merge-confirmation" "pr$pr_number" "$ISSUE_NUMBER" "$TARGET_TITLE"
+    rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    # No pending comment does not prove the confirmation exists: the merge
+    # script can fail after the merge before it wrote either (for example when
+    # the summary cannot be generated). Require the dispatcher's own
+    # confirmation (its exact `Merge gate:` line) on the PR.
+    if own=$(bot_comments_json "$pr_number") \
+        && jq -e 'any(.[]; ((.body // "") | contains("action=evidence-pending") | not)
+                           and ((.body // "") | test("(^|\n)Merge gate:")))' <<< "$own" >/dev/null; then
+        return 0
+    fi
+    # The PO accepted the gap: the give-up blocker was posted and then unblocked.
+    gave=$(evidence_gave_up_marker "merge-confirmation-missing" "pr$pr_number")
+    if own=$(bot_comments_json "$ISSUE_NUMBER") \
+        && jq -e --arg g "$gave" 'any(.[]; (.body // "") | contains($g))' <<< "$own" >/dev/null \
+        && ! marker_holds "$ISSUE_NUMBER" "$gave"; then
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the missing merge confirmation on PR #$pr_number was waived with /unblock"
+        return 0
+    fi
+    echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: PR #$pr_number is merged but carries no merge confirmation from the dispatcher; cleanup waits" >&2
+    evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "merge-confirmation-missing" "pr$pr_number" \
+        "the merge confirmation on PR #$pr_number (no confirmation and no pending text exist)"
+    rc=$?
+    return $(( rc == 0 ? 1 : rc ))
 }
 
 # evidence_is_pending <target> <item> — 0 when the dispatcher's own account left
@@ -2116,6 +2140,15 @@ run_merge_or_block() {
     echo "✓ /merge completed for PR #$pr_number"
 }
 
+# cleanup_evidence_recorded <issue> — 0 when the dispatcher's own account left
+# the cleanup closing summary or its pending copy on the story.
+cleanup_evidence_recorded() {
+    local own
+    own=$(bot_comments_json "$1") || return 1
+    jq -e 'any(.[]; (.body // "") | (contains("action=evidence-pending item=cleanup-summary ")
+                                     or test("(^|\n)Command: cleanup\n")))' <<< "$own" >/dev/null
+}
+
 finish_story() {
     LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
     echo ""
@@ -2124,6 +2157,19 @@ finish_story() {
     # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
     if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
         echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
+        # Issue #348: when neither the closing summary nor its pending text is on
+        # the story, nothing leads a later run back to it. Put the story back to
+        # "In merge" (the merged-PR resume reruns cleanup) until the give-up limit.
+        if ! cleanup_evidence_recorded "$ISSUE_NUMBER"; then
+            local rc=0
+            evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "cleanup-summary-unrecorded" "issue$ISSUE_NUMBER" \
+                "the cleanup closing summary on #$ISSUE_NUMBER (neither it nor a pending copy could be posted)" || rc=$?
+            if [[ $rc -eq 1 ]]; then
+                echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the cleanup closing summary is not on GitHub; back to \"In merge\" so the next run reruns cleanup" >&2
+                set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"
+                return 0
+            fi
+        fi
     fi
     echo "✓ Story #$ISSUE_NUMBER completed (Done)."
 

@@ -262,6 +262,10 @@ FAKE_PHASE = r"""#!/usr/bin/env bash
 echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
 [[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
 [[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
+if [[ "PHASE_NAME" == merge && ! -f "$MOCK_DIR/no_confirmation" ]]; then  # the confirmation the real script posts
+    f="$MOCK_DIR/comments_$2.json"; [[ -f "$f" ]] || echo '[]' > "$f"
+    jq --arg b "$MOCK_BOT" '. + [{user: {login: $b}, body: "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge", created_at: "2026-10-13T09:31:00Z"}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+fi
 exit 0
 """
 
@@ -322,6 +326,8 @@ class Dispatcher:
                       "merged_at": "2026-10-13T09:30:00Z" if merged else None,
                       "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}})
         self._write("pulls.json", pulls)
+        if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
+            self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 
     def add_comment(self, target: int, body: str, login: str = BOT) -> None:
         tick = int((self.mock / "clock").read_text()) + 1 if (self.mock / "clock").exists() else 1
