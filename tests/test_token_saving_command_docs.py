@@ -86,3 +86,11 @@ def test_project_status_requires_green_pytest_for_review_submission() -> None:
     assert "after the required `pytest` check is green for the current PR head SHA" in status
     assert "keeps the item In implementation" in status
     assert "python -m pytest" in read(".github/workflows/tests.yml")
+
+
+def test_project_status_limits_ci_gate_to_implement_handoff() -> None:
+    status = read("docs/PROJECT-STATUS.md")
+
+    assert "binds the implementing session only" in status
+    assert "does not read checks" in status
+    assert "In review" in read("scripts/project-status-sync.sh")
