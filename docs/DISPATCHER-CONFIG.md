@@ -368,7 +368,7 @@ The dispatcher then runs `/implement` for the story, which continues on the exis
 - The dispatcher reads only the bookkeeping job's marker. It does not parse Codex comments or reviews.
 - The bookkeeping job's account is the login behind the dispatcher's own token, because both workflows use `PROJECT_TOKEN`. Set `CODEX_BOOKKEEPING_LOGIN` in the environment if the two ever differ. A marker in a comment by any other account is ignored.
 
-**Maximum fix rounds.** The dispatcher counts the PR heads for which the bookkeeping job recorded findings, one per head. When the count is above `CODEX_FIX_ROUND_MAX`, it starts no session, logs `[RESUME SKIP] #<n>: fix round <k> on PR #<pr> is above the maximum of <max>` and posts one `Type: resource` blocker on the story, once.
+**Maximum fix rounds.** The dispatcher counts the PR heads for which the bookkeeping job recorded findings, one per head. When the count is above `CODEX_FIX_ROUND_MAX`, it starts no session, logs `[RESUME SKIP] #<n>: fix round <k> on PR #<pr> is above the maximum of <max>` and posts one `Type: resource` blocker on the story, once. A round with only Out of scope findings pushes no new head, so it starts no further round; the story waits for the PO's waiver.
 
 | Variable | Valid values | Default |
 |---|---|---|

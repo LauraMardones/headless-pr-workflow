@@ -142,6 +142,8 @@ Review-evidence tooling may inspect normalized review data from GraphQL surfaces
 
 A formal GitHub approval on the current head SHA satisfies the gate. A formal approval recorded on an earlier head is stale and does not count. Path 3 does not depend on the PR timeline or linked stories.
 
+A review finding the story does not own (Out of scope) is classified, not waived: a classification is not a waiver. Only the PO waives it, with a PR comment that names the finding and its follow-up issue; no session waives or resolves it. Waiving changes no merge gate: the thread still has to be resolved under the review-thread gate, and for a waived thread on the current head that resolution is the PO's, since no later review supersedes a same-head thread.
+
 No path waives any other merge condition: required checks, unresolved review threads, draft state, mergeability and the fresh refresh before merge apply unchanged. The only resolution of a review thread by automation is the one described under Path 1: a superseded Codex thread, on Codex's own later clean result.
 
 ## SHA-Bound Approval

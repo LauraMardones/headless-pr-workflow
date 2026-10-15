@@ -24,13 +24,14 @@ Do not merge the PR from the review session.
 Important:
 - Review only the current head SHA.
 - Use GitHub as source of truth.
-- If no blockers remain, use formal approval when GitHub allows it.
+- If no blockers remain and no Out of scope finding is unwaived, use formal approval when GitHub allows it. While an Out of scope finding is unwaived, submit a `COMMENT` review and record no approval (step 7).
 - If GitHub blocks approval because the authenticated account owns the PR, record the separate-session review summary documented in docs/MERGE-POLICY.md exactly, including the `Reviewer provider:` line.
 - Never compose or paraphrase the separate-session review summary. Generate it with `hpw review-evidence-text` or copy the template below verbatim; the approval gate rejects any other wording.
 
 Workflow status goals:
 - If blockers are found: "In review" -> "In implementation"
-- If no blockers remain for the current head SHA: "In review" -> "In merge"
+- If no blockers remain for the current head SHA and no Out of scope finding is unwaived: "In review" -> "In merge"
+- If no blockers remain but an Out of scope finding is unwaived: stay in "In review" until the PO waives it
 - Write a board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` (exit `0` only after it read the status back; non-zero with the reason on stderr otherwise). Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In merge"`).
 
 Required behavior:
@@ -46,6 +47,12 @@ Required behavior:
    - unresolved blockers
    - review/implementation separation
    - whether any new commit has made earlier approval stale
+   - classify every finding against the linked story's `## Acceptance Criteria`, `## Scope`, `## Out of Scope` and the documented policy (`docs/MERGE-POLICY.md`, accepted ADRs, `AGENTS.md`):
+     - **Blocker**: the change breaks or does not meet the story's acceptance criteria, its documented scope or documented policy, or the change itself introduces a defect (a bug in code the PR added or changed)
+     - **Out of scope**: a valid observation the story does not own: behaviour the PR did not add or change, an edge case outside the story's acceptance criteria, or an Epic/Feature requirement the story did not take on
+     - when in doubt, a finding is a Blocker
+     - classifying is not a waiver: only the PO waives a finding, with a PR comment that names it and its follow-up issue
+   - do not report again an Out of scope finding the PO already waived on the PR; a PO comment that names a Blocker is not a waiver, because a Blocker is fixed in the PR and is never waived, so keep reporting it
 6. If blockers are found:
    - before declaring a `Type: decision` blocker, search `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections; follow and record an existing answer instead of escalating it
    - only if no documented answer exists, declare the decision blocker with the Blocked Status Protocol's required `Checked:` line naming what was searched
@@ -57,7 +64,7 @@ Required behavior:
    - state that the next action is implementation
    - before resolving an older review thread, refresh it, confirm it belongs to the verified PR, and resolve it only if the finding is superseded; never resolve a still-actionable thread
    - if a superseded thread cannot be resolved because `gh` or GraphQL is unavailable, leave the thread open and list it in the Session Summary with `--deviation`; never treat it as resolved
-7. If no blockers remain:
+7. If no blockers remain (while an Out of scope finding is unwaived, the Out of scope bullets at the end of this step replace approval and "In merge"):
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
    - if GitHub allows formal approval, approve the PR
    - if GitHub blocks formal approval because the authenticated account owns the PR, submit a `COMMENT` review that carries the separate-session review summary from docs/MERGE-POLICY.md (Path 2)
@@ -86,6 +93,11 @@ Required behavior:
    - if `hpw approval-check` cannot be run in the session, say so with `--deviation`; the verbatim-template rule still applies
    - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
+   - an Out of scope finding is reported with a proposed follow-up issue (title and one-line reason) or a link to an existing issue
+   - post every Out of scope finding that has no review thread yet as an inline review comment on the current head, so it opens an unresolved thread; a finding named only in the review body leaves the review-thread gate nothing to hold. When the finding has no line in the PR's diff (for example a defect in a file the PR did not change), put the comment on the changed line closest to it, or on the first changed line of the PR, and name the finding's real file and line in the comment
+   - it is not listed in `--blockers`, does not by itself cause `REQUEST_CHANGES`, and is recorded with a `--deviation` line
+   - the PR stays unmergeable until the PO waives it (`Type: decision` blocker), so do not set the story to "In merge" or use `--next merge` while one is unwaived
+   - when the only findings are unwaived Out of scope ones, this session records them itself and does not rely on a later `/implement` round: create or link the follow-up issues, declare one `Type: decision` blocker on the story (Question: waive the listed findings for this PR; Options: A) waive and track in the follow-up issues, B) bring them into this story's scope and fix them here; Recommendation: A), submit the review with event `COMMENT` (neither `APPROVE` nor `REQUEST_CHANGES`), leave the story in "In review", use `--blockers none` and `--next implementation` (the only other value the script accepts; it records that no merge is possible yet, not that code must change), and name the findings and follow-up issues in the `--deviation` line; the missing approval and the unresolved thread keep `/merge` from succeeding if the orchestrator reaches it anyway
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 
 Do not rely on chat-only feedback as workflow-authoritative if it is not also recorded on GitHub.
@@ -97,6 +109,7 @@ Do not rely on chat-only feedback as workflow-authoritative if it is not also re
 **Formal PR review posted on the current head SHA** using the available GitHub operation fallback. If formal self-approval is unavailable, record the documented separate-session review summary against that same verified SHA.
 
 - If blockers remain: submit with event `REQUEST_CHANGES`.
-- If no blockers remain: submit with event `APPROVE`, or leave a separate-session review summary with its `Reviewer provider:` line if GitHub blocks self-approval.
+- If no blockers remain but at least one Out of scope finding is unwaived: submit with event `COMMENT`, as in step 7; record no approval and no separate-session review summary until the PO has waived it.
+- If no blockers and no unwaived Out of scope findings remain: submit with event `APPROVE`, or leave a separate-session review summary with its `Reviewer provider:` line if GitHub blocks self-approval.
 
-The Session Summary block is **unconditionally required**. Generate it with `scripts/session-summary.sh --command review --pr $ARGUMENTS --head <reviewed-sha> --checks <checks> --blockers <blockers> --next <implementation|merge>` and post the exact stdout with the formal review. Use `--next implementation` when blockers require another implementation cycle and `--next merge` when none remain. Supply every required argument; use explicit values such as `--blockers none`. Use repeatable `--deviation <text>` flags for deviations, residual risks, or decisions. Do not add any recap section or freeform PR-body/AC repetition after the generated block.
+The Session Summary block is **unconditionally required**. Generate it with `scripts/session-summary.sh --command review --pr $ARGUMENTS --head <reviewed-sha> --checks <checks> --blockers <blockers> --next <implementation|merge>` and post the exact stdout with the formal review. Use `--next implementation` when blockers require another implementation cycle or an unwaived Out of scope finding waits for the PO, and `--next merge` only when neither remains. Supply every required argument; use explicit values such as `--blockers none`. Use repeatable `--deviation <text>` flags for deviations, residual risks, or decisions. Do not add any recap section or freeform PR-body/AC repetition after the generated block.
