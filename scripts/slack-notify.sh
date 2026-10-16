@@ -21,6 +21,8 @@
 #   dispatcher_error          fields: error_description, last_action
 #   ready_for_refinement      fields: issue_title, issue_url
 #   usage_limit_reached       fields: sessions_today, limit, settings_url
+#   dispatch_trigger_stopped  fields: age, last_created_at, check_command, docs_url (issue #339;
+#                                     age is "none" when no dispatched run exists)
 #
 # Exit codes:
 #   0  — message sent successfully, or unrecognised event type (warning logged, no request made)
@@ -273,6 +275,26 @@ build_payload() {
             jq -n --arg sessions_today "$sessions_today" --arg limit "$limit" --arg settings_url "$settings_url" '{ blocks: [ { type: "section", text: { type: "mrkdwn", text: ":no_entry: *Daily session limit reached -- Dispatcher Paused*" } }, { type: "section", text: { type: "mrkdwn", text: ("The dispatcher has reached your daily session limit and starts no new work until 00:00 UTC.\n*Sessions today:* " + $sessions_today + " of " + $limit) } }, { type: "section", text: { type: "mrkdwn", text: (if $settings_url != "" then "<" + $settings_url + "|Change the limit or toggle DISPATCHER_ENABLED in GitHub Settings>" else "Change the limit or toggle DISPATCHER_ENABLED in GitHub Settings" end) } } ] }'
             ;;
 
+        dispatch_trigger_stopped)
+            jq -n --argjson c "$ctx" '
+                def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
+                def str: if type == "string" then . else "" end;
+                def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
+                def or_unknown: if . == "" then "(unknown)" else cut(500) end;
+                ($c.age | clean) as $age
+                | ($c.last_created_at | clean) as $at
+                | ($c.check_command | clean) as $cmd
+                | ($c.docs_url | clean) as $url
+                | {blocks: [
+                    {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *Dispatcher trigger stopped*"}},
+                    {type: "section", text: {type: "mrkdwn", text: (
+                        "*Age of the newest dispatched run:* " + ($age | or_unknown)
+                        + "\n*Created:* " + ($at | or_unknown))}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*Manual check:* `" + ($cmd | or_unknown) + "`")}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*Fix:* " + (if $url != "" then "<" + $url + "|Setup and token rotation>" else "see the trigger section of docs/DISPATCHER-CONFIG.md" end))}}
+                  ]}'
+            ;;
+
         *)
             echo "__UNKNOWN_EVENT__"
             ;;
@@ -281,7 +303,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker po_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached"
+KNOWN_EVENTS="decision_blocker po_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached dispatch_trigger_stopped"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0
