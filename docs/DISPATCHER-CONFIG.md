@@ -114,6 +114,7 @@ claude -p --output-format stream-json --verbose --permission-mode bypassPermissi
 ```
 
 - **Model aliases.** `EXECUTOR_MODEL` names `haiku`, `sonnet` and `opus`. The pinned Claude Code version decides which model each alias means, so a model change is a deliberate version bump.
+- **Git authentication (issue #337).** The checkout keeps no credentials in git config and has the full history (`fetch-depth: 0`). The step "Configure git to authenticate through gh" runs `gh auth setup-git` with `PROJECT_TOKEN`, so git asks `gh` for credentials: a session's plain `git push`, `git fetch` and `git merge` use `PROJECT_TOKEN`, with no `extraheader` or `credential.helper` override and no `--unshallow`.
 - **Never `--bare`.** Bare mode ignores the OAuth token (ADR-012 → Candidate B).
 - **Flags.** Checked on 2026-10-14 against Claude Code 2.1.295 and against the pinned 2.1.296: each flag above is accepted, and an unknown option is rejected. `--max-turns` is no longer listed in `claude --help` but is still accepted. No flag changed from the issue's command line. The AC19 proof run of #314 then ran two live sessions with these flags on the pinned 2.1.296, with the metered API secrets deleted: [run 38534590704](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/38534590704) (2026-10-14), both `success` with `apiKeySource none`.
 - **Token and environment.** `scripts/lib/claude-session.sh`, shared with the allowance probe, removes every whitespace character from `CLAUDE_CODE_OAUTH_TOKEN` and every variable whose name starts with `ANTHROPIC_` from Claude Code's environment.
@@ -195,6 +196,8 @@ This table is the only list of the token's scopes. Other documents and comments 
 | `read:org` | Needed by the PR read of every `hpw` command (`fetch_pr_context()` in `src/headless_pr_workflow/github/pr_context.py`), including `hpw codex-review-bookkeeping` and `scripts/merge-gate-summary`. The read asks `gh pr view --json` for `reviewRequests`, and for that field `gh` requests a team's `name` and `slug` and its organisation's `login`. GitHub checks the token for this scope even when the PR has no team review request and the repository belongs to a user account. |
 
 Both workflows map the secret to the `GH_TOKEN` environment variable (`GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}`), which `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` read via `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"`. No other changes to the scripts are needed.
+
+A dispatcher-started session also pushes with this token: its `git push` goes through `gh auth setup-git` (issue #337), so the `repo` and `workflow` scopes above cover the push, with no new scope.
 
 The Codex review bookkeeping job resolves review threads with this token (`resolveReviewThread`, see [Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop)). GitHub's GraphQL reference for the mutation names the classic `repo` scope (`public_repo` for a public repository), which the table already lists, so no scope is added. This was confirmed from that reference, not by a live call: the first run with a thread to resolve is the live confirmation, and a refused call exits non-zero naming the missing scope.
 
