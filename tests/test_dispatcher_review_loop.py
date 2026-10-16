@@ -1400,14 +1400,14 @@ def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_o
     assert third.returncode == 0, third.stdout + third.stderr
     blockers = [b for b in d.posted(STORY) if "## Blocked Declaration" in b]
     assert len(blockers) == 1 and "Type: external" in blockers[0]
-    assert len(d.slack_calls) == 1
+    assert d.slack_calls == [] and [e["event"] for e in d.queued_events] == ["po_blocker"]  # one retried message (#359)
 
     # Retrying has stopped: no further write attempt, no second blocker, no second Slack message.
     writes = len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])
-    slack = len(d.slack_calls)
+    queued = len(d.queued_events)
     fourth = d.resume()
     assert fourth.returncode == 0, fourth.stdout + fourth.stderr
     assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
-    assert len(d.slack_calls) == slack
+    assert len(d.queued_events) == queued
     assert "retrying stopped after 3 runs" in fourth.stdout
     assert writes == len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])

@@ -126,7 +126,7 @@ case "$path" in
             jq --arg b "$body" --arg t "$(tick)" --arg u "$MOCK_BOT" \
                 '. + [{user: {login: $u}, created_at: $t, body: $b, posted: true}]' "$file" > "$file.tmp"
             mv "$file.tmp" "$file"
-            echo '{}'
+            jq -c '.[-1] | {created_at}' "$file"
         else
             cat "$file"
         fi ;;
