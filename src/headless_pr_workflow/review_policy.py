@@ -193,10 +193,11 @@ def evaluate_codex_review(context: PullRequestContext) -> CodexReviewSummary:
             reason=f"Codex review cannot be verified: {context.review_evidence_error}",
         )
 
+    # Codex's own progress comment is never a result: skip it like a non-Codex comment.
     bot_comments = [
         (index, event)
         for index, event in enumerate(context.timeline)
-        if event.kind == "comment" and _is_codex_bot(event)
+        if event.kind == "comment" and classify_codex_event(event) not in {None, "status"}
     ]
     clean_comments = [(index, event) for index, event in bot_comments if _codex_comment_kind(event.body) == "clean"]
     candidate_index, candidate = clean_comments[-1] if clean_comments else (None, None)
@@ -270,7 +271,7 @@ def evaluate_codex_review(context: PullRequestContext) -> CodexReviewSummary:
                 prefix,
                 "a newer Codex review submission follows the clean Codex review comment",
             )
-        if event.kind == "comment" and _codex_comment_kind(event.body) not in {"clean", "usage-limit"}:
+        if event.kind == "comment" and classify_codex_event(event) not in {"clean", "usage-limit", "status"}:
             return CodexReviewSummary(
                 "superseded",
                 comment_url,
