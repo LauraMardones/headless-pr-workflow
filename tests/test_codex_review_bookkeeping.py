@@ -212,7 +212,7 @@ def test_classifier_recognizes_the_codex_progress_comment():
     assert classify_codex_event(completed) == "status"
     # Only the bot's own comment counts, and it never counts as a clean result.
     assert classify_codex_event(conversation_comment(codex_status_body(), created_at=TWO_HOURS_AGO)) is None
-    assert evaluate_codex_review(pr(request(), running)).status == "invalid"
+    assert evaluate_codex_review(pr(request(), running)).status == "missing"
 
 
 def test_progress_comment_is_not_a_reply_so_the_request_stays_pending():
@@ -318,6 +318,63 @@ def test_clean_result_agrees_with_the_approval_gate_when_a_usage_limit_reply_fol
 
     assert evaluate_codex_review(context).status == "accepted"
     assert decision_for(context).action == ACTION_MOVE_IN_MERGE
+
+
+def status_comment(created_at: str = "2026-10-15T16:12:13Z", **body) -> TimelineEvent:
+    return replace(codex_comment(codex_status_body(HEAD_SHA[:7], **body), url=UNKNOWN_URL), created_at=created_at)
+
+
+COMPLETED = {"status": "✅ **Completed** 2026-10-15T16:12:13Z"}
+
+
+@pytest.mark.parametrize("body", [{}, COMPLETED], ids=["running", "completed"])
+def test_status_comment_after_a_clean_result_does_not_supersede_it(body):
+    # #376: on PR #375 Codex created its status comment 4 s after the clean result.
+    clean = replace(codex_comment(), created_at="2026-10-15T16:12:09Z")
+    summary = evaluate_codex_review(pr(request(), clean, status_comment(**body)))
+
+    assert (summary.status, summary.reason, summary.comment_url) == ("accepted", None, CLEAN_URL)
+
+
+def test_status_comment_then_findings_or_unknown_comment_still_supersedes_a_clean_result():
+    findings = evaluate_codex_review(pr(request(), codex_comment(), status_comment(), codex_findings_review(HEAD_SHA)))
+    unknown = evaluate_codex_review(pr(request(), codex_comment(), status_comment(), codex_comment(CODEX_TASK_REPLY_BODY)))
+
+    assert findings.status == "superseded"
+    assert "newer Codex review submission" in findings.reason
+    assert unknown.status == "superseded"
+    assert "not a clean result" in unknown.reason
+
+
+def test_status_body_posted_by_another_account_after_a_clean_result_has_no_effect():
+    human = conversation_comment(codex_status_body(HEAD_SHA[:7]), created_at=TWO_HOURS_AGO)
+    other_bot = codex_comment(codex_status_body(HEAD_SHA[:7]), author="github-actions[bot]")
+
+    assert evaluate_codex_review(pr(request(), codex_comment(), human, other_bot)).status == "accepted"
+
+
+def test_without_a_clean_result_the_reason_names_the_latest_non_status_codex_comment():
+    task_reply = codex_comment(CODEX_TASK_REPLY_BODY, url="https://x/task-reply")
+    unknown = evaluate_codex_review(pr(request(), task_reply, status_comment()))
+    limited = evaluate_codex_review(pr(request(), usage_limit(TWO_HOURS_AGO), status_comment()))
+    only_status = evaluate_codex_review(pr(request(), status_comment(), status_comment(**COMPLETED)))
+
+    assert (unknown.status, unknown.comment_url) == ("invalid", "https://x/task-reply")
+    assert "in a format the recognizer does not know" in unknown.reason
+    assert (limited.status, limited.comment_url) == ("invalid", "https://x/usage-limit")
+    assert "a usage-limit reply" in limited.reason
+    assert (only_status.status, only_status.comment_url) == ("missing", None)
+
+
+def test_bookkeeping_moves_a_clean_result_on_when_the_status_comment_follows_it():
+    # The PR #375 timeline: clean result at 16:12:09Z, status comment created at 16:12:13Z.
+    clean = replace(codex_comment(), created_at="2026-10-15T16:12:09Z")
+    after = decision_for(pr(request(), clean, status_comment()))
+    # The usual order: status comment created before the result and edited after it.
+    before = decision_for(pr(request(), status_comment("2026-10-15T16:00:00Z", **COMPLETED), clean))
+
+    assert (after.action, after.codex_result, after.codex_url) == (ACTION_MOVE_IN_MERGE, "clean", CLEAN_URL)
+    assert (before.action, before.codex_result) == (ACTION_MOVE_IN_MERGE, "clean")
 
 
 def test_clean_result_after_findings_on_the_same_head_moves_to_in_merge():
