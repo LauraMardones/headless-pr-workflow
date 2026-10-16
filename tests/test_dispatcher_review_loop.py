@@ -1411,3 +1411,201 @@ def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_o
     assert len(d.slack_calls) == slack
     assert "retrying stopped after 3 runs" in fourth.stdout
     assert writes == len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])
+
+
+# ── Decision blocker: alert, no-push round, Codex reviewer (issue #357) ─────
+
+DECLARATION = ("## Blocked Declaration\nType: decision\nQuestion: waive the listed findings for this PR?\n"
+               "Options:\nA) waive\nB) fix here\nRecommendation: A\n")
+
+
+def session_declares_blocker(d: Dispatcher, command: str, issue: int = STORY, push: bool = False) -> None:
+    """The ``command`` session leaves a decision blocker on the story (and, with ``push``, a new head)."""
+    body = json.dumps(DECLARATION)
+    script = (f"""jq --argjson b '{body}' '. + [{{user: {{login: "{BOT}"}}, created_at: "2026-10-13T12:00:00Z", body: $b}}]' """
+              f""""$MOCK_DIR/comments_{issue}.json" > "$MOCK_DIR/c.tmp" && mv "$MOCK_DIR/c.tmp" "$MOCK_DIR/comments_{issue}.json"\n""")
+    if push:
+        new_head_on_implement(d, status="In review")
+        script = (d.mock / f"on_{command}.sh").read_text(encoding="utf-8") + script
+    d.on_session(command, script)
+
+
+def decision_events(d: Dispatcher) -> list[dict]:
+    return [e for e in d.queued_events if e["event"] == "decision_blocker"]
+
+
+@needs_tools
+def test_357_first_implement_that_exits_0_with_a_decision_blocker_registers_one_event(d):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    session_declares_blocker(d, "implement", push=True)
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [(e["issue"], e["delivered"]) for e in decision_events(d)] == [(STORY, False)]
+
+
+@needs_tools
+def test_357_first_implement_without_a_decision_blocker_registers_nothing(d):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    new_head_on_implement(d, status="In review")
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert decision_events(d) == []
+
+
+@needs_tools
+def test_357_fix_round_that_exits_0_with_a_decision_blocker_registers_one_event(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    session_declares_blocker(d, "implement", push=True)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [e["issue"] for e in decision_events(d)] == [STORY]
+
+
+@needs_tools
+def test_357_lifted_blocker_is_not_announced_again(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived.\n/unblock\n", login=PO)
+    d.add_findings(PR, HEAD)
+    new_head_on_implement(d, status="In review")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert decision_events(d) == []
+
+
+@needs_tools
+def test_357_review_that_exits_0_with_a_decision_blocker_registers_one_event_and_never_a_second(d):
+    d.add_story(STORY, "In review", executor="codex")
+    d.add_pr(PR, STORY)
+    session_declares_blocker(d, "review")
+
+    first = d.resume()
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert d.phases == []  # the story stays "In review": no merge
+    assert [e["issue"] for e in decision_events(d)] == [STORY]
+
+    # Forget the reviewed-head record so /review runs again over the same declaration.
+    kept = [c for c in json.loads((d.mock / f"comments_{STORY}.json").read_text()) if "Blocked Declaration" in c["body"]]
+    (d.mock / f"comments_{STORY}.json").write_text(json.dumps(kept))
+    second = d.resume()
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"review {PR}", f"review {PR}"]
+    assert len(decision_events(d)) == 1
+
+
+@needs_tools
+def test_357_review_without_a_decision_blocker_registers_nothing(d):
+    d.add_story(STORY, "In review", executor="codex")
+    d.add_pr(PR, STORY)
+
+    assert d.resume().returncode == 0
+    assert decision_events(d) == []
+
+
+@needs_tools
+def test_357_only_out_of_scope_round_is_not_a_failure_and_is_not_repeated(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    session_declares_blocker(d, "implement")  # exits 0, pushes nothing
+
+    first = d.resume()
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    posted = d.posted(STORY)
+    assert not any("Type: external" in body for body in posted)
+    assert "pushed no new commit" not in first.stderr
+    assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in posted)
+    assert d.status(STORY) == "In implementation" and d.board_writes == []
+    assert [e["issue"] for e in decision_events(d)] == [STORY]
+
+    second = d.resume()
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"implement {STORY}"]  # no second /implement on the same head
+
+
+@needs_tools
+def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    assert not any("Type: external" in body for body in d.posted(STORY))
+    assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
+    assert d.board_writes == [f"{STORY}=In review"]
+    assert d.posted(PR) == []  # the dispatcher posts no review request; the job posts the one for the head
+
+    again = d.resume()
+    assert again.returncode == 0 and d.sessions == [f"implement {STORY}"]
+
+
+@needs_tools
+def test_357_no_push_without_a_decision_blocker_is_still_a_failure(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, "Blocked Declaration is only mentioned in prose, /unblock too.\n")
+
+    proc = d.resume()
+
+    assert proc.returncode == 1
+    assert "pushed no new commit" in proc.stderr
+    assert len([b for b in d.posted(STORY) if "/implement completes successfully" in b]) == 1
+
+
+@needs_tools
+def test_357_blocker_declared_before_the_session_and_still_open_does_not_excuse_a_missing_push(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)  # an earlier declaration the session did not make
+
+    proc = d.resume()
+
+    assert proc.returncode == 1 and "pushed no new commit" in proc.stderr
+
+
+@needs_tools
+def test_357_codex_review_that_leaves_the_story_in_review_runs_no_merge_and_unblock_reviews_again(d):
+    d.add_story(STORY, "In review", executor="codex")
+    d.add_pr(PR, STORY)
+
+    first = d.resume()  # /review exits 0 and leaves the story "In review" (a COMMENT review)
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert d.sessions == [f"review {PR}"] and d.phases == []
+    assert any(f"action=review-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
+
+    skipped = d.resume()
+    assert d.sessions == [f"review {PR}"] and "/review was already tried" in skipped.stdout
+
+    d.add_comment(STORY, "Waived.\n/unblock\n", login=PO)
+    d.session_sets_status("review", STORY, "In merge")
+    third = d.resume()
+
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert d.sessions == [f"review {PR}", f"review {PR}"]  # the same head is reviewed again
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]

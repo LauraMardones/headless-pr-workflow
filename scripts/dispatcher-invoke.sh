@@ -145,6 +145,7 @@
 # Four Slack events are wired into this script via scripts/slack-notify.sh:
 #   decision_blocker          — executor declared Type: decision during /implement or /review;
 #                               carries the declaration's Question, Options and Recommendation
+#                               (also after a session that exits 0, while the blocker is open; #357)
 #   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
@@ -502,16 +503,58 @@ drain_actionable_events() {
 check_and_notify_decision_blocker() {
     local issue_num="$1"
     local issue_title="$2"
-    local blocker_json blocker_body blocker_since
+    local blocker_json
     blocker_json=$(gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
         | jq -c '[.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
                   | last // empty' 2>/dev/null || true)
     [[ -z "$blocker_json" ]] && return 0
+    register_decision_blocker_event "$issue_num" "$issue_title" "$blocker_json"
+}
+
+register_decision_blocker_event() {
+    local issue_num="$1" issue_title="$2" blocker_json="$3"
+    local blocker_body blocker_since
     blocker_body=$(jq -r '.body // ""' <<< "$blocker_json")
     blocker_since=$(jq -r '.created_at // ""' <<< "$blocker_json")
     local issue_url="https://github.com/$REPO/issues/$issue_num"
     register_actionable_event "decision_blocker" "$issue_num" "$blocker_since" \
         "$(decision_blocker_context "$blocker_body" "$issue_title" "$issue_url")"
+}
+
+# The story's latest decision blocker as one JSON object (the comment plus
+# `unblocked`: a standalone `/unblock` line by the PO follows it, the rule of
+# docs/PROJECT-STATUS.md → Decision blockers and of
+# check_and_resolve_decision_blocker_comment() below). Prints nothing when the
+# story has no decision blocker; returns 1 when the comments cannot be read.
+latest_decision_blocker_json() {
+    local issue_num="$1" comments
+    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return 1
+    jq -c --arg login "$DECISION_BLOCKER_PO_LOGIN" '
+        ([.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))] | last) as $b
+        | if $b == null then empty else
+            $b + {unblocked: ([.[] | select((.user.login // "") == $login
+                                            and .created_at > $b.created_at
+                                            and ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$"))))]
+                              | length > 0)}
+          end' <<< "$comments"
+}
+
+# created_at of the story's latest decision blocker, empty when it has none.
+decision_blocker_created_at() {
+    latest_decision_blocker_json "$1" 2>/dev/null | jq -r '.created_at // empty' 2>/dev/null || true
+}
+
+# After a session that exited 0 (issue #357): the PO is told when the session
+# left a decision blocker open (an Out of scope finding waits for the waiver).
+# A lifted blocker (the PO's /unblock follows it) is not announced again; the
+# event state de-duplicates a blocker already registered.
+notify_open_decision_blocker() {
+    local issue_num="$1" issue_title="$2" blocker_json
+    blocker_json=$(latest_decision_blocker_json "$issue_num") || {
+        echo "Warning: could not read the comments of #$issue_num to check for a decision blocker" >&2; return 0; }
+    [[ -n "$blocker_json" ]] || return 0
+    [[ "$(jq -r '.unblocked' <<< "$blocker_json")" == "true" ]] && return 0
+    register_decision_blocker_event "$issue_num" "$issue_title" "$blocker_json"
 }
 
 # ─── Utility: comment-triggered resume for decision blockers (issue #262) ────
@@ -2164,8 +2207,33 @@ $(hand_off_done_marker "$pr_number")" || true
     return 0
 }
 
+# Whether a fix round that pushed no commit is expected (issue #357). Sets
+# NO_PUSH_ROUND_REASON and returns 0 when the story's latest decision blocker
+# was declared during the session (different from $1, the latest one before it)
+# and is still open: only Out of scope findings remain. Returns 0 as well when
+# the PO's /unblock follows the latest blocker: the post-waiver round has
+# nothing left to fix. Returns 1 otherwise, and when the comments cannot be read.
+NO_PUSH_ROUND_REASON=""
+no_push_round_is_expected() {
+    local blocker_before="$1" blocker_json created unblocked
+    NO_PUSH_ROUND_REASON=""
+    blocker_json=$(latest_decision_blocker_json "$ISSUE_NUMBER") || return 1
+    [[ -n "$blocker_json" ]] || return 1
+    created=$(jq -r '.created_at' <<< "$blocker_json")
+    unblocked=$(jq -r '.unblocked' <<< "$blocker_json")
+    if [[ "$unblocked" == "true" ]]; then
+        NO_PUSH_ROUND_REASON="post-waiver round: the PO's /unblock follows the decision blocker"
+        return 0
+    fi
+    if [[ "$created" != "$blocker_before" ]]; then
+        NO_PUSH_ROUND_REASON="waiting for the PO's decision"
+        return 0
+    fi
+    return 1
+}
+
 hand_off_to_codex_review_loop() {
-    local head_before="${1:-}"
+    local head_before="${1:-}" blocker_before="${2:-}"
     local reviewer="${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]}"
     local pr_json pr_number pr_draft pr_head status
     LAST_ACTION="hand-off to the Codex review loop for #$ISSUE_NUMBER"
@@ -2211,6 +2279,23 @@ hand_off_to_codex_review_loop() {
     # Checked whatever the status is: a session that pushed nothing may still
     # have moved the story to "In review", and the bookkeeping job would then
     # move it back for the same head and start the same round again.
+    if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]] \
+            && no_push_round_is_expected "$blocker_before"; then
+        # A round with only Out of scope findings (the session declared a
+        # decision blocker) or the post-waiver round (the PO's /unblock follows
+        # the blocker) pushes nothing by design (issue #357). Record the attempt
+        # so the round does not start again on this head.
+        post_comment "$ISSUE_NUMBER" "Dispatcher: /implement completed on PR #$pr_number at head ${pr_head:0:7} without a new commit ($NO_PUSH_ROUND_REASON); no further fix round starts on this head until the PR has a new head or the PO posts /unblock.
+
+$(fix_round_attempt_marker "$pr_number" "$pr_head")" \
+            || echo "Warning: could not record the fix-round attempt for PR #$pr_number head ${pr_head:0:7}; the next run may start the round again." >&2
+        if [[ "$NO_PUSH_ROUND_REASON" == "waiting for the PO's decision" ]]; then
+            echo "#$ISSUE_NUMBER: the round pushed nothing and waits for the PO's decision; the story stays \"$status\"."
+            echo "[HANDOFF] #$ISSUE_NUMBER: waiting for the PO on PR #$pr_number; no review request, no status change"
+            return 0
+        fi
+        due=false
+    fi
     if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]]; then
         echo "Error: /implement for #$ISSUE_NUMBER pushed no new commit to PR #$pr_number; the findings recorded for head ${pr_head:0:7} are still open." >&2
         post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
@@ -2343,7 +2428,7 @@ resume_in_merge_story() {
 # allowance check inside invoke_executor_command() still applies.
 resume_fix_round() {
     local issue_num="$1" item_id="$2"
-    local pr_json pr_number pr_draft pr_head heads round attempt_marker
+    local pr_json pr_number pr_draft pr_head heads round attempt_marker blocker_before
     load_story_context "$issue_num" "$item_id" || return 0
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
 
@@ -2386,6 +2471,7 @@ resume_fix_round() {
     # The allowance check must not put this story back to "Ready for
     # implementation": it is unfinished work that holds its place.
     FIX_ROUND_SESSION=true
+    blocker_before=$(decision_blocker_created_at "$issue_num")
     if ! invoke_executor_command "implement" "$issue_num"; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
@@ -2394,8 +2480,9 @@ resume_fix_round() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num"
+    notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
     record_merge_owner "$issue_num" "$pr_head" || exit 1
-    hand_off_to_codex_review_loop "$pr_head"
+    hand_off_to_codex_review_loop "$pr_head" "$blocker_before"
 }
 
 # A story still "Ready for implementation" whose hand-off is pending: the
@@ -2478,6 +2565,7 @@ resume_review_story() {
     fi
     $DRY_RUN && return 0
     echo "✓ /review completed for PR #$pr_number"
+    notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
 
     # Record the head as reviewed before anything else: when /review leaves the
     # story "In review" (a failed board write, a finding awaiting PO waiver), the
@@ -2976,6 +3064,7 @@ set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
 # The PR head before the session, if the story already has an open PR: the
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
+BLOCKER_BEFORE_IMPLEMENT=$(decision_blocker_created_at "$ISSUE_NUMBER")
 if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
@@ -2983,6 +3072,7 @@ if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
     exit 1
 fi
 echo "✓ /implement completed for #$ISSUE_NUMBER"
+notify_open_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
 record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT" || exit 1
 
 # ─── Review path (issue #293) ─────────────────────────────────────────────────
@@ -2993,7 +3083,7 @@ record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT" || exit 1
 if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
     echo ""
     echo "── Hand-off: #$ISSUE_NUMBER to the Codex review loop ───────────────────"
-    hand_off_to_codex_review_loop "$HEAD_BEFORE_IMPLEMENT"
+    hand_off_to_codex_review_loop "$HEAD_BEFORE_IMPLEMENT" "$BLOCKER_BEFORE_IMPLEMENT"
     continue_with_next_ready_story
 fi
 
