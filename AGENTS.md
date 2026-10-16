@@ -112,9 +112,11 @@ the branch is for; no random suffixes.
 ## Review Guidelines
 
 This section applies only to automated pull request reviewers acting with no
-human request, such as Codex Cloud automatic review. Any human-requested review,
-including `/review <n>` or "review PR <n>", follows `.claude/commands/review.md`
-in full, read before anything is posted to GitHub.
+human request, such as Codex Cloud automatic review and the Codex Cloud review
+requested by the trigger-phrase PR comment (ADR-006 → Decision), whoever posts
+that comment. Any other human-requested review, including `/review <n>` or "review
+PR <n>" asked of an assistant session, follows `.claude/commands/review.md` in
+full, read before anything is posted to GitHub.
 
 This section applies to automated pull request reviewers, such as Codex Cloud
 automatic review, that can comment on a PR but do not run the full `/review`

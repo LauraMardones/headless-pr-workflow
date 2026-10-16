@@ -269,6 +269,16 @@ def test_review_guidelines_scope_is_limited_to_automated_reviewers() -> None:
     assert "before anything is posted to GitHub" in opening
 
 
+def test_review_guidelines_scope_keeps_adr_006_codex_trigger_on_the_rubric() -> None:
+    opening = _agents_section("Review Guidelines").split("\n\n", maxsplit=1)[0]
+    opening = " ".join(opening.split())
+    automated_scope, redirected_scope = opening.split("human-requested", maxsplit=1)
+
+    assert "trigger-phrase PR comment (ADR-006 → Decision)" in automated_scope
+    assert "whoever posts that comment" in automated_scope
+    assert "ADR-006" not in redirected_scope
+
+
 def test_workflow_commands_document_codex_review_name_collision() -> None:
     section = _agents_section("Workflow Commands")
     collision = next(line for line in section.splitlines() if "built-in" in line)
