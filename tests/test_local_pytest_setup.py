@@ -111,6 +111,32 @@ def test_configure_temproot_keeps_an_explicit_value(tmp_path):
     assert environ == {"PYTEST_DEBUG_TEMPROOT": str(tmp_path / ".pytest_tmp")}
 
 
+def test_explicit_basetemp_skips_the_default_root_when_its_parent_is_unavailable(tmp_path):
+    from conftest import configure_temproot
+
+    blocked = tmp_path / "not-a-dir"  # a file, so <blocked>/.pytest_tmp cannot be created
+    blocked.write_text("")
+    checkout = blocked / "checkout"
+    with pytest.raises(OSError):
+        configure_temproot({}, checkout)
+    environ: dict[str, str] = {}
+    configure_temproot(environ, checkout, basetemp=tmp_path / "writable")
+    assert environ == {}
+
+
+def test_basetemp_on_the_command_line_runs_where_the_default_root_is_unavailable(tmp_path):
+    checkout = make_checkout(tmp_path / "checkout")
+    (tmp_path / ".pytest_tmp").write_text("")  # a file, so the default root cannot be created
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_DEBUG_TEMPROOT", "PYTEST_ADDOPTS")}
+    env["REPORT"] = str(tmp_path / "report.txt")
+    basetemp = tmp_path / "chosen"
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
+                           f"--basetemp={basetemp}"], cwd=checkout, env=env, capture_output=True, text=True,
+                          timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert Path((tmp_path / "report.txt").read_text(encoding="utf-8")).is_relative_to(basetemp.resolve())
+
+
 # ── AC4: Git Bash and PATH selection, on any OS ─────────────────────────────
 
 GIT_ROOT = r"C:\Program Files\Git"

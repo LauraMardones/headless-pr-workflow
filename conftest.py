@@ -12,8 +12,9 @@ def default_temproot(conftest_dir: Path) -> Path:
     return conftest_dir.parent / ".pytest_tmp"
 
 
-def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path) -> None:
-    """Point pytest's own numbered temp root at ``default_temproot`` unless PYTEST_DEBUG_TEMPROOT is set.
+def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path,
+                       basetemp: str | os.PathLike[str] | None = None) -> None:
+    """Point pytest's own numbered temp root at ``default_temproot`` unless the user chose a temp location.
 
     Avoids two problems in sandboxed environments (e.g. Codex):
     1. The system temp directory may not be writable.
@@ -25,9 +26,11 @@ def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path
     session still holds; xdist workers get ``popen-gwN`` inside their session's tree.
     An explicit ``basetemp`` would instead be emptied at every session start, so a
     run in a sibling checkout (or a second run here) deleted the first run's files
-    (issue #384). ``--basetemp`` on the command line still wins, as in pytest.
+    (issue #384). With PYTEST_DEBUG_TEMPROOT set or ``--basetemp`` given, nothing
+    is created or changed, so a run works even where the default root's parent is
+    not writable.
     """
-    if environ.get("PYTEST_DEBUG_TEMPROOT"):
+    if environ.get("PYTEST_DEBUG_TEMPROOT") or basetemp:
         return
     root = default_temproot(conftest_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -35,7 +38,8 @@ def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path
 
 
 def pytest_configure(config: object) -> None:
-    configure_temproot(os.environ, Path(__file__).resolve().parent)
+    basetemp = getattr(getattr(config, "option", None), "basetemp", None)
+    configure_temproot(os.environ, Path(__file__).resolve().parent, basetemp)
 
 
 # Tests that summarize CI without an explicit repo_root read the policy relative to
