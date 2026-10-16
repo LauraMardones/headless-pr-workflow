@@ -95,10 +95,20 @@ def test_ac15_marker_is_written_only_by_mark_notified(tmp_path):
 
 @pytest.fixture
 def d(tmp_path):
-    """A Codex-implemented story: /implement, /review, /merge and /cleanup in one run."""
+    """A Claude-implemented story ready for /implement."""
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(ISSUE, "Ready for implementation", executor="codex")
+    dispatcher.add_story(ISSUE, "Ready for implementation")
     dispatcher.add_pr(PR, ISSUE)
+    return dispatcher
+
+
+@pytest.fixture
+def r(tmp_path):
+    """A Codex-implemented story \"In review\": /review (a session), then /merge and /cleanup (scripts)."""
+    dispatcher = Dispatcher(tmp_path)
+    dispatcher.add_story(ISSUE, "In review", executor="codex")
+    dispatcher.add_pr(PR, ISSUE)
+    dispatcher.session_sets_status("review", ISSUE, "In merge")
     return dispatcher
 
 
@@ -108,10 +118,12 @@ def seed(d, count, day=None):
 
 
 def test_ac2_every_session_kind_counts_once(d):
+    d.add_story(900, "In review", executor="codex")
+    d.add_pr(910, 900)
     proc = d.run_issue(ISSUE, seq="0,0,0,0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    # /merge and /cleanup are scripts since #264: they start no model session and count nothing.
-    assert d.sessions == [f"implement {ISSUE}", f"review {PR}"]
+    # The resume pass reviews the Codex PR first. /merge and /cleanup are scripts since #264: they count nothing.
+    assert d.sessions == ["review 910", f"implement {ISSUE}"]
     assert d.usage_count == 2
 
 
@@ -213,24 +225,28 @@ def test_ac11_leading_zero_allows_eight(d):
     seed(d, 7)
     proc = d.run_issue(ISSUE, seq="0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": "08"})
     assert d.sessions[:1] == [f"implement {ISSUE}"]
+    d.add_story(900, "In review", executor="codex")
+    d.add_pr(910, 900)
+    proc = d.resume(seq="0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": "08"})
     assert "[USAGE LIMIT SKIP]" in proc.stdout  # the second session sees 8 of 8
 
 
 # /merge and /cleanup are scripts since #264: no model session, so the limit never stops them.
-@pytest.mark.parametrize("count,step_name", [(1, "review")])
-def test_ac12_stop_before_later_steps_comments_once_and_ends_the_run(d, count, step_name):
-    limit = str(count)
-    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": limit})
+def test_ac12_stop_before_review_comments_once_and_ends_the_run(r):
+    seed(r, 1)
+    env = {"USAGE_LIMIT_SESSIONS_PER_DAY": "1"}
+    proc = r.resume(seq="0", env=env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert len(d.sessions) == count
-    comments = d.posted(ISSUE)
+    assert r.sessions == []
+    comments = r.posted(ISSUE)
     assert len(comments) == 1
     assert comments[0].startswith("## Usage limit")
-    assert f"/{step_name} was not started for #{ISSUE}" in comments[0]
-    assert f"{count} of {count} sessions today" in comments[0]
+    assert f"/review was not started for #{ISSUE}" in comments[0]
+    assert "1 of 1 sessions today" in comments[0]
     assert "00:00 UTC" in comments[0]
     # the same stop again: the comment is the newest one, so it is not posted twice
-    d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": limit})
+    r.resume(seq="0", env=env)
+    assert len(r.posted(ISSUE)) == 1
 
 
 def test_ac13_notification_is_due_on_the_first_stop_of_the_day_only(d):
@@ -342,7 +358,8 @@ def test_an_invalid_limit_before_cleanup_still_notifies_the_closure(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(ISSUE, "In merge", executor="codex", body="Feature group: #50 Feature: something")
     d.add_pr(PR, ISSUE, merged=True, state="closed")
-    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": ""})
+    d.add_story(700, "Ready for implementation")  # the run's own target needs a session, so the limit is read
+    proc = d.run_issue(700, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": ""})
     assert "[USAGE LIMIT ERROR]" in proc.stderr
     assert d.sessions == []
     assert "Feature #50: all 1 stories Done." in proc.stdout

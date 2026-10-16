@@ -26,6 +26,7 @@ STORY = 500
 PR = 900
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+ROUTING_LIB = REPO_ROOT / "scripts" / "lib" / "review-routing.sh"  # review-path tables, shared with the poll (#315)
 CLAUDE_TIERS = ("claude-code-haiku", "claude-code-sonnet", "claude-code-opus")
 
 
@@ -36,9 +37,9 @@ def d(tmp_path):
 
 def table(name: str) -> dict[str, str]:
     """Rows of a ``declare -A`` table in dispatcher-invoke.sh."""
-    text = INVOKE.read_text(encoding="utf-8")
+    text = INVOKE.read_text(encoding="utf-8") + "\n" + ROUTING_LIB.read_text(encoding="utf-8")
     block = re.search(rf"^declare -A {name}=\(\n(.*?)^\)$", text, re.MULTILINE | re.DOTALL)
-    assert block, f"{name} not found in {INVOKE}"
+    assert block, f"{name} not found in {INVOKE} or {ROUTING_LIB}"
     return dict(re.findall(r'^\s*\["([^"]+)"\]="([^"]*)"$', block.group(1), re.MULTILINE))
 
 
@@ -345,20 +346,20 @@ def test_ac3_no_open_pr_or_draft_pr_blocks_after_implement(d, draft):
 
 
 @needs_tools
-def test_ac4_codex_story_keeps_the_paired_review_session(d):
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+def test_ac4_codex_story_in_review_is_reviewed_on_opus_then_merged(d):
+    d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY)
+    d.session_sets_status("review", STORY, "In merge")
 
-    proc = d.run_issue(STORY)
+    proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"implement {STORY}", f"review {PR}"]  # /merge and /cleanup start no session (#264)
+    assert d.sessions == [f"review {PR}"]  # /merge and /cleanup start no session (#264)
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
-    assert d.session_providers == ["implement openai", "review claude-code"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review",
-                              f"{STORY}=In merge", f"{STORY}=Done"]
-    assert "Review executor: Claude Opus" in proc.stdout
-    assert d.usage_count == 2  # the two model sessions; /merge and /cleanup are scripts (#264)
+    assert d.session_providers == ["review claude-code"]
+    assert d.board_writes == [f"{STORY}=Done"]
+    assert f"[RESUME] #{STORY}: /review on PR #{PR} under claude-code-opus" in proc.stdout
+    assert d.usage_count == 1  # the model session; /merge and /cleanup are scripts (#264)
 
 
 def test_ac5_review_path_tables():
@@ -386,10 +387,10 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
     """A copy of the script with the loop row for one tier removed: that tier fails closed."""
     scripts = tmp_path / "repo" / "scripts"
     scripts.mkdir(parents=True)
-    text = INVOKE.read_text(encoding="utf-8")
+    (scripts / "dispatcher-invoke.sh").write_text(INVOKE.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    routing = ROUTING_LIB.read_text(encoding="utf-8")
     row = '    ["claude-code-haiku"]="Codex Cloud"\n'
-    assert row in text
-    (scripts / "dispatcher-invoke.sh").write_text(text.replace(row, ""), encoding="utf-8", newline="\n")
+    assert row in routing
     (scripts / "dispatcher-usage-limit.sh").write_text(
         (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
         encoding="utf-8", newline="\n")
@@ -398,6 +399,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
+    (scripts / "lib" / "review-routing.sh").write_text(routing.replace(row, ""), encoding="utf-8", newline="\n")
     commands = tmp_path / "repo" / ".claude" / "commands"
     commands.mkdir(parents=True)
     for name in ("implement", "review", "merge", "cleanup"):
@@ -795,10 +797,15 @@ def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
     assert "all 2 stories Done" not in proc.stdout and d.slack_calls == []
 
 
-def poll_json(tmp_path, items: list[tuple[int, str]]) -> dict:
-    """Run the real dispatcher-poll.sh against a fake ``curl`` that serves one board page."""
-    nodes = [{"content": {"number": n, "title": f"Story {n}"},
-              "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}} for n, status in items]
+def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None) -> dict:
+    """Run the real dispatcher-poll.sh against a fake ``curl`` that serves one board page.
+
+    An item is ``(number, status)`` or ``(number, status, [labels])``; ``pulls`` is the open-PR list.
+    """
+    nodes = [{"content": {"number": n, "title": f"Story {n}",
+                          "labels": {"nodes": [{"name": name} for name in (rest[0] if rest else [])]}},
+              "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}}
+             for n, status, *rest in items]
     board = {"data": {"repository": {"projectsV2": {"nodes": [{
         "number": 3, "title": "board",
         "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}]}}}}
@@ -806,10 +813,13 @@ def poll_json(tmp_path, items: list[tuple[int, str]]) -> dict:
     bin_dir.mkdir()
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
     curl = bin_dir / "curl"
-    curl.write_text('#!/usr/bin/env bash\ncat "$BOARD_FILE"\n', encoding="utf-8", newline="\n")
+    (tmp_path / "pulls.json").write_text(json.dumps(pulls or []), encoding="utf-8")
+    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  */pulls*) cat "$PULLS_FILE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
+                    encoding="utf-8", newline="\n")
     curl.chmod(0o755)
     env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
+           "PULLS_FILE": (tmp_path / "pulls.json").as_posix(),
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5"}
     if os.name == "nt":
@@ -830,13 +840,38 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "ready_for_refinement": [{"number": 2, "title": "Story 2"}],
         "in_merge": [{"number": 3, "title": "Story 3"}],
         "in_implementation": [{"number": 4, "title": "Story 4"}],
+        "review_due": [],
     }
+
+
+def open_pr(number: int, issue: int, draft: bool = False) -> dict:
+    return {"number": number, "draft": draft, "body": f"Closes #{issue}"}
+
+
+@needs_tools
+def test_ac15_poll_lists_review_due_for_the_codex_story_only(tmp_path):
+    out = poll_json(
+        tmp_path,
+        [(1, "In review", ["executor:codex"]), (2, "In review", ["executor:claude-code-sonnet"]),
+         (3, "In review", ["executor:codex", "executor:claude-code-opus"]),
+         (4, "In review", ["executor:codex"]), (5, "In review", ["executor:codex"]),
+         (6, "In review", [])],
+        pulls=[open_pr(11, 1), open_pr(12, 2), open_pr(13, 3), open_pr(15, 5, draft=True)],
+    )
+    # 2 is Claude-tier (Codex Cloud reviews it), 3 has two labels, 4 has no PR, 5 has a draft PR, 6 has no label
+    assert out["review_due"] == [{"number": 1, "title": "Story 1"}]
+
+
+@needs_tools
+def test_ac16_only_claude_tier_in_review_gives_an_empty_review_due(tmp_path):
+    out = poll_json(tmp_path, [(2, "In review", ["executor:claude-code-sonnet"])], pulls=[open_pr(12, 2)])
+    assert out["review_due"] == []
 
 
 @needs_tools
 def test_ac14_poll_lists_are_empty_arrays_when_nothing_matches(tmp_path):
     out = poll_json(tmp_path, [(5, "In review")])
-    assert out["in_merge"] == [] and out["in_implementation"] == []
+    assert out["in_merge"] == [] and out["in_implementation"] == [] and out["review_due"] == []
     assert out["ready_for_implementation"] == [] and out["ready_for_refinement"] == []
 
 
@@ -925,6 +960,8 @@ def test_ac14_workflow_poll_step_reports_resumable_work():
 @pytest.mark.parametrize("poll,expected", [
     ({"ready_for_implementation": [], "in_merge": [{"number": 3}], "in_implementation": []}, "true"),
     ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [{"number": 4}]}, "true"),
+    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [{"number": 5}]}, "true"),
+    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": []}, "false"),
     ({"ready_for_implementation": [{"number": 1}], "in_merge": [], "in_implementation": []}, "false"),
     ({"ready_for_implementation": [], "ready_for_refinement": []}, "false"),
 ])

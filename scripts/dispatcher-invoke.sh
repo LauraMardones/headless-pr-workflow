@@ -13,16 +13,19 @@
 #     handed to the Codex review loop and its run ends. A later run resumes it
 #     from GitHub facts — at /merge → /cleanup when it is "In merge", or at
 #     /implement on the same PR when a fix round is due.
-#   - Paired session (executor:codex): /implement → /review → /merge →
-#     /cleanup in one run.
+#   - executor:codex: not started for /implement (no subscription mechanism,
+#     ADR-012; issue #315). A PR that Codex implemented outside the dispatcher
+#     is reviewed by a resume entry: /review under claude-code-opus, then the
+#     script-only /merge and /cleanup when the story is "In merge".
 # Every run handles resumable work first: stories "In merge", then due fix
-# rounds, then new work. See docs/DISPATCHER-CONFIG.md → "Codex review loop
+# rounds, then pending hand-offs, then Codex-implemented PRs "In review", then
+# new work. See docs/DISPATCHER-CONFIG.md → "Codex review loop
 # hand-off and resume".
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
-#             issue #254 (direct provider API invocation — today the OpenAI
-#                         path only; the Claude path was replaced by #314)
+#             issue #254 (direct provider API invocation; replaced by #314 for
+#                         the Claude tiers and removed by #315)
 #             issue #262 (comment-triggered resume for decision blockers, alongside the
 #                         existing time-based stale-recovery loop — see Step 4 below)
 #             issue #263 (cross-provider /review pairing — no new executor: label)
@@ -38,6 +41,9 @@
 #                         the two resume entries: "In merge" and fix rounds)
 #             issue #314 (every Claude session runs Claude Code on the runner,
 #                         signed in with the PO's subscription token; ADR-012)
+#             issue #315 (the metered API path is removed; executor:codex is
+#                         skipped at implementation; a Codex-implemented PR
+#                         "In review" is reviewed on the subscription)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
@@ -75,7 +81,11 @@
 # | executor:claude-code-haiku  | Claude Haiku   | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | haiku        |
 # | executor:claude-code-sonnet | Claude Sonnet  | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | sonnet       |
 # | executor:claude-code-opus   | Claude Opus    | CLAUDE_CODE_OAUTH_TOKEN    | claude-code | opus         |
-# | executor:codex              | Codex          | OPENAI_API_KEY_CODEX       | openai      | gpt-5-codex  |
+# | executor:codex              | Codex          | none                       | none        | none         |
+#
+# executor:codex is a known label with no provider row: the dispatcher does
+# not start it for /implement (it logs a warning and skips the story), but it
+# reviews a Codex-implemented PR (see the review path below).
 #
 # All three Claude tiers run Claude Code on the runner, signed in with one
 # subscription token (CLAUDE_CODE_OAUTH_TOKEN; ADR-012, issue #314). Their
@@ -103,10 +113,10 @@
 # ─── Executor invocation mechanism (issue #314, ADR-012) ──────────────────────
 #
 # invoke_executor_command() resolves the provider and model from the tables
-# below and loads the task prompt: .claude/commands/<slash_command>.md with
+# below (the one provider is claude-code) and loads the task prompt: .claude/commands/<slash_command>.md with
 # $ARGUMENTS substituted, so a dispatcher session follows the same
-# instructions as a manually-run command. Then, by provider:
-#   claude-code (the Claude tiers) — run_claude_code_session() starts Claude
+# instructions as a manually-run command. Then:
+#   claude-code — run_claude_code_session() starts Claude
 #     Code on the runner (`claude -p`, prompt on stdin, in this checkout),
 #     signed in with the subscription token. It is bounded by --max-turns
 #     (AGENT_MAX_TURNS) and a `timeout` of the wall-clock time left
@@ -114,9 +124,6 @@
 #     only when the stream-json output ends with a `result` whose subtype is
 #     "success" and is_error is false, and Claude Code exits 0. Never pass
 #     --bare: bare mode ignores the OAuth token.
-#   openai (the Codex tier, until #315) — run_openai_agent() drives a bounded
-#     tool-use loop against the OpenAI Chat Completions API via curl, with a
-#     single `bash` tool scoped to this checkout.
 # Any other outcome returns non-zero, and the caller posts the blocker.
 #
 # Authentication:
@@ -124,12 +131,11 @@
 #   In GitHub Actions, the workflow sets GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}.
 #   PROJECT_TOKEN must be a classic PAT. Its scopes, each with its reason, are
 #   listed only in docs/DISPATCHER-CONFIG.md -> "GitHub Token — `PROJECT_TOKEN`".
-#   CLAUDE_CODE_OAUTH_TOKEN (the Claude tiers) and OPENAI_API_KEY_CODEX (the
-#   Codex tier, until #315) must be set as GitHub Secrets and wired into
+#   CLAUDE_CODE_OAUTH_TOKEN must be set as a GitHub Secret and wired into
 #   .github/workflows/dispatcher.yml's env: block for the "Run dispatcher
 #   invoke" step — GitHub Actions never auto-injects a secret; it must be
 #   explicitly referenced as ${{ secrets.NAME }} in the workflow YAML or the
-#   script never sees it. Do not hardcode any token or API key in this script.
+#   script never sees it. Do not hardcode any token in this script.
 #   scripts/lib/claude-session.sh removes every whitespace character from the
 #   subscription token and every ANTHROPIC_* variable from the session's
 #   environment, so a session can only run on the subscription.
@@ -193,61 +199,37 @@ declare -A EXECUTOR_ROUTING=(
     ["claude-code-haiku"]="Claude Haiku:CLAUDE_CODE_OAUTH_TOKEN"
     ["claude-code-sonnet"]="Claude Sonnet:CLAUDE_CODE_OAUTH_TOKEN"
     ["claude-code-opus"]="Claude Opus:CLAUDE_CODE_OAUTH_TOKEN"
-    ["codex"]="Codex:OPENAI_API_KEY_CODEX"
+    ["codex"]="Codex:"
 )
 
 # ─── Executor provider + model routing table (data-driven, #254, #314) ────────
 # Maps executor label suffix to how invoke_executor_command() starts the
-# session — "claude-code" (Claude Code on the subscription) or "openai" (the
-# direct API loop, until #315) — and the model: a Claude Code alias, or the
-# model ID sent in the API call. Add a new row to both tables when adding a
-# new executor tier (OSS invariant: data-driven, not logic-driven — do not
-# branch on EXECUTOR_LABEL anywhere else in this script).
+# session — "claude-code" (Claude Code on the subscription) — and the model: a
+# Claude Code alias. Add a new row to both tables when adding a new executor
+# tier (OSS invariant: data-driven, not logic-driven — do not branch on
+# EXECUTOR_LABEL anywhere else in this script). An executor with no row here
+# is not started for /implement: the dispatcher skips its stories (issue #315).
 declare -A EXECUTOR_PROVIDER=(
     ["claude-code-haiku"]="claude-code"
     ["claude-code-sonnet"]="claude-code"
     ["claude-code-opus"]="claude-code"
-    ["codex"]="openai"
 )
 
 declare -A EXECUTOR_MODEL=(
     ["claude-code-haiku"]="haiku"
     ["claude-code-sonnet"]="sonnet"
     ["claude-code-opus"]="opus"
-    ["codex"]="gpt-5-codex"
 )
 
-# ─── Executor API key env-var table (data-driven) ─────────────────────────────
-# Historically named the env-var a locally-installed CLI expected for auth.
-# Not read by invoke_executor_command(). The Claude rows were removed by
-# issue #314: Claude Code signs in with the subscription token only, and a
-# metered key in its environment is scrubbed, never used.
-declare -A EXECUTOR_API_KEY_ENV=(
-    ["codex"]="OPENAI_API_KEY"
-)
-
-# ─── Review-path tables (data-driven, issue #263 and issue #293) ──────────────
-# How a story is reviewed is looked up by its /implement executor label suffix.
-# An executor has a row in exactly one of the two tables:
-#   REVIEW_EXECUTOR_ROUTING   — a paired /review session in the same run, under
-#                               the executor named by the value.
-#   CODEX_REVIEW_LOOP_ROUTING — no dispatcher session: the story is handed to
-#                               the Codex review loop (ADR-006), and the value
-#                               names the reviewer for the log.
-# An executor in neither table stops with a mid-cycle blocker after
-# /implement, so a typo or a new tier never skips review silently.
-# OSS invariant: these are lookup tables, not conditional branches on executor
-# name — add a row to one of them (and to EXECUTOR_ROUTING/EXECUTOR_PROVIDER/
-# EXECUTOR_MODEL) when adding a new executor tier.
-declare -A REVIEW_EXECUTOR_ROUTING=(
-    ["codex"]="claude-code-opus"
-)
-
-declare -A CODEX_REVIEW_LOOP_ROUTING=(
-    ["claude-code-haiku"]="Codex Cloud"
-    ["claude-code-sonnet"]="Codex Cloud"
-    ["claude-code-opus"]="Codex Cloud"
-)
+# ─── Review-path tables (data-driven, issues #263, #293, #315) ────────────────
+# REVIEW_EXECUTOR_ROUTING and CODEX_REVIEW_LOOP_ROUTING live in
+# scripts/lib/review-routing.sh, sourced below, so the poll script reads the
+# same rule. An executor in neither table stops with a mid-cycle blocker after
+# /implement, so a typo or a new tier never skips review silently. Add a row to
+# one of them (and to EXECUTOR_ROUTING, plus EXECUTOR_PROVIDER/EXECUTOR_MODEL
+# for an executor the dispatcher starts) when adding a new tier.
+# A story "In review" whose executor has a REVIEW_EXECUTOR_ROUTING row is
+# reviewed by the resume pass (issue #315).
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -354,35 +336,16 @@ source "$SCRIPT_DIR/lib/limits.sh"
 source "$SCRIPT_DIR/lib/decision-blocker.sh"
 # shellcheck source=scripts/lib/evidence-pending.sh
 source "$SCRIPT_DIR/lib/evidence-pending.sh"
+# shellcheck source=scripts/lib/review-routing.sh
+source "$SCRIPT_DIR/lib/review-routing.sh"
 
 # ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
 # AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
-# session runs under a `timeout` of the time left, and the OpenAI loop checks
-# it on every turn. AGENT_MAX_TURNS is Claude Code's --max-turns and the
-# OpenAI loop's turn cap. For the OpenAI loop (until #315),
-# AGENT_MAX_TURNS x (AGENT_API_TIMEOUT + AGENT_TOOL_TIMEOUT)
-# alone is NOT a safe bound — at the defaults below that product is 60 x 900s =
-# 54000s (15h), which exceeds GitHub Actions' 6h job ceiling. Relying on the
-# platform to force-kill an over-budget job is not acceptable: an abrupt kill
-# can bypass the loop's own non-zero return and the caller's Blocked
-# Declaration. AGENT_MAX_WALLCLOCK_SECONDS makes the script fail closed through
-# its own normal exit path, comfortably before that platform kill could ever
-# fire (see ADR-003).
+# session runs under a `timeout` of the time left, so the script fails closed
+# through its own normal exit path, comfortably before the 6h platform kill
+# could fire (see ADR-003). AGENT_MAX_TURNS is Claude Code's --max-turns.
 AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-60}"          # turns before failing closed (Claude Code --max-turns)
-# AGENT_MAX_TOKENS, AGENT_TOOL_TIMEOUT and AGENT_API_TIMEOUT apply to the
-# OpenAI loop only (until #315); a Claude Code session does not read them.
-# 8192 was the original default and was too tight for real usage: run
-# 31426452350 (PR #255, head f351a1f, live /implement of #240) hit
-# stop_reason=max_tokens on turn 14 of a documentation-synthesis story that
-# had not yet written any code, and correctly failed closed per the
-# truncated-response fix (d845ece) rather than reporting false success.
-# Raised to give a single turn real headroom for a large tool_use payload
-# (e.g. a heredoc writing a substantial file) without hitting the ceiling.
-AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-16384}"     # max_tokens requested per API turn
-AGENT_TOOL_TIMEOUT="${AGENT_TOOL_TIMEOUT:-300}"   # seconds a single bash-tool command may run
-AGENT_API_TIMEOUT="${AGENT_API_TIMEOUT:-600}"     # seconds a single API call may take
 AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total budget per Actions job, shared job-wide via DISPATCH_JOB_START_TS — enforced, not incidental
-OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 
 # A missing or invalid limit variable stops the run before anything is read or
 # written: no board status, no comment, no Slack dispatcher_error (issue #358).
@@ -1122,71 +1085,6 @@ retry_pending_cleanup_summaries() {
     return 0
 }
 
-# ─── Utility: POST JSON to a URL, fail closed on transport/HTTP error ────────
-# The request body is written to a temp file and sent via --data @<file>,
-# never as a raw command-line argument — a large multi-turn conversation
-# payload would otherwise risk the same "Argument list too long" class of
-# failure fixed for board-data pagination in issue #251. Returns the response
-# body on stdout; a curl transport failure or a non-2xx HTTP status both
-# return non-zero with a clear error on stderr (the response body, which for
-# both providers is a JSON error object, is included for diagnosis).
-
-_curl_json() {
-    local url="$1" body="$2"; shift 2
-    local -a headers=("$@")
-    local tmp_req tmp_body http_code rc=0
-    tmp_req="$(mktemp)"
-    tmp_body="$(mktemp)"
-    printf '%s' "$body" > "$tmp_req"
-
-    http_code=$(curl -sS --max-time "$AGENT_API_TIMEOUT" \
-        -o "$tmp_body" -w '%{http_code}' \
-        -X POST "$url" "${headers[@]}" --data @"$tmp_req") || rc=$?
-    rm -f "$tmp_req"
-
-    if [[ $rc -ne 0 ]]; then
-        echo "Error: request to $url failed (curl exit $rc — network error or timeout)." >&2
-        rm -f "$tmp_body"
-        return 1
-    fi
-    if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-        echo "Error: API request to $url failed with HTTP $http_code:" >&2
-        cat "$tmp_body" >&2
-        rm -f "$tmp_body"
-        return 1
-    fi
-    cat "$tmp_body"
-    rm -f "$tmp_body"
-}
-
-# ─── Utility: execute a single bash-tool command inside the repo checkout ────
-# Combined stdout+stderr, capped to bound context growth across agent turns,
-# and time-boxed (AGENT_TOOL_TIMEOUT) so a hung command fails the tool call
-# instead of hanging the job. Results are returned via AGENT_TOOL_LAST_OUTPUT /
-# AGENT_TOOL_LAST_RC (the caller runs synchronously in the same shell, not a
-# subshell, so these are visible immediately after the call returns).
-
-_run_agent_bash_tool() {
-    local cmd="$1" out rc=0
-    out=$(timeout "$AGENT_TOOL_TIMEOUT" bash -c "$cmd" 2>&1) || rc=$?
-    if [[ ${#out} -gt 16000 ]]; then
-        out="${out:0:16000}
-... [output truncated: ${#out} bytes total, showing first 16000]"
-    elif [[ -z "$out" && $rc -ne 0 ]]; then
-        # A tool result with an error and empty content was rejected by
-        # the provider API (HTTP 400) — confirmed live: a command killed by
-        # `timeout` after producing zero output hit exactly this. Every
-        # error path must give the model something to react to.
-        if [[ $rc -eq 124 ]]; then
-            out="(command timed out after ${AGENT_TOOL_TIMEOUT}s with no output)"
-        else
-            out="(command exited with status $rc and produced no output)"
-        fi
-    fi
-    AGENT_TOOL_LAST_OUTPUT="$out"
-    AGENT_TOOL_LAST_RC="$rc"
-}
-
 # ─── Utility: start a Claude Code session on the subscription (#314, ADR-012) ─
 # Runs Claude Code on the runner in this checkout with the task prompt on
 # stdin, signed in with the cleaned subscription token and with every
@@ -1305,100 +1203,6 @@ _claude_code_session() {
     fi
 
     jq -r --arg tok "$token" '(.result // "") | tostring | split($tok) | join("[redacted]")' <<< "$result"
-}
-
-# ─── Utility: bounded tool-use loop against the OpenAI Chat Completions API ──
-# Drives the model through repeated bash-tool turns until it responds without
-# requesting a further tool call (task complete) or AGENT_MAX_TURNS is hit
-# (fails closed). Returns 0 with the model's final message on stdout, or
-# non-zero on any transport/HTTP error, malformed response, turn cap or
-# wall-clock bound. Codex tier only, until #315.
-
-run_openai_agent() {
-    local model="$1" api_key="$2" task_prompt="$3"
-    local system='You are an autonomous software delivery agent running inside a GitHub Actions checkout of this repository. You have exactly one tool, "bash", which runs a shell command in the repository working directory and returns its combined stdout/stderr. Use it to read files, edit files, run tests, and drive git and the gh CLI (already authenticated via GH_TOKEN) to commit, push, and open or update pull requests, following the instructions below exactly. When the task is completely finished, reply with a final plain-text message and do not request any further tool call.'
-    local tools='[{"type":"function","function":{"name":"bash","description":"Execute a bash command in the repository working directory. Returns combined stdout+stderr.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run."}},"required":["command"]}}}]'
-    local messages
-    messages=$(jq -n --arg s "$system" --arg t "$task_prompt" \
-        '[{role:"system", content:$s}, {role:"user", content:$t}]')
-    local -a headers=(-H "Authorization: Bearer $api_key" -H "content-type: application/json")
-
-    local turn=0 response finish_reason assistant_message has_tool_calls
-    local elapsed
-    while (( turn < AGENT_MAX_TURNS )); do
-        elapsed=$(( $(date +%s) - DISPATCH_JOB_START_TS ))
-        if (( elapsed >= AGENT_MAX_WALLCLOCK_SECONDS )); then
-            echo "Error: agent exceeded AGENT_MAX_WALLCLOCK_SECONDS (${AGENT_MAX_WALLCLOCK_SECONDS}s) since job start (elapsed ${elapsed}s)." >&2
-            return 1
-        fi
-        turn=$(( turn + 1 ))
-        local request tmp_messages
-        # $messages grows every turn (tool outputs, file contents, PR bodies
-        # this session wrote) and must never be passed via --argjson on the
-        # command line: by turn 17 it exceeded the OS argument-length limit
-        # ("jq: Argument list too long"), and because this call sits inside a
-        # function invoked as an `if` condition, `set -e` did not catch it —
-        # the request was silently left empty (run 31425632706, PR #255, head
-        # d845ece). --slurpfile reads the value from disk instead of argv.
-        tmp_messages="$(mktemp)"
-        printf '%s' "$messages" > "$tmp_messages"
-        local jq_rc=0
-        request=$(jq -n --arg model "$model" \
-            --argjson max_tokens "$AGENT_MAX_TOKENS" \
-            --slurpfile messages_wrap "$tmp_messages" --argjson tools "$tools" \
-            '{model:$model, max_tokens:$max_tokens, messages:$messages_wrap[0], tools:$tools}') || jq_rc=$?
-        rm -f "$tmp_messages"
-        if [[ $jq_rc -ne 0 || -z "$request" ]]; then
-            echo "Error: failed to build the OpenAI API request (jq exit $jq_rc)." >&2
-            return 1
-        fi
-
-        response=$(_curl_json "$OPENAI_API_URL" "$request" "${headers[@]}") || return 1
-
-        echo "$response" | jq -e '.choices[0].message' >/dev/null 2>&1 || {
-            echo "Error: malformed OpenAI API response (no .choices[0].message)." >&2
-            echo "$response" >&2
-            return 1
-        }
-
-        finish_reason=$(echo "$response" | jq -r '.choices[0].finish_reason // empty')
-        assistant_message=$(echo "$response" | jq -c '.choices[0].message')
-        messages=$(echo "$messages" | jq -c --argjson m "$assistant_message" '. + [$m]')
-        echo "[agent turn $turn/$AGENT_MAX_TURNS] finish_reason=$finish_reason" >&2
-
-        has_tool_calls=$(echo "$assistant_message" | jq -r '(.tool_calls // []) | length')
-
-        if [[ "$finish_reason" == "stop" ]]; then
-            echo "$assistant_message" | jq -r '.content // empty'
-            return 0
-        fi
-
-        if [[ "$finish_reason" != "tool_calls" || "$has_tool_calls" -eq 0 ]]; then
-            # finish_reason="length" (OpenAI's max_tokens truncation) or
-            # anything else that isn't a genuine "stop" or a tool request must
-            # not be read as task completion: a truncated response once made
-            # /implement report "completed" with no commit and no PR (run
-            # 31425063548, PR #255).
-            echo "Error: agent stopped with finish_reason='$finish_reason' (not a genuine completion — response may be truncated); not treating as success." >&2
-            return 1
-        fi
-
-        local call call_id fn_args tool_cmd tool_msg
-        while IFS= read -r call; do
-            [[ -z "$call" ]] && continue
-            call_id=$(echo "$call" | jq -r '.id')
-            fn_args=$(echo "$call" | jq -r '.function.arguments // "{}"')
-            tool_cmd=$(echo "$fn_args" | jq -r '.command // empty' 2>/dev/null || echo "")
-            echo "[agent bash] $tool_cmd" >&2
-            _run_agent_bash_tool "$tool_cmd"
-            tool_msg=$(jq -n --arg id "$call_id" --arg out "$AGENT_TOOL_LAST_OUTPUT" \
-                '{role:"tool", tool_call_id:$id, content:$out}')
-            messages=$(echo "$messages" | jq -c --argjson m "$tool_msg" '. + [$m]')
-        done < <(echo "$assistant_message" | jq -c '.tool_calls[]')
-    done
-
-    echo "Error: agent exceeded AGENT_MAX_TURNS ($AGENT_MAX_TURNS) without completing the task." >&2
-    return 1
 }
 
 # ─── Utility: subscription allowance check before a session start (#317) ────
@@ -1597,13 +1401,12 @@ record_session_start() {
 # corresponding .claude/commands/*.md file as the task prompt — the same
 # instructions a manually-run command follows — substitutes $ARGUMENTS, and
 # starts the session: Claude Code on the subscription for the "claude-code"
-# provider (run_claude_code_session), or the OpenAI API loop for "openai"
-# (run_openai_agent, until #315).
+# provider (run_claude_code_session).
 #
 # The optional third argument (issue #263) lets a caller invoke a command
 # under a *different* executor label than the story's own $EXECUTOR_LABEL —
-# used by Step E2 to run /review under the cross-provider review-pairing
-# result instead of the /implement label. It defaults to $EXECUTOR_LABEL, so
+# used by the "In review" resume entry to run /review under the executor
+# REVIEW_EXECUTOR_ROUTING names instead of the story's own label. It defaults to $EXECUTOR_LABEL, so
 # every other call site (/implement) is unaffected. /merge and /cleanup never
 # come through here (issue #264).
 
@@ -1612,26 +1415,26 @@ invoke_executor_command() {
     local target_arg="$2"
     local executor_label="${3:-$EXECUTOR_LABEL}"
 
+    # First: an executor with no provider row starts nothing, and spends no
+    # usage-limit count and no allowance probe.
+    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
+    local model="${EXECUTOR_MODEL[$executor_label]:-}"
+    if [[ -z "$provider" || -z "$model" ]]; then
+        echo "Error: No provider/model entry for executor '$executor_label' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
+        return 1
+    fi
+
     check_usage_limit "$slash_command"
     check_subscription_allowance "$slash_command"
 
-    local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
-    local model="${EXECUTOR_MODEL[$executor_label]:-}"
     local routing_value="${EXECUTOR_ROUTING[$executor_label]:-}"
     local executor_secret="${routing_value##*:}"
     local secret_value=""
     [[ -n "$executor_secret" ]] && secret_value="${!executor_secret:-}"
-    if [[ "$provider" == "claude-code" ]]; then
-        # A secret saved with stray whitespace fails with a 401 (ADR-012 trial).
-        secret_value=$(claude_clean_token "$secret_value")
-    fi
+    # A secret saved with stray whitespace fails with a 401 (ADR-012 trial).
+    secret_value=$(claude_clean_token "$secret_value")
     if [[ -z "$executor_secret" || -z "$secret_value" ]]; then
         echo "Error: Secret '$executor_secret' is not set in the environment." >&2
-        return 1
-    fi
-
-    if [[ -z "$provider" || -z "$model" ]]; then
-        echo "Error: No provider/model entry for executor '$executor_label' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." >&2
         return 1
     fi
 
@@ -1645,11 +1448,7 @@ invoke_executor_command() {
     task_prompt=$(sed "s/\$ARGUMENTS/$target_arg/g" "$command_file")
 
     if $DRY_RUN; then
-        if [[ "$provider" == "claude-code" ]]; then
-            echo "[DRY RUN] Would start Claude Code ($model) on the subscription for /$slash_command $target_arg"
-        else
-            echo "[DRY RUN] Would invoke $provider ($model) directly via API for /$slash_command $target_arg — no CLI, no install step"
-        fi
+        echo "[DRY RUN] Would start Claude Code ($model) on the subscription for /$slash_command $target_arg"
         return 0
     fi
 
@@ -1659,9 +1458,6 @@ invoke_executor_command() {
     case "$provider" in
         claude-code)
             run_claude_code_session "$model" "$secret_value" "$task_prompt" "$slash_command" "$target_arg"
-            ;;
-        openai)
-            run_openai_agent "$model" "$secret_value" "$task_prompt"
             ;;
         *)
             echo "Error: Unknown provider '$provider' for executor '$executor_label'." >&2
@@ -2593,6 +2389,91 @@ resume_pending_hand_off() {
     complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$(jq -r '.draft // false' <<< "$pr_json")"
 }
 
+# A story "In review" whose executor has a REVIEW_EXECUTOR_ROUTING row (issue
+# #315, F308.9): its PR was implemented outside the dispatcher, so no Codex
+# review loop answers it. /review runs on the PR under the executor the table
+# names, through invoke_executor_command(), so the usage limit and the
+# allowance check apply. When /review leaves the story "In merge", the merge
+# and cleanup scripts run as for any "In merge" story. When it leaves another
+# status, the entry ends: fixes are made outside the dispatcher.
+# One /review attempt per PR head: a failed /review records the head in its
+# blocker, and a later run skips that head until the PR has a new head or the
+# PO posts /unblock (same rule as "one merge attempt per head").
+review_attempt_marker() {
+    dispatcher_marker "action=review-attempt pr=$1 head=$2"
+}
+
+resume_review_story() {
+    local issue_num="$1" item_id="$2"
+    local review_label pr_json pr_number pr_draft pr_head marker status
+    if ! load_story_context "$issue_num" "$item_id"; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: $STORY_SKIP_REASON" >&2
+        return 0
+    fi
+    # A story that uses the Codex review loop waits for Codex Cloud: no session.
+    [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] && return 0
+    if [[ "$STORY_EXECUTOR_LABEL_COUNT" -ne 1 ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: \"In review\" needs exactly one executor: label to pick a reviewer; it has $STORY_EXECUTOR_LABEL_COUNT"
+        return 0
+    fi
+    review_label="${REVIEW_EXECUTOR_ROUTING[$EXECUTOR_LABEL]:-}"
+    if [[ -z "$review_label" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: no review path for executor:$EXECUTOR_LABEL in REVIEW_EXECUTOR_ROUTING or CODEX_REVIEW_LOOP_ROUTING"
+        return 0
+    fi
+
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
+    pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
+    if [[ -z "$pr_number" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: no linked open PR"
+        return 0
+    fi
+    if [[ "$pr_draft" == "true" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number is a draft"
+        return 0
+    fi
+    marker=""
+    if [[ -n "$pr_head" ]]; then
+        marker=$(review_attempt_marker "$pr_number" "$pr_head")
+        if marker_holds "$issue_num" "$marker"; then
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /review was already tried on PR #$pr_number head ${pr_head:0:7}; waiting for a new head or /unblock"
+            return 0
+        fi
+    fi
+
+    echo ""
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: /review on PR #$pr_number under $review_label"
+    RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+    LAST_ACTION="invoking /review for #$issue_num"
+    if ! invoke_executor_command "review" "$pr_number" "$review_label"; then
+        check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
+        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    $DRY_RUN && return 0
+    echo "✓ /review completed for PR #$pr_number"
+
+    # Record the head as reviewed before anything else: when /review leaves the
+    # story "In review" (a failed board write, a finding awaiting PO waiver), the
+    # next poll must not review the same head again.
+    if [[ -n "$marker" ]]; then
+        post_comment "$issue_num" "Dispatcher: /review completed on PR #$pr_number at head ${pr_head:0:7}; no further /review runs on this head until the PR has a new head or the PO posts /unblock.
+
+$marker" || echo "Warning: could not record the /review attempt for PR #$pr_number head ${pr_head:0:7}; the next run may review it again." >&2
+    fi
+
+    refresh_board_after_resumed_story
+    status=$(board_status_of "$issue_num")
+    if [[ "$status" == "In merge" ]]; then
+        resume_in_merge_story "$issue_num" "$item_id"
+        return 0
+    fi
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: /review left the story in \"${status:-unknown}\"; no merge"
+}
+
 # The closure check of each finished story reads $BOARD_DATA. Re-read it after
 # every story the resume pass finishes, so the last two stories of a feature
 # finished in one pass see each other as Done.
@@ -2623,12 +2504,18 @@ run_resume_pass() {
     for ((i=0; i < count; i++)); do
         resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
     done
+
+    items=$(board_items_in_status "In review")
+    count=$(jq 'length' <<< "$items")
+    for ((i=0; i < count; i++)); do
+        resume_review_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+    done
 }
 
 REQUESTED_ISSUE="$ISSUE_NUMBER"
 if ! $RESUME_PASS_DONE; then
     LAST_ACTION="resume pass"
-    echo "Checking for resumable work (\"In merge\", then fix rounds)..."
+    echo "Checking for resumable work (\"In merge\", fix rounds, Codex-implemented PRs \"In review\")..."
     run_resume_pass
     RESUME_PASS_DONE=true
     ISSUE_NUMBER="$REQUESTED_ISSUE"
@@ -2654,6 +2541,31 @@ if [[ " $HAND_OFF_RESUMED_ISSUES " == *" $ISSUE_NUMBER "* ]]; then
     exit 0
 fi
 
+# ─── Utility: skip a story for this run and go on (issues #256, #315) ────────
+# Adds the story to the run's skip list (carried across the recursive exec by
+# --non-executable-issues), then continues with the next ready story or exits
+# 0. It writes nothing: no board status, comment, blocker, Slack message,
+# session count or allowance probe. It never returns.
+
+skip_story_and_continue() {
+    local skipped="$1" action="$2"
+    NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$skipped"
+    LAST_ACTION="$action for #$skipped; searching for next story"
+    NEXT_ISSUE=$(find_next_ready_story || true)
+    if [[ -z "$NEXT_ISSUE" ]]; then
+        echo "No more executable \"Ready for implementation\" stories after $action. Dispatcher exiting cleanly."
+        DISPATCH_HANDLED=true
+        exit 0
+    fi
+    echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
+    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
+        --non-executable-issues "$NON_EXECUTABLE_ISSUES")
+    $DRY_RUN && _NEXT_ARGS+=(--dry-run)
+    DISPATCH_HANDLED=true
+    drain_actionable_events
+    exec bash "$0" "${_NEXT_ARGS[@]}"
+}
+
 # ─── Step 1: Fetch target story ───────────────────────────────────────────────
 
 LAST_ACTION="fetching target story #$ISSUE_NUMBER"
@@ -2678,21 +2590,7 @@ TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
 LAST_ACTION="issue-type check for #$ISSUE_NUMBER"
 if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
     echo "Warning: #$ISSUE_NUMBER is not an executable Story, Task, or Bug ($ISSUE_TYPE_DETAIL); skipping it for this run and continuing selection." >&2
-    NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$ISSUE_NUMBER"
-    LAST_ACTION="non-executable skip for #$ISSUE_NUMBER; searching for next story"
-    NEXT_ISSUE=$(find_next_ready_story || true)
-    if [[ -z "$NEXT_ISSUE" ]]; then
-        echo "No more executable \"Ready for implementation\" stories after non-executable skip. Dispatcher exiting cleanly."
-        DISPATCH_HANDLED=true
-        exit 0
-    fi
-    echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
-    _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
-        --non-executable-issues "$NON_EXECUTABLE_ISSUES")
-    $DRY_RUN && _NEXT_ARGS+=(--dry-run)
-    DISPATCH_HANDLED=true
-    drain_actionable_events
-    exec bash "$0" "${_NEXT_ARGS[@]}"
+    skip_story_and_continue "$ISSUE_NUMBER" "non-executable skip"
 fi
 echo "Issue type: $ISSUE_TYPE_DETAIL (executable)"
 
@@ -2726,6 +2624,13 @@ if [[ -z "$ROUTING_ENTRY" ]]; then
     echo "Error: Unrecognised executor label 'executor:$EXECUTOR_LABEL' on #$ISSUE_NUMBER." >&2
     echo "       Known executors: $(printf 'executor:%s  ' "${!EXECUTOR_ROUTING[@]}")" >&2
     exit 1
+fi
+
+# An executor with no EXECUTOR_PROVIDER row is not started for /implement
+# (issue #315, ADR-012): a table lookup, not a branch on the executor name.
+if [[ -z "${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}" ]]; then
+    echo "Warning: #$ISSUE_NUMBER has executor:$EXECUTOR_LABEL, which the dispatcher does not start for /implement (no subscription mechanism, ADR-012); skipping it for this run and continuing selection." >&2
+    skip_story_and_continue "$ISSUE_NUMBER" "executor skip"
 fi
 
 ROUTING_VALUE="${EXECUTOR_ROUTING[$EXECUTOR_LABEL]}"
@@ -3060,7 +2965,7 @@ record_merge_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT" || exit 1
 # ─── Review path (issue #293) ─────────────────────────────────────────────────
 # Table lookup, not a branch on an executor name: a story whose executor has a
 # CODEX_REVIEW_LOOP_ROUTING row is handed to the Codex review loop and this
-# run goes on to the next ready story. Every other story continues at E2.
+# run goes on to the next ready story. Every other story has no review path.
 
 if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
     echo ""
@@ -3069,66 +2974,15 @@ if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
     continue_with_next_ready_story
 fi
 
-# ─── Step E2: /review ─────────────────────────────────────────────────────────
-# Paired session (issue #263): /review runs under a different provider than
-# the executor that performed /implement, per REVIEW_EXECUTOR_ROUTING — no new
-# `executor:` label is read or stored; the pairing is computed here, at review
-# time, from the story's existing $EXECUTOR_LABEL.
+# ─── No review path ───────────────────────────────────────────────────────────
+# An executor in neither review table has no review step: stop with a mid-cycle
+# blocker so a typo or a new tier never skips review silently. The review of a
+# story with a REVIEW_EXECUTOR_ROUTING row (a Codex-implemented PR) is a resume
+# entry, not a step of this run (issue #315).
 
-LAST_ACTION="review-executor pairing for #$ISSUE_NUMBER"
-REVIEW_EXECUTOR_LABEL="${REVIEW_EXECUTOR_ROUTING[$EXECUTOR_LABEL]:-}"
-if [[ -z "$REVIEW_EXECUTOR_LABEL" ]]; then
-    echo "Error: No review path for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING or CODEX_REVIEW_LOOP_ROUTING." >&2
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
-    DISPATCH_HANDLED=true
-    exit 1
-fi
-REVIEW_EXECUTOR_TYPE="${EXECUTOR_ROUTING[$REVIEW_EXECUTOR_LABEL]%%:*}"
-
-LAST_ACTION="invoking /review for #$ISSUE_NUMBER"
-echo ""
-echo "── E2: /review for #$ISSUE_NUMBER ──────────────────────────────────────"
-PR_NUMBER=$(find_linked_pr "$ISSUE_NUMBER")
-if [[ -z "$PR_NUMBER" ]]; then
-    echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
-    DISPATCH_HANDLED=true
-    exit 1
-fi
-echo "Linked PR: #$PR_NUMBER"
-echo "Review executor: $REVIEW_EXECUTOR_TYPE (paired cross-provider from executor:$EXECUTOR_LABEL)"
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"
-if ! invoke_executor_command "review" "$PR_NUMBER" "$REVIEW_EXECUTOR_LABEL"; then
-    check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
-    DISPATCH_HANDLED=true
-    exit 1
-fi
-echo "✓ /review completed for PR #$PR_NUMBER"
-
-# ─── Step E3: /merge ──────────────────────────────────────────────────────────
-# The head is read now, after /review, so a failed attempt is recorded against
-# the head /merge was tried on (see run_merge_or_block()).
-
-echo ""
-echo "── E3: /merge PR #$PR_NUMBER ────────────────────────────────────────────"
-PR_HEAD_SHA=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"
-if ! ensure_merge_owner "$PR_NUMBER" "$PR_HEAD_SHA"; then
-    echo "#$ISSUE_NUMBER: the merge owner marker is still missing; the \"In merge\" resume retries it. Moving on."
-    continue_with_next_ready_story
-fi
-run_merge_or_block "$PR_NUMBER" "$PR_HEAD_SHA"
-if ! settle_merge_confirmation "$PR_NUMBER"; then
-    echo "#$ISSUE_NUMBER: the merge confirmation is still missing; the \"In merge\" resume retries it. Moving on."
-    continue_with_next_ready_story
-fi
-
-# ─── Step E4: /cleanup, then the feature/epic closure check (issue #179) ──────
-
-finish_story
-
-# ─── Loop: find and process the next Ready for implementation story ───────────
-
-continue_with_next_ready_story
+LAST_ACTION="review path for #$ISSUE_NUMBER"
+echo "Error: No review path for executor 'executor:$EXECUTOR_LABEL' in REVIEW_EXECUTOR_ROUTING or CODEX_REVIEW_LOOP_ROUTING." >&2
+post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "review"
+DISPATCH_HANDLED=true
+exit 1
 }; exit $?

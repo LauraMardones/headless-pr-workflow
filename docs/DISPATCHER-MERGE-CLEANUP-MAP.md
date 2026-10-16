@@ -65,4 +65,4 @@ fails because something was *kept*.
 (`MERGE_SCRIPT` and `CLEANUP_SCRIPT` can be overridden for tests). They call
 neither `invoke_executor_command()`, nor `scripts/dispatcher-allowance.sh`, nor
 `scripts/dispatcher-budget.sh`. The same two functions serve the Claude-tier
-cycle, the paired `executor:codex` run and the resume pass at `In merge`.
+cycle, the review entry for a Codex-implemented PR and the resume pass at `In merge`.

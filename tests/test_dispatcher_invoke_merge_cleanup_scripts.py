@@ -1,8 +1,8 @@
 """/merge and /cleanup are script-only phases of the dispatcher (issue #264).
 
 Drives the real ``scripts/dispatcher-invoke.sh`` with the fakes in
-``tests/dispatcher_fakes.py``. The fake ``claude``, the fake ``curl`` (the
-OpenAI API) and the stub allowance script record every call; the merge and
+``tests/dispatcher_fakes.py``. The fake ``claude`` and the stub allowance
+script record every call; the merge and
 cleanup scripts are stubs that log to ``phases.log``. The scripts' own
 behavior is tested in test_dispatcher_merge_script.py and
 test_dispatcher_cleanup_script.py.
@@ -25,7 +25,6 @@ INVOKE = (REPO_ROOT / "scripts" / "dispatcher-invoke.sh").read_text(encoding="ut
 
 def assert_zero_model_footprint(d, proc):
     assert d.claude_calls == []
-    assert not [line for line in d._log("curl.log") if "openai" in line]
     assert d.allowance_calls == 0
     assert list((d.mock / "usage").iterdir()) == []  # no session counted (#320)
     assert d.sessions == []
@@ -53,22 +52,23 @@ def test_resume_with_a_merged_pr_runs_only_cleanup(tmp_path):
     assert_zero_model_footprint(d, proc)
 
 
-def test_paired_codex_run_has_two_sessions_then_two_scripts(tmp_path):
+def test_codex_review_session_is_followed_by_two_scripts(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY)
-    proc = d.run_issue(STORY, seq="0,0,1,1")
+    d.session_sets_status("review", STORY, "In merge")
+    proc = d.resume(seq="0,1,1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"implement {STORY}", f"review {PR}"]
+    assert d.sessions == [f"review {PR}"]
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
-    assert d.allowance_calls == 2
-    assert d.board_writes[-2:] == [f"{STORY}=In merge", f"{STORY}=Done"]
-    assert d.usage_count == 2  # /implement and /review only; the scripts count nothing
+    assert d.allowance_calls == 1
+    assert d.board_writes[-1:] == [f"{STORY}=Done"]
+    assert d.usage_count == 1  # /review only; the scripts count nothing
 
 
 def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
     d.add_pr(PR, STORY)
     d.on_session("implement", """jq 'map(.head.sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
 """)
@@ -80,7 +80,7 @@ def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_p
 
 def test_no_owner_marker_when_implement_pushed_no_new_head(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
     d.add_pr(PR, STORY)  # the PR already has its head; the fake session pushes nothing
     d.run_issue(STORY, seq="0,0,1,1")
     assert [b for b in d.posted(PR) if "action=merge-owner" in b] == []

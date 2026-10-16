@@ -271,7 +271,7 @@ assert_contains "warning names the detected type" "$RUN_ERR" \
     "Warning: #160 is not an executable Story, Task, or Bug (detected type: type:epic); skipping it for this run and continuing selection."
 assert_not_contains "no executor-label error for the Epic" "$RUN_ERR" "No executor: label found on #160"
 assert_contains "Story #161 went through /implement" "$RUN_OUT" "E1: /implement #161"
-assert_contains "Story #161 reached Done" "$RUN_OUT" "Story #161 completed (Done)."
+assert_contains "Story #161 was handed to the Codex review loop" "$RUN_OUT" "handed to the Codex review loop"
 assert_not_contains "no /implement for the Epic" "$RUN_OUT" "E1: /implement #160"
 assert_contains "Claude Code was started" "$(cat "$E/claude.log")" "model=sonnet"
 assert_not_contains "Epic board item never mutated" "$(cat "$E/gh.log")" "MUTATION item=ITEM_160"

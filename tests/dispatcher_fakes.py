@@ -1,16 +1,16 @@
 """Fakes for tests that drive the real ``scripts/dispatcher-invoke.sh`` end to end.
 
 A fake ``gh`` (board, issues, pull requests, comments), a fake ``claude``
-on ``CLAUDE_BIN`` (Claude sessions, issue #314), a fake ``curl`` (the OpenAI
-API of the Codex tier and the Slack webhook) and a stub allowance script on
+on ``CLAUDE_BIN`` (Claude sessions, issue #314), a fake ``curl`` (the Slack
+webhook) and a stub allowance script on
 ``ALLOWANCE_SCRIPT``. All state lives in files under ``MOCK_DIR``, so a test
 can run the dispatcher several times against the same GitHub state. Issues and
 PRs carry a fixed old activity date, so a story "In implementation" is always
 past the stale threshold.
 
-Both fake executors read the command a session was started for from the task
-prompt (the first line of ``.claude/commands/<command>.md``) and log it to
-``sessions.log`` with the provider (``claude-code`` or ``openai``). A test can
+The fake ``claude`` reads the command a session was started for from the task
+prompt (the first line of ``.claude/commands/<command>.md``) and logs it to
+``sessions.log`` with the provider (``claude-code``). A test can
 make a command fail (``fail``) or give it a side effect on the fake GitHub
 state (``on_session``), such as a new PR head. The fake ``claude`` also keeps
 the argv, stdin and environment of every call (``claude_calls``), and
@@ -182,41 +182,13 @@ esac
 
 FAKE_CURL = r"""#!/usr/bin/env bash
 set -euo pipefail
-outfile="" url="" data=""
-args=("$@")
-i=0
-while [[ $i -lt ${#args[@]} ]]; do
-    case "${args[$i]}" in
-        -o) i=$((i+1)); outfile="${args[$i]}" ;;
-        --data) i=$((i+1)); data="${args[$i]#@}" ;;
-        http*://*) url="${args[$i]}" ;;
+url=""
+for arg in "$@"; do
+    case "$arg" in
+        http*://*) url="$arg" ;;
     esac
-    i=$((i+1))
 done
-if [[ "$url" != *openai* ]]; then
-    echo "other $url" >> "$MOCK_DIR/curl.log"
-    exit 0
-fi
-provider=openai
-# The task prompt is the last user message; its first line names the command.
-first_line=$(jq -r '[.messages[] | select(.role == "user") | .content | strings] | (first // "") | split("\n")[0] // ""' "$data")
-case "$first_line" in
-    "Implement issue #"*) command=implement ;;
-    "Review PR #"*)       command=review ;;
-    "Merge PR #"*)        command=merge ;;
-    "Clean up"*)          command=cleanup ;;
-    *)                    command=unknown ;;
-esac
-target=$(sed -E 's/^[^#]*#([0-9]+).*/\1/' <<< "$first_line")
-echo "session $command $target $provider" >> "$MOCK_DIR/sessions.log"
-if [[ -f "$MOCK_DIR/fail_$command" ]]; then
-    printf '%s' '{"error":"forced failure"}' > "$outfile"
-    echo -n "500"
-    exit 0
-fi
-[[ -f "$MOCK_DIR/on_$command.sh" ]] && bash "$MOCK_DIR/on_$command.sh"
-printf '%s' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}' > "$outfile"
-echo -n "200"
+echo "other $url" >> "$MOCK_DIR/curl.log"
 """
 
 # Claude Code on CLAUDE_BIN (issue #314). Call n keeps its argv (one per line),
@@ -417,7 +389,6 @@ class Dispatcher:
             "GITHUB_OUTPUT": (self.mock / "github_output").as_posix(),
             "CLAUDE_CODE_OAUTH_TOKEN": "fake-subscription-token",
             "CLAUDE_BIN": (self.bin / "claude").as_posix(),
-            "OPENAI_API_KEY_CODEX": "fake-openai",
             "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
             "DISPATCHER_STATE_DIR": (self.mock / "state").as_posix(),
             "USAGE_LIMIT_STATE_DIR": (self.mock / "usage").as_posix(),

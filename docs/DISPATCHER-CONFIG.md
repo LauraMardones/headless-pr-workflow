@@ -72,24 +72,23 @@ WIP count: 2/3
 
 ---
 
-## Executor Secrets — `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY_CODEX`
+## Executor Secrets — `CLAUDE_CODE_OAUTH_TOKEN`
 
-The dispatcher needs credentials to start the sessions of the story cycle. There are exactly **two** required secrets, not one per `executor:` tier:
+The dispatcher needs credentials to start the sessions of the story cycle. There is exactly **one** required secret, not one per `executor:` tier:
 
 | Secret | Type | Covers |
 |---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | Repository secret | All three Claude tiers (`executor:claude-code-haiku`, `-sonnet`, `-opus`): every Claude session runs Claude Code signed in with the PO's subscription (issue #314, ADR-012). The same secret signs in the allowance probe; see [Subscription token](#subscription-token--claude_code_oauth_token). |
-| `OPENAI_API_KEY_CODEX` | Repository secret | `executor:codex`, through the direct OpenAI API loop, until #315 |
 
 One subscription token serves every Claude tier — Haiku, Sonnet and Opus are model aliases chosen per session, not separate credentials (issue #252 removed the per-tier secrets). The [usage limit](#usage-limit) is one number for all sessions, not per tier.
 
-The metered Anthropic API key is no longer used. Since issue #314 it is not read by any script and not wired into the workflow; delete the repository secret and revoke the key at the provider (#308 → PO steps). Every `ANTHROPIC_*` variable is removed from the environment Claude Code runs in, so a metered key can never be used even if one is set again.
+No metered model-provider API key is used (issue #315 removed the OpenAI path, the last one). The metered Anthropic API key is no longer used. Since issue #314 it is not read by any script and not wired into the workflow; delete the repository secret and revoke the key at the provider (#308 → PO steps). Every `ANTHROPIC_*` variable is removed from the environment Claude Code runs in, so a metered key can never be used even if one is set again.
 
-Provision both secrets at:
+Provision the secret at:
 
 `https://github.com/<owner>/<repo>/settings/secrets/actions`
 
-Both secrets must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}` and `OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}`. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
+The secret must also be explicitly wired into `.github/workflows/dispatcher.yml`'s "Run dispatcher invoke" step `env:` block as `CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`; it is the only model-provider secret that step names. GitHub Actions never auto-injects a secret into a step's environment — it only becomes visible if the workflow file explicitly references it via `${{ secrets.NAME }}`. This wiring was missing entirely prior to issue #252, so no executor secret of any name ever reached the dispatcher regardless of what was configured in Settings.
 
 **If a secret is absent**, `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` fails closed with `Error: Secret '<name>' is not set in the environment.` before starting the session, and the dispatcher posts a mid-cycle blocker comment on the story issue. A `CLAUDE_CODE_OAUTH_TOKEN` that is empty after whitespace removal counts as absent.
 
@@ -100,9 +99,10 @@ Both secrets must also be explicitly wired into `.github/workflows/dispatcher.ym
 | Provider | Executor labels | Session |
 |---|---|---|
 | `claude-code` | `claude-code-haiku`, `-sonnet`, `-opus` | Claude Code on the runner, on the subscription (ADR-012, issue #314) |
-| `openai` | `codex` | Bounded tool-use loop against the OpenAI Chat Completions API with a single `bash` tool (issue #254), until #315 |
 
-This covers every model session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass) and `/review` of a Codex-implemented story (under `claude-code-opus`). `/merge` and `/cleanup` are **script-only phases** (issue #264): the dispatcher runs `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh` and starts no session for them, in the Claude-tier cycle, the paired `executor:codex` run and the resume pass at `In merge`. They have no executor tier, no allowance check, no executor budget, and no wall-clock session bound. ADR-012's session-start mechanism does not cover them. The step-by-step map to `merge.md` and `cleanup.md` is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md).
+`invoke_executor_command()` knows one provider, `claude-code`. An executor label with no `EXECUTOR_PROVIDER` row (`executor:codex` has none) returns non-zero with `Error: No provider/model entry for executor '<label>' in EXECUTOR_PROVIDER/EXECUTOR_MODEL.` and starts nothing. The dispatcher does not start `/implement` for `executor:codex` (no subscription mechanism, ADR-012): see [Review path](#review-path-issues-263-and-293).
+
+This covers every model session the dispatcher starts: `/implement` (also the fix-round `/implement` of the resume pass) and `/review` of a Codex-implemented PR (under `claude-code-opus`). `/merge` and `/cleanup` are **script-only phases** (issue #264): the dispatcher runs `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh` and starts no session for them, in the Claude-tier cycle, and the resume pass at `In merge`. They have no executor tier, no allowance check, no executor budget, and no wall-clock session bound. ADR-012's session-start mechanism does not cover them. The step-by-step map to `merge.md` and `cleanup.md` is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md).
 
 #### Claude Code sessions
 
@@ -160,7 +160,7 @@ How a story is reviewed is looked up from two tables in `scripts/dispatcher-invo
 | `codex` | `/review` session under `claude-code-opus` | `REVIEW_EXECUTOR_ROUTING` |
 
 - **Codex review loop.** The dispatcher starts no `/review` session. It hands the story over after `/implement` and resumes it on a later run; see [Codex review loop hand-off and resume](#codex-review-loop-hand-off-and-resume).
-- **Paired session.** `invoke_executor_command()` normally resolves the provider, model and secret from the story's own `executor:` label. For the Step E2 `/review` call the dispatcher passes a third argument that names the reviewing executor instead, so `/review` runs under a different provider than `/implement`. The session counts once toward the [usage limit](#usage-limit), whichever executor runs it.
+- **Paired session (resume entry).** `invoke_executor_command()` normally resolves the provider and model from the story's own `executor:` label. For the `/review` call of the review entry (see [Review of a Codex-implemented PR](#review-of-a-codex-implemented-pr)) the dispatcher passes a third argument that names the reviewing executor instead, so `/review` runs under a different provider than `/implement`. The session counts once toward the [usage limit](#usage-limit), whichever executor runs it.
 - **Neither table.** An executor label with no row in either table gets a mid-cycle blocker after `/implement`.
 
 The path is computed from the story's existing `executor:` label and is never written back to the issue. The label continues to mean "the `/implement` executor" only.
@@ -171,10 +171,7 @@ Session tuning is overridable via environment variables (defaults shown), primar
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_MAX_TURNS` | `60` | Turns before failing closed: Claude Code's `--max-turns`, and the OpenAI loop's turn cap |
-| `AGENT_MAX_TOKENS` | `16384` | `max_tokens` requested per API turn (OpenAI loop only, until #315) |
-| `AGENT_TOOL_TIMEOUT` | `300` | Seconds a single bash-tool command may run (OpenAI loop only, until #315) |
-| `AGENT_API_TIMEOUT` | `600` | Seconds a single API call may take (OpenAI loop only, until #315) |
+| `AGENT_MAX_TURNS` | `60` | Turns before failing closed: Claude Code's `--max-turns` |
 | `AGENT_MAX_WALLCLOCK_SECONDS` | `10800` (3h) | Total elapsed budget for the whole Actions job (shared across `/implement`/`/review` sessions and any chained stories via `DISPATCH_JOB_START_TS`; the script-only `/merge` and `/cleanup` start no session and are not bounded by it, not reset per call) — the enforced bound against GitHub Actions' 6h job ceiling (see ADR-003). A Claude Code session runs under `timeout` set to the time left. |
 | `CLAUDE_BIN` | `claude` | The Claude Code binary, for the sessions and the allowance probe (test hook) |
 
@@ -398,6 +395,24 @@ A retry posts nothing when the exact text is already on the issue or PR (no dupl
 Two gaps have no pending comment to retry, so they are closed separately. (1) A merged PR with no `Merge gate:` confirmation from the dispatcher, for example when the merge script failed before it wrote one, does not reach cleanup: each run counts a `merge-confirmation-missing` failure and, after 3, posts the blocker and the Slack message; a PO `/unblock` after that accepts the gap and cleanup follows. (2) When `/cleanup` fails and neither its closing summary nor a pending copy with the `evidence:pending` label is on the story (the pending or the label write failed too), the story goes back from `Done` to `In merge` so the next run reruns cleanup, with the same 3-run limit (`cleanup-summary-unrecorded`); after the limit the story stays `Done` with the blocker.
 
 **One merge attempt per head.** When `/merge` fails, the mid-cycle blocker records the PR head it was tried on, and the story stays in `In merge`. Later runs do not run the merge script for it and log `[RESUME SKIP] #<n>: /merge was already tried on PR #<pr> at head <sha>`. Another attempt needs a new PR head, or a standalone `/unblock` line from the PO posted after the blocker (the resolving-comment rule of issue #262). The same applies when `/merge` fails in the same run as `/review` for an `executor:codex` story.
+
+### Review of a Codex-implemented PR
+
+`executor:codex` stories are not started for `/implement`: in "Ready for implementation" they are skipped with `Warning: #<n> has executor:codex, which the dispatcher does not start for /implement (no subscription mechanism, ADR-012); skipping it for this run and continuing selection.` The skip changes and spends nothing (no board write, comment, blocker, notification, counted session or allowance probe), and the story is not returned again in the same run. It is a lookup, not a branch on the label: an executor with no `EXECUTOR_PROVIDER` row is not started for `/implement`.
+
+A PR that Codex implemented outside the dispatcher is still reviewed by it. The resume pass has a fourth entry, after the three above. A review is due when all of these hold:
+
+- the story's board status is `In review`;
+- it has exactly one `executor:` label, and that label has a `REVIEW_EXECUTOR_ROUTING` row (`scripts/lib/review-routing.sh`, shared with `scripts/dispatcher-poll.sh`);
+- it has a linked open PR that is not a draft.
+
+The dispatcher then runs `/review <pr>` through `invoke_executor_command()` under the executor the table names (`claude-code-opus`). The usage limit and the allowance reserve apply as for any session. Log: `[RESUME] #<n>: /review on PR #<pr> under claude-code-opus`. A story that waits for Codex Cloud (a `CODEX_REVIEW_LOOP_ROUTING` row) logs nothing; a story with zero or two `executor:` labels, no linked open PR or a draft PR logs one `[RESUME SKIP] #<n>: <reason>` line.
+
+After `/review` succeeds the board status is read again. When it is `In merge`, the script-only `/merge` and `/cleanup` and the closure check run as for any `In merge` story. Otherwise the entry ends with `[RESUME] #<n>: /review left the story in "<status>"; no merge`: when `/review` found blockers the fixes are made outside the dispatcher, as the implementation was.
+
+**One `/review` attempt per head.** When `/review` fails, the mid-cycle blocker records the PR head it was tried on. Later runs log `[RESUME SKIP] #<n>: /review was already tried on PR #<pr> head <sha7>; waiting for a new head or /unblock` and start no session. A new PR head, or the PO's `/unblock`, allows one new attempt.
+
+`scripts/dispatcher-poll.sh` lists such stories as `review_due` (number and title), and the workflow counts `review_due` in `resumable`, so the invoke step runs for them even when nothing else is due. A board whose only `In review` story is Claude-tier gives `review_due: []`. Under `--dry-run` the entry logs `[DRY RUN] Would start Claude Code (opus) on the subscription for /review <pr>` and starts nothing.
 
 ### Fix round
 
