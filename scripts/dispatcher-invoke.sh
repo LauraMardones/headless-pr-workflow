@@ -434,7 +434,7 @@ post_comment() {
         LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     else
         response=$(gh api "repos/$REPO/issues/$issue_num/comments" \
-            -X POST -f body="$body")
+            -X POST -f body="$body") || return 1
         LAST_POSTED_AT=$(jq -r '.created_at // empty' <<< "$response" 2>/dev/null || true)
         [[ -n "$LAST_POSTED_AT" ]] || LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
@@ -883,7 +883,7 @@ State of in-progress work: $state"
     [[ -n "$reason" ]] && body+=$'\n'"Cause: $reason"
     [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
-    post_comment "$issue_num" "$body"
+    post_comment "$issue_num" "$body" || return 1
     register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason"
 }
 
@@ -967,7 +967,7 @@ Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
 State of in-progress work: $state
 
-$marker"
+$marker" || return 1
     register_po_blocker "$issue_num" "$issue_title" "$blocker_type" "$unblocked_when" "$state"
 }
 

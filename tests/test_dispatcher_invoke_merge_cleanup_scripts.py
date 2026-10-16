@@ -141,7 +141,7 @@ def test_348_cleanup_without_evidence_gives_up_after_three_runs_and_stays_done(t
         assert d.resume().returncode == 0
     assert d.status(STORY) == "Done"
     assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
-    assert len(d.slack_calls) == 1
+    assert d.slack_calls == [] and [e["event"] for e in d.queued_events] == ["po_blocker"]  # #359
 
 
 def test_348_merged_pr_without_any_confirmation_does_not_reach_cleanup(tmp_path):
