@@ -28,7 +28,7 @@ The PO caps how many autonomous sessions the dispatcher starts per UTC day with 
 [USAGE LIMIT ERROR] USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more (value: "<value>") — starting nothing
 ```
 
-**When the limit stops a session** the story is left where a refusal by the reserve leaves it, the run exits `0` and starts no other session (it does not go on to the next story): before `/implement` the story goes back to "Ready for implementation"; before a fix round it keeps its place in "In implementation" and nothing is written; before `/review` one comment starting `## Usage limit` names the step, `N of M sessions today` and the reset time (00:00 UTC), and is not posted again while it is the story's newest comment for that step. Nothing restarts `/review` until #316; run it by hand after the reset.
+**When the limit stops a session** the story is left where a refusal by the reserve leaves it, the run exits `0` and starts no other session (it does not go on to the next story): before `/implement` the story goes back to "Ready for implementation"; before a fix round it keeps its place in "In implementation" and nothing is written; before `/review` one comment starting `## Usage limit` names the step, `N of M sessions today` and the reset time (00:00 UTC), and is not posted again while it is the story's newest comment for that step. A later poll tries `/review` again once the usage limit and the allowance check allow it.
 
 **Notification.** The first stop of a UTC day sets the invoke step output `usage_limit_reached=true`. The workflow step "Notify usage limit reached" runs in the same run, sends one `usage_limit_reached` Slack message (`sessions_today`, `limit`, `settings_url`: the count, the limit and a link to the variables page) and only then writes the day's marker. If the send fails, no marker is written and the next run tries again; a second stop on the same day after a successful send sends nothing. A full retry with a durable record is #295.
 
@@ -129,7 +129,7 @@ The stream-json output is written to a temporary file, parsed by message type (n
 | `timeout` stopped the session | `[SESSION ERROR] /<command> #<n> stopped by the wall-clock bound ...` |
 | Token rejected (`401`) | `[SESSION ERROR] /<command> #<n>: the subscription token was rejected (401). Run 'claude setup-token' again and save the CLAUDE_CODE_OAUTH_TOKEN secret with nothing before or after the token` |
 | `init` reports an `apiKeySource` other than `none` (or none at all) | `[SESSION ERROR] apiKeySource=<value>; only the subscription token may be used` |
-| A provider usage limit (`rate_limit`) | `[SESSION RATE LIMIT] /<command> #<n> stopped at a provider usage limit; resume is #316` |
+| A provider usage limit (`rate_limit`) | `[SESSION RATE LIMIT] /<command> #<n> stopped at a provider usage limit; resets <UTC time or unknown>` (exit code 75, a pause, not a failure: see [Pause at a provider usage limit](#pause-at-a-provider-usage-limit)) |
 | Claude Code exits non-zero | `[SESSION ERROR] /<command> #<n>: Claude Code exited with code <rc>`, then the last five lines of its stderr |
 | No `result` message | `[SESSION ERROR] /<command> #<n>: the stream has no result message` |
 | `subtype` other than `success` (for example `error_max_turns`), or `is_error` `true` | `[SESSION ERROR] /<command> #<n>: result subtype <subtype>, is_error <bool>; not treating as success` |
@@ -479,6 +479,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself; `scripts/dispatcher-merge.sh` exits 0 only after `hpw merge-pr` confirmed the merge (or GitHub already reported it merged).
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
+- A story paused at a provider usage limit waits at its step (fix round, `/review`) or in `Ready for implementation` (new `/implement`) until the usage limit and the allowance check allow a start; the run ends at that refused start, before the stale check, so stale recovery does not roll back a fix-round or `/review` story. Only pushed commits survive a pause.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 
 ---
@@ -545,7 +546,7 @@ The pin keeps the undocumented event shape stable. Every Claude session runs on 
 
 A probe that is itself stopped by a usage limit (result error `rate_limit`) with no readable `rate_limit_event` is a `refuse`, not an `error`. An `overageStatus` other than `"rejected"` is an `error`: usage credits look turned on, so a session could be billed past the limit.
 
-A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is not affected: its `/merge` is a script and never checks the allowance (issues #293, #264). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` nothing restarts the step automatically until #316; the PO can run it by hand after the reset time. `/merge` and `/cleanup` are script-only and are never refused or held by the allowance (issue #264). Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
+A refusal partway through a cycle leaves the story at its current step. A story in `In merge` is not affected: its `/merge` is a script and never checks the allowance (issues #293, #264). A refusal or an error before a fix round changes nothing on the board: the story keeps its place in `In implementation`, no comment is posted, and the fix round is tried again on a later run, before new work. For `/review` a later poll tries the step again once the allowance allows it. `/merge` and `/cleanup` are script-only and are never refused or held by the allowance (issue #264). Under `--dry-run`, the dispatcher logs `[DRY RUN] Would check subscription allowance before /<step>` and does not run the script.
 
 The script prints exactly one JSON object on stdout in every exit path:
 
@@ -572,6 +573,28 @@ The hold lives in the same `actions/cache` entry as the usage limit's session co
 ### A repeated `[ALLOWANCE ERROR]`
 
 An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumented `rate_limit_event` shape has changed, or the token has expired. Each such run fails visibly in Actions (and in GitHub's failed-run email) but sends no Slack message. The remedy is to set `DISPATCHER_ENABLED=false`, read the reason in the log, and either renew the token or revisit ADR-012.
+
+## Pause at a provider usage limit
+
+A session stopped by the subscription's provider usage limit (issue #316, ADR-012) is not a failure and needs no PO action: the limit ends by itself at the reset.
+
+**Detection.** `claude_limit_stop` in `scripts/lib/claude-session.sh` decides it from the session's stream: a final `result` that is not a success (`is_error` true or `subtype` not `success`) and has `rate_limit` or `rate_limit_error` in `error`, `subtype`, `error_type` or `error_category`, or `api_error_status` 429; or a `rate_limit_event` with `rate_limit_info.status` `rejected` when the stream has no successful result. Everything else (non-zero exit without a limit signal, wall-clock bound, 401, `apiKeySource` not `none`, missing `result`) stays a session error with the mid-cycle blocker. `run_claude_code_session()` returns `75` for a limit stop and sets `CLAUDE_LIMIT_RESET_TS` to the reset time in Unix seconds (`rate_limit_info.resetsAt`, else the latest `unifiedWindows.*.resetsAt` at utilization 1 or more), or to an empty string. `invoke_executor_command()` passes the code through.
+
+**Placement.** The run exits `0` and starts no other session.
+
+| Session | Story afterwards | Written |
+|---|---|---|
+| New `/implement` (Step E1) | `Ready for implementation`; the next start continues on the existing branch and PR | the pause record |
+| Fix round | stays `In implementation` | the pause record; no fix-round attempt marker |
+| `/review` of a Codex-implemented PR | stays `In review` | the pause record; no per-head review attempt marker |
+
+No `## Blocked Declaration` is posted, no Slack message is sent and no actionable event is registered.
+
+**The record.** One comment headed `## Paused at a provider usage limit` names the step and target, the branch, the PR number and head SHA (or `no PR yet`), the reset time in UTC (or `unknown — the dispatcher checks the allowance on every poll`), the commits the runner had not pushed and whether it had uncommitted changes, what the dispatcher does next, and "No PO action is needed." It is not posted again while it is the story's newest comment for the same step and PR head. The run log has one `[SESSION RATE LIMIT]` line.
+
+**Restart.** There is no timer. The usage limit check and the allowance check with its hold refuse every start until the window has reset, and a restart is counted by the usage limit like any session, which bounds a loop of limit stops. `/implement` continues on an existing branch for the story, with or without a PR (`.claude/commands/implement.md` steps 9 and 10).
+
+**What is lost.** Only commits the session pushed survive: the next runner is fresh. The dispatcher does not commit or push leftover work, so half-done changes never reach the PR; the record counts what was not pushed.
 
 ## The dispatcher script is read completely before any session starts
 

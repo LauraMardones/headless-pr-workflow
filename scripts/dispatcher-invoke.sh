@@ -1112,15 +1112,23 @@ retry_pending_cleanup_summaries() {
 # "[SESSION]" summary line (stderr). Returns 0 with the result text on stdout
 # only when the stream has a `result` with subtype "success" and is_error
 # false, and Claude Code exited 0. Every other outcome returns non-zero with a
-# "[SESSION ERROR]" or "[SESSION RATE LIMIT]" line on stderr. The stream is
+# "[SESSION ERROR]" line on stderr; a provider usage limit stop returns
+# CLAUDE_LIMIT_STOP_RC with a "[SESSION RATE LIMIT]" line. The stream is
 # parsed by message type, not line order, and kept in a temporary directory
 # that is removed before returning. The token, the full stream and the init
 # message are never printed; the token is also masked in the lines that are.
+
+# Exit code of run_claude_code_session() and invoke_executor_command() for a
+# session stopped by a provider usage limit (issue #316); 1 stays "failed".
+# CLAUDE_LIMIT_RESET_TS then holds the reset time as Unix seconds, or is empty.
+CLAUDE_LIMIT_STOP_RC=75
+CLAUDE_LIMIT_RESET_TS=""
 
 CLAUDE_SESSION_ARGS=(-p --output-format stream-json --verbose
                      --permission-mode bypassPermissions --strict-mcp-config)
 
 run_claude_code_session() {
+    CLAUDE_LIMIT_RESET_TS=""
     local alias="$1" token="$2" task_prompt="$3" slash_command="$4" target_arg="$5"
     local work rc=0
     work=$(mktemp -d)
@@ -1195,13 +1203,14 @@ _claude_code_session() {
         return 1
     fi
 
-    if [[ -n "$result" ]] && jq -e '
-            (.is_error == true or .subtype != "success")
-            and (([.error, .subtype, .error_type, .error_category]
-                   | any(. == "rate_limit" or . == "rate_limit_error"))
-                 or .api_error_status == 429)' <<< "$result" >/dev/null 2>&1; then
-        echo "[SESSION RATE LIMIT] $label stopped at a provider usage limit; resume is #316" >&2
-        return 1
+    local reset_ts="" limit_rc=0
+    reset_ts=$(claude_limit_stop "$work/events.jsonl") || limit_rc=$?
+    if [[ $limit_rc -eq 0 ]]; then
+        CLAUDE_LIMIT_RESET_TS="$reset_ts"
+        local reset_text="unknown"
+        [[ -n "$reset_ts" ]] && reset_text=$(date -u -d "@$reset_ts" +%Y-%m-%dT%H:%MZ 2>/dev/null || echo "unknown")
+        echo "[SESSION RATE LIMIT] $label stopped at a provider usage limit; resets $reset_text" >&2
+        return "$CLAUDE_LIMIT_STOP_RC"
     fi
 
     if [[ $session_rc -ne 0 ]]; then
@@ -1232,7 +1241,7 @@ _claude_code_session() {
 #                     the fix round again on a later run.
 #                     Before /review: one comment on the
 #                     story naming the step, the window, the share left, the
-#                     reserve and the reset time; exit 0. Resuming is #316.
+#                     reserve and the reset time; exit 0. A later poll tries it again.
 #   exit 2 (error)  — log [ALLOWANCE ERROR] and fail the job without a
 #                     dispatcher_error Slack message; after /implement, the
 #                     story gets the same comment with the reason.
@@ -1257,7 +1266,7 @@ allowance_comment() {
         | ["## Subscription allowance check", "", $head, ""]
           + (if ($lines | length) > 0 then $lines + [""] else [] end)
           + ["Reason: \($d.reason)", "",
-             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
+             "The story stays at its current step. The dispatcher tries /\($step) again on a later poll."]
         | join("\n")' <<< "$decision_json"
 }
 
@@ -1344,7 +1353,7 @@ usage_limit_comment() {
     else
         head="/$step was not started for #$ISSUE_NUMBER: USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more, so nothing starts."
     fi
-    tail="The story stays at its current step. Nothing restarts it automatically until #316; run /$step by hand after the reset time."
+    tail="The story stays at its current step. The dispatcher tries /$step again on a later poll."
     printf '## Usage limit\n\n%s\n\n%s\n' "$head" "$tail"
 }
 
@@ -1410,6 +1419,82 @@ record_session_start() {
         echo "[USAGE LIMIT ERROR] could not record the session start — starting nothing" >&2
         return 1
     }
+}
+
+# ─── Utility: pause at a provider usage limit (issue #316) ───────────────────
+# A session stopped by a provider usage limit (invoke_executor_command()
+# returned CLAUDE_LIMIT_STOP_RC) ends by itself at the reset, so it is not a
+# blocker and needs no PO action. pause_at_usage_limit <step> <target> <issue>:
+#   - a new /implement goes back to "Ready for implementation"; a fix round
+#     stays "In implementation" and a /review stays "In review";
+#   - no mid-cycle blocker and no attempt marker is written, so the resume
+#     pass (or the next selection) starts the same step again once the usage
+#     limit and the allowance check let it;
+#   - one "## Paused at a provider usage limit" comment records what was left
+#     behind, unless it is already the story's newest comment for this step and
+#     PR head; no Slack message and no actionable event;
+#   - the run exits 0 and starts no other session.
+# Only pushed commits survive a runner; the comment counts what was lost.
+
+paused_comment() {
+    local step="$1" target="$2" issue="$3" branch="$4" pr_number="$5" pr_head="$6" \
+          reset_ts="$7" unpushed="$8" dirty="$9" next="${10}"
+    local reset_text="unknown — the dispatcher checks the allowance on every poll"
+    [[ -n "$reset_ts" ]] && reset_text=$(date -u -d "@$reset_ts" +%Y-%m-%dT%H:%MZ 2>/dev/null || echo "$reset_text")
+    local pr_text="no PR yet"
+    [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`${pr_head}\`"
+    local dirty_text="no uncommitted changes"
+    [[ "$dirty" == "true" ]] && dirty_text="uncommitted changes"
+    printf '## Paused at a provider usage limit\n\n'
+    printf -- '- Step: `/%s %s` for #%s\n' "$step" "$target" "$issue"
+    printf -- '- Branch: %s\n' "${branch:-unknown}"
+    printf -- '- PR: %s\n' "$pr_text"
+    printf -- '- Resets: %s\n' "$reset_text"
+    printf -- '- Not pushed when the session stopped: %s commit(s), %s\n\n' "$unpushed" "$dirty_text"
+    printf 'Only pushed commits survive; anything not pushed is redone by the next start.\n\n'
+    printf 'Next: %s\n\nNo PO action is needed.\n' "$next"
+}
+
+pause_at_usage_limit() {
+    local step="$1" target="$2" issue="$3"
+    local pr_json pr_number pr_head branch unpushed dirty next reset_ts
+    reset_ts="$CLAUDE_LIMIT_RESET_TS"
+    LAST_ACTION="pausing #$issue at a provider usage limit"
+    pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
+    pr_number=$(jq -r '.number // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    pr_head=$(jq -r '.head.sha // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    branch=$(jq -r '.head.ref // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    [[ -n "$branch" ]] || branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    unpushed=$(git -C "$REPO_ROOT" rev-list --count '@{upstream}..HEAD' 2>/dev/null \
+        || git -C "$REPO_ROOT" rev-list --count 'origin/main..HEAD' 2>/dev/null || echo 0)
+    dirty=false
+    [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]] && dirty=true
+
+    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        next="the fix round stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
+    elif [[ "$step" == "implement" ]]; then
+        next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
+        set_project_status "$TARGET_ITEM_ID" "$issue" "Ready for implementation"
+    else
+        next="the story stays in \"In review\" and /$step is tried again on a later poll, once the usage limit and the allowance check allow it."
+    fi
+
+    local body newest pr_text="no PR yet"
+    [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`$pr_head\`"
+    body=$(paused_comment "$step" "$target" "$issue" "$branch" "$pr_number" "$pr_head" "$reset_ts" "$unpushed" "$dirty" "$next")
+    newest=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" \
+        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    if [[ "$newest" == "## Paused at a provider usage limit"* \
+          && "$newest" == *"- Step: \`/$step $target\` for #$issue"* \
+          && "$newest" == *"- PR: $pr_text"* ]]; then
+        echo "#$issue: the pause record for /$step is already the newest comment; not posting it again"
+    else
+        post_comment "$issue" "$body" \
+            || echo "Warning: could not post the pause record on #$issue" >&2
+    fi
+    echo "#$issue paused at a provider usage limit; no other session is started in this run"
+    DISPATCH_HANDLED=true
+    exit 0
 }
 
 # ─── Utility: invoke an executor command (issue #254, issue #314) ────────────
@@ -2386,7 +2471,10 @@ resume_fix_round() {
     # The allowance check must not put this story back to "Ready for
     # implementation": it is unfinished work that holds its place.
     FIX_ROUND_SESSION=true
-    if ! invoke_executor_command "implement" "$issue_num"; then
+    local session_rc=0
+    invoke_executor_command "implement" "$issue_num" || session_rc=$?
+    [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
+    if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
         DISPATCH_HANDLED=true
@@ -2470,7 +2558,10 @@ resume_review_story() {
     echo "${LOG_PREFIX}[RESUME] #$issue_num: /review on PR #$pr_number under $review_label"
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     LAST_ACTION="invoking /review for #$issue_num"
-    if ! invoke_executor_command "review" "$pr_number" "$review_label"; then
+    local session_rc=0
+    invoke_executor_command "review" "$pr_number" "$review_label" || session_rc=$?
+    [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "review" "$pr_number" "$issue_num"
+    if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
         DISPATCH_HANDLED=true
@@ -2976,7 +3067,10 @@ set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
 # The PR head before the session, if the story already has an open PR: the
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
-if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
+SESSION_RC=0
+invoke_executor_command "implement" "$ISSUE_NUMBER" || SESSION_RC=$?
+[[ $SESSION_RC -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$ISSUE_NUMBER" "$ISSUE_NUMBER"
+if [[ $SESSION_RC -ne 0 ]]; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
     DISPATCH_HANDLED=true
