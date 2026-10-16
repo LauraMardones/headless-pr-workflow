@@ -411,6 +411,28 @@ def codex_pr_298_findings_body(prefix: str = PR_298_COMMITS[0][:10]) -> str:
     )
 
 
+CODEX_RECEIPT_MARKER = "<!-- codex-review-receipt:v1 -->"
+
+
+def codex_pr_378_clean_receipt_body(prefix: str = "eab639b146") -> str:
+    """The receipt-format clean comment on PR #378 (issuecomment-6211124392)."""
+
+    return (
+        f"{CODEX_RECEIPT_MARKER}\n\nCodex Review: Didn't find any major issues. Bravo.\n\n"
+        f"**Reviewed commit:** `{prefix}`\n\n{_codex_about_footer()}"
+    )
+
+
+def codex_pr_378_findings_receipt_body(prefix: str = "42d332fe1c") -> str:
+    """The receipt-format findings review on PR #378 (review 5541676665, state COMMENTED)."""
+
+    return (
+        f"{CODEX_RECEIPT_MARKER}\n\n\n### \U0001f4a1 Codex Review\n\n"
+        "Here are some automated review suggestions for this pull request.\n\n"
+        f"**Reviewed commit:** `{prefix}`\n    \n\n{_codex_about_footer()}"
+    )
+
+
 def codex_status_body(commit: str = "ae24ec5", *, status: str = "\U0001f504 **Running** since 2026-10-11T14:48:57Z") -> str:
     """The progress comment Codex keeps up to date, as on PR #327 (issuecomment-6109911085)."""
 

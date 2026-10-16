@@ -17,6 +17,7 @@ from tests.github_scenarios import (
     CODEX_USAGE_LIMIT_BODY,
     HEAD_SHA,
     codex_comment,
+    codex_pr_378_clean_receipt_body,
     commit_event,
     scenario_codex_review,
     scenario_current_approval,
@@ -378,6 +379,12 @@ def test_dry_run_sample_line_is_a_passing_gate(module):
     [
         (scenario_current_approval(head_sha="abcdef1234567890"), "formal"),
         (scenario_codex_review(), "codex-review"),
+        (
+            scenario_codex_review(
+                timeline=(commit_event(HEAD_SHA), codex_comment(codex_pr_378_clean_receipt_body(HEAD_SHA[:10]))),
+            ),
+            "codex-review",
+        ),
         (scenario_separate_session_review(head_sha="abcdef1234567890"), "separate-session"),
     ],
 )
