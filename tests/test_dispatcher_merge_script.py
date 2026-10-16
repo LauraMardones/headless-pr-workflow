@@ -9,10 +9,12 @@ from __future__ import annotations
 import base64
 import json
 import re
+import sys
+from pathlib import Path
 
 import pytest
 
-from tests.phase_script_fakes import HAVE_TOOLS, PhaseHarness
+from tests.phase_script_fakes import HAVE_TOOLS, REPO_ROOT, PhaseHarness
 
 pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq, git and python3")
 
@@ -108,9 +110,12 @@ def test_owner_evidence_for_the_current_head_is_passed_to_merge_owner(h):
 def test_missing_owner_evidence_for_the_head_blocks_before_the_merge(h):
     h.fixture(f"repos/{REPO}/issues/{PR}/comments", [owner_marker("b" * 40)])  # an older head
     h.set("hpw_merge-owner.rc", "1")
-    h.set("hpw_merge-owner.json", json.dumps({"blocking_reasons": ["Expected merge owner evidence is missing"]}))
+    h.set("hpw_merge-owner.json", json.dumps({"ownership_status": "unknown_owner",
+                                              "blocking_reasons": ["Expected merge owner evidence is missing"]}))
     proc = run(h)
     assert proc.returncode == 1 and "ownership gate not passed" in proc.stderr
+    assert "status: unknown_owner" in proc.stderr and "Expected merge owner evidence is missing" in proc.stderr
+    assert "no dispatcher owner marker for head aaaaaaa" in proc.stderr
     assert "--expected-owner" not in owner_calls(h)[0]
     assert_no_mutation(h) and h.log("gate.log") == []
 
@@ -131,9 +136,105 @@ def test_only_the_dispatcher_owner_marker_for_this_head_is_owner_evidence(h, com
 
 def test_ownership_gate_failure_blocks_even_with_evidence(h):
     h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", json.dumps({"ownership_status": "takeover_required",
+                                              "blocking_reasons": ["Current session is not the expected owner"]}))
     proc = run(h)
     assert proc.returncode == 1 and "ownership gate not passed" in proc.stderr
+    assert "status: takeover_required" in proc.stderr and "Current session is not the expected owner" in proc.stderr
+    assert "owner marker" not in proc.stderr  # the marker for this head was found
     assert_no_mutation(h)
+
+
+def gh_error_json(error="gh-command-failed", stderr="HTTP 403: Resource not accessible by personal access token"):
+    """The shape of hpw's _print_gh_error output (src/headless_pr_workflow/cli.py)."""
+    return json.dumps({"ok": False, "error": error, "command": ["gh", "pr", "view", str(PR)],
+                       "returncode": 1, "stderr": stderr}, indent=2)
+
+
+def assert_not_an_ownership_message(stderr):
+    assert "owner marker" not in stderr and "takeover required" not in stderr
+    assert "ownership gate not passed" not in stderr
+
+
+def test_merge_owner_gh_error_names_the_gh_error_not_ownership(h):
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", gh_error_json())
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "hpw merge-owner could not evaluate ownership" in proc.stderr
+    assert "gh-command-failed" in proc.stderr and "gh exit 1" in proc.stderr
+    assert "HTTP 403: Resource not accessible by personal access token" in proc.stderr
+    assert_not_an_ownership_message(proc.stderr)
+    assert_no_mutation(h) and h.log("gate.log") == []
+
+
+@pytest.mark.parametrize("rc,stdout", [
+    ("1", ""),
+    ("1", "Traceback (most recent call last):\n  File \"cli.py\", line 1\n"),
+    ("127", ""),  # hpw could not start
+])
+def test_merge_owner_without_usable_output_quotes_hpw_stderr(h, rc, stdout):
+    h.set("hpw_merge-owner.rc", rc)
+    h.set("hpw_merge-owner.json", stdout)
+    h.set("hpw_merge-owner.stderr", "ModuleNotFoundError: No module named 'headless_pr_workflow'\n")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert f"hpw merge-owner failed (exit {rc}) without a usable result" in proc.stderr
+    assert "ModuleNotFoundError: No module named 'headless_pr_workflow'" in proc.stderr
+    assert_not_an_ownership_message(proc.stderr)
+    assert_no_mutation(h) and h.log("gate.log") == []
+
+
+def test_merge_owner_failure_with_only_stdout_quotes_stdout(h):
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", "Traceback (most recent call last):\nKeyError: 'headRefOid'\n")
+    proc = run(h)
+    assert proc.returncode == 1 and "without a usable result" in proc.stderr
+    assert "KeyError: 'headRefOid'" in proc.stderr
+
+
+def test_merge_owner_json_without_reasons_or_error_is_not_usable(h):
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", json.dumps({"ownership_status": "unknown_owner", "blocking_reasons": []}))
+    proc = run(h)
+    assert proc.returncode == 1 and "hpw merge-owner failed (exit 1) without a usable result" in proc.stderr
+    assert_not_an_ownership_message(proc.stderr)
+
+
+def long_text(lines=500):
+    return "".join(f"line {i:04d} " + "x" * 90 + "\n" for i in range(lines))
+
+
+def test_quoted_hpw_stderr_is_bounded(h):
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.stderr", long_text())
+    proc = run(h)
+    assert proc.returncode == 1 and "line 0499" in proc.stderr  # the end is kept
+    assert "line 0000" not in proc.stderr and len(proc.stderr) < 2500
+
+
+def test_quoted_gh_stderr_is_bounded(h):
+    h.set("hpw_merge-owner.rc", "1")
+    h.set("hpw_merge-owner.json", gh_error_json(stderr=long_text()))
+    proc = run(h)
+    assert proc.returncode == 1 and "line 0499" in proc.stderr
+    assert "line 0000" not in proc.stderr and len(proc.stderr) < 2500
+
+
+def test_real_hpw_merge_owner_reports_the_failing_gh_call(h):
+    """AC6 (#374): the real scripts/hpw, not the HPW_BIN stub, against a failing gh."""
+    shim = h.bin / "python"  # scripts/hpw runs `python -m headless_pr_workflow.cli`
+    shim.write_text(f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
+    shim.chmod(0o755)
+    h.set("gh_fail_stderr", "HTTP 403: Resource not accessible by personal access token (repository.pullRequest)\n")
+    proc = h.run("dispatcher-merge.sh", "--pr", str(PR), "--repo", REPO,
+                 env_overrides={"HPW_BIN": (REPO_ROOT / "scripts" / "hpw").as_posix()})
+    assert proc.returncode == 1
+    assert "hpw merge-owner could not evaluate ownership" in proc.stderr
+    assert "HTTP 403: Resource not accessible by personal access token (repository.pullRequest)" in proc.stderr
+    assert_not_an_ownership_message(proc.stderr)
+    assert any(line.startswith(f"gh pr view {PR}") for line in h.log("gh.log"))  # the real hpw called gh
+    assert h.posts == [] and h.log("gate.log") == []
 
 
 def test_unreadable_comments_block(h):
@@ -198,6 +299,25 @@ def test_merge_command_failure_exits_1(h):
 def test_merged_state_must_be_confirmed(h):
     h.set("hpw_merge-pr.json", json.dumps({"merged": False, "blocking_reasons": ["GitHub does not report PR as merged"]}))
     assert run(h).returncode == 1
+    assert h.posts == []
+
+
+def test_merge_pr_gh_error_names_the_gh_error(h):
+    h.set("hpw_merge-pr.rc", "1")
+    h.set("hpw_merge-pr.json", gh_error_json(stderr="GraphQL: Pull request is not mergeable"))
+    proc = run(h)
+    assert proc.returncode == 1 and "hpw merge-pr did not confirm a merge (exit 1)" in proc.stderr
+    assert "gh-command-failed" in proc.stderr and "GraphQL: Pull request is not mergeable" in proc.stderr
+    assert h.posts == []
+
+
+def test_merge_pr_without_usable_output_quotes_hpw_stderr(h):
+    h.set("hpw_merge-pr.rc", "1")
+    h.set("hpw_merge-pr.json", "")
+    h.set("hpw_merge-pr.stderr", "Traceback (most recent call last):\nRuntimeError: boom\n")
+    proc = run(h)
+    assert proc.returncode == 1 and "hpw merge-pr failed (exit 1) without a usable result" in proc.stderr
+    assert "RuntimeError: boom" in proc.stderr
     assert h.posts == []
 
 

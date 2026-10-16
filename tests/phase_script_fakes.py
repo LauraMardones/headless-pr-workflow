@@ -20,7 +20,10 @@ HAVE_TOOLS = all(shutil.which(tool) for tool in ("bash", "jq", "git", "python3")
 
 FAKE_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$MOCK_DIR/gh.log"
-[[ "${1:-}" == "api" ]] || exit 1
+if [[ "${1:-}" != "api" ]]; then  # e.g. the real hpw's `gh pr view`; gh_fail_stderr is its stderr
+    [[ -f "$MOCK_DIR/gh_fail_stderr" ]] && cat "$MOCK_DIR/gh_fail_stderr" >&2
+    exit 1
+fi
 shift
 endpoint="" jq_expr="" method=GET body=""
 while [[ $# -gt 0 ]]; do
@@ -52,11 +55,13 @@ file="$MOCK_DIR/$(echo "${endpoint%%\?*}" | tr / _).json"
 if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" "$file"; else cat "$file"; fi
 """
 
-# Prints $MOCK_DIR/hpw_<subcommand>.json and exits with hpw_<subcommand>.rc (default 0).
+# Prints $MOCK_DIR/hpw_<subcommand>.json, writes hpw_<subcommand>.stderr to stderr
+# and exits with hpw_<subcommand>.rc (default 0).
 FAKE_HPW = r"""#!/usr/bin/env bash
 echo "hpw $*" >> "$MOCK_DIR/hpw.log"
 sub="$1"
 [[ -f "$MOCK_DIR/hpw_$sub.json" ]] && cat "$MOCK_DIR/hpw_$sub.json"
+[[ -f "$MOCK_DIR/hpw_$sub.stderr" ]] && cat "$MOCK_DIR/hpw_$sub.stderr" >&2
 exit "$(cat "$MOCK_DIR/hpw_$sub.rc" 2>/dev/null || echo 0)"
 """
 
@@ -100,7 +105,7 @@ class PhaseHarness:
         return subprocess.run(["git", *args], cwd=self.cwd, env=env, capture_output=True, text=True,
                               check=True).stdout
 
-    def run(self, script: str, *args: str):
+    def run(self, script: str, *args: str, env_overrides: dict[str, str] | None = None):
         env = {
             "HOME": self.tmp.as_posix(),
             "PATH": ":".join([self.bin.as_posix(), "/usr/bin", "/bin"]),
@@ -109,6 +114,7 @@ class PhaseHarness:
             "HPW_BIN": (self.bin / "hpw").as_posix(),
             "MERGE_GATE_SCRIPT": (self.bin / "gate").as_posix(),
             "GIT_CONFIG_GLOBAL": os.devnull,
+            **(env_overrides or {}),
         }
         return subprocess.run([BASH, (REPO_ROOT / "scripts" / script).as_posix(), *args], cwd=self.cwd, env=env,
                               capture_output=True, text=True, encoding="utf-8", timeout=120)
