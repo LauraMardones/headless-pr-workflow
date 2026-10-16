@@ -37,6 +37,7 @@ from headless_pr_workflow.codex_review_bookkeeping import (
     classify_threads,
     decide,
     missing_scope_message,
+    open_decision_blocker,
     parse_story_board,
     review_request_body,
     run_bookkeeping,
@@ -134,6 +135,7 @@ class FakeGitHub:
         self.status = status
         self.options = BOARD_OPTIONS if options is None else options
         self.story_comments: list[str] = []
+        self.story_thread: list[dict] = []  # story comments with author and time, for the decision blocker
         self.pr_comments: list[str] = []
         self.moves: list[str] = []
         self.fail_next_move = False
@@ -170,6 +172,10 @@ class FakeGitHub:
 
     def fetch_issue_comments(self, number: int) -> tuple[str, ...]:
         return tuple(self.story_comments)
+
+    def fetch_open_decision_blocker(self, number: int) -> str | None:
+        blocker = open_decision_blocker(self.story_thread)
+        return blocker["url"] if blocker else None
 
     def post_comment(self, number: int, body: str) -> str:
         if number == PR:
@@ -1826,3 +1832,149 @@ def test_cli_exits_1_for_a_failure_before_any_pr_is_read(monkeypatch, capsys, tm
 
     assert exit_code == 1
     assert json.loads(errors_file.read_text())["errors"][0]["pr"] is None
+
+
+# --- Hold on an open decision blocker (issue #357) ----------------------------------------------
+
+PO = "LauraMardones"
+DECLARATION = "## Blocked Declaration\nType: decision\nQuestion: waive the listed findings for this PR?\n"
+BLOCKER_URL = "https://github.com/owner/repo/issues/290#issuecomment-1"
+
+
+def story_comment(body: str, created_at: str, author: str = "claude-bot", url: str | None = None) -> dict:
+    return {"body": body, "author": author, "created_at": created_at, "url": url or BLOCKER_URL}
+
+
+def held(github: FakeGitHub, *extra: dict) -> FakeGitHub:
+    github.story_thread = [story_comment(DECLARATION, "2026-10-11T09:00:00Z"), *extra]
+    return github
+
+
+def assert_untouched(github: FakeGitHub) -> None:
+    assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
+    assert github.resolve_calls == [] and github.status == "In review"
+
+
+def test_open_decision_blocker_holds_a_head_with_no_review_request():
+    github = held(FakeGitHub(pr()))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_NONE, NOT_NEEDED)
+    assert BLOCKER_URL in outcome.decision.reason and "decision blocker" in outcome.decision.reason
+    assert_untouched(github)
+
+
+def test_open_decision_blocker_keeps_an_old_head_thread_unresolved_after_a_clean_result():
+    github = held(with_threads(thread(1, commit=OLDER_SHA)))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_NONE
+    assert_untouched(github)
+    assert github.thread_reads == 0 and not github.threads[0].is_resolved
+
+
+@pytest.mark.parametrize("events", [(request(), codex_comment()), ()])
+def test_open_decision_blocker_dry_run_reports_none(events):
+    github = held(FakeGitHub(pr(*events)))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW, dry_run=True)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_NONE, NOT_NEEDED)
+    assert_untouched(github)
+
+
+def test_decision_blocker_holds_a_codex_findings_result_too():
+    github = held(FakeGitHub(pr(request(), codex_findings_review(HEAD_SHA))))
+
+    assert run_bookkeeping(PR, github=github, now=NOW).decision.action == ACTION_NONE
+    assert_untouched(github)
+
+
+def test_po_unblock_line_after_the_blocker_restores_todays_decision():
+    github = held(FakeGitHub(pr()), story_comment("Waived F1 (#400).\n  /unblock  \n", "2026-10-11T10:00:00Z", PO))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_REQUEST_REVIEW, APPLIED)
+    assert len(github.pr_comments) == 1
+
+
+def test_po_unblock_line_restores_the_move_and_the_thread_resolution():
+    github = with_threads(thread(1, commit=OLDER_SHA))
+    held(github, story_comment("/unblock", "2026-10-11T10:00:00Z", PO))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_MOVE_IN_MERGE
+    assert github.resolve_calls == ["PRRT_1"] and github.moves == ["In merge"]
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        story_comment("please do not /unblock yet", "2026-10-11T10:00:00Z", PO),  # inside prose
+        story_comment("/unblock", "2026-10-11T10:00:00Z", "someone-else"),  # another account
+        story_comment("/unblock", "2026-10-11T08:00:00Z", PO),  # before the declaration
+        story_comment("/unblock", "2026-10-11T09:00:00Z", PO),  # not strictly after it
+        story_comment("/unblock now", "2026-10-11T10:00:00Z", PO),  # not a line of its own
+    ],
+)
+def test_only_a_po_unblock_line_after_the_latest_blocker_lifts_the_hold(comment):
+    github = held(FakeGitHub(pr()), comment)
+
+    assert run_bookkeeping(PR, github=github, now=NOW).decision.action == ACTION_NONE
+    assert_untouched(github)
+
+
+def test_unblock_of_an_earlier_blocker_does_not_lift_a_newer_one():
+    github = FakeGitHub(pr())
+    github.story_thread = [
+        story_comment(DECLARATION, "2026-10-11T09:00:00Z"),
+        story_comment("/unblock", "2026-10-11T10:00:00Z", PO),
+        story_comment(DECLARATION, "2026-10-11T11:00:00Z", url="https://github.com/owner/repo/issues/290#issuecomment-2"),
+    ]
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_NONE and "issuecomment-2" in outcome.decision.reason
+
+
+def test_resource_and_external_blockers_do_not_hold():
+    github = FakeGitHub(pr())
+    github.story_thread = [story_comment("## Blocked Declaration\nType: resource\n", "2026-10-11T09:00:00Z")]
+
+    assert run_bookkeeping(PR, github=github, now=NOW).decision.action == ACTION_REQUEST_REVIEW
+
+
+def test_decision_blocker_appearing_between_the_two_reads_changes_nothing():
+    github = FakeGitHub(pr())
+    reads = iter([None, BLOCKER_URL])
+    github.fetch_open_decision_blocker = lambda number: next(reads)
+
+    with pytest.raises(BookkeepingError) as error:
+        run_bookkeeping(PR, github=github, now=NOW)
+
+    assert error.value.step == "revalidate decision"
+    assert_untouched(github)
+
+
+def test_decision_blocker_on_a_story_that_is_not_in_review_is_not_read():
+    github = held(FakeGitHub(pr(), status="In implementation"))
+    github.fetch_open_decision_blocker = None  # must not be called
+
+    assert run_bookkeeping(PR, github=github, now=NOW).decision.action == ACTION_NONE
+
+
+def test_gateway_reads_the_open_decision_blocker_with_author_time_and_url(monkeypatch):
+    lines = [
+        {"body": DECLARATION, "author": "bot", "created_at": "2026-10-11T09:00:00Z", "url": BLOCKER_URL},
+        {"body": "/unblock", "author": PO, "created_at": "2026-10-11T10:00:00Z", "url": "u2"},
+    ]
+    outputs = iter(["\n".join(json.dumps(x) for x in lines[:1]) + "\n", "\n".join(json.dumps(x) for x in lines) + "\n"])
+    monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, **kwargs: Completed(next(outputs)))
+    gateway = GhCliGateway("owner/repo")
+
+    assert gateway.fetch_open_decision_blocker(STORY) == BLOCKER_URL
+    assert gateway.fetch_open_decision_blocker(STORY) is None
