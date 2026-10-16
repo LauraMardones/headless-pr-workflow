@@ -147,6 +147,22 @@ def test_ac13_one_review_attempt_per_head(d):
     assert d.sessions == [f"review {PR}", f"review {PR}"]
 
 
+def test_ac13_completed_review_that_leaves_in_review_is_not_repeated_on_the_same_head(d):
+    codex_in_review(d)  # the fake /review session changes no status
+    first = d.resume()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert f'/review left the story in "In review"; no merge' in first.stdout
+    recorded = d.posted(STORY)
+    assert len(recorded) == 1 and f"action=review-attempt pr={PR} head={'a' * 40}" in recorded[0]
+    second = d.resume()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert f"[RESUME SKIP] #{STORY}: /review was already tried on PR #{PR} head {'a' * 7}" in second.stdout + second.stderr
+    assert d.sessions == [f"review {PR}"]  # one session for the head
+    d.add_pr(PR, STORY, head="b" * 40)  # a new head allows one new attempt
+    assert d.resume().returncode == 0
+    assert d.sessions == [f"review {PR}", f"review {PR}"]
+
+
 def test_ac14_usage_limit_stops_the_entry(d):
     codex_in_review(d)
     day = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
