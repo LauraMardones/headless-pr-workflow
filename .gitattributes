@@ -1,0 +1,7 @@
+# Scripts that bash runs, directly or through their shebang, keep LF on every checkout,
+# including Windows with core.autocrlf=true (issue #384). The index already stores LF.
+*.sh text eol=lf
+scripts/hpw text eol=lf
+scripts/set-project-status text eol=lf
+scripts/merge-gate-summary text eol=lf
+scripts/pr-context text eol=lf

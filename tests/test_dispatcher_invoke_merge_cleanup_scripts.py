@@ -14,9 +14,9 @@ import re
 
 import pytest
 
-from tests.dispatcher_fakes import HAVE_TOOLS, REPO_ROOT, Dispatcher
+from tests.dispatcher_fakes import REPO_ROOT, Dispatcher, needs_tools
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+pytestmark = needs_tools
 
 STORY = 500
 PR = 900

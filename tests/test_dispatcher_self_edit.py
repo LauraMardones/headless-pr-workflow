@@ -13,9 +13,7 @@ import shutil
 import pytest
 
 from tests import dispatcher_fakes
-from tests.dispatcher_fakes import HAVE_TOOLS, REPO_ROOT, Dispatcher
-
-needs_tools = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+from tests.dispatcher_fakes import REPO_ROOT, Dispatcher, needs_tools
 
 STORY = 500
 NEXT_STORY = 501
