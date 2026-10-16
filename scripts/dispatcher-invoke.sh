@@ -142,15 +142,18 @@
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
 #
-# Four Slack events are wired into this script via scripts/slack-notify.sh:
+# Five Slack events are wired into this script via scripts/slack-notify.sh:
 #   decision_blocker          — executor declared Type: decision during /implement or /review;
 #                               carries the declaration's Question, Options and Recommendation
+#   po_blocker                — a blocker this script posted that only the PO can resolve
+#                               (post_blocker_once, post_mid_cycle_blocker; issue #359);
+#                               not post_conflict_blocker. Resolved by the PO's /unblock line
 #   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
 #
 # Notification adapter failure never aborts the loop: dispatcher_error is guarded
-# with || true, and the three events that need PO action are only queued here
+# with || true, and the four events that need PO action are only queued here
 # (register_actionable_event) and delivered and retried by
 # scripts/dispatcher-notify-retry.sh (issue #295).
 # Under --dry-run, calls are suppressed and logged instead.
@@ -416,16 +419,24 @@ has_handoff_note() {
 }
 
 # ─── Utility: post a GitHub issue comment ────────────────────────────────────
+# LAST_POSTED_AT holds the created_at GitHub gave the comment just posted (the
+# current UTC time under --dry-run, or when the response carries none), so a
+# caller can key an actionable event on it (issue #359).
+
+LAST_POSTED_AT=""
 
 post_comment() {
     local issue_num="$1"
-    local body="$2"
+    local body="$2" response
     if $DRY_RUN; then
         echo "[DRY RUN] Would post comment on #$issue_num:"
         echo "$body" | sed 's/^/  /'
+        LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     else
-        gh api "repos/$REPO/issues/$issue_num/comments" \
-            -X POST -f body="$body" >/dev/null
+        response=$(gh api "repos/$REPO/issues/$issue_num/comments" \
+            -X POST -f body="$body")
+        LAST_POSTED_AT=$(jq -r '.created_at // empty' <<< "$response" 2>/dev/null || true)
+        [[ -n "$LAST_POSTED_AT" ]] || LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
 }
 
@@ -465,8 +476,8 @@ _dispatcher_exit_hook() {
 trap _dispatcher_exit_hook EXIT
 
 # ─── Utility: queue an event that needs PO action (issue #295) ───────────────
-# decision_blocker, feature_closure_confirmation and epic_closure_approval are
-# recorded in the notification state and delivered, retried and bounded by
+# decision_blocker, po_blocker, feature_closure_confirmation and
+# epic_closure_approval are recorded in the notification state and delivered, retried and bounded by
 # scripts/dispatcher-notify-retry.sh run, which the workflow runs on every
 # cycle. A registration failure only warns and never aborts the invoke loop.
 
@@ -479,6 +490,22 @@ register_actionable_event() {
     $DRY_RUN && args+=(--dry-run)
     bash "$script_dir/dispatcher-notify-retry.sh" "${args[@]}" \
         || echo "Warning: could not register $event_type for #$issue_num; it will not be delivered" >&2
+}
+
+# register_po_blocker <issue> <title> <type> <unblocked-when> <state> [<cause>]
+# Queues the po_blocker event for the "## Blocked Declaration" that
+# post_comment just posted (issue #359): a blocker only the PO can resolve.
+# The event key uses that comment's created_at, so a later blocker on the same
+# issue is a new event. Resolved by the PO's `/unblock` line or by closing the
+# issue (scripts/dispatcher-notify-retry.sh).
+register_po_blocker() {
+    local issue_num="$1" title="$2" blocker_type="$3" unblocked_when="$4" state="$5" cause="${6:-}"
+    register_actionable_event "po_blocker" "$issue_num" "$LAST_POSTED_AT" \
+        "$(jq -nc --arg st "$title" --arg iu "https://github.com/$REPO/issues/$issue_num" \
+                  --arg bt "$blocker_type" --arg uw "$unblocked_when" --arg state "$state" \
+                  --arg cause "$cause" \
+                  '{story_title: $st, issue_url: $iu, blocker_type: $bt,
+                    unblocked_when: $uw, state: $state, cause: $cause}')"
 }
 
 # Delivers queued actionable events before the script replaces itself with the
@@ -844,18 +871,20 @@ post_mid_cycle_blocker() {
     # the default; a caller that knows the cause names it instead.
     local reason="${5:-}"
     local unblocked_when="${6:-/$failed_command completes successfully for #$issue_num with exit code 0}"
-    local body
+    local body state
+    state="execution loop halted after /$failed_command failed; board reflects last successful state"
     body="## Blocked Declaration
 Type: external
 Declared by: $DECLARED_BY
 Blocks: #$issue_num — $issue_title
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
-State of in-progress work: execution loop halted after /$failed_command failed; board reflects last successful state"
+State of in-progress work: $state"
     [[ -n "$reason" ]] && body+=$'\n'"Cause: $reason"
     [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
     post_comment "$issue_num" "$body"
+    register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason"
 }
 
 # pr_conflicts_with_main <pr> — 0 only when GitHub reports the PR as conflicting
@@ -939,6 +968,7 @@ Owner: PO (@LauraMardones)
 State of in-progress work: $state
 
 $marker"
+    register_po_blocker "$issue_num" "$issue_title" "$blocker_type" "$unblocked_when" "$state"
 }
 
 # ─── Utility: retry a required comment that could not be written (#348) ──────
@@ -947,8 +977,8 @@ $marker"
 # evidence-pending comment (scripts/lib/evidence-pending.sh) whose hidden
 # payload is the exact text. evidence_retry posts that text once, on a later
 # run, and counts the runs that failed on hidden markers on the story, never on
-# the runner: after EVIDENCE_RETRY_MAX failed runs it posts one blocker, sends
-# one dispatcher_error, and stops retrying until the PO posts `/unblock`.
+# the runner: after EVIDENCE_RETRY_MAX failed runs it posts one blocker (which queues one
+# po_blocker event, no dispatcher_error), and stops retrying until the PO posts `/unblock`.
 # Every marker is honoured only on a comment of the dispatcher's own account.
 
 EVIDENCE_RETRY_MAX="${EVIDENCE_RETRY_MAX:-3}"
@@ -997,10 +1027,6 @@ $(evidence_failed_marker "$item" "$ref")" || true
         post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
             "the evidence ($what) is posted by hand, then the PO posts /unblock" \
             "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue."
-        notify_slack "dispatcher_error" \
-            "$(jq -n --arg desc "The dispatcher could not write $what after $EVIDENCE_RETRY_MAX runs (#$story); it stopped retrying" \
-                     --arg action "retrying $what for #$story" \
-                     '{error_description: $desc, last_action: $action}')"
     fi
     return 2
 }

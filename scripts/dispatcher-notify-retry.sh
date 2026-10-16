@@ -2,7 +2,8 @@
 # scripts/dispatcher-notify-retry.sh
 #
 # Delivery of the Slack notifications that need PO action (issue #295):
-# decision_blocker, feature_closure_confirmation and epic_closure_approval.
+# decision_blocker, po_blocker, feature_closure_confirmation and
+# epic_closure_approval.
 # Each is retried every dispatcher cycle until it is delivered or the PO no
 # longer needs to act. A failed delivery never aborts the dispatcher.
 #
@@ -24,12 +25,12 @@
 #           cycle, by the workflow's own run.
 #
 # Event key: <event>:<issue>:<since>. For decision_blocker, <since> is the
-# created_at of the "## Blocked Declaration" comment, so a new blocker on the
+# (and po_blocker, issue #359) the created_at of the "## Blocked Declaration" comment, so a new blocker on the
 # same issue after an earlier one was resolved is a new event.
 #
 # Resolved (record dropped, even if never delivered):
-#   decision_blocker      the issue is closed, or the PO ($DECISION_BLOCKER_PO_LOGIN)
-#                         posted a standalone "/unblock" line after <since>
+#   decision_blocker,     the issue is closed, or the PO ($DECISION_BLOCKER_PO_LOGIN)
+#   po_blocker            posted a standalone "/unblock" line after <since>
 #   closure events        the Feature or Epic issue is closed
 # A dropped record can be registered again (then it is dropped again by the
 # resolution check before any send), so a delivered event stays suppressed
@@ -175,7 +176,7 @@ resolved() {
     local event="$1" issue="$2" since="$3" state comments
     state=$(gh api "repos/$REPO/issues/$issue" --jq '.state' 2>/dev/null) || state=""
     [[ "$state" == closed ]] && return 0
-    [[ "$event" == decision_blocker ]] || return 1
+    [[ "$event" == decision_blocker || "$event" == po_blocker ]] || return 1
     comments=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
         || return 1
     [[ "$(jq -r --arg login "$DECISION_BLOCKER_PO_LOGIN" --arg since "$since" \
