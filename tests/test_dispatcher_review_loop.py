@@ -1457,7 +1457,7 @@ DECLARATION = ("## Blocked Declaration\nType: decision\nQuestion: waive the list
 def session_declares_blocker(d: Dispatcher, command: str, issue: int = STORY, push: bool = False) -> None:
     """The ``command`` session leaves a decision blocker on the story (and, with ``push``, a new head)."""
     body = json.dumps(DECLARATION)
-    script = (f"""jq --argjson b '{body}' '. + [{{user: {{login: "{BOT}"}}, created_at: "2026-10-13T12:00:00Z", body: $b}}]' """
+    script = (f"""jq --argjson b '{body}' '. + [{{user: {{login: "{BOT}"}}, author_association: "COLLABORATOR", created_at: "2026-10-13T12:00:00Z", body: $b}}]' """
               f""""$MOCK_DIR/comments_{issue}.json" > "$MOCK_DIR/c.tmp" && mv "$MOCK_DIR/c.tmp" "$MOCK_DIR/comments_{issue}.json"\n""")
     if push:
         new_head_on_implement(d, status="In review")
@@ -1632,6 +1632,21 @@ def test_357_blocker_declared_before_the_session_and_still_open_does_not_excuse_
     d.add_pr(PR, STORY)
     d.add_findings(PR, HEAD)
     d.add_comment(STORY, DECLARATION)  # an earlier declaration the session did not make
+
+    proc = d.resume()
+
+    assert proc.returncode == 1 and "pushed no new commit" in proc.stderr
+
+
+@needs_tools
+def test_357_declaration_forged_by_an_outsider_does_not_excuse_a_missing_push(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    comments = d._read(f"comments_{STORY}.json", [])
+    comments.append({"user": {"login": "stranger"}, "author_association": "NONE", "body": DECLARATION,
+                     "created_at": "2026-10-13T12:00:00Z"})
+    d._write(f"comments_{STORY}.json", comments)
 
     proc = d.resume()
 

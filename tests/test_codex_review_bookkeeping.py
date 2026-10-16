@@ -1841,8 +1841,16 @@ DECLARATION = "## Blocked Declaration\nType: decision\nQuestion: waive the liste
 BLOCKER_URL = "https://github.com/owner/repo/issues/290#issuecomment-1"
 
 
-def story_comment(body: str, created_at: str, author: str = "claude-bot", url: str | None = None) -> dict:
-    return {"body": body, "author": author, "created_at": created_at, "url": url or BLOCKER_URL}
+def story_comment(
+    body: str, created_at: str, author: str = "claude-bot", url: str | None = None, association: str = "COLLABORATOR"
+) -> dict:
+    return {
+        "body": body,
+        "author": author,
+        "association": association,
+        "created_at": created_at,
+        "url": url or BLOCKER_URL,
+    }
 
 
 def held(github: FakeGitHub, *extra: dict) -> FakeGitHub:
@@ -1969,7 +1977,7 @@ def test_decision_blocker_on_a_story_that_is_not_in_review_is_not_read():
 
 def test_gateway_reads_the_open_decision_blocker_with_author_time_and_url(monkeypatch):
     lines = [
-        {"body": DECLARATION, "author": "bot", "created_at": "2026-10-11T09:00:00Z", "url": BLOCKER_URL},
+        {"body": DECLARATION, "author": "bot", "association": "COLLABORATOR", "created_at": "2026-10-11T09:00:00Z", "url": BLOCKER_URL},
         {"body": "/unblock", "author": PO, "created_at": "2026-10-11T10:00:00Z", "url": "u2"},
     ]
     outputs = iter(["\n".join(json.dumps(x) for x in lines[:1]) + "\n", "\n".join(json.dumps(x) for x in lines) + "\n"])
@@ -1978,3 +1986,13 @@ def test_gateway_reads_the_open_decision_blocker_with_author_time_and_url(monkey
 
     assert gateway.fetch_open_decision_blocker(STORY) == BLOCKER_URL
     assert gateway.fetch_open_decision_blocker(STORY) is None
+
+
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR"])
+def test_a_declaration_forged_by_an_outsider_does_not_hold_the_story(association):
+    forged = story_comment(DECLARATION, "2026-10-11T09:00:00Z", author="stranger", association=association)
+
+    assert open_decision_blocker([forged]) is None
+    assert open_decision_blocker([{**forged, "author_type": "Bot"}]) is not None
+    assert open_decision_blocker([{**forged, "association": "OWNER"}]) is not None
+    assert open_decision_blocker([{**forged, "author": PO, "association": "NONE"}]) is not None

@@ -77,6 +77,9 @@ BLOCKER_OWNER = "PO (@LauraMardones)"
 # The PO account whose standalone `/unblock` line lifts a decision blocker
 # (docs/PROJECT-STATUS.md, Decision blockers; DECISION_BLOCKER_PO_LOGIN in the dispatcher).
 DECISION_BLOCKER_PO_LOGIN = "LauraMardones"
+# Who may declare a decision blocker: repository writers and GitHub Apps/Actions.
+# Anyone can comment on a public repository, so a forged declaration must not hold a story.
+TRUSTED_DECLARER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 SESSION_SUMMARY_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session-summary.sh"
 
 # The one place that lists the scopes of the token the job runs with.
@@ -415,10 +418,18 @@ def linked_story_or_reason(context: PullRequestContext) -> tuple[LinkedIssue | N
     return story, None
 
 
+def _trusted_declarer(comment: Mapping[str, Any]) -> bool:
+    return (
+        comment.get("author") == DECISION_BLOCKER_PO_LOGIN
+        or comment.get("association") in TRUSTED_DECLARER_ASSOCIATIONS
+        or comment.get("author_type") == "Bot"
+    )
+
+
 def open_decision_blocker(comments: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     """The latest `Type: decision` Blocked Declaration that no later PO `/unblock` line lifts.
 
-    Each comment carries `body`, `author`, `created_at` (ISO 8601, so strings of one
+    Each comment carries `body`, `author`, `author_type`, `association`, `created_at` (ISO 8601, so strings of one
     format compare in time order) and `url`. The rule is the one of
     `docs/PROJECT-STATUS.md` (Decision blockers): the PO account, a comment strictly
     after the declaration, a line that trims to exactly `/unblock`.
@@ -428,7 +439,9 @@ def open_decision_blocker(comments: Iterable[Mapping[str, Any]]) -> Mapping[str,
     declared = [
         c
         for c in items
-        if "## Blocked Declaration" in (c.get("body") or "") and "Type: decision" in (c.get("body") or "")
+        if "## Blocked Declaration" in (c.get("body") or "")
+        and "Type: decision" in (c.get("body") or "")
+        and _trusted_declarer(c)
     ]
     if not declared:
         return None
@@ -1009,7 +1022,7 @@ class GhCliGateway:
             step,
             [
                 "api", f"repos/{self.repo}/issues/{number}/comments", "--paginate",
-                "--jq", ".[] | {body, author: .user.login, created_at, url: .html_url}",
+                "--jq", ".[] | {body, author: .user.login, author_type: .user.type, association: .author_association, created_at, url: .html_url}",
             ],
         )  # fmt: skip
         comments: list[Mapping[str, Any]] = []

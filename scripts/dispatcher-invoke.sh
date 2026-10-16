@@ -557,7 +557,10 @@ latest_decision_blocker_json() {
     local issue_num="$1" comments
     comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return 1
     jq -c --arg login "$DECISION_BLOCKER_PO_LOGIN" '
-        ([.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))] | last) as $b
+        ([.[] | select((.body | (test("## Blocked Declaration") and test("Type: decision")))
+                            and ((.user.login // "") == $login
+                                 or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
+                                 or (.user.type // "") == "Bot"))] | last) as $b
         | if $b == null then empty else
             ([.[] | select((.user.login // "") == $login
                            and .created_at > $b.created_at
