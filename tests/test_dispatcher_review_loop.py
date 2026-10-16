@@ -345,6 +345,66 @@ def test_ac3_no_open_pr_or_draft_pr_blocks_after_implement(d, draft):
     assert d.slack_calls == []
 
 
+CONFLICT_PHRASE = "merge conflict with main"
+UNBLOCK_PHRASE = "Unblocked when: the PR branch is merged with main and the conflict resolved"
+
+
+@needs_tools
+@pytest.mark.parametrize("extra", [
+    {"mergeable": False, "mergeable_state": "dirty"},
+    {"mergeable": None, "mergeable_state": "dirty"},
+    {"mergeable": False},
+])
+def test_381_conflicting_draft_pr_gets_the_conflict_blocker(d, extra):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY, draft=True, **extra)
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode != 0
+    assert "conflicts with main, so no CI run can start" in proc.stderr
+    blockers = d.posted(STORY)
+    assert len(blockers) == 1
+    assert "## Blocked Declaration" in blockers[0]
+    assert CONFLICT_PHRASE in blockers[0] and f"PR #{PR}" in blockers[0]
+    assert "no CI run" in blockers[0] and UNBLOCK_PHRASE in blockers[0]
+    assert "/implement completes successfully" not in blockers[0]
+    assert d.status(STORY) == "In implementation"
+
+
+@needs_tools
+@pytest.mark.parametrize("extra", [
+    {"mergeable": True, "mergeable_state": "clean"},
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {},
+])
+def test_381_clean_or_unknown_draft_pr_keeps_the_generic_blocker(d, extra):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY, draft=True, **extra)
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode != 0
+    assert "conflicts with main" not in proc.stderr
+    blockers = d.posted(STORY)
+    assert len(blockers) == 1
+    assert "/implement completes successfully" in blockers[0] and CONFLICT_PHRASE not in blockers[0]
+
+
+@needs_tools
+def test_381_unreadable_mergeability_keeps_the_generic_blocker_and_fails(d):
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY, draft=True, mergeable=False, mergeable_state="dirty")
+    d.fail_pr_read()
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode != 0
+    blockers = d.posted(STORY)
+    assert len(blockers) == 1
+    assert "/implement completes successfully" in blockers[0] and CONFLICT_PHRASE not in blockers[0]
+
+
 @needs_tools
 def test_ac4_codex_story_in_review_is_reviewed_on_opus_then_merged(d):
     d.add_story(STORY, "In review", executor="codex")
