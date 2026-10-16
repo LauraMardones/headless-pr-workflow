@@ -81,6 +81,27 @@ so run it locally only intentionally; `.github/workflows/tests.yml` runs it on e
 PR. Before marking a PR Ready for review, the required `pytest` check must be green
 for the exact current PR head SHA (see `.claude/commands/implement.md`).
 
+Run a single test or file serially, without `-n`, when debugging:
+
+```
+python -m pytest tests/path.py::test_name
+```
+
+Run the complete suite serially with `python -m pytest`, or in parallel with
+`pytest-xdist` (installed by the `dev` extra) using:
+
+```
+python -m pytest -n 4
+```
+
+Locally, use 4 workers rather than `-n auto`. On a 16-core Windows machine, `-n 4`
+ran the suite about three times faster than serial with no new failures, while
+`-n auto` (16 workers) added failures. CI runs the full suite with `-n auto`, which
+is 4 workers on its runner. Parallel execution is not a pytest default
+(no `addopts`), so targeted runs stay serial. On the Windows Codex fallback use
+`py -3.12 -m pytest` and `py -3.12 -m pytest -n 4`. Each xdist worker gets its own
+`popen-gwN` directory under the temp base below, so workers do not share temp trees.
+
 The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail.
 
 **Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the parent directory is also restricted), set the environment variable before running:

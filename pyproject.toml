@@ -17,7 +17,7 @@ authors = [
 hpw = "headless_pr_workflow.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-xdist>=3"]
 
 [project.urls]
 Homepage = "https://github.com/lauramardones/headless-pr-workflow"

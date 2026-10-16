@@ -22,7 +22,13 @@ def temp_repo_root():
     try:
         yield repo_root
     finally:
-        shutil.rmtree(repo_root.parent, ignore_errors=True)
+        # Remove only this test's directory: under pytest-xdist other workers keep
+        # their own children of the shared parent. rmdir succeeds only once it is empty.
+        shutil.rmtree(repo_root, ignore_errors=True)
+        try:
+            repo_root.parent.rmdir()
+        except OSError:
+            pass
 
 
 def write_policy(repo_root, ci_workflows="present_non_required", required_status_checks="absent"):
