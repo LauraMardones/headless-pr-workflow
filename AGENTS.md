@@ -59,6 +59,28 @@ The sandbox workspace may be initialized from an older checkout and `git fetch` 
 
 ## Running Tests
 
+Run focused tests locally; the full suite runs in CI. Select the test files for the
+changed modules or scripts and for directly affected callers, commands, or contracts:
+
+```
+python -m pytest tests/test_example.py tests/test_other.py
+```
+
+Test file names do not always mirror production file names. Use repository search
+(for example `grep -rn "<changed-name>" tests/ src/ scripts/ docs/ .claude/`) to find
+indirect callers and test coverage. Record the selected files and the reason for
+including them in the implementation handoff.
+
+Shared test infrastructure (`conftest.py`, `tests/dispatcher_fakes.py`, or any other
+shared fixture or helper) needs a wider set: every test file that uses it, or a
+representative local subset when that set is too large. State any omitted local
+coverage and why in the handoff. The full CI suite is mandatory in either case.
+
+The complete suite is `python -m pytest`. It is slow on Windows (tens of minutes),
+so run it locally only intentionally; `.github/workflows/tests.yml` runs it on every
+PR. Before marking a PR Ready for review, the required `pytest` check must be green
+for the exact current PR head SHA (see `.claude/commands/implement.md`).
+
 Run a single test or file serially, without `-n`, when debugging:
 
 ```

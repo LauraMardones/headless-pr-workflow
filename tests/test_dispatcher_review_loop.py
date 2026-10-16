@@ -394,7 +394,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
-    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh"):  # sourced (#314, #296, #348)
+    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh"):  # sourced (#314, #296, #348, #358)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -810,7 +810,8 @@ def poll_json(tmp_path, items: list[tuple[int, str]]) -> dict:
     curl.chmod(0o755)
     env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
-           "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix()}
+           "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
+           "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5"}
     if os.name == "nt":
         env["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
     proc = subprocess.run(

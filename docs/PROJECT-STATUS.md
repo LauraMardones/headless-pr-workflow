@@ -116,7 +116,7 @@ All transitions and their triggering events are listed below. Transitions not li
 | Refined | Ready for implementation | All hard dependencies are resolved |
 | Refined | Blocked | A blocking condition is declared on this item |
 | Ready for implementation | In implementation | An executor pulls the item and begins work (branch created, draft PR opened) |
-| In implementation | In review | Executor submits PR for review (PR marked ready for review) |
+| In implementation | In review | Executor submits PR for review (PR marked ready for review) after the required `pytest` check is green for the current PR head SHA; a failed, pending, absent, unreadable, or older-head result keeps the item In implementation |
 | In implementation | Blocked | A blocking condition is declared while implementation is underway |
 | In review | Ready to merge | The approval gate is satisfied (ADR-007) and all required checks pass |
 | In review | Needs rework | Reviewer requests changes; PR is returned to the implementer |
@@ -130,6 +130,8 @@ All transitions and their triggering events are listed below. Transitions not li
 | Any | Blocked | A blocking condition is declared at any point from Refined onward |
 
 ### Notes on specific transitions
+
+**In implementation → In review**: The green current-head `pytest` condition is the `/implement` handoff rule. It binds the implementing session only; `scripts/project-status-sync.sh` reconciles `In review` from PR state (an open non-draft PR) and does not read checks, and `/review` does not gate on it. Merge stays gated by the required checks in `docs/MERGE-POLICY.md`, unchanged.
 
 **In review → Ready to merge**: Both conditions must be true simultaneously — the approval gate is satisfied (ADR-007) for the current PR head SHA, and all required CI checks are passing. `docs/MERGE-POLICY.md` → Approval Gate: Independent Review lists the evidence that satisfies the gate.
 
@@ -473,14 +475,14 @@ The pre-flight check is:
 4. Count active **In implementation** stories.
 5. Compare file lists for overlap with the candidate story.
 
-The WIP limit is **maximum 2 parallel stories**. Parallel implementation is allowed only when both of these conditions are true:
+The WIP limit is the repository variable `WIP_LIMIT_IMPLEMENTATION` (see [WIP and queue limits](DISPATCHER-CONFIG.md#wip-and-queue-limits)); the current value is **2 parallel stories**. The dispatcher and the flow review read the variable, so the number is not stated anywhere else as a source of truth. Parallel implementation is allowed only when both of these conditions are true:
 
-- Fewer than 2 stories are already **In implementation**.
+- Fewer than `WIP_LIMIT_IMPLEMENTATION` stories are already **In implementation**.
 - The candidate story's declared files do not overlap with any active **In implementation** story.
 
-If 2 or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
+If `WIP_LIMIT_IMPLEMENTATION` or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
 
-If no overlap exists and the WIP count is below 2, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
+If no overlap exists and the WIP count is below `WIP_LIMIT_IMPLEMENTATION`, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
 
 This pre-flight logic is part of the workflow contract. Model-specific commands, prompts, and adapter files must reference this contract instead of redefining incompatible rules.
 

@@ -57,6 +57,7 @@ Required behavior:
    - continue on the existing PR branch
    - update the existing PR instead of opening a parallel PR unless explicitly needed
    - keep the story in "In implementation" while implementation or blocker fixes are ongoing
+   - if the existing PR is Ready for review (a review-fix run), convert it back to Draft before pushing (for example `gh pr ready <pr> --undo --repo LauraMardones/headless-pr-workflow`), so the dispatcher's draft signal shows the handoff incomplete until the new head's `pytest` check is green
 11. Implement only the requested changes.
 12. Add or update deterministic tests as needed.
 13. For mutation work, preserve fresh-refresh and safety checks before mutating behavior.
@@ -72,10 +73,15 @@ Required behavior:
    - confirm command files use `In implementation`, not the legacy progress-status spelling
    - confirm the PR title and body are accurate and not auto-generated boilerplate
 16. When implementation is complete:
-   - run the most relevant documented local checks
-   - record any checks that could not be run and why
-   - commit only the intended changes
+   - run focused local tests before the final push, not the full suite (see `AGENTS.md` → Running Tests): the test files for changed modules or scripts and for directly affected callers, commands, or contracts, found by repository search when names do not match; a change to shared test infrastructure (`conftest.py`, `tests/dispatcher_fakes.py`, another shared fixture or helper) needs every test file that uses it or a representative subset
+   - record the exact commands, results, selected coverage and reason for each selected file, and any omitted local coverage or unrun check with its reason, in the handoff `--checks` and `--deviation` fields
+   - commit only the intended changes and push
    - confirm the current PR head SHA from GitHub
+   - read the required `pytest` check for that exact head SHA; only a successful result for the current head counts, and a failed, pending, absent, unreadable, or older-head result never does
+   - if the `pytest` check failed: keep the PR Draft (re-draft it if it is Ready for review) and the story "In implementation", inspect the failures, fix the implementation or tests, rerun the affected local tests, push a new head, and wait for that head's check
+   - while the check is pending, keep this session alive and poll the current head's `pytest` check (for example `gh pr checks <pr> --repo LauraMardones/headless-pr-workflow --watch`, or re-read it at intervals) until it completes; the check normally reports within minutes, so do not stop on the first pending read, and re-read the PR head SHA before each poll so a newer head restarts the wait
+   - if the `pytest` check is still pending after waiting as long as the session allows, or is absent or unreadable: do not claim completion, keep the PR Draft (re-draft it if it is Ready for review) and the story "In implementation", and report the state or blocker truthfully; a later continuation re-reads the PR head and check instead of trusting an earlier result
+   - only when the current head's `pytest` check is green, continue with the steps below (Ready for review, "In review", Codex review request, completion handoff with `--next review`); until then do not use `--next review`
    - mark the PR Ready for review, or explicitly request review if Ready for review is unavailable
    - set the story status to "In review" (best-effort, as described under Workflow status goals)
    - if the story carries an `executor:claude-code-*` label, request the Codex review (ADR-006): once the PR is Ready for review, post exactly one PR conversation comment whose first line is the Codex review trigger phrase (read it from ADR-006 → Decision or the constant `CODEX_REVIEW_TRIGGER_PHRASE` in `src/headless_pr_workflow/review_policy.py`)

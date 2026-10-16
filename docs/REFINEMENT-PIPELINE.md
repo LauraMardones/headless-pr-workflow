@@ -29,6 +29,8 @@ Rolling, just-in-time refinement is the required strategy. Big-bang refinement �
 
 At any point, 3–5 issues should be in the **Ready for implementation** status ahead of the current implementation front.
 
+The range is set by the repository variables `READY_BUFFER_MIN` (currently 3) and `READY_BUFFER_MAX` (currently 5); see [WIP and queue limits](DISPATCHER-CONFIG.md#wip-and-queue-limits). The numbers in this section state the current policy; the variables are what the scripts read.
+
 **Why not fewer than 3:**
 
 - A buffer of 0–2 creates pipeline stalls: if refinement is slow or a Human Approver decision is needed, implementation blocks waiting for ready work.
