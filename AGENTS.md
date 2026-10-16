@@ -106,6 +106,8 @@ The root-level `conftest.py` points pytest's temp root (`PYTEST_DEBUG_TEMPROOT`,
 
 On Windows, run the suite with Git for Windows (its Git Bash runs the shell-script tests, never WSL's `C:\Windows\System32\bash.exe`) and `jq` on `PATH`. There the script-test harnesses (`tests/script_tools.py`) keep the host `PATH` behind their fakes, and they skip with the missing tool's name when one is absent. `.gitattributes` checks shell scripts out with LF; a checkout made before it landed keeps CRLF scripts until they are checked out again (for example `git rm --cached -r . && git reset --hard`, or a fresh worktree). One test is skipped on Windows by design: `test_real_hpw_merge_owner_reports_the_failing_gh_call` runs the real `hpw`, whose Python `subprocess` can start `gh.exe` but not the bash `gh` fake.
 
+Known Windows-only failures (they pass in CI), tracked in #398: 7 tests in `tests/test_dispatcher_usage_limit.py`, 3 in `tests/test_dispatcher_codex_pr_review.py`, `tests/test_dispatcher_review_loop.py::test_ac15_poll_lists_review_due_for_the_codex_story_only` and `tests/test_dispatcher_claude_session.py::test_log_has_one_line_per_tool_call_and_the_summary`. Reason: Git Bash rewrites slash-command arguments such as `/review` to `C:/Program Files/Git/review` before a native tool (`jq`) sees them; this is confirmed for 3 of the 12, and #398 analyses the rest.
+
 **Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the parent directory is also restricted), set the environment variable before running:
 
 ```

@@ -106,7 +106,7 @@ class Env:
         full.update(self.extra)
         full.update({k: str(v) for k, v in env.items()})
         proc = subprocess.run([BASH, str(SCRIPT)], env=full, capture_output=True,
-                              text=True, timeout=60)
+                              text=True, encoding="utf-8", timeout=60)
         out = check_contract(proc)
         return proc, out
 

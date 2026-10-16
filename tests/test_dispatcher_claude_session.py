@@ -88,6 +88,7 @@ def test_prompt_on_stdin_is_the_substituted_command_file(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     raw = (REPO_ROOT / ".claude" / "commands" / "implement.md").read_bytes().decode("utf-8")
+    raw = raw.replace("\r\n", "\n")  # a CRLF checkout on Windows
     # What `$(sed "s/\$ARGUMENTS/<n>/g" file)` gives: trailing newlines removed.
     assert d.claude_calls[0]["stdin"] == raw.replace("$ARGUMENTS", str(STORY)).rstrip("\n")
 
