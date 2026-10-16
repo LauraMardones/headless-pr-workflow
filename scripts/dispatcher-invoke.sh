@@ -559,10 +559,11 @@ latest_decision_blocker_json() {
     jq -c --arg login "$DECISION_BLOCKER_PO_LOGIN" '
         ([.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))] | last) as $b
         | if $b == null then empty else
-            $b + {unblocked: ([.[] | select((.user.login // "") == $login
-                                            and .created_at > $b.created_at
-                                            and ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$"))))]
-                              | length > 0)}
+            ([.[] | select((.user.login // "") == $login
+                           and .created_at > $b.created_at
+                           and ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$"))))]
+              | map(.created_at) | max) as $u
+            | $b + {unblocked: ($u != null), unblocked_at: ($u // "")}
           end' <<< "$comments"
 }
 
@@ -2242,9 +2243,12 @@ fix_round_attempt_superseded() {
     local issue_num="$1" pr_number="$2" head="$3" login attempt_at moves_at
     login=$(bookkeeping_login)
     [[ -n "$login" ]] || return 1
+    resolve_dispatcher_login || return 1
+    # Only the dispatcher's own marker counts, as in marker_holds: anyone can
+    # copy the visible marker into a later comment.
     attempt_at=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" 2>/dev/null \
-        | jq -rs --arg marker "$(fix_round_attempt_marker "$pr_number" "$head")" '
-            [add // [] | .[] | select((.body // "") | contains($marker)) | .created_at] | max // empty') || return 1
+        | jq -rs --arg bot "$DISPATCHER_LOGIN" --arg marker "$(fix_round_attempt_marker "$pr_number" "$head")" '
+            [add // [] | .[] | select((.user.login // "") == $bot and ((.body // "") | contains($marker))) | .created_at] | max // empty') || return 1
     [[ -n "$attempt_at" ]] || return 1
     moves_at=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
         | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER${head,,} " '
@@ -2351,16 +2355,27 @@ $(hand_off_done_marker "$pr_number")" || true
 # was declared during the session (different from $1, the latest one before it)
 # and is still open: only Out of scope findings remain. Returns 0 as well when
 # the PO's /unblock follows the latest blocker: the post-waiver round has
-# nothing left to fix. Returns 1 otherwise, and when the comments cannot be read.
+# nothing left to fix, but only while no later findings result has moved the
+# story back to implementation (a waiver already consumed by an earlier round
+# does not excuse a later unrelated Blocker). Returns 1 otherwise, and when the
+# comments cannot be read.
 NO_PUSH_ROUND_REASON=""
 no_push_round_is_expected() {
-    local blocker_before="$1" blocker_json created unblocked
+    local blocker_before="$1" pr_number="${2:-}" blocker_json created unblocked unblocked_at login moved_after
     NO_PUSH_ROUND_REASON=""
     blocker_json=$(latest_decision_blocker_json "$ISSUE_NUMBER") || return 1
     [[ -n "$blocker_json" ]] || return 1
     created=$(jq -r '.created_at' <<< "$blocker_json")
     unblocked=$(jq -r '.unblocked' <<< "$blocker_json")
     if [[ "$unblocked" == "true" ]]; then
+        unblocked_at=$(jq -r '.unblocked_at' <<< "$blocker_json")
+        login=$(bookkeeping_login)
+        [[ -n "$login" && -n "$pr_number" ]] || return 1
+        moved_after=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+            | jq -rs --arg login "$login" --arg since "$unblocked_at" --arg marker "$BOOKKEEPING_FIX_MARKER" '
+                [add // [] | .[] | select((.user.login // "") == $login and .created_at > $since
+                                          and ((.body // "") | contains($marker)))] | length') || return 1
+        [[ "$moved_after" == "0" ]] || return 1
         NO_PUSH_ROUND_REASON="post-waiver round: the PO's /unblock follows the decision blocker"
         return 0
     fi
@@ -2419,7 +2434,7 @@ hand_off_to_codex_review_loop() {
     # have moved the story to "In review", and the bookkeeping job would then
     # move it back for the same head and start the same round again.
     if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]] \
-            && no_push_round_is_expected "$blocker_before"; then
+            && no_push_round_is_expected "$blocker_before" "$pr_number"; then
         # A round with only Out of scope findings (the session declared a
         # decision blocker) or the post-waiver round (the PO's /unblock follows
         # the blocker) pushes nothing by design (issue #357). Record the attempt

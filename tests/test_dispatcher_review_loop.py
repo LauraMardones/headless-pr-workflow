@@ -327,6 +327,24 @@ def test_attempt_marker_is_superseded_by_a_later_findings_result_on_the_same_hea
 
 
 @needs_tools
+def test_forged_attempt_marker_cannot_hide_a_later_findings_result(d):
+    """A copied attempt marker from another account does not push the genuine one past a new findings result (issue #357)."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->")
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->", login="someone-else")
+    new_head_on_implement_once(d)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    assert "[RESUME SKIP]" not in proc.stdout
+
+
+@needs_tools
 def test_dispatcher_markers_by_its_own_account_are_honoured(d):
     """The same markers as above, written by the dispatcher: both stories are skipped."""
     d.add_story(STORY, "In implementation")
@@ -1577,6 +1595,21 @@ def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
 
     again = d.resume()
     assert again.returncode == 0 and d.sessions == [f"implement {STORY}"]
+
+
+@needs_tools
+def test_357_consumed_waiver_does_not_excuse_a_later_unrelated_no_push_round(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+    d.add_findings(PR, HEAD)  # a later, unrelated findings result after the waiver
+
+    proc = d.resume()
+
+    assert proc.returncode == 1 and "pushed no new commit" in proc.stderr
+    assert not any("without a new commit" in body for body in d.posted(STORY))
 
 
 @needs_tools
