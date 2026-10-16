@@ -49,7 +49,8 @@ def test_review_start_runs_the_session_then_the_scripts(r):
     assert r.allowance_calls == 1  # /review; /merge and /cleanup start no session (#264)
     assert r.sessions == [f"review {PR}"]
     assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
-    assert r.posted(ISSUE) == []
+    # the only comment is the per-head record of the completed /review
+    assert [c for c in r.posted(ISSUE) if "action=review-attempt" not in c] == []
     assert r.status(ISSUE) == "Done"
 
 
@@ -95,7 +96,8 @@ def test_merge_and_cleanup_never_consult_the_allowance(r):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert r.allowance_calls == 1
     assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
-    assert r.posted(ISSUE) == []
+    # the only comment is the per-head record of the completed /review
+    assert [c for c in r.posted(ISSUE) if "action=review-attempt" not in c] == []
     assert r.status(ISSUE) == "Done"
 
 
