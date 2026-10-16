@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
 
 from headless_pr_workflow import bookkeeping_failure_notice as notice
+from tests.script_tools import BASH
 
 NOW = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
 TODAY = "2026-10-14T03:00:00Z"
@@ -62,12 +65,17 @@ def test_token_is_masked_and_text_is_cut():
 
 
 @pytest.fixture
-def fake_slack(tmp_path):
+def fake_slack(tmp_path, monkeypatch):
     log = tmp_path / "calls.log"
     script = tmp_path / "slack.sh"
+    if os.name == "nt":  # a bare "bash" is the WSL launcher in System32 there; run the fake with Git Bash
+        real_run = subprocess.run
+        monkeypatch.setattr(notice.subprocess, "run",
+                            lambda argv, **kw: real_run([BASH, *argv[1:]] if argv[0] == "bash" else argv, **kw))
 
     def make(exit_code=0):
-        script.write_text(f'#!/usr/bin/env bash\necho "$1 $2" >> "{log}"\nexit {exit_code}\n')
+        script.write_text(f'#!/usr/bin/env bash\necho "$1 $2" >> "{log.as_posix()}"\nexit {exit_code}\n',
+                          encoding="utf-8", newline="\n")
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
         return script
 

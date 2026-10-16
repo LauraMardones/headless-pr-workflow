@@ -17,10 +17,9 @@ import pytest
 
 from headless_pr_workflow import codex_review_bookkeeping as bookkeeping
 from tests.dispatcher_fakes import (
-    BASH, BOARD_OPTIONS, BOT, HAVE_TOOLS, INVOKE, PO, REPO_ROOT, Dispatcher, bookkeeping_marker,
+    BASH, BOARD_OPTIONS, BOT, INVOKE, PO, REPO_ROOT, Dispatcher, bookkeeping_marker, needs_tools,
 )
-
-needs_tools = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+from tests.script_tools import script_path, windows_env
 
 STORY = 500
 PR = 900
@@ -877,13 +876,11 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None) -> 
     curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  */pulls*) cat "$PULLS_FILE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
                     encoding="utf-8", newline="\n")
     curl.chmod(0o755)
-    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
+    env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "PULLS_FILE": (tmp_path / "pulls.json").as_posix(),
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
-           "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5"}
-    if os.name == "nt":
-        env["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+           "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5", **windows_env()}
     proc = subprocess.run(
         [BASH, (REPO_ROOT / "scripts" / "dispatcher-poll.sh").as_posix(), "--repo", "o/r", "--dry-run"],
         env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
@@ -1046,10 +1043,8 @@ def poll_step_resumable(tmp_path, poll: dict, gh_output: str, gh_exit: int = 0) 
     gh.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{(tmp_path / "gh.log").as_posix()}"\n'
                   f'echo "{gh_output}"\nexit {gh_exit}\n', encoding="utf-8", newline="\n")
     gh.chmod(0o755)
-    path = f"{bin_dir.as_posix()}:/usr/bin:/bin"
-    if os.name == "nt":
-        path = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
-    proc = subprocess.run([BASH, "-c", snippet], env={**os.environ, "PATH": path, "POLL_JSON": json.dumps(poll)},
+    env = {**os.environ, "PATH": script_path(bin_dir.as_posix()), "POLL_JSON": json.dumps(poll)}
+    proc = subprocess.run([BASH, "-c", snippet], env=env,
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     log = (tmp_path / "gh.log").read_text(encoding="utf-8") if (tmp_path / "gh.log").exists() else ""

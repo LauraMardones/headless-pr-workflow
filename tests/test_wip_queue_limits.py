@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.dispatcher_fakes import BASH, HAVE_TOOLS, Dispatcher
+from tests.dispatcher_fakes import BASH, Dispatcher, needs_tools
+from tests.script_tools import script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "scripts" / "lib" / "limits.sh"
@@ -27,7 +28,7 @@ VARIABLES = ("WIP_LIMIT_IMPLEMENTATION", "READY_BUFFER_MIN", "READY_BUFFER_MAX")
 GOOD = {"WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5"}
 STORY = 500
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+pytestmark = needs_tools
 
 
 def load(**values):
@@ -180,10 +181,8 @@ def flow_review(tmp_path, in_implementation, ready=1, env=None, args=()):
     curl.write_text('#!/usr/bin/env bash\nif [[ "$*" == *"projectsV2(first:10)"* ]]; then cat "$MOCK/projects.json"; '
                     'else cat "$MOCK/items.json"; fi\n', encoding="utf-8", newline="\n")
     curl.chmod(0o755)
-    full = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
-            "MOCK": tmp_path.as_posix(), **(env if env is not None else {})}
-    if os.name == "nt":
-        full["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+    full = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
+            "MOCK": tmp_path.as_posix(), **windows_env(), **(env if env is not None else {})}
     return subprocess.run([BASH, FLOW_REVIEW.as_posix(), "--repo", "o/r", *args], env=full,
                           capture_output=True, text=True, encoding="utf-8", timeout=120)
 
@@ -227,9 +226,9 @@ def test_poll_does_not_hide_the_flow_review_error(tmp_path):
     curl = bin_dir / "curl"
     curl.write_text('#!/usr/bin/env bash\ncat "$BOARD_FILE"\n', encoding="utf-8", newline="\n")
     curl.chmod(0o755)
-    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
+    env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
-           "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix()}
+           "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(), **windows_env()}
     proc = subprocess.run([BASH, POLL.as_posix(), "--repo", "o/r", "--dry-run"], env=env,
                           capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert proc.returncode == 2

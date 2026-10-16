@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
+from tests.script_tools import BASH, missing_tools, requires, script_path, windows_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BASH = shutil.which("bash")
-HAVE_TOOLS = all(shutil.which(tool) for tool in ("bash", "jq", "git", "python3"))
+TOOLS = ("bash", "jq", "git", "python3")
+HAVE_TOOLS = not missing_tools(TOOLS)
+needs_tools = requires(*TOOLS)
 
 FAKE_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$MOCK_DIR/gh.log"
@@ -108,14 +110,15 @@ class PhaseHarness:
     def run(self, script: str, *args: str, env_overrides: dict[str, str] | None = None):
         env = {
             "HOME": self.tmp.as_posix(),
-            "PATH": ":".join([self.bin.as_posix(), "/usr/bin", "/bin"]),
+            "PATH": script_path(self.bin.as_posix()),
             "MOCK_DIR": self.mock.as_posix(),
             "COMMENT_RETRY_DELAY": "0",
             "HPW_BIN": (self.bin / "hpw").as_posix(),
             "MERGE_GATE_SCRIPT": (self.bin / "gate").as_posix(),
             "GIT_CONFIG_GLOBAL": os.devnull,
-            **(env_overrides or {}),
         }
+        env.update(windows_env())
+        env.update(env_overrides or {})
         return subprocess.run([BASH, (REPO_ROOT / "scripts" / script).as_posix(), *args], cwd=self.cwd, env=env,
                               capture_output=True, text=True, encoding="utf-8", timeout=120)
 

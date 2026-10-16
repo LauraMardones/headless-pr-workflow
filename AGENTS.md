@@ -102,7 +102,11 @@ is 4 workers on its runner. Parallel execution is not a pytest default
 `py -3.12 -m pytest` and `py -3.12 -m pytest -n 4`. Each xdist worker gets its own
 `popen-gwN` directory under the temp base below, so workers do not share temp trees.
 
-The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail.
+The root-level `conftest.py` points pytest's temp root (`PYTEST_DEBUG_TEMPROOT`, when you have not set it) at `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail. Under that root every pytest session gets its own locked tree, `.pytest_tmp/pytest-of-<user>/pytest-<N>/`; pytest keeps the last 3 and never removes a tree that a running session holds, so concurrent runs in sibling worktrees or in the same checkout do not delete each other's files.
+
+On Windows, run the suite with Git for Windows (its Git Bash runs the shell-script tests, never WSL's `C:\Windows\System32\bash.exe`) and `jq` on `PATH`. There the script-test harnesses (`tests/script_tools.py`) keep the host `PATH` behind their fakes, and they skip with the missing tool's name when one is absent. `.gitattributes` checks shell scripts out with LF; a checkout made before it landed keeps CRLF scripts until they are checked out again (for example `git rm --cached -r . && git reset --hard`, or a fresh worktree). One test is skipped on Windows by design: `test_real_hpw_merge_owner_reports_the_failing_gh_call` runs the real `hpw`, whose Python `subprocess` can start `gh.exe` but not the bash `gh` fake.
+
+Known Windows-only failures (they pass in CI), tracked in #398: 7 tests in `tests/test_dispatcher_usage_limit.py`, 3 in `tests/test_dispatcher_codex_pr_review.py`, `tests/test_dispatcher_review_loop.py::test_ac15_poll_lists_review_due_for_the_codex_story_only` and `tests/test_dispatcher_claude_session.py::test_log_has_one_line_per_tool_call_and_the_summary`. Reason: Git Bash rewrites slash-command arguments such as `/review` to `C:/Program Files/Git/review` before a native tool (`jq`) sees them; this is confirmed for 3 of the 12, and #398 analyses the rest.
 
 **Fallback**: If you still encounter temp-directory setup errors (e.g. on Windows environments where the parent directory is also restricted), set the environment variable before running:
 
@@ -120,7 +124,7 @@ Quick reference for constraints specific to the Codex Windows sandbox. Each entr
 |---|---|---|
 | `.git/` directory operations blocked | `git switch`, `git fetch` fail with lock or permission errors | Use `mcp__github__*` tools for all branch and commit operations. See [Stale Checkout Handling](#stale-checkout-handling). |
 | Default Python version lacks pytest | `python -m pytest` → `No module named pytest` | Use `py -3.12 -m pytest`. Run `py -0p` to list available Python versions. |
-| pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` redirects temp root automatically (fix from #135). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
+| pytest temp root outside sandbox | Setup errors on first test run | `conftest.py` sets the temp root to `.pytest_tmp/` above the repo when `PYTEST_DEBUG_TEMPROOT` is unset (#135, #384). If errors persist, set `PYTEST_DEBUG_TEMPROOT=C:\tmp`. See [Running Tests](#running-tests). |
 | `gh` CLI blocked | `gh issue view` and similar commands are denied | Use `mcp__github__*` tools exclusively. Board status writes are skipped with a note, and `/merge` cannot run there because the merge gate needs GraphQL-capable `gh`. See [GitHub Operations](#github-operations). |
 
 ## Branch Naming

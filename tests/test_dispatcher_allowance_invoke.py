@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.dispatcher_fakes import HAVE_TOOLS, Dispatcher
+from tests.dispatcher_fakes import Dispatcher, needs_tools
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+pytestmark = needs_tools
 
 ISSUE = 500
 PR = 900

@@ -15,9 +15,9 @@ import re
 
 import pytest
 
-from tests.phase_script_fakes import HAVE_TOOLS, PhaseHarness
+from tests.phase_script_fakes import PhaseHarness, needs_tools
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq, git and python3")
+pytestmark = needs_tools
 
 ISSUE = 12
 PR = 77

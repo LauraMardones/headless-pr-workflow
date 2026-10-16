@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.dispatcher_fakes import BASH, HAVE_TOOLS, Dispatcher
+from tests.dispatcher_fakes import BASH, Dispatcher, needs_tools
 from tests.test_dispatcher_review_loop import new_head_on_implement_once
 from tests.test_dispatcher_workflow_allowance import step, step_if
 
@@ -28,7 +28,7 @@ TODAY = "2026-10-14"
 ISSUE = 500
 PR = 900
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
+pytestmark = needs_tools
 
 
 def usage(tmp_path, command, limit="2", today=TODAY):

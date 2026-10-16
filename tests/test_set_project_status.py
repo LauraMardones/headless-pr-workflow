@@ -9,18 +9,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.script_tools import BASH, host_script_path, requires
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "set-project-status"
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(
-    not all(shutil.which(t) for t in ("bash", "jq")), reason="requires bash and jq"
-)
+pytestmark = requires("bash", "jq")
 
 OPTIONS = {"Backlog": "O1", "In implementation": "O2", "In review": "O3", "Done": "O4"}
 
@@ -88,12 +86,12 @@ def run(env, *args, token="secret-token-value", extra=None):
         state["next"] = status
         state_file.write_text(json.dumps(state), encoding="utf-8")
     environ = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY")}
-    environ["PATH"] = f"{env['bin']}{os.pathsep}{environ['PATH']}"
+    environ["PATH"] = host_script_path(str(env["bin"]))
     environ["MOCK_DIR"] = str(env["mock"])
     if token:
         environ["GH_TOKEN"] = token
     environ.update(extra or {})
-    return subprocess.run([BASH, str(SCRIPT), *args], capture_output=True, text=True, env=environ, check=False)
+    return subprocess.run([BASH, SCRIPT.as_posix(), *args], capture_output=True, text=True, env=environ, check=False)
 
 
 ARGS = ("--issue", "7", "--repo", "o/r", "--status")
@@ -192,6 +190,7 @@ def test_invalid_arguments_exit_2(env, args):
 def test_session_environment_keeps_gh_token_and_drops_anthropic_variables():
     helper = REPO_ROOT / "scripts" / "lib" / "claude-session.sh"
     environ = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+    environ["PATH"] = host_script_path()
     environ.update({"GH_TOKEN": "gh-pat", "ANTHROPIC_AUTH_TOKEN": "x", "ANTHROPIC_BASE_URL": "https://p.test"})
     environ["ANTHROPIC_" + "API_KEY"] = "y"
     proc = subprocess.run(
