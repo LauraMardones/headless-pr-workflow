@@ -94,13 +94,13 @@ def test_prompt_on_stdin_is_the_substituted_command_file(d):
 
 def test_review_of_a_codex_story_runs_on_opus(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY)
 
-    proc = d.run_issue(STORY)
+    proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.session_providers == ["implement openai", "review claude-code"]
+    assert d.session_providers == ["review claude-code"]
     calls = d.claude_calls
     assert len(calls) == 1
     assert calls[0]["argv"] == expected_argv("opus")

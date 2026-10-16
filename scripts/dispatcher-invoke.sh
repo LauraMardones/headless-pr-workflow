@@ -2462,7 +2462,7 @@ resume_review_story() {
         resume_in_merge_story "$issue_num" "$item_id"
         return 0
     fi
-    echo "[RESUME] #$issue_num: /review left the story in \"${status:-unknown}\"; no merge"
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: /review left the story in \"${status:-unknown}\"; no merge"
 }
 
 # The closure check of each finished story reads $BOARD_DATA. Re-read it after

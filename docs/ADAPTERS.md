@@ -84,12 +84,12 @@ The Claude Code / Codex split is a declared capability boundary, not a policy pr
 
 The Executor Roles table above describes the intended split, but a story's `executor:` label only ever governs `/implement` — it says nothing about who reviews it. `scripts/dispatcher-invoke.sh` closes that gap from two lookup tables, keyed by the executor that performed `/implement` (issues #263 and #293, ADR-006). No new `executor:` label value is introduced or stored — the review path is derived, not assigned.
 
-| `/implement` executor | Review | Table in `scripts/dispatcher-invoke.sh` |
+| `/implement` executor | Review | Table in `scripts/lib/review-routing.sh` |
 |---|---|---|
 | `executor:claude-code-haiku` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
 | `executor:claude-code-sonnet` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
 | `executor:claude-code-opus` | Codex Cloud, through the Codex review loop — no dispatcher session | `CODEX_REVIEW_LOOP_ROUTING` |
-| `executor:codex` | A `/review` session under Claude Opus (the "deep code review, complex reasoning" tier — see Claude Model Tiers below) | `REVIEW_EXECUTOR_ROUTING` |
+| `executor:codex` | Not started for `/implement`; a Codex PR "In review" gets a `/review` session under Claude Opus (the "deep code review, complex reasoning" tier — see Claude Model Tiers below) | `REVIEW_EXECUTOR_ROUTING` |
 
 An executor with a row in neither table stops with a mid-cycle blocker after `/implement`, so a typo or a new tier never skips review silently.
 
@@ -101,9 +101,9 @@ An executor with a row in neither table stops with a mid-cycle blocker after `/i
 
 Each run handles resumable work before new work: stories in `In merge`, then fix rounds, then **Ready for implementation**. The rules, bounds and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#codex-review-loop-hand-off-and-resume).
 
-**Codex-implemented stories (paired session).** `/review` runs in the same dispatcher run, under Claude Opus, followed by the script-only `/merge` and `/cleanup`.
+**Codex-implemented stories (paired session).** The dispatcher does not start `/implement` for an `executor:codex` story (no subscription mechanism, ADR-012, issue #315); it skips it with a warning. A PR that Codex implemented outside the dispatcher and a story "In review" with an open, non-draft PR gets a resume entry: `/review` under Claude Opus on the subscription, followed by the script-only `/merge` and `/cleanup` when the story is then "In merge". One `/review` attempt per PR head; see [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#review-of-a-codex-implemented-pr).
 
-**Script-only phases: `/merge` and `/cleanup` (issue #264).** No executor tier applies to these two phases. The dispatcher starts no model session for them: no Claude Code session, no OpenAI call, no subscription-allowance check and no executor budget increment. `run_merge_or_block()` and `finish_story()` in `scripts/dispatcher-invoke.sh` run `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh`, which reuse `scripts/merge-gate-summary` and the `hpw` helpers. This holds in every path: the Claude-tier cycle, the paired `executor:codex` run and the resume pass at `In merge`. A step the scripts cannot judge (for example a dirty file that is neither clearly a stale copy of the merged PR nor clearly unrelated) is kept and reported, never forced. The step-by-step map from `merge.md` and `cleanup.md` to the scripts and their tests is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md). A manually run `/merge` or `/cleanup` still follows `.claude/commands/merge.md` and `cleanup.md`, which are unchanged; a later edit to either file needs the matching script change. ADR-012's session-start mechanism does not cover these two phases.
+**Script-only phases: `/merge` and `/cleanup` (issue #264).** No executor tier applies to these two phases. The dispatcher starts no model session for them: no Claude Code session, no model API call, no subscription-allowance check and no executor budget increment. `run_merge_or_block()` and `finish_story()` in `scripts/dispatcher-invoke.sh` run `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh`, which reuse `scripts/merge-gate-summary` and the `hpw` helpers. This holds in every path: the Claude-tier cycle, the review entry for a Codex-implemented PR and the resume pass at `In merge`. A step the scripts cannot judge (for example a dirty file that is neither clearly a stale copy of the merged PR nor clearly unrelated) is kept and reported, never forced. The step-by-step map from `merge.md` and `cleanup.md` to the scripts and their tests is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md). A manually run `/merge` or `/cleanup` still follows `.claude/commands/merge.md` and `cleanup.md`, which are unchanged; a later edit to either file needs the matching script change. ADR-012's session-start mechanism does not cover these two phases.
 
 This applies only to the dispatcher's own invocation path in `scripts/dispatcher-invoke.sh`. A human or interactive session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
 
@@ -114,7 +114,7 @@ The dispatcher starts every model session (`/implement` and `/review`) through `
 | Executor labels | Provider | How the session starts |
 |---|---|---|
 | `executor:claude-code-haiku`, `-sonnet`, `-opus` | `claude-code` | Claude Code (`claude -p`) on the GitHub Actions runner, signed in with the PO's subscription token `CLAUDE_CODE_OAUTH_TOKEN`, with the model alias `haiku`, `sonnet` or `opus` (ADR-012, issue #314) |
-| `executor:codex` | `openai` | A bounded tool-use loop against the OpenAI API with a single `bash` tool (issue #254), until #315 |
+| `executor:codex` | none | Not started for `/implement` (issue #315); no `EXECUTOR_PROVIDER` row |
 
 Every Claude session runs this way: `/implement` and its fix rounds, and `/review` of a Codex-implemented story. `/merge` and `/cleanup` are script-only phases and start no session. No metered Anthropic API key is used. The command line, bounds, result handling and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#executor-invocation-mechanism).
 

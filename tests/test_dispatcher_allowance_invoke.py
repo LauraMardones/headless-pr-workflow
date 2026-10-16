@@ -5,10 +5,11 @@ Drives the real ``scripts/dispatcher-invoke.sh`` end to end with the fakes in
 (executor API and Slack webhook) and a stub allowance script on
 ``ALLOWANCE_SCRIPT`` whose exit codes follow a sequence, one per session start.
 
-A Codex-implemented story runs two sessions in one run (/implement, /review),
-then the script-only /merge and /cleanup (issue #264), which check no allowance. A Claude-implemented story runs one, then is handed to the
+A Claude-implemented story runs one session (/implement), then is handed to the
 Codex review loop (issue #293); tests/test_dispatcher_review_loop.py covers
-the allowance check at its resume entries.
+the allowance check at its resume entries. A Codex-implemented story "In review"
+runs one /review session in the resume pass (issue #315), then the script-only
+/merge and /cleanup (issue #264), which check no allowance.
 """
 
 from __future__ import annotations
@@ -25,21 +26,31 @@ PR = 900
 
 @pytest.fixture
 def d(tmp_path):
-    """A Codex-implemented story: every session of the cycle starts in one run."""
+    """A Claude-implemented story ready for /implement."""
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(ISSUE, "Ready for implementation", executor="codex")
+    dispatcher.add_story(ISSUE, "Ready for implementation")
     dispatcher.add_pr(PR, ISSUE)
     return dispatcher
 
 
-def test_start_runs_every_session(d):
-    proc = d.run_issue(ISSUE, seq="0,0,0,0")
+@pytest.fixture
+def r(tmp_path):
+    """A Codex-implemented story \"In review\": the resume pass runs /review, which moves it to \"In merge\"."""
+    dispatcher = Dispatcher(tmp_path)
+    dispatcher.add_story(ISSUE, "In review", executor="codex")
+    dispatcher.add_pr(PR, ISSUE)
+    dispatcher.session_sets_status("review", ISSUE, "In merge")
+    return dispatcher
+
+
+def test_review_start_runs_the_session_then_the_scripts(r):
+    proc = r.resume(seq="0,0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.allowance_calls == 2  # /implement and /review; /merge and /cleanup start no session (#264)
-    assert len(d.sessions) == 2
-    assert d.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
-    assert d.posted(ISSUE) == []
-    assert f"Story #{ISSUE} completed (Done)." in proc.stdout
+    assert r.allowance_calls == 1  # /review; /merge and /cleanup start no session (#264)
+    assert r.sessions == [f"review {PR}"]
+    assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
+    assert r.posted(ISSUE) == []
+    assert r.status(ISSUE) == "Done"
 
 
 def test_claude_story_checks_allowance_once_then_hands_off(tmp_path):
@@ -64,27 +75,28 @@ def test_refuse_before_implement_skips_quietly(d):
     assert d.slack_calls == []
 
 
-def test_refuse_before_review_comments_once(d):
-    proc = d.run_issue(ISSUE, seq="0,1")
+def test_refuse_before_review_comments_once(r):
+    proc = r.resume(seq="1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.allowance_calls == 2
-    assert d.sessions == [f"implement {ISSUE}"]  # /review not started
-    comments = d.posted(ISSUE)
+    assert r.allowance_calls == 1
+    assert r.sessions == []  # /review not started
+    comments = r.posted(ISSUE)
     assert len(comments) == 1
     body = comments[0]
     assert "/review was not started" in body
     assert "weekly window: 15% left, reserve 20%, resets 2026-10-14T08:00:00Z" in body
     assert "five-hour window" not in body  # only the window below the reserve
-    assert d.slack_calls == []
+    assert r.slack_calls == []
+    assert r.phases == []
 
 
-def test_merge_and_cleanup_never_consult_the_allowance(d):
-    proc = d.run_issue(ISSUE, seq="0,0,1,1")  # a refusal after /review would block a session
+def test_merge_and_cleanup_never_consult_the_allowance(r):
+    proc = r.resume(seq="0,1,1")  # a refusal after /review would block a session
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.allowance_calls == 2
-    assert d.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
-    assert d.posted(ISSUE) == []
-    assert d.status(ISSUE) == "Done"
+    assert r.allowance_calls == 1
+    assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
+    assert r.posted(ISSUE) == []
+    assert r.status(ISSUE) == "Done"
 
 
 def test_error_before_implement_fails_without_slack(d):
@@ -97,12 +109,12 @@ def test_error_before_implement_fails_without_slack(d):
     assert d.status(ISSUE) == "Ready for implementation"
 
 
-def test_error_after_implement_comments_with_reason(d):
-    proc = d.run_issue(ISSUE, seq="0,2")
+def test_error_before_review_comments_with_reason(r):
+    proc = r.resume(seq="2")
     assert proc.returncode != 0
-    assert d.sessions == [f"implement {ISSUE}"]
-    assert d.slack_calls == []
-    comments = d.posted(ISSUE)
+    assert r.sessions == []
+    assert r.slack_calls == []
+    comments = r.posted(ISSUE)
     assert len(comments) == 1
     body = comments[0]
     assert "/review was not started" in body
