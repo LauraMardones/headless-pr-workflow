@@ -45,6 +45,11 @@ _CODEX_REVIEWED_COMMIT = re.compile(r"\*\*Reviewed commit:\*\*[ \t]*`([0-9a-fA-F
 _CODEX_USAGE_LIMIT_START = "You have reached your Codex usage limits."
 _CODEX_STATUS_START = "<!-- codex-pull-request-review-summary -->"
 _CODEX_FINDINGS_START = "### 💡 Codex Review"
+# Codex may put this receipt marker in front of a clean-result comment or a
+# findings review (#382; PR #378 comment 6211124392 and review 5541676665).
+# Only this exact marker, once, at the start of the body is skipped, and only
+# for those two kinds. Any other marker or version stays `unknown`.
+_CODEX_RECEIPT_MARKER = "<!-- codex-review-receipt:v1 -->"
 
 
 @dataclass(frozen=True)
@@ -538,7 +543,7 @@ def _is_codex_bot(event: TimelineEvent) -> bool:
 
 def _codex_comment_kind(body: str | None) -> str:
     text = (body or "").strip()
-    if _CODEX_CLEAN_START.match(text) and _codex_reviewed_commit(text) is not None:
+    if _CODEX_CLEAN_START.match(_strip_receipt_marker(text)) and _codex_reviewed_commit(text) is not None:
         return "clean"
     if text.startswith(_CODEX_USAGE_LIMIT_START):
         return "usage-limit"
@@ -547,9 +552,17 @@ def _codex_comment_kind(body: str | None) -> str:
 
 def _codex_review_kind(body: str | None) -> str:
     text = (body or "").strip()
-    if text.startswith(_CODEX_FINDINGS_START) and _codex_reviewed_commit(text) is not None:
+    if _strip_receipt_marker(text).startswith(_CODEX_FINDINGS_START) and _codex_reviewed_commit(text) is not None:
         return "findings"
     return "unknown"
+
+
+def _strip_receipt_marker(text: str) -> str:
+    """Remove one leading `_CODEX_RECEIPT_MARKER` and the whitespace after it; return other text unchanged."""
+
+    if text.startswith(_CODEX_RECEIPT_MARKER):
+        return text[len(_CODEX_RECEIPT_MARKER) :].lstrip()
+    return text
 
 
 def _codex_reviewed_commit(body: str | None) -> str | None:

@@ -52,6 +52,7 @@ from headless_pr_workflow.review_policy import (
 
 from tests.github_scenarios import (
     CODEX_BOT,
+    CODEX_RECEIPT_MARKER,
     CODEX_TASK_REPLY_BODY,
     CODEX_USAGE_LIMIT_BODY,
     HEAD_SHA,
@@ -63,6 +64,8 @@ from tests.github_scenarios import (
     codex_findings_review,
     codex_pr_287_clean_body,
     codex_pr_298_findings_review,
+    codex_pr_378_clean_receipt_body,
+    codex_pr_378_findings_receipt_body,
     codex_status_body,
     commit_event,
     conversation_comment,
@@ -261,6 +264,89 @@ def test_job_request_starts_with_the_phrase_and_carries_the_marker_on_a_later_li
     assert lines[0] == CODEX_REVIEW_TRIGGER_PHRASE
     assert lines[-1] == action_marker(ACTION_REQUEST_REVIEW, HEAD_SHA, source="request-2")
     assert lines[-1].startswith("<!--") and lines[-1].endswith("-->")
+
+
+# --- #382: receipt marker ------------------------------------------------------
+
+
+def receipt_findings_review(body: str) -> TimelineEvent:
+    return replace(codex_findings_review(HEAD_SHA), body=body)
+
+
+def test_receipt_format_clean_comment_from_pr_378_is_a_clean_result():
+    clean = codex_comment(codex_pr_378_clean_receipt_body(HEAD_SHA[:10]))
+    summary = evaluate_codex_review(pr(request(), clean))
+    decision = decision_for(pr(request(), clean))
+
+    assert classify_codex_event(codex_comment(codex_pr_378_clean_receipt_body())) == "clean"
+    assert (summary.status, summary.reason, summary.comment_url) == ("accepted", None, CLEAN_URL)
+    assert summary.reviewed_commit_prefix == HEAD_SHA[:10]
+    assert (decision.action, decision.codex_result) == (ACTION_MOVE_IN_MERGE, "clean")
+
+
+def test_receipt_format_findings_review_from_pr_378_is_findings():
+    findings = receipt_findings_review(codex_pr_378_findings_receipt_body(HEAD_SHA[:10]))
+    decision = decision_for(pr(request(), findings))
+
+    assert classify_codex_event(receipt_findings_review(codex_pr_378_findings_receipt_body())) == "findings"
+    assert (decision.action, decision.codex_result) == (ACTION_MOVE_IN_IMPLEMENTATION, "findings")
+
+
+def _receipt_clean(prefix: str = HEAD_SHA[:10]) -> str:
+    return codex_pr_378_clean_receipt_body(prefix)
+
+
+def _receipt_findings(prefix: str = HEAD_SHA[:10]) -> str:
+    return codex_pr_378_findings_receipt_body(prefix)
+
+
+UNKNOWN_RECEIPT_COMMENTS = [
+    pytest.param(f"{CODEX_RECEIPT_MARKER}\n\nCodex could not complete this request.", id="marker-then-unknown-text"),
+    pytest.param(CODEX_RECEIPT_MARKER, id="marker-only"),
+    pytest.param(_receipt_clean().replace("receipt:v1", "receipt:v2"), id="v2-marker"),
+    pytest.param(f"Note.\n\n{_receipt_clean()}", id="marker-not-at-start"),
+    pytest.param(f"{CODEX_RECEIPT_MARKER}\n{_receipt_clean()}", id="marker-twice"),
+    pytest.param(f"{CODEX_RECEIPT_MARKER}\n\n{CODEX_USAGE_LIMIT_BODY}", id="marker-then-usage-limit"),
+    pytest.param(CODEX_TASK_REPLY_BODY, id="no-marker-unknown-text"),
+]
+
+
+@pytest.mark.parametrize("body", UNKNOWN_RECEIPT_COMMENTS)
+def test_comment_in_an_unknown_receipt_format_stays_unknown_and_is_not_accepted(body):
+    comment = codex_comment(body)
+    summary = evaluate_codex_review(pr(request(), comment))
+
+    assert classify_codex_event(comment) == "unknown"
+    assert summary.status == "invalid"
+    assert "in a format the recognizer does not know" in summary.reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(f"{CODEX_RECEIPT_MARKER}\n\n### Codex could not finish", id="marker-then-unknown-text"),
+        pytest.param(CODEX_RECEIPT_MARKER, id="marker-only"),
+        pytest.param(_receipt_findings().replace("receipt:v1", "receipt:v2"), id="v2-marker"),
+        pytest.param(f"Note.\n\n{_receipt_findings()}", id="marker-not-at-start"),
+        pytest.param(f"{CODEX_RECEIPT_MARKER}\n{_receipt_findings()}", id="marker-twice"),
+        pytest.param(CODEX_TASK_REPLY_BODY, id="no-marker-unknown-text"),
+    ],
+)
+def test_review_in_an_unknown_receipt_format_stays_unknown(body):
+    assert classify_codex_event(receipt_findings_review(body)) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(conversation_comment(_receipt_clean(), created_at=TWO_HOURS_AGO), id="human"),
+        pytest.param(codex_comment(_receipt_clean(), author="github-actions[bot]"), id="other-bot"),
+        pytest.param(codex_comment(_receipt_clean(), author_type="User"), id="user-with-the-bot-login"),
+    ],
+)
+def test_receipt_format_clean_body_from_another_account_is_not_accepted(event):
+    assert classify_codex_event(event) is None
+    assert evaluate_codex_review(pr(request(), event)).status == "missing"
 
 
 # --- AC3 / AC4: clean result --------------------------------------------------

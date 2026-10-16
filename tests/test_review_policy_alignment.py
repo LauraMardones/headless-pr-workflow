@@ -15,6 +15,7 @@ from tests.github_scenarios import (
     codex_clean_body,
     codex_comment,
     codex_findings_review,
+    codex_pr_378_clean_receipt_body,
     commit_event,
     force_push_event,
     linked_story,
@@ -198,6 +199,17 @@ def test_clean_codex_review_accepts_the_varying_closing_sentence(closing):
     context = scenario_codex_review(timeline=(commit_event(HEAD_SHA), codex_comment(codex_clean_body(closing=closing))))
 
     _assert_gate_passes_everywhere(context, approval_source="codex-review", satisfied_by="codex-review")
+
+
+def test_receipt_format_clean_codex_review_passes_the_gate():
+    # #382: the PR #378 clean comment starts with the codex-review-receipt:v1 marker.
+    context = scenario_codex_review(
+        timeline=(commit_event(HEAD_SHA), codex_comment(codex_pr_378_clean_receipt_body(HEAD_SHA[:10]))),
+    )
+
+    approval = _assert_gate_passes_everywhere(context, approval_source="codex-review", satisfied_by="codex-review")
+
+    assert approval.codex_review.reviewed_commit_prefix == HEAD_SHA[:10]
 
 
 def test_pr_298_real_timeline_passes_with_codex_review():
