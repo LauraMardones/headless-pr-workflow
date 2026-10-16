@@ -142,16 +142,19 @@
 #
 # ─── Notification events (issue #179) ────────────────────────────────────────
 #
-# Four Slack events are wired into this script via scripts/slack-notify.sh:
+# Five Slack events are wired into this script via scripts/slack-notify.sh:
 #   decision_blocker          — executor declared Type: decision during /implement or /review;
 #                               carries the declaration's Question, Options and Recommendation
 #                               (also after a session that exits 0, while the blocker is open; #357)
+#   po_blocker                — a blocker this script posted that only the PO can resolve
+#                               (post_blocker_once, post_mid_cycle_blocker; issue #359);
+#                               not post_conflict_blocker. Resolved by the PO's /unblock line
 #   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
 #
 # Notification adapter failure never aborts the loop: dispatcher_error is guarded
-# with || true, and the three events that need PO action are only queued here
+# with || true, and the four events that need PO action are only queued here
 # (register_actionable_event) and delivered and retried by
 # scripts/dispatcher-notify-retry.sh (issue #295).
 # Under --dry-run, calls are suppressed and logged instead.
@@ -417,16 +420,24 @@ has_handoff_note() {
 }
 
 # ─── Utility: post a GitHub issue comment ────────────────────────────────────
+# LAST_POSTED_AT holds the created_at GitHub gave the comment just posted (the
+# current UTC time under --dry-run, or when the response carries none), so a
+# caller can key an actionable event on it (issue #359).
+
+LAST_POSTED_AT=""
 
 post_comment() {
     local issue_num="$1"
-    local body="$2"
+    local body="$2" response
     if $DRY_RUN; then
         echo "[DRY RUN] Would post comment on #$issue_num:"
         echo "$body" | sed 's/^/  /'
+        LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     else
-        gh api "repos/$REPO/issues/$issue_num/comments" \
-            -X POST -f body="$body" >/dev/null
+        response=$(gh api "repos/$REPO/issues/$issue_num/comments" \
+            -X POST -f body="$body") || return 1
+        LAST_POSTED_AT=$(jq -r '.created_at // empty' <<< "$response" 2>/dev/null || true)
+        [[ -n "$LAST_POSTED_AT" ]] || LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
 }
 
@@ -466,8 +477,8 @@ _dispatcher_exit_hook() {
 trap _dispatcher_exit_hook EXIT
 
 # ─── Utility: queue an event that needs PO action (issue #295) ───────────────
-# decision_blocker, feature_closure_confirmation and epic_closure_approval are
-# recorded in the notification state and delivered, retried and bounded by
+# decision_blocker, po_blocker, feature_closure_confirmation and
+# epic_closure_approval are recorded in the notification state and delivered, retried and bounded by
 # scripts/dispatcher-notify-retry.sh run, which the workflow runs on every
 # cycle. A registration failure only warns and never aborts the invoke loop.
 
@@ -480,6 +491,22 @@ register_actionable_event() {
     $DRY_RUN && args+=(--dry-run)
     bash "$script_dir/dispatcher-notify-retry.sh" "${args[@]}" \
         || echo "Warning: could not register $event_type for #$issue_num; it will not be delivered" >&2
+}
+
+# register_po_blocker <issue> <title> <type> <unblocked-when> <state> [<cause>]
+# Queues the po_blocker event for the "## Blocked Declaration" that
+# post_comment just posted (issue #359): a blocker only the PO can resolve.
+# The event key uses that comment's created_at, so a later blocker on the same
+# issue is a new event. Resolved by the PO's `/unblock` line or by closing the
+# issue (scripts/dispatcher-notify-retry.sh).
+register_po_blocker() {
+    local issue_num="$1" title="$2" blocker_type="$3" unblocked_when="$4" state="$5" cause="${6:-}"
+    register_actionable_event "po_blocker" "$issue_num" "$LAST_POSTED_AT" \
+        "$(jq -nc --arg st "$title" --arg iu "https://github.com/$REPO/issues/$issue_num" \
+                  --arg bt "$blocker_type" --arg uw "$unblocked_when" --arg state "$state" \
+                  --arg cause "$cause" \
+                  '{story_title: $st, issue_url: $iu, blocker_type: $bt,
+                    unblocked_when: $uw, state: $state, cause: $cause}')"
 }
 
 # Delivers queued actionable events before the script replaces itself with the
@@ -887,18 +914,20 @@ post_mid_cycle_blocker() {
     # the default; a caller that knows the cause names it instead.
     local reason="${5:-}"
     local unblocked_when="${6:-/$failed_command completes successfully for #$issue_num with exit code 0}"
-    local body
+    local body state
+    state="execution loop halted after /$failed_command failed; board reflects last successful state"
     body="## Blocked Declaration
 Type: external
 Declared by: $DECLARED_BY
 Blocks: #$issue_num — $issue_title
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
-State of in-progress work: execution loop halted after /$failed_command failed; board reflects last successful state"
+State of in-progress work: $state"
     [[ -n "$reason" ]] && body+=$'\n'"Cause: $reason"
     [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
-    post_comment "$issue_num" "$body"
+    post_comment "$issue_num" "$body" || return 1
+    register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason"
 }
 
 # pr_conflicts_with_main <pr> — 0 only when GitHub reports the PR as conflicting
@@ -981,7 +1010,8 @@ Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
 State of in-progress work: $state
 
-$marker"
+$marker" || return 1
+    register_po_blocker "$issue_num" "$issue_title" "$blocker_type" "$unblocked_when" "$state"
 }
 
 # ─── Utility: retry a required comment that could not be written (#348) ──────
@@ -990,8 +1020,8 @@ $marker"
 # evidence-pending comment (scripts/lib/evidence-pending.sh) whose hidden
 # payload is the exact text. evidence_retry posts that text once, on a later
 # run, and counts the runs that failed on hidden markers on the story, never on
-# the runner: after EVIDENCE_RETRY_MAX failed runs it posts one blocker, sends
-# one dispatcher_error, and stops retrying until the PO posts `/unblock`.
+# the runner: after EVIDENCE_RETRY_MAX failed runs it posts one blocker (which queues one
+# po_blocker event, no dispatcher_error), and stops retrying until the PO posts `/unblock`.
 # Every marker is honoured only on a comment of the dispatcher's own account.
 
 EVIDENCE_RETRY_MAX="${EVIDENCE_RETRY_MAX:-3}"
@@ -1040,10 +1070,6 @@ $(evidence_failed_marker "$item" "$ref")" || true
         post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
             "the evidence ($what) is posted by hand, then the PO posts /unblock" \
             "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue."
-        notify_slack "dispatcher_error" \
-            "$(jq -n --arg desc "The dispatcher could not write $what after $EVIDENCE_RETRY_MAX runs (#$story); it stopped retrying" \
-                     --arg action "retrying $what for #$story" \
-                     '{error_description: $desc, last_action: $action}')"
     fi
     return 2
 }
@@ -1155,15 +1181,23 @@ retry_pending_cleanup_summaries() {
 # "[SESSION]" summary line (stderr). Returns 0 with the result text on stdout
 # only when the stream has a `result` with subtype "success" and is_error
 # false, and Claude Code exited 0. Every other outcome returns non-zero with a
-# "[SESSION ERROR]" or "[SESSION RATE LIMIT]" line on stderr. The stream is
+# "[SESSION ERROR]" line on stderr; a provider usage limit stop returns
+# CLAUDE_LIMIT_STOP_RC with a "[SESSION RATE LIMIT]" line. The stream is
 # parsed by message type, not line order, and kept in a temporary directory
 # that is removed before returning. The token, the full stream and the init
 # message are never printed; the token is also masked in the lines that are.
+
+# Exit code of run_claude_code_session() and invoke_executor_command() for a
+# session stopped by a provider usage limit (issue #316); 1 stays "failed".
+# CLAUDE_LIMIT_RESET_TS then holds the reset time as Unix seconds, or is empty.
+CLAUDE_LIMIT_STOP_RC=75
+CLAUDE_LIMIT_RESET_TS=""
 
 CLAUDE_SESSION_ARGS=(-p --output-format stream-json --verbose
                      --permission-mode bypassPermissions --strict-mcp-config)
 
 run_claude_code_session() {
+    CLAUDE_LIMIT_RESET_TS=""
     local alias="$1" token="$2" task_prompt="$3" slash_command="$4" target_arg="$5"
     local work rc=0
     work=$(mktemp -d)
@@ -1238,13 +1272,14 @@ _claude_code_session() {
         return 1
     fi
 
-    if [[ -n "$result" ]] && jq -e '
-            (.is_error == true or .subtype != "success")
-            and (([.error, .subtype, .error_type, .error_category]
-                   | any(. == "rate_limit" or . == "rate_limit_error"))
-                 or .api_error_status == 429)' <<< "$result" >/dev/null 2>&1; then
-        echo "[SESSION RATE LIMIT] $label stopped at a provider usage limit; resume is #316" >&2
-        return 1
+    local reset_ts="" limit_rc=0
+    reset_ts=$(claude_limit_stop "$work/events.jsonl") || limit_rc=$?
+    if [[ $limit_rc -eq 0 ]]; then
+        CLAUDE_LIMIT_RESET_TS="$reset_ts"
+        local reset_text="unknown"
+        [[ -n "$reset_ts" ]] && reset_text=$(date -u -d "@$reset_ts" +%Y-%m-%dT%H:%MZ 2>/dev/null || echo "unknown")
+        echo "[SESSION RATE LIMIT] $label stopped at a provider usage limit; resets $reset_text" >&2
+        return "$CLAUDE_LIMIT_STOP_RC"
     fi
 
     if [[ $session_rc -ne 0 ]]; then
@@ -1275,7 +1310,7 @@ _claude_code_session() {
 #                     the fix round again on a later run.
 #                     Before /review: one comment on the
 #                     story naming the step, the window, the share left, the
-#                     reserve and the reset time; exit 0. Resuming is #316.
+#                     reserve and the reset time; exit 0. A later poll tries it again.
 #   exit 2 (error)  — log [ALLOWANCE ERROR] and fail the job without a
 #                     dispatcher_error Slack message; after /implement, the
 #                     story gets the same comment with the reason.
@@ -1300,7 +1335,7 @@ allowance_comment() {
         | ["## Subscription allowance check", "", $head, ""]
           + (if ($lines | length) > 0 then $lines + [""] else [] end)
           + ["Reason: \($d.reason)", "",
-             "The story stays at its current step. Nothing restarts it automatically yet (#316); run /\($step) by hand after the reset time."]
+             "The story stays at its current step. The dispatcher tries /\($step) again on a later poll."]
         | join("\n")' <<< "$decision_json"
 }
 
@@ -1387,7 +1422,7 @@ usage_limit_comment() {
     else
         head="/$step was not started for #$ISSUE_NUMBER: USAGE_LIMIT_SESSIONS_PER_DAY is not set or is not a whole number of zero or more, so nothing starts."
     fi
-    tail="The story stays at its current step. Nothing restarts it automatically until #316; run /$step by hand after the reset time."
+    tail="The story stays at its current step. The dispatcher tries /$step again on a later poll."
     printf '## Usage limit\n\n%s\n\n%s\n' "$head" "$tail"
 }
 
@@ -1453,6 +1488,90 @@ record_session_start() {
         echo "[USAGE LIMIT ERROR] could not record the session start — starting nothing" >&2
         return 1
     }
+}
+
+# ─── Utility: pause at a provider usage limit (issue #316) ───────────────────
+# A session stopped by a provider usage limit (invoke_executor_command()
+# returned CLAUDE_LIMIT_STOP_RC) ends by itself at the reset, so it is not a
+# blocker and needs no PO action. pause_at_usage_limit <step> <target> <issue>:
+#   - a new /implement goes back to "Ready for implementation"; a fix round
+#     stays "In implementation" and a /review stays "In review";
+#   - no mid-cycle blocker and no attempt marker is written, so the resume
+#     pass (or the next selection) starts the same step again once the usage
+#     limit and the allowance check let it;
+#   - one "## Paused at a provider usage limit" comment records what was left
+#     behind, unless it is already the story's newest comment for this step and
+#     PR head; no Slack message and no actionable event;
+#   - the run exits 0 and starts no other session.
+# Only pushed commits survive a runner; the comment counts what was lost.
+
+paused_comment() {
+    local step="$1" target="$2" issue="$3" branch="$4" pr_number="$5" pr_head="$6" \
+          reset_ts="$7" unpushed="$8" dirty="$9" next="${10}"
+    local reset_text="unknown — the dispatcher checks the allowance on every poll"
+    [[ -n "$reset_ts" ]] && reset_text=$(date -u -d "@$reset_ts" +%Y-%m-%dT%H:%MZ 2>/dev/null || echo "$reset_text")
+    local pr_text="no PR yet"
+    [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`${pr_head}\`"
+    local dirty_text="no uncommitted changes"
+    [[ "$dirty" == "true" ]] && dirty_text="uncommitted changes"
+    printf '## Paused at a provider usage limit\n\n'
+    printf -- '- Step: `/%s %s` for #%s\n' "$step" "$target" "$issue"
+    printf -- '- Branch: %s\n' "${branch:-unknown}"
+    printf -- '- PR: %s\n' "$pr_text"
+    printf -- '- Resets: %s\n' "$reset_text"
+    printf -- '- Not pushed when the session stopped: %s commit(s), %s\n\n' "$unpushed" "$dirty_text"
+    printf 'Only pushed commits survive; anything not pushed is redone by the next start.\n\n'
+    printf 'Next: %s\n\nNo PO action is needed.\n' "$next"
+}
+
+pause_at_usage_limit() {
+    local step="$1" target="$2" issue="$3"
+    local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false
+    reset_ts="$CLAUDE_LIMIT_RESET_TS"
+    LAST_ACTION="pausing #$issue at a provider usage limit"
+    pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
+    pr_number=$(jq -r '.number // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    pr_head=$(jq -r '.head.sha // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    branch=$(jq -r '.head.ref // empty' <<< "${pr_json:-null}" 2>/dev/null || true)
+    [[ -n "$branch" ]] || branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    unpushed=$(git -C "$REPO_ROOT" rev-list --count '@{upstream}..HEAD' 2>/dev/null \
+        || git -C "$REPO_ROOT" rev-list --count 'origin/main..HEAD' 2>/dev/null || echo 0)
+    dirty=false
+    [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]] && dirty=true
+
+    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        next="the fix round stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
+    elif [[ "$step" == "implement" ]]; then
+        next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
+        if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
+            rollback_failed=true
+            echo "Warning: Board status update failed for #$issue to 'Ready for implementation'" >&2
+            next="the board write to \"Ready for implementation\" did not take effect, so #$issue is still in \"In implementation\"; stale recovery returns it to \"Ready for implementation\" after ${STALE_THRESHOLD}s of inactivity, and /implement then starts again on the existing branch and PR."
+        fi
+    else
+        next="the story stays in \"In review\" and /$step is tried again on a later poll, once the usage limit and the allowance check allow it."
+    fi
+
+    local body newest pr_text="no PR yet"
+    [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`$pr_head\`"
+    body=$(paused_comment "$step" "$target" "$issue" "$branch" "$pr_number" "$pr_head" "$reset_ts" "$unpushed" "$dirty" "$next")
+    newest=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" \
+        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    if [[ "$newest" == "## Paused at a provider usage limit"* \
+          && "$newest" == *"- Step: \`/$step $target\` for #$issue"* \
+          && "$newest" == *"- PR: $pr_text"* ]]; then
+        echo "#$issue: the pause record for /$step is already the newest comment; not posting it again"
+    else
+        post_comment "$issue" "$body" \
+            || echo "Warning: could not post the pause record on #$issue" >&2
+    fi
+    DISPATCH_HANDLED=true
+    if $rollback_failed; then
+        echo "#$issue paused at a provider usage limit, but the move to \"Ready for implementation\" failed" >&2
+        exit 1
+    fi
+    echo "#$issue paused at a provider usage limit; no other session is started in this run"
+    exit 0
 }
 
 # ─── Utility: invoke an executor command (issue #254, issue #314) ────────────
@@ -2113,6 +2232,26 @@ fix_round_attempt_marker() {
     dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
 }
 
+# A fix-round attempt marker is superseded by a later findings result on the
+# same head (issue #357): after the post-waiver no-push round the marker stays
+# newer than the PO's /unblock, and a new Blocker that Codex then finds on the
+# unchanged head must start a round. fix_round_attempt_superseded <issue> <pr>
+# <head> returns 0 when the bookkeeping job posted its move-in-implementation
+# marker for <head> on the PR after the story's latest attempt marker for it.
+fix_round_attempt_superseded() {
+    local issue_num="$1" pr_number="$2" head="$3" login attempt_at moves_at
+    login=$(bookkeeping_login)
+    [[ -n "$login" ]] || return 1
+    attempt_at=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" 2>/dev/null \
+        | jq -rs --arg marker "$(fix_round_attempt_marker "$pr_number" "$head")" '
+            [add // [] | .[] | select((.body // "") | contains($marker)) | .created_at] | max // empty') || return 1
+    [[ -n "$attempt_at" ]] || return 1
+    moves_at=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER${head,,} " '
+            [add // [] | .[] | select((.user.login // "") == $login and ((.body // "") | ascii_downcase | contains($marker))) | .created_at] | max // empty') || return 1
+    [[ -n "$moves_at" && "$moves_at" > "$attempt_at" ]]
+}
+
 # A pending hand-off is matched by PR, not by head: a commit may land between
 # the failed write and the run that retries it. It is cancelled by the "done"
 # marker the retry posts, so it is completed once.
@@ -2459,7 +2598,8 @@ resume_fix_round() {
     fi
 
     attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
-    if marker_holds "$issue_num" "$attempt_marker"; then
+    if marker_holds "$issue_num" "$attempt_marker" \
+            && ! fix_round_attempt_superseded "$issue_num" "$pr_number" "$pr_head"; then
         echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the fix round was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
         return 0
     fi
@@ -2472,7 +2612,10 @@ resume_fix_round() {
     # implementation": it is unfinished work that holds its place.
     FIX_ROUND_SESSION=true
     blocker_before=$(decision_blocker_created_at "$issue_num")
-    if ! invoke_executor_command "implement" "$issue_num"; then
+    local session_rc=0
+    invoke_executor_command "implement" "$issue_num" || session_rc=$?
+    [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
+    if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
         DISPATCH_HANDLED=true
@@ -2557,7 +2700,10 @@ resume_review_story() {
     echo "${LOG_PREFIX}[RESUME] #$issue_num: /review on PR #$pr_number under $review_label"
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     LAST_ACTION="invoking /review for #$issue_num"
-    if ! invoke_executor_command "review" "$pr_number" "$review_label"; then
+    local session_rc=0
+    invoke_executor_command "review" "$pr_number" "$review_label" || session_rc=$?
+    [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "review" "$pr_number" "$issue_num"
+    if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
         DISPATCH_HANDLED=true
@@ -3065,7 +3211,10 @@ set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
 BLOCKER_BEFORE_IMPLEMENT=$(decision_blocker_created_at "$ISSUE_NUMBER")
-if ! invoke_executor_command "implement" "$ISSUE_NUMBER"; then
+SESSION_RC=0
+invoke_executor_command "implement" "$ISSUE_NUMBER" || SESSION_RC=$?
+[[ $SESSION_RC -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$ISSUE_NUMBER" "$ISSUE_NUMBER"
+if [[ $SESSION_RC -ne 0 ]]; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
     DISPATCH_HANDLED=true

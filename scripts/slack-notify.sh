@@ -2,7 +2,7 @@
 # scripts/slack-notify.sh
 #
 # Slack notification adapter — posts a Block Kit message to an incoming webhook
-# for any of the seven dispatcher notification event types.
+# for any of the dispatcher notification event types.
 # Implements: issue #178, issue #204
 #
 # Usage:
@@ -12,6 +12,9 @@
 #   decision_blocker          fields: story_title, issue_url, blocker_type, unblocked_when,
 #                                     question, options, recommendation (the last three optional;
 #                                     missing ones are named in the message)
+#   po_blocker                fields: story_title, issue_url, blocker_type, unblocked_when,
+#                                     state, cause (cause optional; a blocker only the PO resolves,
+#                                     resumed by a standalone "/unblock" line, issue #359)
 #   feature_closure_confirmation  fields: feature_title, summary_url
 #   epic_closure_approval     fields: epic_title, summary_url
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
@@ -99,6 +102,36 @@ build_payload() {
                     {type: "section", text: {type: "mrkdwn", text: ("*Unblocked when:* " + (if $uw == "" then "(unknown)" else $uw | cut(1000) end))}},
                     {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
                     {type: "section", text: {type: "mrkdwn", text: "To answer: reply on the issue with your decision and a line that is exactly `/unblock`."}}
+                  ])}'
+            ;;
+
+        po_blocker)
+            # A blocker the dispatcher posted and only the PO can resolve
+            # (issue #359). Every text is capped below Block Kit's 3000
+            # characters; the issue link and the resume line are never cut.
+            jq -n --argjson c "$ctx" '
+                def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
+                def str: if type == "string" then . else "" end;
+                def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
+                def or_unknown($n): if . == "" then "(unknown)" else cut($n) end;
+                ($c.story_title | clean) as $title
+                | ($c.issue_url | clean) as $url
+                | ($c.blocker_type | clean) as $type
+                | ($c.unblocked_when | clean) as $uw
+                | ($c.state | clean) as $state
+                | ($c.cause | clean) as $cause
+                | {blocks: ([
+                    {type: "section", text: {type: "mrkdwn", text: ":octagonal_sign: *Story stopped — waiting for the PO*"}},
+                    {type: "section", text: {type: "mrkdwn", text: (
+                        "*Story:* " + ($title | or_unknown(500))
+                        + "\n*Blocker type:* " + ($type | or_unknown(100)))}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*Unblocked when:* " + ($uw | or_unknown(1000)))}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*State of in-progress work:* " + ($state | or_unknown(1000)))}}
+                  ]
+                  + (if $cause != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Cause:* " + ($cause | cut(1000)))}}] else [] end)
+                  + [
+                    {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
+                    {type: "section", text: {type: "mrkdwn", text: "To resume: do what *Unblocked when* says, then reply on the issue with a line that is exactly `/unblock`."}}
                   ])}'
             ;;
 
@@ -248,7 +281,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached"
+KNOWN_EVENTS="decision_blocker po_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0

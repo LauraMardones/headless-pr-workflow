@@ -50,6 +50,7 @@ Required behavior:
 9. If no PR exists yet:
    - create a Draft PR as early as possible
    - the PR body must be non-empty: include `Closes #$ARGUMENTS` and a brief description of what the PR changes and why; `--fill` alone is insufficient
+   - if a branch for the story already exists on the remote without a PR (a session stopped, for example at a provider usage limit, before it opened the draft PR), continue on that branch and open the PR from it; do not start a second branch
    - link the PR to issue #$ARGUMENTS
    - ensure the PR references and closes #$ARGUMENTS when merged
    - ensure the story moves to "In implementation" (best-effort, as described under Workflow status goals)

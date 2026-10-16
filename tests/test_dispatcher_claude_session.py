@@ -213,13 +213,15 @@ def test_unsuccessful_session_fails_closed(d, events, exit_code, reason):
     assert "[SESSION ERROR]" in proc.stderr and reason in proc.stderr
 
 
-def test_rate_limit_fails_closed_with_its_own_line(d):
+def test_rate_limit_is_a_pause_with_its_own_line(d):
     d.claude_stream(INIT, result("error_during_execution", True, "limit reached", error="rate_limit"), exit_code=1)
 
     proc = d.run_issue(STORY)
 
-    assert_failed_closed(d, proc)
-    assert f"[SESSION RATE LIMIT] /implement #{STORY} stopped at a provider usage limit; resume is #316" in proc.stderr
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"[SESSION RATE LIMIT] /implement #{STORY} stopped at a provider usage limit; resets unknown" in proc.stderr
+    assert "#316" not in proc.stderr
+    assert d.posted(STORY)[0].startswith("## Paused at a provider usage limit")
 
 
 # ── Wall clock (AC5) ────────────────────────────────────────────────────────
