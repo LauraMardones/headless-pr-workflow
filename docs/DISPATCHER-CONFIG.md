@@ -242,8 +242,9 @@ The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for t
 | `red_flow_health` | the board health is Red | re-sent on every poll while Red |
 | `budget_cap_reached` | every ready story is budget-blocked | no |
 | `dispatcher_error` | the invoke run exited unexpectedly | no: the failing run is itself red |
+| `dispatch_trigger_stopped` | the newest `workflow_dispatch` run of `dispatcher.yml` on `main` is more than 15 minutes old, or none exists (issue #339, [Dispatcher trigger](#dispatcher-trigger)) | yes, until a newer dispatched run exists |
 
-**Retry of notifications that need PO action (issue #295).** `dispatcher-invoke.sh` only queues `decision_blocker`, `po_blocker`, `feature_closure_confirmation` and `epic_closure_approval` in `$DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events` (restored and saved by the same `actions/cache` steps as the refinement state). The workflow step **Retry actionable Slack notifications** (`scripts/dispatcher-notify-retry.sh run`) runs on every cycle, also when no story is ready or resumable, sends each undelivered event and records it as delivered only after `slack-notify.sh` exits 0. A delivered event is not sent again while it stays unresolved. An event stops being retried, even if it was never delivered, when it is resolved: a decision blocker or `po_blocker` by a `/unblock` line from the PO after the declaration or by closing the issue, a closure event by closing the Feature or Epic. A new decision blocker or `po_blocker` on the same issue is a new event (the key is the `created_at` of the declaration comment). `po_blocker` is queued by `post_blocker_once` and `post_mid_cycle_blocker` for every `Type: resource` or `Type: external` blocker the dispatcher posts; `Type: conflict` blockers (WIP limit, file overlap) clear on their own and send nothing. A blocker the dispatcher does not post again because its marker still holds queues no second event. Before `dispatcher-invoke.sh` chains to the next story it makes one extra delivery attempt (`run --drain`), so an alert is not held back by the chained sessions; that attempt records a success but never counts a failure. If the state file cannot be written, `register` delivers the event synchronously instead and exits non-zero when that fails too, and the retry step ends the run red with an `[NOTIFY] Error:` line.
+**Retry of notifications that need PO action (issue #295).** `dispatcher-invoke.sh` queues `decision_blocker`, `po_blocker`, `feature_closure_confirmation` and `epic_closure_approval`, and `scripts/dispatcher-trigger-check.sh` queues `dispatch_trigger_stopped` (issue #339; it is resolved when a newer dispatched run exists, uses issue `0` and never posts an issue comment, so a persistent delivery failure only turns the run red), in `$DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events` (restored and saved by the same `actions/cache` steps as the refinement state). The workflow step **Retry actionable Slack notifications** (`scripts/dispatcher-notify-retry.sh run`) runs on every cycle, also when no story is ready or resumable, sends each undelivered event and records it as delivered only after `slack-notify.sh` exits 0. A delivered event is not sent again while it stays unresolved. An event stops being retried, even if it was never delivered, when it is resolved: a decision blocker or `po_blocker` by a `/unblock` line from the PO after the declaration or by closing the issue, a closure event by closing the Feature or Epic. A new decision blocker or `po_blocker` on the same issue is a new event (the key is the `created_at` of the declaration comment). `po_blocker` is queued by `post_blocker_once` and `post_mid_cycle_blocker` for every `Type: resource` or `Type: external` blocker the dispatcher posts; `Type: conflict` blockers (WIP limit, file overlap) clear on their own and send nothing. A blocker the dispatcher does not post again because its marker still holds queues no second event. Before `dispatcher-invoke.sh` chains to the next story it makes one extra delivery attempt (`run --drain`), so an alert is not held back by the chained sessions; that attempt records a success but never counts a failure. If the state file cannot be written, `register` delivers the event synchronously instead and exits non-zero when that fails too, and the retry step ends the run red with an `[NOTIFY] Error:` line.
 
 **Bound and red run.** A failed delivery never aborts the dispatcher; the step exits 0 and retries on the next cycle. After 3 failed cycles in a row (about 15 minutes) the step exits 1, so the run ends red, and one comment is posted on the affected issue naming the event and the first failed attempt. Later failing cycles stay red but add no comment, and Slack still receives the message when it recovers. Missing or unreadable state warns and is treated as empty; in a malformed state file only the malformed lines are dropped and valid records are kept. At most one extra notification. Under `--dry-run` nothing is sent, recorded or commented. A manual run on a non-default ref only reports what it would send; an event queued in such a run is not saved and is not delivered.
 
@@ -285,6 +286,62 @@ GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persi
 **Residual risk:** if the cache is evicted (GitHub removes entries unused for 7 days, or the oldest entries past the repository's size limit) or a save fails, the next poll starts from empty state. Each issue still in **Ready for refinement** can then be notified once more.
 
 **Interim mechanism:** this cache exists only because the dispatcher runs on ephemeral GitHub-hosted runners. #259 moves the dispatcher to persistent infrastructure, where local disk supersedes the cache steps. That migration must keep the continuous-stay, exit/re-entry, delivery-only recording, and retry semantics above, and must revalidate #257's acceptance criteria before the cache steps are removed.
+
+---
+
+## Dispatcher trigger
+
+Issue #339, [ADR-013](decisions/ADR-013-dispatcher-trigger-mechanism.md). GitHub's `schedule` cron is best effort and was observed 2h44 to 7h27 apart. A hosted HTTP cron service therefore calls `workflow_dispatch` on `main` every 5 minutes. The GitHub cron (`*/5 * * * *`) stays as a backup, and the `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) keeps simultaneous starts from running in parallel or notifying twice. A pending run replaced in the group shows as cancelled; that is expected.
+
+### Chosen service and alternative
+
+| | Service | Provider documentation |
+|---|---|---|
+| Chosen | **cron-job.org** | [REST API](https://docs.cron-job.org/rest-api.html): schedule `minutes` 0-59 or `-1` for every minute (`JobSchedule`); POST and a header dictionary and body (`RequestMethod`, `JobExtendedData`); execution history (`/jobs/<jobId>/history`); `notification.onFailure` with the built-in account e-mail (`JobNotificationSettings`) |
+| Alternative | **Upstash QStash** schedules | [Create a schedule](https://upstash.com/docs/qstash/api-reference/schedules/create-a-schedule): cron schedule with one-minute resolution, headers forwarded to the target, retries and a failure callback; free plan |
+
+The five ADR-013 properties are: a schedule of 5 minutes or less, a POST with an `Authorization` header, a run history, an e-mail to the account owner when a call fails, and a free plan. The provider pages above show the first four for cron-job.org and the first two and the callback for QStash. **Unconfirmed at the time of writing:** the free plan's limits for cron-job.org and QStash's failure e-mail. The PO confirms both on the provider's current plan page at setup step 1 and may choose the alternative.
+
+### PO setup
+
+The implementer never creates accounts or handles token values.
+
+1. Create the scheduler account (cron-job.org, or the alternative).
+2. Create a fine-grained personal access token: repository access `LauraMardones/headless-pr-workflow` only, repository permission **Actions: Read and write** only, with an expiry date. Store it only in the scheduler, never in the repository, an issue, a PR, an Actions secret or a log. It is not `PROJECT_TOKEN`.
+3. Create the job: `POST https://api.github.com/repos/LauraMardones/headless-pr-workflow/actions/workflows/dispatcher.yml/dispatches`, body `{"ref":"main"}`, headers `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, every 5 minutes, with the failure e-mail switched on.
+4. Run the [manual check](#manual-check) and confirm that dispatched runs appear.
+
+### Token rotation
+
+Before the token's expiry date:
+
+1. Create the new token with the same repository and permission.
+2. Update the job's `Authorization` header in the scheduler.
+3. Run the manual check and confirm a dispatched run created after the update.
+4. Revoke the old token.
+
+**Leaked token.** Revoke it at once, create a replacement and update the job as above, run `gh workflow enable dispatcher.yml` (GitHub can disable a workflow), then run the manual check. A leaked token can only dispatch runs of this repository's workflows (Actions: Read and write); it cannot read code.
+
+### Stop alert
+
+Every enabled dispatcher run on the default branch, whatever started it, runs **Check the dispatch trigger** (`scripts/dispatcher-trigger-check.sh`). It reads the creation time of the newest `workflow_dispatch` run of `dispatcher.yml` on `main`. If that is more than 15 minutes old, or no such run exists, it queues one `dispatch_trigger_stopped` event, which **Retry actionable Slack notifications** sends and retries. The event key is the creation time of that run (or `none`), so each gap notifies once, and the event is dropped as soon as a newer dispatched run exists; a later gap is a new event. Age is judged by creation time, never by finish time or conclusion, so a long session or a cancelled (replaced) run does not look like a stop. On a non-default ref or under `--dry-run` the check only logs `[TRIGGER] Would queue ...`. A failed API read logs `[TRIGGER] Warning: ...`, sends nothing and never fails the run.
+
+The Slack message names the age of the newest dispatched run, its creation time, the manual check command and this section.
+
+### Manual check
+
+```
+gh run list --workflow dispatcher.yml --branch main --event workflow_dispatch --limit 5
+```
+
+Read the `CREATED` column (the "ago" value of the first row): with the scheduler live, the newest row is at most about 5 minutes old and consecutive rows are about 5 minutes apart. A newest row older than 15 minutes means the scheduler is stopped: check the provider's run history and failure e-mail, then the token's expiry and permission. A `cancelled` conclusion on some rows is normal (replaced pending runs).
+
+### Known limits
+
+- A manual `workflow_dispatch` run by the PO on `main` uses the same identity and event as the scheduler, so it resets the 15-minute clock once.
+- No alert while `DISPATCHER_ENABLED` is not `true`: the guard skips every step.
+- No alert when the scheduler and the cron both stop (for example a disabled workflow); the service's failure e-mail and the manual check cover that.
+- Until the PR for issue #339 is merged, a stopped scheduler is not alerted.
 
 ---
 

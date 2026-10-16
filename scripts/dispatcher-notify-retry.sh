@@ -2,8 +2,8 @@
 # scripts/dispatcher-notify-retry.sh
 #
 # Delivery of the Slack notifications that need PO action (issue #295):
-# decision_blocker, po_blocker, feature_closure_confirmation and
-# epic_closure_approval.
+# decision_blocker, po_blocker, feature_closure_confirmation,
+# epic_closure_approval and dispatch_trigger_stopped (issue #339).
 # Each is retried every dispatcher cycle until it is delivered or the PO no
 # longer needs to act. A failed delivery never aborts the dispatcher.
 #
@@ -32,6 +32,13 @@
 #   decision_blocker,     the issue is closed, or the PO ($DECISION_BLOCKER_PO_LOGIN)
 #   po_blocker            posted a standalone "/unblock" line after <since>
 #   closure events        the Feature or Epic issue is closed
+#   dispatch_trigger_stopped  (issue #339, registered with --issue 0 and --since
+#                         the creation time of the newest dispatched run, or
+#                         "none") a workflow_dispatch run of dispatcher.yml on
+#                         main created after <since> exists. A failed lookup
+#                         counts as unresolved. No comment is posted for it
+#                         (there is no issue); a persistent failure only turns
+#                         the run red.
 # A dropped record can be registered again (then it is dropped again by the
 # resolution check before any send), so a delivered event stays suppressed
 # while unresolved and only while unresolved.
@@ -173,7 +180,15 @@ fi
 # resolved <event> <issue> <since>: 0 when the PO no longer needs to act.
 # A failed lookup counts as unresolved so the event is never lost to an API error.
 resolved() {
-    local event="$1" issue="$2" since="$3" state comments
+    local event="$1" issue="$2" since="$3" state comments newest
+    if [[ "$event" == dispatch_trigger_stopped ]]; then
+        newest=$(gh run list --repo "$REPO" --workflow dispatcher.yml --branch main \
+            --event workflow_dispatch --limit 1 --json createdAt --jq '.[0].createdAt // ""' 2>/dev/null) \
+            || return 1
+        [[ -n "$newest" ]] || return 1
+        [[ "$since" == none || "$newest" > "$since" ]]
+        return
+    fi
     state=$(gh api "repos/$REPO/issues/$issue" --jq '.state' 2>/dev/null) || state=""
     [[ "$state" == closed ]] && return 0
     [[ "$event" == decision_blocker || "$event" == po_blocker ]] || return 1
@@ -234,7 +249,7 @@ while IFS= read -r rec; do
     echo "[NOTIFY] Warning: Slack delivery failed for $key (failed cycle $cycles of $FAILURE_BOUND); will retry next cycle" >&2
     if (( cycles >= FAILURE_BOUND )); then
         RED=true
-        if [[ "$(jq -r '.comment_posted' <<< "$rec")" != true ]]; then
+        if [[ "$event" != dispatch_trigger_stopped && "$(jq -r '.comment_posted' <<< "$rec")" != true ]]; then
             first=$(jq -r '.first_failed_at' <<< "$rec")
             body="## Slack notification not delivered
 The Slack notification \`$event\` for #$issue could not be delivered for $cycles dispatcher cycles in a row (first failed attempt: $first). The dispatcher keeps retrying and Slack will get it as soon as delivery recovers; this issue needs the PO's attention in the meantime. Check the \`SLACK_WEBHOOK_URL\` secret and the Slack webhook."
