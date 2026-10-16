@@ -141,6 +141,19 @@ def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
     assert "[HANDOFF]" not in proc.stdout
 
 
+def test_failed_rollback_is_not_reported_as_a_clean_pause(d):
+    d.fail_status_write("Ready for implementation")
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert d.board_writes == [f"{STORY}=In implementation"]
+    body = d.posted(STORY)[0]
+    assert body.startswith(PAUSE) and "did not take effect" in body and "stale recovery" in body
+    assert "Blocked Declaration" not in body
+    assert d.sessions == [f"implement {STORY}"]
+
+
 def test_reset_time_unknown_when_the_stream_has_none(d):
     d.claude_stream(INIT, result(error="rate_limit"), exit_code=1)
 

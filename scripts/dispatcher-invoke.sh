@@ -1457,7 +1457,7 @@ paused_comment() {
 
 pause_at_usage_limit() {
     local step="$1" target="$2" issue="$3"
-    local pr_json pr_number pr_head branch unpushed dirty next reset_ts
+    local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false
     reset_ts="$CLAUDE_LIMIT_RESET_TS"
     LAST_ACTION="pausing #$issue at a provider usage limit"
     pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
@@ -1474,7 +1474,11 @@ pause_at_usage_limit() {
         next="the fix round stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
-        set_project_status "$TARGET_ITEM_ID" "$issue" "Ready for implementation"
+        if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
+            rollback_failed=true
+            echo "Warning: Board status update failed for #$issue to 'Ready for implementation'" >&2
+            next="the board write to \"Ready for implementation\" did not take effect, so #$issue is still in \"In implementation\"; stale recovery returns it to \"Ready for implementation\" after ${STALE_THRESHOLD}s of inactivity, and /implement then starts again on the existing branch and PR."
+        fi
     else
         next="the story stays in \"In review\" and /$step is tried again on a later poll, once the usage limit and the allowance check allow it."
     fi
@@ -1492,8 +1496,12 @@ pause_at_usage_limit() {
         post_comment "$issue" "$body" \
             || echo "Warning: could not post the pause record on #$issue" >&2
     fi
-    echo "#$issue paused at a provider usage limit; no other session is started in this run"
     DISPATCH_HANDLED=true
+    if $rollback_failed; then
+        echo "#$issue paused at a provider usage limit, but the move to \"Ready for implementation\" failed" >&2
+        exit 1
+    fi
+    echo "#$issue paused at a provider usage limit; no other session is started in this run"
     exit 0
 }
 
