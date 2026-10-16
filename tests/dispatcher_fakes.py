@@ -133,6 +133,7 @@ case "$path" in
     repos/*/pulls/[0-9]*)  # one pull request, with --jq applied as the real gh does
         n="${path##*/}"
         [[ "$n" =~ ^[0-9]+$ ]] || { echo '[]'; exit 0; }
+        [[ -f "$MOCK_DIR/fail_pr_read" ]] && { echo "fake gh: forced pull request read failure" >&2; exit 1; }
         pr=$(jq --argjson n "$n" '.[] | select(.number == $n)' "$MOCK_DIR/pulls.json")
         [[ -n "$pr" ]] || { echo "fake gh: no pull request $n" >&2; exit 1; }
         if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$pr"; else echo "$pr"; fi ;;
@@ -317,11 +318,11 @@ class Dispatcher:
                                              "labels": [{"name": name} for name in labels]})
 
     def add_pr(self, number: int, issue: int, head: str = "a" * 40, draft: bool = False,
-               state: str = "open", merged: bool = False) -> None:
+               state: str = "open", merged: bool = False, **extra) -> None:
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
         pulls.append({"number": number, "body": f"Closes #{issue}", "state": state, "draft": draft,
                       "merged_at": "2026-10-13T09:30:00Z" if merged else None,
-                      "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}})
+                      "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}, **extra})
         self._write("pulls.json", pulls)
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
@@ -354,6 +355,11 @@ class Dispatcher:
     def fail_status_write(self, status: str, failing: bool = True) -> None:
         """Make the board write of ``status`` fail (a GraphQL error)."""
         path = self.mock / f"fail_option_{self._read('board.json')['options'][status]}"
+        path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def fail_pr_read(self, failing: bool = True) -> None:
+        """Make the read of a single pull request (``pulls/<n>``) fail (issue #381)."""
+        path = self.mock / "fail_pr_read"
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
     def fail_comment_writes(self, target: int, times: int) -> None:

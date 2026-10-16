@@ -840,17 +840,33 @@ post_mid_cycle_blocker() {
     # Optional hidden marker (issue #293): records the PR head a resumable step
     # was tried on, so a later run does not repeat it on the same head.
     local marker="${4:-}"
+    # Optional cause and unblock condition (issue #381): the generic text stays
+    # the default; a caller that knows the cause names it instead.
+    local reason="${5:-}"
+    local unblocked_when="${6:-/$failed_command completes successfully for #$issue_num with exit code 0}"
     local body
     body="## Blocked Declaration
 Type: external
 Declared by: $DECLARED_BY
 Blocks: #$issue_num — $issue_title
-Unblocked when: /$failed_command completes successfully for #$issue_num with exit code 0
+Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
 State of in-progress work: execution loop halted after /$failed_command failed; board reflects last successful state"
+    [[ -n "$reason" ]] && body+=$'\n'"Cause: $reason"
     [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
     post_comment "$issue_num" "$body"
+}
+
+# pr_conflicts_with_main <pr> — 0 only when GitHub reports the PR as conflicting
+# (mergeable == false or mergeable_state == "dirty"). A clean PR, an unknown
+# mergeability (null, still being computed) and a failed read all return 1, so
+# the caller keeps the generic blocker; none of them is read as a conflict
+# (issue #381). The PR list has no mergeable fields, so the PR is read alone.
+pr_conflicts_with_main() {
+    local pr_number="$1" detail
+    detail=$(gh api "repos/$REPO/pulls/$pr_number" 2>/dev/null) || return 1
+    jq -e '(.mergeable == false) or (.mergeable_state == "dirty")' <<< "$detail" >/dev/null 2>&1
 }
 
 # ─── Utility: "posted once" markers for the resume entries (issue #293) ──────
@@ -2172,8 +2188,15 @@ hand_off_to_codex_review_loop() {
         exit 1
     fi
     if [[ "$pr_draft" == "true" ]]; then
-        echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement." >&2
-        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+        if pr_conflicts_with_main "$pr_number"; then
+            echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement: it conflicts with main, so no CI run can start." >&2
+            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" "" \
+                "PR #$pr_number conflicts with main (merge conflict with main); GitHub starts no CI run for a conflicting PR, so the required pytest check cannot run until it is resolved" \
+                "the PR branch is merged with main and the conflict resolved"
+        else
+            echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement." >&2
+            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+        fi
         DISPATCH_HANDLED=true
         exit 1
     fi
