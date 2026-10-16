@@ -2456,6 +2456,15 @@ resume_review_story() {
     $DRY_RUN && return 0
     echo "✓ /review completed for PR #$pr_number"
 
+    # Record the head as reviewed before anything else: when /review leaves the
+    # story "In review" (a failed board write, a finding awaiting PO waiver), the
+    # next poll must not review the same head again.
+    if [[ -n "$marker" ]]; then
+        post_comment "$issue_num" "Dispatcher: /review completed on PR #$pr_number at head ${pr_head:0:7}; no further /review runs on this head until the PR has a new head or the PO posts /unblock.
+
+$marker" || echo "Warning: could not record the /review attempt for PR #$pr_number head ${pr_head:0:7}; the next run may review it again." >&2
+    fi
+
     refresh_board_after_resumed_story
     status=$(board_status_of "$issue_num")
     if [[ "$status" == "In merge" ]]; then
