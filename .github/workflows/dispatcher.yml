@@ -19,6 +19,10 @@
 # non-draft PR), and resumable counts it, so the invoke step reviews that PR on
 # the subscription even when nothing else is due.
 #
+# 2026-10-16 (issue #337): the checkout keeps no credentials and has the full
+# history, and a step before the invoke makes plain `git push` authenticate
+# through `gh` with PROJECT_TOKEN. A session no longer needs a git override.
+#
 # 2026-09-27 (issue #257): ready_for_refinement de-duplication state now
 # survives ephemeral runners. .dispatcher-state/ is restored from
 # actions/cache before the poll and saved under a unique per-run key right
@@ -70,6 +74,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Issue #337: no token is written into .git/config (the job token
+          # cannot push here and its extraheader overrides GH_TOKEN), and the
+          # full history lets a session merge origin/main without --unshallow.
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Guard — check DISPATCHER_ENABLED
         id: guard
@@ -174,6 +184,14 @@ jobs:
       - name: Install Claude Code
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
         run: npm install -g @anthropic-ai/claude-code@2.1.296
+
+      # Issue #337: git asks gh for credentials, so a session's plain git push
+      # authenticates with PROJECT_TOKEN and no token is written to git config.
+      - name: Configure git to authenticate through gh
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: gh auth setup-git
 
       - name: Run dispatcher invoke
         if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
