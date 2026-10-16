@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests import script_tools
-from tests.script_tools import find_bash, missing_tools, script_path, windows_env
+from tests.script_tools import find_bash, git_bash_dirs, host_script_path, missing_tools, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -183,10 +183,23 @@ def test_missing_tools_names_each_missing_tool():
     assert missing_tools(["bash", "jq", "git", "python3"], which, "posix") == ["jq", "python3"]
 
 
-def test_windows_path_keeps_the_host_path_with_jq_behind_the_fakes():
-    host = r"C:\Program Files\Git\mingw64\bin;C:\ProgramData\chocolatey\lib\jq\tools"
-    path = script_path("C:/t/bin", "nt", host)
-    assert path.split(";") == ["C:/t/bin", r"C:\Program Files\Git\mingw64\bin", r"C:\ProgramData\chocolatey\lib\jq\tools"]
+POWERSHELL_PATH = r"C:\Windows\system32;C:\Program Files\Git\cmd;C:\ProgramData\chocolatey\lib\jq\tools"
+
+
+@pytest.mark.parametrize("bash", [GIT_ROOT + r"\usr\bin\bash.exe", GIT_ROOT + r"\bin\bash.exe"])
+def test_windows_path_from_powershell_gets_git_bash_coreutils_before_the_host_path(bash):
+    # A PowerShell PATH has Git's cmd dir only, so dirname/mktemp were "command not found" (issue #384).
+    path = script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")
+    assert path[:3] == ["C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert path[3:] == POWERSHELL_PATH.split(";")  # jq stays reachable, after Git's own timeout and coreutils
+
+
+def test_host_script_path_keeps_the_host_path_and_adds_git_bash_dirs_on_windows():
+    bash = GIT_ROOT + r"\usr\bin\bash.exe"
+    assert host_script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")[:3] == [
+        "C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert host_script_path(None, "posix", "/opt/jq/bin:/usr/bin") == "/opt/jq/bin:/usr/bin"
+    assert git_bash_dirs(None) == []
 
 
 def test_posix_path_stays_narrow():

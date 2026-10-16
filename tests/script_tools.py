@@ -67,12 +67,38 @@ def requires(*tools: str) -> pytest.MarkDecorator:
     return pytest.mark.skipif(bool(missing), reason=f"requires {', '.join(tools)} (not found: {', '.join(names)})")
 
 
-def script_path(fake_bin: str, os_name: str = os.name, host_path: str | None = None) -> str:
-    """``PATH`` for a script under test: the fakes first, then the narrow system dirs or, on Windows, the host ``PATH``."""
+def git_bash_dirs(bash: str | None) -> list[str]:
+    """Git for Windows' ``usr\\bin`` (coreutils) and ``mingw64\\bin`` for a Git Bash ``bash.exe``.
+
+    A PowerShell or cmd ``PATH`` has neither, so a script run there cannot find ``dirname`` or ``mktemp``.
+    """
+    if not bash:
+        return []
+    parent = PureWindowsPath(bash).parent
+    is_usr_bin = parent.name.lower() == "bin" and parent.parent.name.lower() == "usr"
+    root = parent.parent.parent if is_usr_bin else parent.parent
+    return [str(root / "usr" / "bin"), str(root / "mingw64" / "bin")]
+
+
+def script_path(fake_bin: str, os_name: str = os.name, host_path: str | None = None,
+                bash: str | None = None) -> str:
+    """``PATH`` for a script under test: the fakes first, then the narrow system dirs or, on Windows,
+    Git Bash's own tool dirs and the host ``PATH``."""
     if os_name == "nt":
         host = os.environ.get("PATH", "") if host_path is None else host_path
-        return ";".join([fake_bin, host]) if host else fake_bin
+        dirs = git_bash_dirs(BASH if bash is None else bash)
+        return ";".join(p for p in [fake_bin, *dirs, host] if p)
     return ":".join([fake_bin, "/usr/bin", "/bin"])
+
+
+def host_script_path(fake_bin: str | None = None, os_name: str = os.name, host_path: str | None = None,
+                     bash: str | None = None) -> str:
+    """``PATH`` for a harness that keeps the host ``PATH`` on every OS, with Git Bash's tool dirs on Windows."""
+    host = os.environ.get("PATH", "") if host_path is None else host_path
+    if os_name == "nt":
+        dirs = git_bash_dirs(BASH if bash is None else bash)
+        return ";".join(p for p in [fake_bin, *dirs, host] if p)
+    return ":".join(p for p in [fake_bin, host] if p)
 
 
 # Windows processes misbehave without these, e.g. a child creates a literal ``%SystemDrive%`` folder

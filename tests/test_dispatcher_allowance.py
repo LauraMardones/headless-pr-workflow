@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.script_tools import BASH, requires
+from tests.script_tools import BASH, host_script_path, requires
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "dispatcher-allowance.sh"
@@ -94,7 +94,7 @@ class Env:
 
     def run(self, token: str | None = TOKEN, **env):
         full = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": host_script_path(),
             "HOME": str(self.tmp),
             "CLAUDE_BIN": str(self.bin),
             "STUB_LOG": str(self.log),
@@ -105,7 +105,7 @@ class Env:
             full["CLAUDE_CODE_OAUTH_TOKEN"] = token
         full.update(self.extra)
         full.update({k: str(v) for k, v in env.items()})
-        proc = subprocess.run([BASH, str(SCRIPT)], env=full, capture_output=True,
+        proc = subprocess.run([BASH, SCRIPT.as_posix()], env=full, capture_output=True,
                               text=True, encoding="utf-8", timeout=60)
         out = check_contract(proc)
         return proc, out
