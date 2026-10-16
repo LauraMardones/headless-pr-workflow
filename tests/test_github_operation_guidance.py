@@ -250,3 +250,29 @@ def test_workflow_docs_describe_the_codex_review_loop() -> None:
         "| `codex-review-bookkeeping` | Move the story and post the Session Summary after a Codex review, "
         "with no model. | orchestrator | P1-high | F-review | action | core | implemented |"
     ) in automation_map
+
+
+def _agents_section(heading: str) -> str:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    return agents.split(f"## {heading}", maxsplit=1)[1].split("\n## ", maxsplit=1)[0].strip()
+
+
+def test_review_guidelines_scope_is_limited_to_automated_reviewers() -> None:
+    opening = _agents_section("Review Guidelines").split("\n\n", maxsplit=1)[0]
+    opening = " ".join(opening.split())
+
+    assert "applies only to automated pull request reviewers" in opening
+    assert "human-requested" in opening
+    assert "`/review <n>`" in opening
+    assert '"review PR <n>"' in opening
+    assert "`.claude/commands/review.md` in full" in opening
+    assert "before anything is posted to GitHub" in opening
+
+
+def test_workflow_commands_document_codex_review_name_collision() -> None:
+    section = _agents_section("Workflow Commands")
+    collision = next(line for line in section.splitlines() if "built-in" in line)
+
+    assert "Codex" in collision
+    assert "`/review`" in collision
+    assert 'say "Follow .claude/commands/review.md for PR <n>"' in collision
