@@ -42,6 +42,36 @@ case "$METHOD" in squash|merge|rebase) ;; *) echo "Error: invalid --method: $MET
 
 block() { echo "/merge blocked for PR #$PR: $*" >&2; exit 1; }
 
+# hpw's stderr is kept for the block message, never dropped (issue #374).
+hpw_err=$(mktemp) || { echo "Error: could not create a temporary file." >&2; exit 1; }
+trap 'rm -f "$hpw_err"' EXIT
+
+# Quoted output is bounded so the block message stays readable: last 20 lines,
+# at most 2000 bytes.
+bounded() { tail -n 20 | tail -c 2000; }
+
+# Blocks on an `hpw <sub> --json` failure that carries no blocking reasons:
+# hpw's gh error path ({"ok": false, "error", "returncode", "stderr"}) names the
+# gh error; anything else is not a usable result and quotes hpw's own stderr
+# (its stdout when stderr is empty, for example a traceback).
+block_hpw_failure() {  # <sub> <gh-error prefix> <rc> <stdout>
+    local sub="$1" prefix="$2" rc="$3" out="$4" error gh_rc gh_err detail
+    error=$(jq -r 'select(type == "object" and .ok == false and (.error | type == "string") and .error != "") | .error'         <<< "$out" 2>/dev/null | head -n 1)
+    if [[ -n "$error" ]]; then
+        gh_rc=$(jq -r 'select(type == "object") | .returncode // "unknown"' <<< "$out" 2>/dev/null | head -n 1)
+        gh_err=$(jq -r 'select(type == "object") | .stderr // ""' <<< "$out" 2>/dev/null | bounded)
+        block "$prefix: $error (gh exit ${gh_rc:-unknown}): ${gh_err:-(no stderr)}"
+    fi
+    detail=$(bounded < "$hpw_err")
+    [[ -n "$detail" ]] || detail=$(bounded <<< "$out")
+    block "hpw $sub failed (exit $rc) without a usable result: ${detail:-(no output)}"
+}
+
+# The blocking reasons of an hpw --json result, joined; empty when there are none.
+blocking_reasons() {
+    jq -r 'select(type == "object") | (.blocking_reasons // []) | select(type == "array" and length > 0) | map(tostring) | join("; ")'         <<< "$1" 2>/dev/null | head -n 1
+}
+
 # GraphQL pre-flight: before any other step and before any mutation.
 if ! command -v gh >/dev/null 2>&1; then
     block "merging requires GraphQL-capable gh (2.50 or later) to run the merge gate; gh was not found. GitHub Actions or a local session provides it. No GitHub mutation was made."
@@ -90,14 +120,24 @@ if ! comment_records=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_pa
     block "the PR comments could not be read, so merge ownership cannot be verified."
 fi
 owner_marker="<!-- hpw:dispatcher action=merge-owner pr=$PR head=$head_sha -->"
+marker_note="; no dispatcher owner marker for head ${head_sha:0:7}"
 if jq -e -s --arg bot "$bot_login" --arg marker "$owner_marker" '
         any(.[];.l == $bot and (.b | contains($marker)))
     ' <<< "$comment_records" >/dev/null 2>&1; then
     owner_args+=(--expected-owner "$OWNER_ID" --expected-owner-sha "$head_sha")
+    marker_note=""
 fi
-if ! owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>/dev/null); then
-    reasons=$(jq -r '(.blocking_reasons // []) | join("; ")' <<< "$owner_out" 2>/dev/null)
-    block "merge ownership gate not passed (no dispatcher owner marker for head ${head_sha:0:7}, or takeover required). ${reasons}"
+owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>"$hpw_err")
+owner_rc=$?
+if [[ $owner_rc -ne 0 ]]; then
+    # The status and reasons are named only when hpw reported them; a gh error
+    # or an unusable result is never shown as an ownership failure (#374).
+    reasons=$(blocking_reasons "$owner_out")
+    if [[ -n "$reasons" ]]; then
+        owner_status=$(jq -r 'select(type == "object") | .ownership_status // "unknown"' <<< "$owner_out" 2>/dev/null | head -n 1)
+        block "merge ownership gate not passed (status: ${owner_status:-unknown}${marker_note}). ${reasons}"
+    fi
+    block_hpw_failure merge-owner "hpw merge-owner could not evaluate ownership" "$owner_rc" "$owner_out"
 fi
 
 # Merge gate, run against the freshly refreshed evidence. Only exit 0 merges.
@@ -113,11 +153,12 @@ if [[ -z "$gate_head" || "${head_sha:0:7}" != "${gate_head,,}" ]]; then
 fi
 
 # The merge. hpw merge-pr re-reads readiness and merges only the verified head.
-merge_json=$("$HPW_BIN" merge-pr "$PR" --repo "$REPO" --method "$METHOD" --execute --expect-head "$head_sha" --json 2>/dev/null)
+merge_json=$("$HPW_BIN" merge-pr "$PR" --repo "$REPO" --method "$METHOD" --execute --expect-head "$head_sha" --json 2>"$hpw_err")
 merge_rc=$?
 if [[ $merge_rc -ne 0 ]] || [[ "$(jq -r '.merged // false' <<< "$merge_json" 2>/dev/null)" != "true" ]]; then
-    reasons=$(jq -r '(.blocking_reasons // []) | join("; ")' <<< "$merge_json" 2>/dev/null)
-    block "hpw merge-pr did not confirm a merge (exit $merge_rc). ${reasons}"
+    reasons=$(blocking_reasons "$merge_json")
+    [[ -z "$reasons" ]] || block "hpw merge-pr did not confirm a merge (exit $merge_rc). ${reasons}"
+    block_hpw_failure merge-pr "hpw merge-pr did not confirm a merge (exit $merge_rc)" "$merge_rc" "$merge_json"
 fi
 merged_head=$(jq -r '.head_sha // empty' <<< "$merge_json")
 [[ -n "$merged_head" ]] || merged_head="$head_sha"
