@@ -36,15 +36,22 @@
 #   but never written.
 #   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
-# Requirements: bash, curl, jq
+# Requirements: bash 4+, curl, jq
 #
 # Output (stdout):
 #   JSON object:
 #     {
 #       "ready_for_implementation": [{"number": N, "title": "..."}, ...],
-#       "ready_for_refinement":     [{"number": N, "title": "..."}, ...]
+#       "ready_for_refinement":     [{"number": N, "title": "..."}, ...],
+#       "in_merge":                 [{"number": N, "title": "..."}, ...],
+#       "in_implementation":        [{"number": N, "title": "..."}, ...],
+#       "review_due":               [{"number": N, "title": "..."}, ...]
 #     }
-#   Both keys are always present; each value is [] when no items match.
+#   Every key is always present; each value is [] when no items match.
+#   review_due (issue #315) lists the stories "In review" that
+#   dispatcher-invoke.sh reviews with a /review session: one executor: label
+#   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
+#   open, non-draft PR that closes the story.
 #
 # Prototype divergences from expected behaviour:
 #   D1  Pagination: fetches all project items via cursor pagination, 100 per
@@ -123,10 +130,14 @@ done
 OWNER="${REPO%%/*}"
 REPO_NAME="${REPO##*/}"
 GRAPHQL="https://api.github.com/graphql"
+REST="https://api.github.com"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
+# The review-path tables, shared with dispatcher-invoke.sh (issue #315).
+# shellcheck source=scripts/lib/review-routing.sh
+source "$SCRIPT_DIR/lib/review-routing.sh"
 
 # ─── GraphQL helper ───────────────────────────────────────────────────────────
 
@@ -202,6 +213,7 @@ while :; do
           ... on Issue {
             number
             title
+            labels(first:20) { nodes { name } }
           }
         }
         fieldValues(first:20) { nodes {
@@ -271,6 +283,46 @@ status_items() {
 IN_MERGE=$(status_items "In merge")
 IN_IMPLEMENTATION=$(status_items "In implementation")
 
+# Stories "In review" that dispatcher-invoke.sh reviews with a /review session
+# (issue #315): exactly one executor: label with a REVIEW_EXECUTOR_ROUTING row
+# (scripts/lib/review-routing.sh, the table the invoke script reads) and an
+# open, non-draft PR linked by "Closes #<n>". A story that waits for Codex
+# Cloud is not listed.
+REVIEW_CANDIDATES=$(echo "$ITEMS" | jq -c '[
+  .data.repository.projectsV2.nodes[0].items.nodes[] |
+  select(
+    (.content.number? != null) and
+    ([ .fieldValues.nodes[] |
+       select((.field.name? // "") == "Status" and (.name? // "") == "In review")
+    ] | length > 0)
+  ) |
+  { number: .content.number, title: .content.title,
+    executors: [ (.content.labels.nodes // [])[] | .name | select(startswith("executor:")) | ltrimstr("executor:") ] }
+]')
+REVIEW_DUE='[]'
+if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
+    REVIEW_ROWS=$(echo "$REVIEW_CANDIDATES" | jq -c '.[]')
+    OPEN_PRS=""
+    while IFS= read -r row; do
+        mapfile -t EXEC_SUFFIXES < <(echo "$row" | jq -r '.executors[]')
+        review_by_dispatcher_session "${EXEC_SUFFIXES[@]}" || continue
+        if [[ -z "$OPEN_PRS" ]]; then
+            OPEN_PRS=$(curl -sf \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
+                echo "[POLL] Warning: could not read open pull requests; review_due may be incomplete" >&2
+                OPEN_PRS="[]"
+            }
+        fi
+        if echo "$OPEN_PRS" | jq -e --argjson n "$(echo "$row" | jq '.number')" '
+            any(.[]; (.draft | not) and ((.body // "") | ascii_downcase
+                | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))' >/dev/null; then
+            REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+        fi
+    done <<< "$REVIEW_ROWS"
+fi
+
 IMPL_COUNT=$(echo "$READY_FOR_IMPL" | jq 'length')
 REFINE_COUNT=$(echo "$READY_FOR_REFINE" | jq 'length')
 
@@ -302,7 +354,7 @@ else
 fi
 
 echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(s) ready for refinement." >&2
-echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN_IMPLEMENTATION" | jq 'length') item(s) in implementation." >&2
+echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN_IMPLEMENTATION" | jq 'length') item(s) in implementation, $(echo "$REVIEW_DUE" | jq 'length') item(s) due for review." >&2
 
 # ─── Ready for refinement notification ───────────────────────────────────────
 #
@@ -424,5 +476,7 @@ jq -n \
     --argjson refine "$READY_FOR_REFINE" \
     --argjson in_merge "$IN_MERGE" \
     --argjson in_implementation "$IN_IMPLEMENTATION" \
+    --argjson review_due "$REVIEW_DUE" \
     '{ready_for_implementation: $impl, ready_for_refinement: $refine,
-      in_merge: $in_merge, in_implementation: $in_implementation}'
+      in_merge: $in_merge, in_implementation: $in_implementation,
+      review_due: $review_due}'

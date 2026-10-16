@@ -11,8 +11,13 @@
 #
 # 2026-10-14 (issue #314, ADR-012): every Claude session runs Claude Code on
 # the runner, signed in with CLAUDE_CODE_OAUTH_TOKEN (the PO's subscription).
-# The metered Anthropic key is no longer wired in and must not be added back;
-# OPENAI_API_KEY_CODEX stays for the Codex tier until #315.
+# The metered Anthropic key is no longer wired in and must not be added back.
+#
+# 2026-10-16 (issue #315): the last metered path is gone. The invoke step's env:
+# names CLAUDE_CODE_OAUTH_TOKEN as its only model-provider secret. The poll
+# reports review_due (a Codex-implemented story "In review" with an open,
+# non-draft PR), and resumable counts it, so the invoke step reviews that PR on
+# the subscription even when nothing else is due.
 #
 # 2026-09-27 (issue #257): ready_for_refinement de-duplication state now
 # survives ephemeral runners. .dispatcher-state/ is restored from
@@ -123,8 +128,9 @@ jobs:
           echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"
           # Issue #293: a story "In merge", or "In implementation" with a fix
           # round due, is resumed by dispatcher-invoke.sh even when no story is
-          # ready for implementation.
-          RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // [])) | length > 0')
+          # ready for implementation. Issue #315: so is a story "In review"
+          # whose PR a dispatcher /review session reviews (review_due).
+          RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // []) + (.review_due // [])) | length > 0')
           # Issue #348: a story labelled evidence:pending is Done, so no board
           # state leads back to it, but its cleanup closing summary is still to
           # be posted by dispatcher-invoke.sh. A failed read counts as pending,
@@ -177,7 +183,6 @@ jobs:
           READY_BUFFER_MIN: ${{ vars.READY_BUFFER_MIN }}
           READY_BUFFER_MAX: ${{ vars.READY_BUFFER_MAX }}
           USAGE_LIMIT_SESSIONS_PER_DAY: ${{ vars.USAGE_LIMIT_SESSIONS_PER_DAY }}
-          OPENAI_API_KEY_CODEX: ${{ secrets.OPENAI_API_KEY_CODEX }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
           RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
