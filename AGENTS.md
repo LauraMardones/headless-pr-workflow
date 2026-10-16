@@ -111,6 +111,13 @@ the branch is for; no random suffixes.
 
 ## Review Guidelines
 
+This section applies only to automated pull request reviewers acting with no
+human request, such as Codex Cloud automatic review and the Codex Cloud review
+requested by the trigger-phrase PR comment (ADR-006 → Decision), whoever posts
+that comment. Any other human-requested review, including `/review <n>` or "review
+PR <n>" asked of an assistant session, follows `.claude/commands/review.md` in
+full, read before anything is posted to GitHub.
+
 This section applies to automated pull request reviewers, such as Codex Cloud
 automatic review, that can comment on a PR but do not run the full `/review`
 workflow in `.claude/commands/review.md` (board transitions, formal approval,
@@ -154,6 +161,7 @@ To specify an Epic with the PO: Follow `.claude/commands/spec.md` with no argume
 To refine an issue: Follow `.claude/commands/refine.md` with the issue number.
 To implement an issue: Follow `.claude/commands/implement.md` with the issue number.
 To review a PR: Follow `.claude/commands/review.md` with the PR number.
+In Codex, `/review` collides with Codex's built-in reviewer, so `/review <n>` does not reliably reach the repo command; instead say "Follow .claude/commands/review.md for PR <n>".
 To merge a PR: Follow `.claude/commands/merge.md` with the PR number.
 To clean up after a merged PR: Follow `.claude/commands/cleanup.md` with the PR number.
 To verify Feature or Epic closure: Follow `.claude/commands/verify-closure.md`
