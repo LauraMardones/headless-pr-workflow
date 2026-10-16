@@ -91,12 +91,15 @@ Run the complete suite serially with `python -m pytest`, or in parallel with
 `pytest-xdist` (installed by the `dev` extra) using:
 
 ```
-python -m pytest -n auto
+python -m pytest -n 4
 ```
 
-CI runs the full suite with `-n auto`. Parallel execution is not a pytest default
+Locally, use 4 workers rather than `-n auto`. On a 16-core Windows machine, `-n 4`
+ran the suite about three times faster than serial with no new failures, while
+`-n auto` (16 workers) added failures. CI runs the full suite with `-n auto`, which
+is 4 workers on its runner. Parallel execution is not a pytest default
 (no `addopts`), so targeted runs stay serial. On the Windows Codex fallback use
-`py -3.12 -m pytest` and `py -3.12 -m pytest -n auto`. Each xdist worker gets its own
+`py -3.12 -m pytest` and `py -3.12 -m pytest -n 4`. Each xdist worker gets its own
 `popen-gwN` directory under the temp base below, so workers do not share temp trees.
 
 The root-level `conftest.py` redirects pytest's temp directory to `.pytest_tmp/` one level above the repo root (outside the git working tree) to avoid two issues: the system temp directory may not be writable in sandboxed environments like Codex, and a temp dir inside the repo causes tests that expect a non-git environment to fail.

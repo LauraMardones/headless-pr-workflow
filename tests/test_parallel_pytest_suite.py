@@ -29,8 +29,10 @@ def test_ci_runs_full_suite_in_parallel_under_pytest_check_name() -> None:
 def test_agents_documents_serial_targeted_and_parallel_full_commands() -> None:
     agents = read("AGENTS.md")
     assert "python -m pytest tests/path.py::test_name" in agents
-    assert "python -m pytest -n auto" in agents
-    assert "py -3.12 -m pytest -n auto" in agents
+    assert "\npython -m pytest -n 4\n" in agents
+    assert "py -3.12 -m pytest -n 4" in agents
+    # Locally, -n auto (16 workers) added failures on Windows; the bounded count did not.
+    assert "\npython -m pytest -n auto\n" not in agents
 
 
 def test_policy_temp_repo_teardown_leaves_sibling_directories() -> None:
