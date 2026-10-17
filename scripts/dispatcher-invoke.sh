@@ -324,6 +324,9 @@ CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The Codex review request is read from its one definition, never written in
+# this file (AGENTS.md, Codex Review Requests): CODEX_REVIEW_TRIGGER_PHRASE.
+REVIEW_POLICY_FILE="$REPO_ROOT/src/headless_pr_workflow/review_policy.py"
 USAGE_LIMIT_SCRIPT="${USAGE_LIMIT_SCRIPT:-$SCRIPT_DIR/dispatcher-usage-limit.sh}"  # overridable for tests
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 MERGE_SCRIPT="${MERGE_SCRIPT:-$SCRIPT_DIR/dispatcher-merge.sh}"          # /merge without a session (#264); overridable for tests
@@ -2224,7 +2227,11 @@ finish_story() {
 #   - a fix round that is due on the head the PR already had before the
 #     session means the session pushed no commit. The blocker records that
 #     head, so the same findings do not start a session on every poll. This
-#     holds whatever status the session left the story in;
+#     holds whatever status the session left the story in. Exceptions (issue
+#     #357, no_push_round_is_expected): a round that declared a decision
+#     blocker, and the post-waiver round once the session has posted a review
+#     request after the PO's /unblock; the post-waiver round without that
+#     request gets a blocker naming the missing request;
 #   - a fix round that is due on a new head means Codex answered, and the
 #     bookkeeping job acted, while the session was still running. Nothing is
 #     written and nothing is recorded: the next run starts that fix round.
@@ -2363,9 +2370,37 @@ $(hand_off_done_marker "$pr_number")" || true
 # does not excuse a later unrelated Blocker). Returns 1 otherwise, and when the
 # comments cannot be read.
 NO_PUSH_ROUND_REASON=""
+NO_PUSH_ROUND_MISSING_REQUEST=false
+
+# codex_review_trigger_phrase — CODEX_REVIEW_TRIGGER_PHRASE from
+# REVIEW_POLICY_FILE, lowercased; prints nothing when it cannot be read.
+codex_review_trigger_phrase() {
+    sed -n 's/^CODEX_REVIEW_TRIGGER_PHRASE = "\(.*\)"[[:space:]]*$/\1/p' "$REVIEW_POLICY_FILE" 2>/dev/null \
+        | head -n 1 | tr '[:upper:]' '[:lower:]'
+}
+
+# review_request_after <pr> <time> — 0 when a PR conversation comment by a
+# non-Bot account, created after <time>, has the trigger phrase as its first
+# line (is_codex_review_request in review_policy.py). 1 otherwise, and when the
+# phrase or the comments cannot be read.
+review_request_after() {
+    local pr_number="$1" since="$2" phrase count
+    phrase=$(codex_review_trigger_phrase)
+    [[ -n "$phrase" ]] || return 1
+    count=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+        | jq -rs --arg phrase "$phrase" --arg since "$since" '
+            [add // [] | .[]
+             | select((.user.type // "") != "Bot" and (.created_at // "") > $since
+                      and (((.body // "") | gsub("^\\s+"; "") | split("\n")[0]
+                            | gsub("^\\s+|\\s+$"; "") | ascii_downcase) == $phrase))]
+            | length') || return 1
+    [[ -n "$count" && "$count" != "0" ]]
+}
+
 no_push_round_is_expected() {
     local blocker_before="$1" pr_number="${2:-}" blocker_json created unblocked unblocked_at login moved_after
     NO_PUSH_ROUND_REASON=""
+    NO_PUSH_ROUND_MISSING_REQUEST=false
     blocker_json=$(latest_decision_blocker_json "$ISSUE_NUMBER") || return 1
     [[ -n "$blocker_json" ]] || return 1
     created=$(jq -r '.created_at' <<< "$blocker_json")
@@ -2379,6 +2414,14 @@ no_push_round_is_expected() {
                 [add // [] | .[] | select((.user.login // "") == $login and .created_at > $since
                                           and ((.body // "") | contains($marker)))] | length') || return 1
         [[ "$moved_after" == "0" ]] || return 1
+        # The round ends only with a fresh review request: the head's latest
+        # review event is still the waived findings result, so without a newer
+        # request the bookkeeping job would act on it again and the attempt
+        # marker below would never be superseded.
+        if ! review_request_after "$pr_number" "$unblocked_at"; then
+            NO_PUSH_ROUND_MISSING_REQUEST=true
+            return 1
+        fi
         NO_PUSH_ROUND_REASON="post-waiver round: the PO's /unblock follows the decision blocker"
         return 0
     fi
@@ -2452,6 +2495,15 @@ $(fix_round_attempt_marker "$pr_number" "$pr_head")" \
             return 0
         fi
         due=false
+    fi
+    if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]] && $NO_PUSH_ROUND_MISSING_REQUEST; then
+        echo "Error: the post-waiver /implement for #$ISSUE_NUMBER pushed nothing and posted no review request on PR #$pr_number after the PO's /unblock." >&2
+        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
+            "$(fix_round_attempt_marker "$pr_number" "$pr_head")" \
+            "the post-waiver /implement pushed no commit and posted no review request on PR #$pr_number after the PO's /unblock; the latest Codex result on head ${pr_head:0:7} is still the waived findings" \
+            "a review request for head ${pr_head:0:7} is posted on PR #$pr_number and the PO posts /unblock"
+        DISPATCH_HANDLED=true
+        exit 1
     fi
     if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]]; then
         echo "Error: /implement for #$ISSUE_NUMBER pushed no new commit to PR #$pr_number; the findings recorded for head ${pr_head:0:7} are still open." >&2

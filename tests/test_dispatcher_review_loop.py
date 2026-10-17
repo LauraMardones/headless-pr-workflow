@@ -1465,6 +1465,15 @@ def session_declares_blocker(d: Dispatcher, command: str, issue: int = STORY, pu
     d.on_session(command, script)
 
 
+def session_requests_review(d: Dispatcher, pr: int = PR, login: str = BOT) -> None:
+    """The ``/implement`` session posts the post-waiver review request on the PR (pushing nothing)."""
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    body = json.dumps(CODEX_REVIEW_TRIGGER_PHRASE + "\n")
+    d.on_session("implement", f"""jq --argjson b '{body}' '. + [{{user: {{login: "{login}"}}, author_association: "COLLABORATOR", created_at: "2026-10-13T12:00:00Z", body: $b}}]' """
+                 f""""$MOCK_DIR/comments_{pr}.json" > "$MOCK_DIR/c.tmp" && mv "$MOCK_DIR/c.tmp" "$MOCK_DIR/comments_{pr}.json"\n""")
+
+
 def decision_events(d: Dispatcher) -> list[dict]:
     return [e for e in d.queued_events if e["event"] == "decision_blocker"]
 
@@ -1583,6 +1592,7 @@ def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
     d.add_findings(PR, HEAD)
     d.add_comment(STORY, DECLARATION)
     d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+    session_requests_review(d)
 
     proc = d.resume()
 
@@ -1591,10 +1601,55 @@ def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
     assert not any("Type: external" in body for body in d.posted(STORY))
     assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
     assert d.board_writes == [f"{STORY}=In review"]
-    assert d.posted(PR) == []  # the dispatcher posts no review request; the job posts the one for the head
+    assert d.posted(PR) == []  # the one review request is the session's; the dispatcher posts none
 
     again = d.resume()
     assert again.returncode == 0 and d.sessions == [f"implement {STORY}"]
+
+
+@needs_tools
+def test_357_post_waiver_round_without_a_fresh_review_request_is_a_failure(d):
+    # The request that produced the waived findings predates the /unblock; the
+    # session pushes nothing and posts no new request, so the head's latest
+    # review event stays the waived findings result.
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_comment(PR, CODEX_REVIEW_TRIGGER_PHRASE + "\n")
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+    d.add_comment(PR, "Thanks, " + CODEX_REVIEW_TRIGGER_PHRASE + " later.\n")  # not a request: phrase not first
+
+    proc = d.resume()
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "posted no review request" in proc.stderr
+    blockers = [b for b in d.posted(STORY) if "Type: external" in b]
+    assert len(blockers) == 1 and "posted no review request" in blockers[0]
+    assert f"action=fix-round-attempt pr={PR} head={HEAD}" in blockers[0]
+    assert not any("without a new commit" in body for body in d.posted(STORY))
+    assert d.board_writes == []
+
+    again = d.resume()
+    assert d.sessions == [f"implement {STORY}"], again.stdout + again.stderr  # no second round on the head
+
+
+@needs_tools
+def test_357_post_waiver_review_request_by_a_bot_does_not_end_the_round(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+    session_requests_review(d)
+    script = (d.mock / "on_implement.sh").read_text(encoding="utf-8")
+    d.on_session("implement", script.replace("user: {login:", 'user: {type: "Bot", login:'))
+
+    proc = d.resume()
+
+    assert proc.returncode == 1 and "posted no review request" in proc.stderr
 
 
 @needs_tools
