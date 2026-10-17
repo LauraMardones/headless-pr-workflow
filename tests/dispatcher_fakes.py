@@ -331,7 +331,7 @@ class Dispatcher:
         tick = int((self.mock / "clock").read_text()) + 1 if (self.mock / "clock").exists() else 1
         (self.mock / "clock").write_text(str(tick))
         comments = self._read(f"comments_{target}.json", [])
-        comments.append({"user": {"login": login}, "body": body,
+        comments.append({"user": {"login": login}, "author_association": "COLLABORATOR", "body": body,
                          "created_at": f"2026-10-13T10:{tick // 60:02d}:{tick % 60:02d}Z"})
         self._write(f"comments_{target}.json", comments)
 
