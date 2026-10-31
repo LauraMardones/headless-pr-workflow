@@ -872,10 +872,71 @@ def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_res
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.phases == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
     assert proc.stdout.count("Feature #50: all 3 stories Done.") == 1
-    # Issue #295: invoke queues the event; the retry step delivers it.
-    assert d.slack_calls == []
+    # Issue #349: the drain after the last resume item delivers the event in the run.
+    assert len(d.slack_calls) == 1
     assert [(e["event"], e["issue"], e["delivered"]) for e in d.queued_events] == [
-        ("feature_closure_confirmation", 50, False)]
+        ("feature_closure_confirmation", 50, True)]
+
+
+def _closure_then_other_feature(d):
+    d.add_story(600, "In merge", body="Feature group: #50 Feature: a")
+    d.add_pr(960, 600)
+    d.add_story(602, "Done", body="Feature group: #50 Feature: a")
+    d.add_story(601, "In merge", body="Feature group: #51 Feature: b")
+    d.add_pr(961, 601)
+    d.add_story(603, "Ready for refinement", body="Feature group: #51 Feature: b")
+
+
+@needs_tools
+def test_event_is_delivered_before_the_next_resume_item_starts(d):
+    _closure_then_other_feature(d)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sequence == ["merge 960", "cleanup 600", "slack", "merge 961", "cleanup 601"]
+    assert [(e["event"], e["delivered"]) for e in d.queued_events] == [
+        ("feature_closure_confirmation", True)]
+
+
+@needs_tools
+def test_event_is_delivered_before_the_requested_implement_session(d):
+    d.add_story(600, "In merge", body="Feature group: #50 Feature: a")
+    d.add_pr(960, 600)
+    d.add_story(602, "Done", body="Feature group: #50 Feature: a")
+    d.add_story(700, "Ready for implementation")
+    d.add_pr(970, 700)
+
+    proc = d.run_issue(700)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    seq = d.sequence
+    assert "slack" in seq and "session implement 700" in seq, seq
+    assert seq.index("slack") < seq.index("session implement 700")
+
+
+@needs_tools
+def test_failed_drain_between_resume_items_does_not_stop_the_pass(d):
+    _closure_then_other_feature(d)
+    (d.mock / "fail_slack").write_text("")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.phases == ["merge 960", "cleanup 600", "merge 961", "cleanup 601"]
+    events = d.queued_events
+    assert [(e["event"], e["delivered"]) for e in events] == [("feature_closure_confirmation", False)]
+    assert not events[0].get("failed_cycles")
+
+
+@needs_tools
+def test_dry_run_drain_between_resume_items_sends_nothing(d):
+    _closure_then_other_feature(d)
+
+    proc = d.resume("--dry-run")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.slack_calls == []
 
 
 @needs_tools
@@ -1435,7 +1496,8 @@ def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_o
     assert third.returncode == 0, third.stdout + third.stderr
     blockers = [b for b in d.posted(STORY) if "## Blocked Declaration" in b]
     assert len(blockers) == 1 and "Type: external" in blockers[0]
-    assert d.slack_calls == [] and [e["event"] for e in d.queued_events] == ["po_blocker"]  # one retried message (#359)
+    # One retried message (#359); the drain after the resume item delivers it in the run (#349).
+    assert len(d.slack_calls) == 1 and [(e["event"], e["delivered"]) for e in d.queued_events] == [("po_blocker", True)]
 
     # Retrying has stopped: no further write attempt, no second blocker, no second Slack message.
     writes = len([line for line in (d.mock / "gh.log").read_text().splitlines() if f"issues/{PR}/comments" in line and "POST" in line])

@@ -202,6 +202,19 @@ Revalidate after dependency closes: yes/no
 - ...
 ```
 
+## Refinement Completeness Gate (mandatory)
+
+The last step of every refinement, after the board write, is the deterministic check; the model is not the judge of its own completeness.
+
+- Write the board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` and require exit `0`: that exit is the board read-back. A non-zero exit means the board was not confirmed; report it, never claim the status.
+- Then run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and the board and checks the `type:`, `executor:` and `prio:` labels, the body `PO status:` against the board Status, open hard dependencies, the required body sections, open questions and parent references.
+- Run it on every refinement, including a re-refinement of an issue that is already `Ready for implementation`.
+- Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels, dependencies or board could not be read) forbids it.
+- On a non-zero exit after the board write: fix what can be fixed and re-run the check; if a failure remains, move the board back with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`, set `PO status: In refinement` in the issue body, and list the failing checks as blockers, so the body and the board never claim a status the check did not confirm.
+- `executor:` label rule: a `type:story`, `type:task` or `type:bug` issue carries exactly one existing `executor:` label (`docs/PROJECT-STATUS.md`); a `type:epic` or `type:feature` issue needs none. Apply it before the check, choosing among the repository's existing labels.
+- Any statement about labels or board status in the reply or the Session Summary comes from the check output, not from memory or from the issue text.
+- The Session Summary `Checks run:` line carries the result: `refine-check — pass`, or `refine-check — fail: <check-ids>` / `refine-check — unreadable`. `none` is not valid for a refinement that reports a status.
+
 ## Final Reply Format
 
 After updating GitHub, reply only with:
