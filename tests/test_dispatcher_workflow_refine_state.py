@@ -95,7 +95,7 @@ def test_retry_does_not_record_delivery_when_state_will_not_be_saved():
 
 def test_state_is_saved_even_when_invoke_or_retry_fails():
     condition = _field(_step(SAVE), "if")
-    assert "!cancelled()" in condition
+    assert "always()" in condition  # issue #352: also after a cancellation
     assert "steps.poll.outcome == 'success'" in condition
 
 
@@ -104,7 +104,8 @@ def test_state_steps_run_on_every_enabled_poll_regardless_of_issue_number():
         condition = _field(_step(name), "if")
         assert "steps.guard.outputs.enabled == 'true'" in condition
         assert "issue_number" not in condition
-        assert "always()" not in condition
+        if name != SAVE:  # the save runs after a cancellation too (issue #352)
+            assert "always()" not in condition
 
 
 def test_only_default_branch_runs_write_state():
@@ -206,3 +207,32 @@ def test_poll_state_is_saved_before_the_cancellable_invoke_step():
     assert early_key != final_key
     assert early_key.startswith("dispatcher-state-")
     assert "${{ github.run_id }}" in early_key
+
+
+USAGE_NOTICE = "Notify usage limit reached"
+SESSION_SAVE = "Save session state cache"
+
+
+def test_state_save_after_cancellation_keeps_every_guard():
+    """Issue #352: events queued during the invoke step reach the cache even
+    when the job is cancelled, but only for an enabled, polled state writer."""
+    names = [name for name, _ in _steps()]
+    assert names.index(INVOKE) < names.index(SAVE)
+    condition = _field(_step(SAVE), "if")
+    assert "always()" in condition
+    assert "!cancelled()" not in condition
+    assert "steps.guard.outputs.enabled == 'true'" in condition
+    assert "steps.poll.outcome == 'success'" in condition
+    assert "steps.scope.outputs.state_writer == 'true'" in condition
+
+
+def test_steps_after_a_red_invoke_step_still_run():
+    """Issue #352: the invoke step ends red when a registration failed; these
+    steps run under their own other conditions."""
+    usage = _field(_step(USAGE_NOTICE), "if")
+    assert "!cancelled()" in usage or "always()" in usage
+    assert "steps.invoke.outputs.usage_limit_reached == 'true'" in usage
+    assert "steps.guard.outputs.enabled == 'true'" in usage
+    assert "always()" in _field(_step(SESSION_SAVE), "if")
+    assert "!cancelled()" in _field(_step(RETRY), "if")
+    assert "always()" in _field(_step(SAVE), "if")
