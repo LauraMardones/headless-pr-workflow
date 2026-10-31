@@ -2670,6 +2670,14 @@ resume_fix_round() {
     attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
     if marker_holds "$issue_num" "$attempt_marker" \
             && ! fix_round_attempt_superseded "$issue_num" "$pr_number" "$pr_head"; then
+        # A round that ended without a push (issue #357) records its attempt
+        # before the "In review" write; if that write failed, the pending
+        # hand-off for this head is finished here, without a new /implement,
+        # or the story would stay "In implementation" for good.
+        if marker_holds "$issue_num" "$(hand_off_pending_marker "$pr_number" "$pr_head")" 1 "$(hand_off_done_marker "$pr_number")"; then
+            complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$pr_draft"
+            return 0
+        fi
         echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the fix round was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
         return 0
     fi

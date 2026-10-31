@@ -1608,6 +1608,32 @@ def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
 
 
 @needs_tools
+def test_357_post_waiver_round_whose_in_review_write_fails_is_finished_by_the_next_run(d):
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.add_comment(STORY, DECLARATION)
+    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
+    session_requests_review(d)
+    d.fail_status_write("In review")
+
+    first = d.resume()
+
+    assert first.returncode == 1, first.stdout + first.stderr
+    assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
+    assert any(f"action=hand-off-pending pr={PR} head={HEAD}" in body for body in d.posted(STORY))
+    assert d.status(STORY) == "In implementation"
+
+    d.fail_status_write("In review", failing=False)
+    second = d.resume()
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"implement {STORY}"]  # finished without a second /implement
+    assert d.status(STORY) == "In review"
+    assert any(f"action=hand-off-done pr={PR}" in body for body in d.posted(STORY))
+
+
+@needs_tools
 def test_357_post_waiver_round_without_a_fresh_review_request_is_a_failure(d):
     # The request that produced the waived findings predates the /unblock; the
     # session pushes nothing and posts no new request, so the head's latest
