@@ -12,6 +12,12 @@ This document defines the normative strategy for issue refinement in HPW-based A
 
 ---
 
+## Refinement completeness gate
+
+`scripts/refine-check --issue <n> [--repo <owner/repo>] [--json]` is the last step of every refinement (`.claude/commands/refine.md` and the five `refine-*.md` files), after the board write. It reads the issue, the repository label list, the open hard dependencies and the board Status live, and reports one line per check: `type_label`, `executor_label` (story, task and bug only, the dispatcher's executable types), `prio_label`, `po_status_board` (body `PO status:` equals the board Status), `hard_dependencies` (never `Ready for implementation` while one is open; `Refined; blocked by #X` otherwise), `required_sections` (per type, non-empty), `open_questions` (no `### ` question when ready) and `parent_refs` (when ready).
+
+Exit `0`: every applicable check passes. Exit `1`: a check fails and is named. Exit `2`: something could not be read, or the arguments are invalid; never a pass. Only exit `0` permits reporting `Refined` or `Ready for implementation`. After a non-zero exit the refine session moves the board and the body back to `In refinement` and lists the failing checks as blockers. The refine Session Summary carries the result in `Checks run:`. The script is not an `hpw` command, so `docs/PR-AUTOMATION-MAP.md` does not list it.
+
 ## Normative Strategy: Rolling, Just-in-Time Refinement
 
 Rolling, just-in-time refinement is the required strategy. Big-bang refinement — refining all issues for an Epic or Feature before implementation begins — is explicitly not the default.
