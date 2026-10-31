@@ -327,12 +327,12 @@ class Dispatcher:
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 
-    def add_comment(self, target: int, body: str, login: str = BOT) -> None:
+    def add_comment(self, target: int, body: str, login: str = BOT, at: str | None = None) -> None:
         tick = int((self.mock / "clock").read_text()) + 1 if (self.mock / "clock").exists() else 1
         (self.mock / "clock").write_text(str(tick))
         comments = self._read(f"comments_{target}.json", [])
         comments.append({"user": {"login": login}, "body": body,
-                         "created_at": f"2026-10-13T10:{tick // 60:02d}:{tick % 60:02d}Z"})
+                         "created_at": at or f"2026-10-13T10:{tick // 60:02d}:{tick % 60:02d}Z"})
         self._write(f"comments_{target}.json", comments)
 
     def add_findings(self, pr: int, head: str, login: str = BOT) -> None:

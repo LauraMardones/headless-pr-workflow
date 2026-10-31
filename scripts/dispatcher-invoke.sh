@@ -1011,23 +1011,71 @@ evidence_failure_count() {
         | [.[] | select(((.body // "") | contains($failed)) and .created_at > $since)] | length' <<< "$own"
 }
 
-# evidence_record_failure <story> <title> <item> <ref> <what> — records one
-# failed run. Returns 1 while retries remain, 2 when this run is the last one.
+# pr_merged_at <pr> — the merged_at of the PR; empty when it cannot be read.
+pr_merged_at() {
+    gh api "repos/$REPO/pulls/$1" --jq '.merged_at // empty' 2>/dev/null || true
+}
+
+# ─── Utility: alert when the story cannot be written at all (#372) ───────────
+# #348 counts failed runs with marker comments on the story. When the story's
+# comments cannot be written those markers fail too, nothing is counted and the
+# PO hears nothing. Then the alert is timed from a GitHub timestamp instead: the
+# item has been missing for EVIDENCE_UNWRITABLE_MINUTES or more. The one-time
+# "already alerted" is kept in the notification state (the event key holds the
+# item), and the state only decides whether to send the alert, never a merge or
+# cleanup decision.
+
+EVIDENCE_UNWRITABLE_MINUTES="${EVIDENCE_UNWRITABLE_MINUTES:-15}"
+
+# evidence_unwritable_alert <story> <title> <item> <ref> <target> <since> <kind> [<text>]
+# <since> is the created_at of the dispatcher's evidence-pending comment, or the
+# PR's merged_at. <kind> says how the notification state tells the evidence is
+# posted: payload (the exact <text> on <target>), merge-gate (the `Merge gate:`
+# line on the PR) or cleanup-summary (the `Command: cleanup` summary on the story).
+evidence_unwritable_alert() {
+    local story="$1" title="$2" item="$3" ref="$4" target="$5" since="$6" kind="$7" text="${8:-}"
+    local since_ts now_ts minutes
+    if [[ -z "$since" ]]; then
+        echo "Warning: the start of the missing $item evidence on #$target is unknown; no PO alert in this run." >&2
+        return 0
+    fi
+    since_ts=$(iso_to_ts "$since")
+    now_ts=$(date -u +%s)
+    [[ "$since_ts" -gt 0 ]] || return 0
+    minutes=$(( (now_ts - since_ts) / 60 ))
+    [[ $minutes -ge $EVIDENCE_UNWRITABLE_MINUTES ]] || return 0
+    echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target has been missing for $minutes min and the story cannot be written; PO alert queued"
+    register_actionable_event "evidence_unwritable" "$story" "$since:$item:$ref" \
+        "$(jq -nc --arg st "$title" --arg sn "$story" --arg iu "https://github.com/$REPO/issues/$story" \
+                  --arg item "$item" --arg ref "$ref" --arg tn "$target" \
+                  --arg tu "https://github.com/$REPO/issues/$target" --argjson min "$minutes" \
+                  --arg kind "$kind" --arg text "$text" --arg gave "$(evidence_gave_up_marker "$item" "$ref")" \
+                  '{story_title: $st, story_number: $sn, issue_url: $iu, item: $item, ref: $ref,
+                    target_number: $tn, target_url: $tu, minutes: $min, has_pending_text: ($text != ""),
+                    resolve_kind: $kind, resolve_text: $text, gave_up_marker: $gave}')"
+}
+
+# evidence_record_failure <story> <title> <item> <ref> <what> [<target> <since> <kind> [<text>]]
+# Records one failed run. Returns 1 while retries remain, 2 when this run is the
+# last one. With the optional arguments, a failed write of the marker or of the
+# give-up blocker on the story also checks the unwritable-story alert (#372).
 evidence_record_failure() {
-    local story="$1" title="$2" item="$3" ref="$4" what="$5" count run
+    local story="$1" title="$2" item="$3" ref="$4" what="$5" count run unwritable=false
     count=$(evidence_failure_count "$story" "$item" "$ref")
     run=$(( count + 1 ))
     post_comment "$story" "Dispatcher: $what could not be written to GitHub (failed run $run of $EVIDENCE_RETRY_MAX). It is retried on the next run.
 
-$(evidence_failed_marker "$item" "$ref")" || true
-    if [[ $run -lt $EVIDENCE_RETRY_MAX ]]; then
-        return 1
-    fi
-    if ! marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
+$(evidence_failed_marker "$item" "$ref")" || unwritable=true
+    if [[ $run -ge $EVIDENCE_RETRY_MAX ]] && ! marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
         post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
             "the evidence ($what) is posted by hand, then the PO posts /unblock" \
-            "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue."
+            "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
+            || unwritable=true
     fi
+    if $unwritable && [[ $# -ge 8 ]]; then
+        evidence_unwritable_alert "$story" "$title" "$item" "$ref" "$6" "$7" "$8" "${9:-}"
+    fi
+    [[ $run -lt $EVIDENCE_RETRY_MAX ]] && return 1
     return 2
 }
 
@@ -1039,7 +1087,7 @@ $(evidence_failed_marker "$item" "$ref")" || true
 # With <expected-head>, evidence recorded for another head is never posted.
 evidence_retry() {
     local target="$1" item="$2" ref="$3" story="$4" title="$5" expected_head="${6:-}"
-    local own pending head b64 payload
+    local own pending pending_at head b64 payload
     own=$(bot_comments_json "$target") || {
         echo "Warning: could not read the comments on #$target; the $item evidence is not retried in this run." >&2
         return 1
@@ -1047,6 +1095,8 @@ evidence_retry() {
     pending=$(jq -r --arg m "action=evidence-pending item=$item " \
         '[.[] | select((.body // "") | contains($m))] | last | .body // empty' <<< "$own")
     [[ -n "$pending" ]] || return 0
+    pending_at=$(jq -r --arg m "action=evidence-pending item=$item " \
+        '[.[] | select((.body // "") | contains($m))] | last | .created_at // empty' <<< "$own")
     if [[ "$pending" =~ head=([^[:space:]]+)[[:space:]]payload=([A-Za-z0-9+/=]*) ]]; then
         head="${BASH_REMATCH[1]}"; b64="${BASH_REMATCH[2]}"
     else
@@ -1077,7 +1127,8 @@ evidence_retry() {
         return 0
     fi
     echo "Warning: the $item evidence on #$target could not be posted; retried on the next run." >&2
-    evidence_record_failure "$story" "$title" "$item" "$ref" "the $item evidence on #$target"
+    evidence_record_failure "$story" "$title" "$item" "$ref" "the $item evidence on #$target" \
+        "$target" "$pending_at" payload "$payload"
 }
 
 # The cleanup closing summary is written on a story that is already Done, so no
@@ -2077,7 +2128,8 @@ settle_merge_confirmation() {
     fi
     echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: PR #$pr_number is merged but carries no merge confirmation from the dispatcher; cleanup waits" >&2
     evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "merge-confirmation-missing" "pr$pr_number" \
-        "the merge confirmation on PR #$pr_number (no confirmation and no pending text exist)"
+        "the merge confirmation on PR #$pr_number (no confirmation and no pending text exist)" \
+        "$pr_number" "$(pr_merged_at "$pr_number")" merge-gate
     rc=$?
     return $(( rc == 0 ? 1 : rc ))
 }
@@ -2146,9 +2198,12 @@ finish_story() {
         # story back to "In merge" (the merged-PR resume reruns cleanup) until
         # the give-up limit.
         if ! cleanup_evidence_recorded "$ISSUE_NUMBER"; then
-            local rc=0
+            local rc=0 merged_pr merged_at=""
+            merged_pr=$(find_merged_linked_pr "$ISSUE_NUMBER" 2>/dev/null || true)
+            [[ -z "$merged_pr" ]] || merged_at=$(pr_merged_at "$merged_pr")
             evidence_record_failure "$ISSUE_NUMBER" "$TARGET_TITLE" "cleanup-summary-unrecorded" "issue$ISSUE_NUMBER" \
-                "the cleanup closing summary on #$ISSUE_NUMBER (neither it nor a pending copy could be posted)" || rc=$?
+                "the cleanup closing summary on #$ISSUE_NUMBER (neither it nor a pending copy could be posted)" \
+                "$ISSUE_NUMBER" "$merged_at" cleanup-summary || rc=$?
             if [[ $rc -eq 1 ]]; then
                 echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the cleanup closing summary is not on GitHub; back to \"In merge\" so the next run reruns cleanup" >&2
                 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"

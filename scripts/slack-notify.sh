@@ -15,6 +15,9 @@
 #   po_blocker                fields: story_title, issue_url, blocker_type, unblocked_when,
 #                                     state, cause (cause optional; a blocker only the PO resolves,
 #                                     resumed by a standalone "/unblock" line, issue #359)
+#   evidence_unwritable       fields: story_title, story_number, issue_url, item, target_number,
+#                                     target_url, minutes, has_pending_text (merge or cleanup evidence
+#                                     missing and the story cannot be written, issue #372)
 #   feature_closure_confirmation  fields: feature_title, summary_url
 #   epic_closure_approval     fields: epic_title, summary_url
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
@@ -133,6 +136,38 @@ build_payload() {
                     {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
                     {type: "section", text: {type: "mrkdwn", text: "To resume: do what *Unblocked when* says, then reply on the issue with a line that is exactly `/unblock`."}}
                   ])}'
+            ;;
+
+        evidence_unwritable)
+            # Required evidence has been missing for a while and the story's
+            # comments cannot be written (issue #372). The link and the advice
+            # are never cut.
+            jq -n --argjson c "$ctx" '
+                def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
+                def str: if type == "string" then . else "" end;
+                def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
+                def or_unknown($n): if . == "" then "(unknown)" else cut($n) end;
+                ($c.story_title | clean) as $title
+                | ($c.story_number | tostring | clean) as $num
+                | ($c.issue_url | clean) as $url
+                | ($c.item | clean) as $item
+                | ($c.target_number | tostring | clean) as $tn
+                | ($c.target_url | clean) as $tu
+                | (if ($c.minutes | type) == "number" then ($c.minutes | tostring) else "" end) as $min
+                | ($c.has_pending_text == true) as $pending
+                | {blocks: [
+                    {type: "section", text: {type: "mrkdwn", text: ":warning: *Evidence missing — the dispatcher cannot write to the story*"}},
+                    {type: "section", text: {type: "mrkdwn", text: (
+                        "*Story:* #" + ($num | or_unknown(20)) + " " + ($title | or_unknown(500))
+                        + "\n*Missing item:* " + ($item | or_unknown(100))
+                        + "\n*Belongs on:* " + (if $tu != "" then "<" + $tu + "|#" + $tn + ">" else "#" + ($tn | or_unknown(20)) end)
+                        + "\n*Missing for:* " + (if $min == "" then "(unknown)" else $min + " min" end))}},
+                    {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View story>" else "(no URL)" end))}},
+                    {type: "section", text: {type: "mrkdwn", text: (
+                        "What you can do: fix the cause of the failed GitHub write (for example the token permission)"
+                        + (if $pending then ", or post the text by hand from the evidence-pending comment on the target." else "." end)
+                        + " This alert stops once the evidence is posted.")}}
+                  ]}'
             ;;
 
         feature_closure_confirmation)
@@ -281,7 +316,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker po_blocker feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached"
+KNOWN_EVENTS="decision_blocker po_blocker evidence_unwritable feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0

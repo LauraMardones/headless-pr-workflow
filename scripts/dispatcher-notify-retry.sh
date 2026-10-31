@@ -2,8 +2,8 @@
 # scripts/dispatcher-notify-retry.sh
 #
 # Delivery of the Slack notifications that need PO action (issue #295):
-# decision_blocker, po_blocker, feature_closure_confirmation and
-# epic_closure_approval.
+# decision_blocker, po_blocker, feature_closure_confirmation,
+# epic_closure_approval and evidence_unwritable (issue #372).
 # Each is retried every dispatcher cycle until it is delivered or the PO no
 # longer needs to act. A failed delivery never aborts the dispatcher.
 #
@@ -28,10 +28,18 @@
 # (and po_blocker, issue #359) the created_at of the "## Blocked Declaration" comment, so a new blocker on the
 # same issue after an earlier one was resolved is a new event.
 #
+# For evidence_unwritable (issue #372) <since> is "<timestamp>:<item>:<ref>" of
+# the missing evidence item, so two items on one story are two events.
+#
 # Resolved (record dropped, even if never delivered):
 #   decision_blocker,     the issue is closed, or the PO ($DECISION_BLOCKER_PO_LOGIN)
 #   po_blocker            posted a standalone "/unblock" line after <since>
 #   closure events        the Feature or Epic issue is closed
+#   evidence_unwritable   the evidence is posted by the dispatcher's own account
+#                         (the context's resolve_kind says how it is recognised),
+#                         or #348's give-up blocker for the item is on the story.
+#                         A closed story does not resolve it: the cleanup case
+#                         concerns a story that is already Done and closed.
 # A dropped record can be registered again (then it is dropped again by the
 # resolution check before any send), so a delivered event stays suppressed
 # while unresolved and only while unresolved.
@@ -172,8 +180,46 @@ fi
 
 # resolved <event> <issue> <since>: 0 when the PO no longer needs to act.
 # A failed lookup counts as unresolved so the event is never lost to an API error.
+# evidence_resolved <issue> <context-json>: 0 when the missing evidence is posted
+# on its target or #348's give-up blocker for the item is on the story. Only
+# comments of the dispatcher's own account count; any unreadable fact is 1.
+evidence_resolved() {
+    local issue="$1" ctx="$2" bot target kind text gave story_comments target_comments
+    bot=$(gh api user --jq '.login' 2>/dev/null) || return 1
+    [[ -n "$bot" ]] || return 1
+    target=$(jq -r '.target_number // empty' <<< "$ctx" 2>/dev/null) || return 1
+    kind=$(jq -r '.resolve_kind // empty' <<< "$ctx" 2>/dev/null) || return 1
+    text=$(jq -r '.resolve_text // ""' <<< "$ctx" 2>/dev/null) || return 1
+    gave=$(jq -r '.gave_up_marker // empty' <<< "$ctx" 2>/dev/null) || return 1
+    [[ "$target" =~ ^[0-9]+$ && -n "$kind" ]] || return 1
+    story_comments=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
+        || return 1
+    if [[ -n "$gave" ]] && jq -e --arg bot "$bot" --arg g "$gave" \
+            'any(.[]; (.user.login // "") == $bot and ((.body // "") | contains($g)))' <<< "$story_comments" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$target" == "$issue" ]]; then
+        target_comments="$story_comments"
+    else
+        target_comments=$(gh api --paginate "repos/$REPO/issues/$target/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
+            || return 1
+    fi
+    jq -e --arg bot "$bot" --arg kind "$kind" --arg text "$text" '
+        def trim: gsub("^\\s+|\\s+$"; "");
+        any(.[]; (.user.login // "") == $bot
+            and ((.body // "") | contains("action=evidence-pending") | not)
+            and (if $kind == "merge-gate" then ((.body // "") | test("(^|\n)Merge gate:"))
+                 elif $kind == "cleanup-summary" then ((.body // "") | test("(^|\n)Command: cleanup\n"))
+                 elif $kind == "payload" and $text != "" then ((.body // "") | trim | contains($text | trim))
+                 else false end))' <<< "$target_comments" >/dev/null 2>&1
+}
+
 resolved() {
-    local event="$1" issue="$2" since="$3" state comments
+    local event="$1" issue="$2" since="$3" ctx="${4:-}" state comments
+    if [[ "$event" == evidence_unwritable ]]; then
+        evidence_resolved "$issue" "$ctx"
+        return
+    fi
     state=$(gh api "repos/$REPO/issues/$issue" --jq '.state' 2>/dev/null) || state=""
     [[ "$state" == closed ]] && return 0
     [[ "$event" == decision_blocker || "$event" == po_blocker ]] || return 1
@@ -198,7 +244,7 @@ while IFS= read -r rec; do
     since=$(jq -r '.since // ""' <<< "$rec")
     delivered=$(jq -r '.delivered' <<< "$rec")
 
-    if resolved "$event" "$issue" "$since"; then
+    if resolved "$event" "$issue" "$since" "$(jq -r '.context // ""' <<< "$rec")"; then
         echo "[NOTIFY] Resolved, dropping: $key" >&2
         continue
     fi

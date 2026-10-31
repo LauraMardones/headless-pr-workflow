@@ -51,7 +51,9 @@ while [[ \$# -gt 0 ]]; do
     esac
 done
 n=\$(echo "\$path" | sed -E 's#^repos/[^/]+/[^/]+/issues/([0-9]+).*#\1#')
-if [[ "\$path" == */comments* ]]; then
+if [[ "\$path" == user ]]; then
+    echo "dispatcher-bot"
+elif [[ "\$path" == */comments* ]]; then
     \$post && exit 0
     cat "$T/gh/comments_\$n.json" 2>/dev/null || echo '[]'
 else
@@ -271,6 +273,97 @@ test_dry_run_sends_nothing() {
     check "dry-run: logs the would-be send" $(grep -q 'DRY RUN' "$T/stderr"; echo $?)
 }
 
+# evidence_unwritable (issue #372): <since> is "<timestamp>:<item>:<ref>"; the
+# context says how the posted evidence is recognised.
+EV_CTX='{"story_title":"S","story_number":"7","issue_url":"u","item":"merge-confirmation","ref":"pr5","target_number":"5","target_url":"t","minutes":20,"has_pending_text":true,"resolve_kind":"payload","resolve_text":"Merge gate: ok","gave_up_marker":"<!-- hpw:dispatcher action=evidence-gave-up item=merge-confirmation ref=pr5 -->"}'
+reg_evidence() {  # reg_evidence <issue> <item> [<context>]
+    retry register --repo o/r --event evidence_unwritable --issue "$1" \
+        --since "2026-10-31T10:00:00Z:$2:pr5" --context "${3:-$EV_CTX}"
+}
+
+test_evidence_unwritable_on_a_closed_story_stays_unresolved_and_is_sent() {
+    setup
+    reg_evidence 7 merge-confirmation
+    echo closed > "$T/gh/state_7"
+    retry run --repo o/r; rc=$?
+    check "evidence_unwritable closed story: exit 0" $(( rc ))
+    check "evidence_unwritable closed story: sent" $(( $(slack_count) == 1 ? 0 : 1 ))
+    retry run --repo o/r
+    check "evidence_unwritable closed story: sent once, record kept" $(( $(slack_count) == 1 && $(wc -l < "$(STATE)") == 1 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_resolved_when_the_evidence_is_posted() {
+    setup
+    reg_evidence 7 merge-confirmation
+    echo '[{"user":{"login":"dispatcher-bot"},"created_at":"2026-10-31T10:30:00Z","body":"Merge gate: ok\nmore"}]' > "$T/gh/comments_5.json"
+    touch "$T/slack-fail"
+    retry run --repo o/r; rc=$?
+    check "evidence posted: exit 0" $(( rc ))
+    check "evidence posted: nothing sent" $(( $(slack_count) == 0 ? 0 : 1 ))
+    check "evidence posted: record dropped" $(( $(wc -l < "$(STATE)") == 0 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_not_resolved_by_another_account_or_the_pending_comment() {
+    setup
+    reg_evidence 7 merge-confirmation
+    echo '[{"user":{"login":"someone"},"created_at":"2026-10-31T10:30:00Z","body":"Merge gate: ok"},
+           {"user":{"login":"dispatcher-bot"},"created_at":"2026-10-31T10:31:00Z","body":"Merge gate: ok <!-- hpw:dispatcher action=evidence-pending item=merge-confirmation -->"}]' > "$T/gh/comments_5.json"
+    retry run --repo o/r
+    check "foreign or pending copy does not resolve: sent" $(( $(slack_count) == 1 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_resolved_by_the_give_up_blocker() {
+    setup
+    reg_evidence 7 merge-confirmation
+    echo '[{"user":{"login":"dispatcher-bot"},"created_at":"2026-10-31T10:30:00Z","body":"## Blocked Declaration\n<!-- hpw:dispatcher action=evidence-gave-up item=merge-confirmation ref=pr5 -->"}]' > "$T/gh/comments_7.json"
+    retry run --repo o/r
+    check "give-up blocker: nothing sent" $(( $(slack_count) == 0 ? 0 : 1 ))
+    check "give-up blocker: record dropped" $(( $(wc -l < "$(STATE)") == 0 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_give_up_blocker_of_another_item_does_not_resolve() {
+    setup
+    reg_evidence 7 merge-confirmation
+    echo '[{"user":{"login":"dispatcher-bot"},"created_at":"2026-10-31T10:30:00Z","body":"<!-- hpw:dispatcher action=evidence-gave-up item=merge-owner ref=pr5 -->"}]' > "$T/gh/comments_7.json"
+    retry run --repo o/r
+    check "other item's blocker: sent" $(( $(slack_count) == 1 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_two_items_on_one_story_are_two_events() {
+    setup
+    reg_evidence 7 merge-confirmation
+    reg_evidence 7 cleanup-summary
+    reg_evidence 7 cleanup-summary
+    check "two items, one repeat: two records" $(( $(wc -l < "$(STATE)") == 2 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_failed_delivery_is_retried_and_red_after_three_cycles() {
+    setup
+    reg_evidence 7 merge-confirmation
+    touch "$T/slack-fail"
+    retry run --repo o/r; rc1=$?
+    retry run --repo o/r; rc2=$?
+    retry run --repo o/r; rc3=$?
+    check "evidence_unwritable: cycles 1 and 2 stay green" $(( rc1 + rc2 ))
+    check "evidence_unwritable: cycle 3 is red" $(( rc3 == 1 ? 0 : 1 ))
+    rm "$T/slack-fail"
+    retry run --repo o/r
+    check "evidence_unwritable: delivered after recovery" $(( $(jq -s '[.[]|select(.delivered)]|length' "$(STATE)") == 1 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_unreadable_facts_count_as_unresolved() {
+    setup
+    reg_evidence 7 merge-confirmation '{"story_title":"S"}'
+    retry run --repo o/r
+    check "context without resolve facts: still sent" $(( $(slack_count) == 1 ? 0 : 1 ))
+}
+
+test_evidence_unwritable_dry_run_registers_nothing() {
+    setup
+    retry register --repo o/r --event evidence_unwritable --issue 7 --since "2026-10-31T10:00:00Z:x:y" --context "$EV_CTX" --dry-run
+    check "evidence_unwritable dry-run: no state" $([[ ! -e "$(STATE)" ]]; echo $?)
+}
+
 test_fail_then_succeed_delivers_once
 test_delivered_event_not_resent_when_registered_again
 test_closure_events_retried
@@ -286,6 +379,15 @@ test_malformed_line_keeps_pending_record
 test_unwritable_state_is_observable
 test_directory_valued_state_path_is_replaced
 test_dry_run_sends_nothing
+test_evidence_unwritable_on_a_closed_story_stays_unresolved_and_is_sent
+test_evidence_unwritable_resolved_when_the_evidence_is_posted
+test_evidence_unwritable_not_resolved_by_another_account_or_the_pending_comment
+test_evidence_unwritable_resolved_by_the_give_up_blocker
+test_evidence_unwritable_give_up_blocker_of_another_item_does_not_resolve
+test_evidence_unwritable_two_items_on_one_story_are_two_events
+test_evidence_unwritable_failed_delivery_is_retried_and_red_after_three_cycles
+test_evidence_unwritable_unreadable_facts_count_as_unresolved
+test_evidence_unwritable_dry_run_registers_nothing
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
