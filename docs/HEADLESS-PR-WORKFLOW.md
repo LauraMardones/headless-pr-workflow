@@ -13,6 +13,7 @@ This document defines the normative workflow for assistant-agnostic, GitHub-cent
 - Takeover between assistants, machines, and sessions must be recoverable from GitHub state plus explicit handoff notes.
 - Repo-specific constraints must be implemented through adapters, not core workflow policy.
 - Assistant-specific behaviors must be optional integrations, not normative requirements.
+- The workflow never requires the Human Approver to poll for state; every point that needs human judgment is pulled to them as a decidable notification, see [Human Attention Is Pulled, Not Polled](#human-attention-is-pulled-not-polled).
 
 ## Lifecycle
 
@@ -144,6 +145,28 @@ Rules:
 - **Trigger phrase.** The phrase is written only in a PR conversation comment that requests a review, by `/implement` or by this job (`AGENTS.md` → Codex Review Requests).
 
 `/review` remains the path for `executor:codex` stories and for a separate-session review (path 2).
+
+## Human Attention Is Pulled, Not Polled
+
+**Human attention is pulled, not polled.** The workflow must never require the Human Approver to poll for state. Every point where work requires human judgment:
+
+1. is a **named escalation type**, not an undefined "the agent got stuck" — the five blocker types in `docs/PROJECT-STATUS.md` → Blocker types, plus the notification events of Epic #160 (closure confirmation, Red flow health, reached usage limit, item ready for refinement);
+2. is delivered as an **actionable notification**, and a failed delivery is an error, not silently dropped;
+3. contains **enough to decide** without opening a session: the question, the options, the agent's recommendation, the consequences, and what is blocked;
+4. is resolved by a **decision recorded in GitHub** that the workflow picks up without further manual steps.
+
+Notifications are the doorbell; GitHub is the record.
+
+Where each clause is put into practice, and its state at implementation (2026-10-31):
+
+| Clause | Put into practice by | State |
+|---|---|---|
+| 1 Named escalation type | `docs/PROJECT-STATUS.md` → Blocker types; Epic #160 human touchpoints | in place |
+| 2 Actionable notification; failed delivery is an error | Feature #270 (Notification reliability) | gap — tracked in #270 |
+| 3 Enough to decide | `docs/PROJECT-STATUS.md` → decision-blocker fields (Question, Options, Recommendation); Feature #267 | partly in place — tracked in #267 |
+| 4 Decision recorded in GitHub, picked up without manual steps | `/unblock` resume (#262, in place); Feature #267 | partly in place — tracked in #267 |
+
+A clause marked as a gap or partly in place is still the rule. New work must not widen the gap, and the linked issue closes it.
 
 ## Deterministic Automation
 
