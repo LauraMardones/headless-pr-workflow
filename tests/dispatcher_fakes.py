@@ -190,6 +190,11 @@ for arg in "$@"; do
     esac
 done
 echo "other $url" >> "$MOCK_DIR/curl.log"
+if [[ "$url" == *hooks.slack* ]]; then
+    echo "slack" >> "$MOCK_DIR/seq.log"
+    [[ -f "$MOCK_DIR/fail_slack" ]] && exit 22
+fi
+exit 0
 """
 
 # Claude Code on CLAUDE_BIN (issue #314). Call n keeps its argv (one per line),
@@ -215,6 +220,7 @@ case "$first_line" in
 esac
 target=$(sed -E 's/^[^#]*#([0-9]+).*/\1/' <<< "$first_line")
 echo "session $command $target claude-code" >> "$MOCK_DIR/sessions.log"
+echo "session $command $target" >> "$MOCK_DIR/seq.log"
 if [[ -f "$MOCK_DIR/claude_sleep" ]]; then
     sleep "$(cat "$MOCK_DIR/claude_sleep")"
 fi
@@ -258,6 +264,7 @@ exit "$rc"
 # the PR (merge) or issue (cleanup) number.
 FAKE_PHASE = r"""#!/usr/bin/env bash
 echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
+echo "PHASE_NAME $2" >> "$MOCK_DIR/seq.log"
 [[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
 [[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
 if [[ "PHASE_NAME" == merge && ! -f "$MOCK_DIR/no_confirmation" ]]; then  # the confirmation the real script posts
@@ -294,7 +301,7 @@ class Dispatcher:
         self._write("state.json", {})
         self._write("pulls.json", [])
         self._write("board.json", {"items": [], "options": options or BOARD_OPTIONS})
-        for name in ("gh.log", "curl.log", "sessions.log", "phases.log", "github_output", "mutations.log"):
+        for name in ("gh.log", "curl.log", "sessions.log", "phases.log", "github_output", "mutations.log", "seq.log"):
             (self.mock / name).write_text("")
 
     # ── fake GitHub state ───────────────────────────────────────────────────
@@ -432,6 +439,11 @@ class Dispatcher:
     def sessions(self) -> list[str]:
         """Sessions started, in order, as ``"<command> <target>"``."""
         return [" ".join(line.split()[1:3]) for line in self._log("sessions.log")]
+
+    @property
+    def sequence(self) -> list[str]:
+        """Slack calls (``slack``), phases and sessions in one order (issue #349)."""
+        return self._log("seq.log")
 
     @property
     def phases(self) -> list[str]:

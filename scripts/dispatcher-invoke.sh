@@ -2632,6 +2632,8 @@ refresh_board_after_resumed_story() {
     }
 }
 
+# One delivery attempt after each item, so an alert queued by one story is not
+# held back by the next one (issue #349).
 run_resume_pass() {
     local items count i
     retry_pending_cleanup_summaries
@@ -2639,24 +2641,28 @@ run_resume_pass() {
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
         resume_in_merge_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        drain_actionable_events
     done
 
     items=$(board_items_in_status "In implementation")
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
         resume_fix_round "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        drain_actionable_events
     done
 
     items=$(board_items_in_status "Ready for implementation")
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
         resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        drain_actionable_events
     done
 
     items=$(board_items_in_status "In review")
     count=$(jq 'length' <<< "$items")
     for ((i=0; i < count; i++)); do
         resume_review_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        drain_actionable_events
     done
 }
 
