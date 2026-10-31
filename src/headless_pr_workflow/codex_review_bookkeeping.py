@@ -667,9 +667,13 @@ def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingC
     if linked is not None:
         story = github.fetch_story(linked.number)
         if story.status == STATUS_IN_REVIEW:
-            ci = github.fetch_ci(context)
-            story_comments = github.fetch_issue_comments(linked.number)
+            # The hold comes first: while a decision blocker is open the
+            # decision is `none` whatever CI says, so a failing CI read must
+            # not turn the hold into a failed run (issue #357).
             blocker = github.fetch_open_decision_blocker(linked.number)
+            if blocker is None:
+                ci = github.fetch_ci(context)
+                story_comments = github.fetch_issue_comments(linked.number)
 
     status = story.status if story else None
     decision = decide(context, story_status=status, ci=ci, now=now, config=config, decision_blocker=blocker)

@@ -1968,6 +1968,21 @@ def test_decision_blocker_appearing_between_the_two_reads_changes_nothing():
     assert_untouched(github)
 
 
+def test_open_decision_blocker_holds_even_when_the_ci_read_would_fail():
+    github = held(FakeGitHub(pr(request(), codex_comment())))
+
+    def failing_read(*_args: object) -> None:
+        raise BookkeepingError("read required checks", "HTTP 403")
+
+    github.fetch_ci = github.fetch_issue_comments = failing_read
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (outcome.decision.action, outcome.applied) == (ACTION_NONE, NOT_NEEDED)
+    assert BLOCKER_URL in outcome.decision.reason
+    assert_untouched(github)
+
+
 def test_decision_blocker_on_a_story_that_is_not_in_review_is_not_read():
     github = held(FakeGitHub(pr(), status="In implementation"))
     github.fetch_open_decision_blocker = None  # must not be called
