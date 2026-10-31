@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""Check that a refined issue's labels, board status, dependencies and body are complete.
+
+Usage:
+  scripts/refine-check --issue <n> [--repo <owner/repo>] [--json]
+
+--repo defaults to $GITHUB_REPOSITORY. The first output line is the verdict,
+then one line per check: `<check-id>: pass|fail|skip - <detail>`.
+
+Exit codes:
+  0  every applicable check passes.
+  1  one or more checks fail; each failure is named.
+  2  the issue, its labels, the repository label list, a dependency or the board
+     item could not be read, or the arguments are invalid. Never a pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+
+
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+# Source of the values: docs/PROJECT-STATUS.md (statuses) and
+# EXECUTABLE_ISSUE_TYPES in scripts/dispatcher-invoke.sh.
+ISSUE_TYPES = ("epic", "feature", "story", "task", "bug")
+EXECUTABLE_TYPES = ("story", "task", "bug")
+READY = "Ready for implementation"
+REFINED = "Refined"
+
+_TASK_SECTIONS = (
+    "Goal", "Scope", "Out of Scope", "Acceptance Criteria", "Test Expectations",
+    "Documentation Impact", "Dependencies", "Assumptions", "Risks / Blockers",
+    "Technical Notes", "Definition of Done",
+)
+# Each entry is a list of accepted heading alternatives.
+REQUIRED_SECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "epic": tuple((s,) for s in ("Goal",)) + (("Why / Background", "Why"),)
+    + tuple((s,) for s in ("Scope", "Non-goals", "Success Criteria", "Dependencies")),
+    "feature": tuple((s,) for s in (
+        "Goal", "Why", "Scope", "Out of Scope", "Success Criteria", "Dependencies", "Assumptions")),
+    "story": tuple((s,) for s in (
+        "Goal", "User Story / Problem Statement", "Business Value", "Why", "Scope", "Out of Scope",
+        "Acceptance Criteria", "Epic and Feature Requirements Mapping", "Test Expectations",
+        "Documentation Impact", "Dependencies", "Assumptions", "Risks / Blockers",
+        "Technical Notes", "Definition of Done")),
+    "task": tuple((s,) for s in _TASK_SECTIONS),
+    "bug": tuple((s,) for s in (
+        "Goal", "Defect Description", "Impact", "Scope", "Out of Scope", "Acceptance Criteria",
+        "Test Expectations", "Documentation Impact", "Dependencies", "Assumptions",
+        "Risks / Blockers", "Technical Notes", "Definition of Done")),
+}
+
+TITLE_PREFIX = re.compile(r"^\s*(?:\[(epic|feature|story|task|bug)\]|(epic|feature|story|task|bug)\s*:)", re.I)
+
+
+class ReadError(Exception):
+    """A GitHub read failed; the check cannot pass."""
+
+
+@dataclass(frozen=True)
+class Issue:
+    number: int
+    title: str
+    body: str
+    labels: tuple[str, ...]
+    state: str
+
+
+@dataclass(frozen=True)
+class Check:
+    id: str
+    status: str  # pass | fail | skip
+    detail: str
+
+
+# --- GitHub reads (stubbed in tests) -------------------------------------------------
+
+def _gh(args: list[str], what: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", *args], capture_output=True, encoding="utf-8", check=False,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except FileNotFoundError as error:
+        raise ReadError(f"{what}: gh is not installed") from error
+    if result.returncode != 0:
+        detail = " ".join(result.stderr.split())[:200] or f"exit {result.returncode}"
+        raise ReadError(f"{what}: {detail}")
+    return result.stdout
+
+
+def read_issue(repo: str, number: int) -> Issue:
+    out = _gh(["issue", "view", str(number), "--repo", repo, "--json", "number,title,body,labels,state"],
+              f"issue #{number}")
+    try:
+        raw = json.loads(out)
+        return Issue(
+            number=int(raw["number"]), title=str(raw["title"]), body=str(raw.get("body") or ""),
+            labels=tuple(str(label["name"]) for label in raw["labels"]), state=str(raw["state"]),
+        )
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"issue #{number}: payload could not be parsed ({error})") from error
+
+
+def read_repo_labels(repo: str) -> set[str]:
+    out = _gh(["label", "list", "--repo", repo, "--limit", "1000", "--json", "name"], "repository labels")
+    try:
+        return {str(item["name"]) for item in json.loads(out)}
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"repository labels: payload could not be parsed ({error})") from error
+
+
+_BOARD_QUERY = """query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    projectsV2(first: 1) { nodes { id } }
+    issue(number: $number) {
+      projectItems(first: 20) {
+        nodes {
+          project { id }
+          fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+        }
+      }
+    }
+  }
+}"""
+
+
+def read_board_status(repo: str, number: int) -> str:
+    owner, name = repo.split("/", 1)
+    out = _gh(["api", "graphql", "-f", f"query={_BOARD_QUERY}", "-f", f"owner={owner}",
+               "-f", f"repo={name}", "-F", f"number={number}"], "board status")
+    try:
+        data = json.loads(out)
+        if data.get("errors"):
+            raise ReadError("board status: GraphQL returned errors")
+        repository = data["data"]["repository"]
+        nodes = repository["projectsV2"]["nodes"]
+        if not nodes:
+            raise ReadError("board status: no Projects v2 board is visible")
+        project_id = nodes[0]["id"]
+        for item in repository["issue"]["projectItems"]["nodes"]:
+            if item["project"]["id"] == project_id:
+                value = item.get("fieldValueByName") or {}
+                return str(value.get("name") or "(none)")
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"board status: payload could not be parsed ({error})") from error
+    raise ReadError(f"board status: issue #{number} is not on the project board")
+
+
+# --- body parsing --------------------------------------------------------------------
+
+def parse_sections(body: str) -> dict[str, str]:
+    """Map each `## ` heading to its text; headings inside code fences are ignored."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    fenced = False
+    for line in body.replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        match = None if fenced else re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1)
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def parse_po_status(body: str) -> str | None:
+    match = re.search(r"^[ \t>*_-]*PO status:?\**\s*(.+?)\s*$", body.replace("\r\n", "\n"), re.I | re.M)
+    return match.group(1).strip() if match else None
+
+
+def split_po_status(text: str) -> tuple[str, bool]:
+    """Return (board-comparable status, blocked-by marker present)."""
+    head, _, rest = text.partition(";")
+    return head.strip().rstrip(".").strip().strip("*_").strip(), bool(re.search(r"blocked by\s+#\d+", rest, re.I))
+
+
+def hard_dependencies(sections: dict[str, str], own: int) -> list[int]:
+    text = sections.get("Dependencies", "")
+    collected: list[str] = []
+    active = False
+    for line in text.split("\n"):
+        bare = line.strip().strip("*_ ").lower()
+        if bare.startswith("hard depends on"):
+            active = True
+            continue
+        if bare.startswith(("soft depends on", "revalidate after")):
+            active = False
+        if active:
+            collected.append(line)
+    numbers = [int(n) for n in re.findall(r"#(\d+)", "\n".join(collected))]
+    return sorted({n for n in numbers if n != own})
+
+
+def type_labels(issue: Issue) -> list[str]:
+    return [label.split(":", 1)[1] for label in issue.labels if label.startswith("type:")]
+
+
+# --- checks --------------------------------------------------------------------------
+
+def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, board_reader=None) -> tuple[str | None, list[Check]]:
+    issue_reader = issue_reader or read_issue
+    labels_reader = labels_reader or read_repo_labels
+    board_reader = board_reader or read_board_status
+    checks: list[Check] = []
+
+    types = type_labels(issue)
+    prefix = TITLE_PREFIX.match(issue.title)
+    prefix_type = (prefix.group(1) or prefix.group(2)).lower() if prefix else None
+    if len(types) != 1 or types[0] not in ISSUE_TYPES:
+        checks.append(Check("type_label", "fail", f"expected exactly one type: label, found {len(types)} ({', '.join(types) or 'none'})"))
+        effective = prefix_type
+    elif prefix_type and prefix_type != types[0]:
+        checks.append(Check("type_label", "fail", f"label type:{types[0]} disagrees with title prefix '{prefix_type}'"))
+        effective = types[0]
+    else:
+        checks.append(Check("type_label", "pass", f"type:{types[0]}"))
+        effective = types[0]
+
+    execs = [label for label in issue.labels if label.startswith("executor:")]
+    if effective is None:
+        checks.append(Check("executor_label", "skip", "issue type unknown"))
+    elif effective not in EXECUTABLE_TYPES:
+        checks.append(Check("executor_label", "skip", f"not applicable to type:{effective}"))
+    elif len(execs) != 1:
+        checks.append(Check("executor_label", "fail", f"expected exactly one executor: label on a {effective}, found {len(execs)}"))
+    elif execs[0] not in labels_reader(repo):
+        checks.append(Check("executor_label", "fail", f"{execs[0]} does not exist in {repo}"))
+    else:
+        checks.append(Check("executor_label", "pass", execs[0]))
+
+    prios = [label for label in issue.labels if label.startswith("prio:")]
+    checks.append(Check("prio_label", "pass", ", ".join(prios)) if prios else Check("prio_label", "fail", "no prio: label"))
+
+    sections = parse_sections(issue.body)
+    raw_status = parse_po_status(issue.body)
+    body_status, blocked_marker = split_po_status(raw_status) if raw_status else ("", False)
+    board = board_reader(repo, issue.number)
+    if raw_status is None:
+        checks.append(Check("po_status_board", "fail", f"no 'PO status:' field in the body (board: {board})"))
+    elif body_status != board:
+        checks.append(Check("po_status_board", "fail", f"body says '{body_status}' but the board says '{board}'"))
+    else:
+        checks.append(Check("po_status_board", "pass", f"body and board agree: {board}"))
+
+    open_deps = []
+    for dep in hard_dependencies(sections, issue.number):
+        if issue_reader(repo, dep).state.upper() == "OPEN":
+            open_deps.append(dep)
+    refs = ", ".join(f"#{n}" for n in open_deps)
+    if open_deps and body_status == READY:
+        checks.append(Check("hard_dependencies", "fail", f"{READY} while hard dependencies are open: {refs}"))
+    elif open_deps and body_status == REFINED and not blocked_marker:
+        checks.append(Check("hard_dependencies", "fail", f"open hard dependencies {refs}; status must be '{REFINED}; blocked by #X'"))
+    elif not open_deps and blocked_marker:
+        checks.append(Check("hard_dependencies", "fail", "status says 'blocked by' but no hard dependency is open"))
+    else:
+        checks.append(Check("hard_dependencies", "pass", f"open: {refs}" if open_deps else "no open hard dependency"))
+
+    if effective is None:
+        checks.append(Check("required_sections", "skip", "issue type unknown"))
+    else:
+        missing = []
+        for alternatives in REQUIRED_SECTIONS[effective]:
+            if not any(sections.get(name) for name in alternatives):
+                missing.append(alternatives[0])
+        checks.append(
+            Check("required_sections", "fail", "missing or empty: " + ", ".join(missing))
+            if missing else Check("required_sections", "pass", f"all {len(REQUIRED_SECTIONS[effective])} sections present"))
+
+    ready = body_status == READY or board == READY
+    questions = sections.get("Open Questions", "")
+    if not ready:
+        checks.append(Check("open_questions", "pass", f"only enforced for {READY}"))
+    elif re.search(r"^###\s+\S", questions, re.M):
+        checks.append(Check("open_questions", "fail", "Open Questions still contains a '### ' question"))
+    else:
+        checks.append(Check("open_questions", "pass", "no open question"))
+
+    if not ready:
+        checks.append(Check("parent_refs", "pass", f"only enforced for {READY}"))
+    elif effective == "epic":
+        checks.append(Check("parent_refs", "skip", "an Epic has no parent"))
+    else:
+        problems = []
+        parent = re.search(r"^[ \t]*Parent epic:\s*(.*)$", issue.body, re.I | re.M)
+        if not parent or not re.search(r"#\d+", parent.group(1)):
+            problems.append("no 'Parent epic: #N' line")
+        feature = re.search(r"^[ \t]*Feature group:\s*(.*)$", issue.body, re.I | re.M)
+        if effective == "feature":
+            feature = None
+        wanted = [parent.group(1) if parent else "", feature.group(1) if feature else ""]
+        for number in sorted({int(n) for text in wanted for n in re.findall(r"#(\d+)", text)}):
+            try:
+                issue_reader(repo, number)
+            except ReadError as error:
+                if "not found" in str(error).lower() or "could not resolve" in str(error).lower():
+                    problems.append(f"#{number} does not resolve")
+                else:
+                    raise
+        checks.append(Check("parent_refs", "fail", "; ".join(problems)) if problems else Check("parent_refs", "pass", "parent references resolve"))
+
+    return effective, checks
+
+
+def verdict_line(number: int, checks: list[Check]) -> str:
+    applicable = [c for c in checks if c.status != "skip"]
+    failed = [c.id for c in applicable if c.status == "fail"]
+    if not failed:
+        return f"Refine check: #{number} pass"
+    return f"Refine check: #{number} fail ({len(failed)} of {len(applicable)}): {', '.join(failed)}"
+
+
+def positive_int(value: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return int(value)
+
+
+def repository(value: str) -> str:
+    if not REPO_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("must use owner/repo format")
+    return value
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):  # exit 2 is argparse's default; keep the message on stderr
+        self.print_usage(sys.stderr)
+        print(f"refine-check: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--issue", required=True, type=positive_int, help="positive issue number")
+    parser.add_argument("--repo", type=repository, help="owner/repo (default: $GITHUB_REPOSITORY)")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+    if not REPO_PATTERN.fullmatch(repo):
+        print("refine-check: --repo must be <owner/repo> (or set GITHUB_REPOSITORY)", file=sys.stderr)
+        return 2
+
+    try:
+        issue = read_issue(repo, args.issue)
+        effective, checks = run_checks(issue, repo)
+    except ReadError as error:
+        if args.json:
+            print(json.dumps({"issue": args.issue, "type": None, "verdict": "unreadable", "exit_code": 2,
+                              "reason": str(error), "checks": []}))
+        else:
+            print(f"Refine check: #{args.issue} unreadable: {error}")
+        return 2
+
+    failed = any(c.status == "fail" for c in checks)
+    code = 1 if failed else 0
+    if args.json:
+        print(json.dumps({
+            "issue": args.issue, "type": effective, "verdict": "fail" if failed else "pass",
+            "exit_code": code,
+            "checks": [{"id": c.id, "status": c.status, "detail": c.detail} for c in checks],
+        }))
+    else:
+        print(verdict_line(args.issue, checks))
+        for c in checks:
+            print(f"{c.id}: {c.status} - {c.detail}")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

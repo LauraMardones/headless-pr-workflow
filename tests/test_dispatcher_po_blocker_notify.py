@@ -63,7 +63,7 @@ def test_ac1_fix_round_maximum_registers_one_po_blocker(d):
     assert context["story_title"] == f"Story {STORY}" and context["issue_url"] == f"https://github.com/o/r/issues/{STORY}"
     assert "fixed by hand" in context["unblocked_when"] and "CODEX_FIX_ROUND_MAX" in context["unblocked_when"]
     assert "2 automatic fix rounds" in context["state"] and context["cause"] == ""
-    assert d.slack_calls == []  # queued for the retry step, not sent directly
+    assert len(d.slack_calls) == 1  # queued, then delivered once by the drain after the resume item (#349)
 
 
 @needs_tools
@@ -150,7 +150,7 @@ def test_ac7_evidence_give_up_registers_one_po_blocker_and_no_dispatcher_error(t
         assert d.resume().returncode == 0
 
     assert len([e for e in po_events(d)]) == 1 and len(d.queued_events) == 1
-    assert d.slack_calls == []
+    assert len(d.slack_calls) == 1  # one event, delivered once by the first drain, never again (#349)
 
 
 @needs_tools

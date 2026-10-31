@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
 from .ci_summary import CiSummary, summarize_ci
 from .github import (
@@ -74,6 +74,12 @@ MARKER_PREFIX = f"<!-- hpw:{COMMAND_NAME}"
 AUTOMATION_DEVIATION = f"produced by the {COMMAND_NAME} job without a model session"
 DECLARED_BY = f"{COMMAND_NAME} (GitHub Actions)"
 BLOCKER_OWNER = "PO (@LauraMardones)"
+# The PO account whose standalone `/unblock` line lifts a decision blocker
+# (docs/PROJECT-STATUS.md, Decision blockers; DECISION_BLOCKER_PO_LOGIN in the dispatcher).
+DECISION_BLOCKER_PO_LOGIN = "LauraMardones"
+# Who may declare a decision blocker: repository writers and GitHub Apps/Actions.
+# Anyone can comment on a public repository, so a forged declaration must not hold a story.
+TRUSTED_DECLARER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 SESSION_SUMMARY_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "session-summary.sh"
 
 # The one place that lists the scopes of the token the job runs with.
@@ -360,6 +366,8 @@ class GitHubGateway(Protocol):
 
     def fetch_issue_comments(self, number: int) -> tuple[str, ...]: ...
 
+    def fetch_open_decision_blocker(self, number: int) -> str | None: ...
+
     def fetch_review_threads(self, context: PullRequestContext) -> tuple[ReviewThreadFact, ...]: ...
 
     def resolve_review_thread(self, thread_id: str) -> None: ...
@@ -410,6 +418,44 @@ def linked_story_or_reason(context: PullRequestContext) -> tuple[LinkedIssue | N
     return story, None
 
 
+def _trusted_declarer(comment: Mapping[str, Any]) -> bool:
+    return (
+        comment.get("author") == DECISION_BLOCKER_PO_LOGIN
+        or comment.get("association") in TRUSTED_DECLARER_ASSOCIATIONS
+        or comment.get("author_type") == "Bot"
+    )
+
+
+def open_decision_blocker(comments: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The latest `Type: decision` Blocked Declaration that no later PO `/unblock` line lifts.
+
+    Each comment carries `body`, `author`, `author_type`, `association`, `created_at` (ISO 8601, so strings of one
+    format compare in time order) and `url`. The rule is the one of
+    `docs/PROJECT-STATUS.md` (Decision blockers): the PO account, a comment strictly
+    after the declaration, a line that trims to exactly `/unblock`.
+    """
+
+    items = list(comments)
+    declared = [
+        c
+        for c in items
+        if "## Blocked Declaration" in (c.get("body") or "")
+        and "Type: decision" in (c.get("body") or "")
+        and _trusted_declarer(c)
+    ]
+    if not declared:
+        return None
+    latest = declared[-1]
+    for c in items:
+        if (
+            c.get("author") == DECISION_BLOCKER_PO_LOGIN
+            and (c.get("created_at") or "") > (latest.get("created_at") or "")
+            and any(line.strip() == "/unblock" for line in (c.get("body") or "").split("\n"))
+        ):
+            return None
+    return latest
+
+
 def decide(
     context: PullRequestContext,
     *,
@@ -418,6 +464,7 @@ def decide(
     now: datetime,
     config: BookkeepingConfig = BookkeepingConfig(),
     threads: tuple[ReviewThreadFact, ...] | None = None,
+    decision_blocker: str | None = None,
 ) -> Decision:
     """Decide the one action for a PR from GitHub facts and the current time.
 
@@ -428,6 +475,11 @@ def decide(
     that the approval gate and the required checks accept, so `None` there
     yields the preliminary `move-in-merge` that `_read` completes with the
     threads before anything is applied.
+
+    `decision_blocker` names the story's open `Type: decision` blocker (a PO
+    waiver decision is pending). While it is set, an `In review` story is held:
+    the action is `none`, so no review request, thread resolution or move
+    happens until the PO's `/unblock`.
     """
 
     if context.review_evidence_error:
@@ -471,6 +523,14 @@ def decide(
         )
     if not head_sha:
         raise BookkeepingError("read PR", "current PR head SHA is unknown")
+    if decision_blocker:
+        return result(
+            ACTION_NONE,
+            codex_result,
+            codex_url,
+            f"Story #{story.number} has an open decision blocker ({decision_blocker}); "
+            "it waits for the PO's `/unblock` line before a review request, a thread resolution or a move.",
+        )
 
     def request_or_blocker(why: str) -> Decision:
         if requests_posted >= config.max_requests:
@@ -603,17 +663,25 @@ def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingC
     story: StoryBoard | None = None
     ci: CiSummary | None = None
     story_comments: tuple[str, ...] = ()
+    blocker: str | None = None
     if linked is not None:
         story = github.fetch_story(linked.number)
         if story.status == STATUS_IN_REVIEW:
-            ci = github.fetch_ci(context)
-            story_comments = github.fetch_issue_comments(linked.number)
+            # The hold comes first: while a decision blocker is open the
+            # decision is `none` whatever CI says, so a failing CI read must
+            # not turn the hold into a failed run (issue #357).
+            blocker = github.fetch_open_decision_blocker(linked.number)
+            if blocker is None:
+                ci = github.fetch_ci(context)
+                story_comments = github.fetch_issue_comments(linked.number)
 
     status = story.status if story else None
-    decision = decide(context, story_status=status, ci=ci, now=now, config=config)
+    decision = decide(context, story_status=status, ci=ci, now=now, config=config, decision_blocker=blocker)
     if decision.action == ACTION_MOVE_IN_MERGE and decision.codex_result == "clean":
         threads = github.fetch_review_threads(context)
-        decision = decide(context, story_status=status, ci=ci, now=now, config=config, threads=threads)
+        decision = decide(
+            context, story_status=status, ci=ci, now=now, config=config, threads=threads, decision_blocker=blocker
+        )
     return _Reading(decision, context, story, story_comments)
 
 
@@ -951,6 +1019,28 @@ class GhCliGateway:
             except (json.JSONDecodeError, AttributeError):
                 raise BookkeepingError(step, "GitHub returned a comment that could not be parsed") from None
         return tuple(bodies)
+
+    def fetch_open_decision_blocker(self, number: int) -> str | None:
+        step = "read story decision blocker"
+        output = self._run(
+            step,
+            [
+                "api", f"repos/{self.repo}/issues/{number}/comments", "--paginate",
+                "--jq", ".[] | {body, author: .user.login, author_type: .user.type, association: .author_association, created_at, url: .html_url}",
+            ],
+        )  # fmt: skip
+        comments: list[Mapping[str, Any]] = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            try:
+                comments.append(json.loads(line))
+            except (json.JSONDecodeError, AttributeError):
+                raise BookkeepingError(step, "GitHub returned a comment that could not be parsed") from None
+        blocker = open_decision_blocker(comments)
+        if blocker is None:
+            return None
+        return str(blocker.get("url") or f"comment of {blocker.get('created_at')}")
 
     def fetch_review_threads(self, context: PullRequestContext) -> tuple[ReviewThreadFact, ...]:
         step = "read review threads"
