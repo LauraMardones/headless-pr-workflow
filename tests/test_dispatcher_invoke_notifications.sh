@@ -212,7 +212,7 @@ test_decision_blocker_fires_for_decision_type() {
 
         # Mock gh — returns a decision-type blocked declaration comment
         gh() {
-            printf '[{\"body\":\"## Blocked Declaration\\nType: decision\\nDeclared by: executor\\nBlocks: #42\\nUnblocked when: PO must decide\\nOwner: PO\"}]'
+            printf '[{\"body\":\"## Blocked Declaration\\\\nType: decision\\\\nDeclared by: executor\\\\nBlocks: #42\\\\nUnblocked when: PO must decide\\\\nOwner: PO\"}]'
         }
 
         notify_slack() {
@@ -270,7 +270,7 @@ test_decision_blocker_silent_for_conflict_type() {
         REPO='owner/repo'
 
         gh() {
-            printf '[{\"body\":\"## Blocked Declaration\\nType: conflict\\nDeclared by: dispatcher\"}]'
+            printf '[{\"body\":\"## Blocked Declaration\\\\nType: conflict\\\\nDeclared by: dispatcher\"}]'
         }
 
         notify_slack() {
@@ -710,7 +710,7 @@ test_decision_blocker_wired_passes_fields() {
     local tmpdir call_log fn
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
     call_log="$tmpdir/calls.log"
-    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p' "$INVOKE_SCRIPT")
+    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p;/^register_decision_blocker_event() {/,/^}/p' "$INVOKE_SCRIPT")
     bash -c "
         set -euo pipefail
         REPO='owner/repo'
