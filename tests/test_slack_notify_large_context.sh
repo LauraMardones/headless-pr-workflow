@@ -49,16 +49,16 @@ valid_payload() {
     jq -e '(.blocks | length) >= 1 and ([.blocks[].text.text | length] | max) <= 3000 and ([.blocks[].text.text] | join(" ") | contains("github.com") or contains("example.com"))' "$CURL_BODY_FILE" >/dev/null
 }
 
-# 40 KB padding key is ignored by the script but makes the context large.
-PAD=$(head -c 40000 /dev/zero | tr '\0' 'p')
+# The 40 KB padding key is ignored by the script but makes the context large.
+# jq builds it, so no command-line argument grows past the Windows limit.
 LONG=$(head -c 5000 /dev/zero | tr '\0' 'x')
-jq -n --arg pad "$PAD" --arg l "$LONG" '{
+jq -n --argjson n 40000 --arg l "$LONG" '{
     story_title:("Story " + $l), issue_url:"https://github.com/o/r/issues/7",
     blocker_type:"decision", unblocked_when:$l, question:$l, options:$l,
     recommendation:$l, cause:$l, state:$l, story_number:"7", item:$l,
     target_number:"8", target_url:"https://github.com/o/r/pull/8",
     minutes:"90", has_pending_text:$l, age:"3h", last_created_at:"now",
-    check_command:$l, docs_url:"https://example.com", pad:$pad}' > "$TMP/big.json"
+    check_command:$l, docs_url:"https://example.com", pad:([range($n) | "p"] | join(""))}' > "$TMP/big.json"
 check "context is larger than 32 KB" test "$(wc -c < "$TMP/big.json")" -gt 32768
 
 for ev in decision_blocker po_blocker evidence_unwritable dispatch_trigger_stopped; do
