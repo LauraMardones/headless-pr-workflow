@@ -114,7 +114,8 @@ def r(tmp_path):
 
 def seed(d, count, day=None):
     day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    (d.mock / "usage" / "sessions").write_text(f"{day}:{count}\n")
+    # LF on every OS: on Windows bash would read the count "2\r", which is no number, as 0 (#398).
+    (d.mock / "usage" / "sessions").write_text(f"{day}:{count}\n", newline="\n")
 
 
 def test_ac2_every_session_kind_counts_once(d):

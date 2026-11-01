@@ -166,7 +166,7 @@ def test_ac13_completed_review_that_leaves_in_review_is_not_repeated_on_the_same
 def test_ac14_usage_limit_stops_the_entry(d):
     codex_in_review(d)
     day = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
-    (d.mock / "usage" / "sessions").write_text(f"{day}:3\n")
+    (d.mock / "usage" / "sessions").write_text(f"{day}:3\n", newline="\n")  # LF: bash reads "3\r" as 0 (#398)
     proc = d.resume(env={"USAGE_LIMIT_SESSIONS_PER_DAY": "3"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == []

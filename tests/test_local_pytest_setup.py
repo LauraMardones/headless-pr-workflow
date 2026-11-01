@@ -215,14 +215,14 @@ POWERSHELL_PATH = r"C:\Windows\system32;C:\Program Files\Git\cmd;C:\ProgramData\
 def test_windows_path_from_powershell_gets_git_bash_coreutils_before_the_host_path(bash):
     # A PowerShell PATH has Git's cmd dir only, so dirname/mktemp were "command not found" (issue #384).
     path = script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")
-    assert path[:3] == ["C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
-    assert path[3:] == POWERSHELL_PATH.split(";")  # jq stays reachable, after Git's own timeout and coreutils
+    assert path[:4] == ["C:/t/bin", script_tools.WINDOWS_BIN, GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert path[4:] == POWERSHELL_PATH.split(";")  # jq stays reachable, after Git's own timeout and coreutils
 
 
 def test_host_script_path_keeps_the_host_path_and_adds_git_bash_dirs_on_windows():
     bash = GIT_ROOT + r"\usr\bin\bash.exe"
-    assert host_script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")[:3] == [
-        "C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert host_script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")[:4] == [
+        "C:/t/bin", script_tools.WINDOWS_BIN, GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
     assert host_script_path(None, "posix", "/opt/jq/bin:/usr/bin") == "/opt/jq/bin:/usr/bin"
     assert git_bash_dirs(None) == []
 
@@ -233,8 +233,41 @@ def test_posix_path_stays_narrow():
 
 def test_windows_env_keeps_system_variables_only_on_windows():
     environ = {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:", "SECRET": "x"}
-    assert windows_env("nt", environ) == {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:"}
+    kept = windows_env("nt", environ)
+    assert "SECRET" not in kept
+    assert {k: kept[k] for k in ("SYSTEMROOT", "SYSTEMDRIVE")} == {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:"}
     assert windows_env("posix", environ) == {}
+
+
+def test_windows_env_keeps_slash_commands_unconverted_on_windows_only():
+    # Git Bash rewrote "/review #398" to "C:/Program Files/Git/review #398" for jq (issue #398).
+    excluded = windows_env("nt", {})["MSYS2_ARG_CONV_EXCL"].split(";")
+    assert {"/review", "/implement", "/merge", "/cleanup"} <= set(excluded)
+    assert not any(p.startswith("/tmp") or p in ("/", "*") for p in excluded)  # /tmp paths still convert
+    assert "MSYS2_ARG_CONV_EXCL" not in windows_env("posix", {})
+
+
+def test_windows_jq_shim_asks_jq_for_lf_and_is_itself_lf():
+    # A native jq.exe ends lines with CRLF; "500\r" never matched "500", so the resume pass
+    # restarted itself without end (issue #398). The shim asks jq for LF with -b.
+    raw = (Path(script_tools.WINDOWS_BIN) / "jq").read_bytes()
+    assert b"\r" not in raw  # Git Bash cannot run a CRLF script
+    assert raw.startswith(b"#!/usr/bin/env bash\n")
+    assert b'exec jq.exe -b "$@"' in raw
+    assert script_tools.WINDOWS_BIN not in script_path("/t/bin", "posix")
+
+
+@pytest.mark.skipif(os.name != "nt" or script_tools.BASH is None or shutil.which("jq") is None,
+                    reason="Git Bash and jq on Windows only")
+def test_git_bash_scripts_see_jq_output_and_slash_arguments_as_on_linux():
+    env = {**os.environ, **windows_env(), "PATH": host_script_path()}
+    script = (
+        """x=$(echo '[500]' | jq -r '.[]'); [[ "$x" == 500 ]] || { printf 'crlf:%q' "$x"; exit 1; }; """
+        """jq -nr --arg l '/review #398' '$l'; f=$(mktemp); echo '{"a":1}' > "$f"; jq -c .a "$f"; rm -f "$f" """
+    )
+    proc = subprocess.run([script_tools.BASH, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.splitlines() == ["/review #398", "1"]  # /tmp paths still reach jq as Windows paths
 
 
 def test_windows_env_points_mktemp_at_the_pytest_temp_root():
