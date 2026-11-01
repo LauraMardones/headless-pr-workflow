@@ -7,25 +7,44 @@ from pathlib import Path
 import pytest
 
 
-def pytest_configure(config: object) -> None:
-    """Redirect pytest tmp_path base to a dir outside the repo.
+def default_temproot(conftest_dir: Path) -> Path:
+    """``.pytest_sessions`` one level above the checkout: outside the git working tree.
+
+    Not ``.pytest_tmp``: a checkout from before issue #384 uses that folder as an explicit
+    ``basetemp`` and empties it at every session start, which would delete a running
+    session's tree here too.
+    """
+    return conftest_dir.parent / ".pytest_sessions"
+
+
+def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path,
+                       basetemp: str | os.PathLike[str] | None = None) -> None:
+    """Point pytest's own numbered temp root at ``default_temproot`` unless the user chose a temp location.
 
     Avoids two problems in sandboxed environments (e.g. Codex):
     1. The system temp directory may not be writable.
     2. A temp dir inside the repo causes git-detection to succeed for tests
        that create subdirectories expecting a non-git environment.
 
-    Placing the base one level above the repo root sidesteps both issues.
-    PYTEST_DEBUG_TEMPROOT takes precedence when set explicitly.
+    pytest then gives every session its own locked ``pytest-of-<user>/pytest-<N>``
+    tree under that root, keeps the last 3 and never removes a tree that a running
+    session still holds; xdist workers get ``popen-gwN`` inside their session's tree.
+    An explicit ``basetemp`` would instead be emptied at every session start, so a
+    run in a sibling checkout (or a second run here) deleted the first run's files
+    (issue #384). With PYTEST_DEBUG_TEMPROOT set or ``--basetemp`` given, nothing
+    is created or changed, so a run works even where the default root's parent is
+    not writable.
     """
-    if os.environ.get("PYTEST_DEBUG_TEMPROOT"):
+    if environ.get("PYTEST_DEBUG_TEMPROOT") or basetemp:
         return
-    opts = getattr(config, "option", None)
-    if opts is not None and not getattr(opts, "basetemp", None):
-        # One level above the repo root — outside git working tree.
-        basetemp = Path(__file__).parent.parent / ".pytest_tmp"
-        basetemp.mkdir(parents=True, exist_ok=True)
-        opts.basetemp = basetemp
+    root = default_temproot(conftest_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    environ["PYTEST_DEBUG_TEMPROOT"] = str(root)
+
+
+def pytest_configure(config: object) -> None:
+    basetemp = getattr(getattr(config, "option", None), "basetemp", None)
+    configure_temproot(os.environ, Path(__file__).resolve().parent, basetemp)
 
 
 # Tests that summarize CI without an explicit repo_root read the policy relative to

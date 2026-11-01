@@ -21,17 +21,18 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from tests.script_tools import BASH, missing_tools, requires, script_path, windows_env
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INVOKE = REPO_ROOT / "scripts" / "dispatcher-invoke.sh"
 
-# ``subprocess`` would resolve a bare "bash" to the WSL launcher on Windows.
-BASH = shutil.which("bash")
-HAVE_TOOLS = all(shutil.which(tool) for tool in ("bash", "jq", "timeout"))
+TOOLS = ("bash", "jq", "timeout")
+HAVE_TOOLS = not missing_tools(TOOLS)
+needs_tools = requires(*TOOLS)
 
 BOT = "hpw-bot"          # the account behind GH_TOKEN; the bookkeeping job posts with it too
 PO = "LauraMardones"     # DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh
@@ -391,10 +392,9 @@ class Dispatcher:
     # ── running ─────────────────────────────────────────────────────────────
 
     def run(self, *args: str, seq: str = "0", env: dict[str, str] | None = None):
-        path = [self.bin.as_posix(), "/usr/bin", "/bin"]
         full_env = {
             "HOME": self.tmp.as_posix(),
-            "PATH": ":".join(path),
+            "PATH": script_path(self.bin.as_posix()),
             "MOCK_DIR": self.mock.as_posix(),
             "MOCK_BOT": BOT,
             "LC_ALL": "C.UTF-8",  # grep -P in the dispatcher needs a UTF-8 or unibyte locale
@@ -413,9 +413,7 @@ class Dispatcher:
             "MERGE_SCRIPT": (self.bin / "merge.sh").as_posix(),
             "CLEANUP_SCRIPT": (self.bin / "cleanup.sh").as_posix(),
         }
-        if os.name == "nt":  # Git Bash: keep the host PATH (jq, coreutils) behind the fakes
-            full_env["PATH"] = os.pathsep.join([str(self.bin), os.environ["PATH"]])
-            full_env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
+        full_env.update(windows_env())
         full_env.update(env or {})
         (self.mock / "allowance.count").unlink(missing_ok=True)  # ALLOWANCE_SEQ counts per run
         return subprocess.run(

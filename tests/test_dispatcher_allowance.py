@@ -11,20 +11,18 @@ from __future__ import annotations
 import calendar
 import json
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
+from tests.script_tools import BASH, host_script_path, requires
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "dispatcher-allowance.sh"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None or shutil.which("jq") is None or shutil.which("timeout") is None,
-    reason="requires bash, jq and timeout",
-)
+pytestmark = requires("bash", "jq", "timeout")
 
 TOKEN = "sk-ant-oat01-SECRETVALUE"
 FIVE_RESET = calendar.timegm((2026, 10, 10, 15, 0, 0))  # 2026-10-10T15:00:00Z
@@ -83,7 +81,7 @@ class Env:
     def __init__(self, tmp_path: Path):
         self.tmp = tmp_path
         self.bin = tmp_path / "claude-stub"
-        self.bin.write_text(STUB)
+        self.bin.write_text(STUB, encoding="utf-8", newline="\n")
         self.bin.chmod(0o755)
         self.log = tmp_path / "stub.log"
         self.stdout_fixture = tmp_path / "stream.jsonl"
@@ -96,7 +94,7 @@ class Env:
 
     def run(self, token: str | None = TOKEN, **env):
         full = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": host_script_path(),
             "HOME": str(self.tmp),
             "CLAUDE_BIN": str(self.bin),
             "STUB_LOG": str(self.log),
@@ -107,8 +105,8 @@ class Env:
             full["CLAUDE_CODE_OAUTH_TOKEN"] = token
         full.update(self.extra)
         full.update({k: str(v) for k, v in env.items()})
-        proc = subprocess.run(["bash", str(SCRIPT)], env=full, capture_output=True,
-                              text=True, timeout=60)
+        proc = subprocess.run([BASH, SCRIPT.as_posix()], env=full, capture_output=True,
+                              text=True, encoding="utf-8", timeout=60)
         out = check_contract(proc)
         return proc, out
 

@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 import pytest
 
-from tests.phase_script_fakes import HAVE_TOOLS, REPO_ROOT, PhaseHarness
+from tests.phase_script_fakes import REPO_ROOT, PhaseHarness, needs_tools
 
-pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq, git and python3")
+pytestmark = needs_tools
 
 PR = 77
 REPO = "o/r"
@@ -221,6 +222,9 @@ def test_quoted_gh_stderr_is_bounded(h):
     assert "line 0000" not in proc.stderr and len(proc.stderr) < 2500
 
 
+# The real hpw starts ``gh`` through Python's subprocess; on Windows that finds only ``gh.exe``, never the
+# bash fake, so the run would reach the host's real gh (issue #384).
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the real hpw cannot run the bash gh fake (needs gh.exe)")
 def test_real_hpw_merge_owner_reports_the_failing_gh_call(h):
     """AC6 (#374): the real scripts/hpw, not the HPW_BIN stub, against a failing gh."""
     shim = h.bin / "python"  # scripts/hpw runs `python -m headless_pr_workflow.cli`

@@ -1,0 +1,5 @@
+# Scripts that bash runs, directly or through their shebang, keep LF on every checkout,
+# including Windows with core.autocrlf=true (issue #384). The index already stores LF.
+# Every file under scripts/ is covered, so a new script needs no new line here.
+*.sh text eol=lf
+scripts/** text eol=lf
