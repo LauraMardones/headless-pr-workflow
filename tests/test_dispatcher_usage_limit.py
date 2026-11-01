@@ -9,7 +9,6 @@ payload.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -18,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.dispatcher_fakes import BASH, Dispatcher, needs_tools
+from tests.script_tools import host_env
 from tests.test_dispatcher_review_loop import new_head_on_implement_once
 from tests.test_dispatcher_workflow_allowance import step, step_if
 
@@ -32,11 +32,11 @@ pytestmark = needs_tools
 
 
 def usage(tmp_path, command, limit="2", today=TODAY):
-    env = {**os.environ, "USAGE_LIMIT_STATE_DIR": str(tmp_path / "state"), "USAGE_LIMIT_TODAY": today}
+    env = {**host_env(), "USAGE_LIMIT_STATE_DIR": str(tmp_path / "state"), "USAGE_LIMIT_TODAY": today}
     env.pop("USAGE_LIMIT_SESSIONS_PER_DAY", None)
     if limit is not None:
         env["USAGE_LIMIT_SESSIONS_PER_DAY"] = limit
-    return subprocess.run([BASH, str(SCRIPT), command], env=env, capture_output=True, text=True)
+    return subprocess.run([BASH, SCRIPT.as_posix(), command], env=env, capture_output=True, text=True)
 
 
 # ── the counter script ──────────────────────────────────────────────────────
@@ -256,8 +256,8 @@ def test_ac13_notification_is_due_on_the_first_stop_of_the_day_only(d):
     assert first.returncode == 0
     assert d.usage_output.count("usage_limit_reached=true") == 1
     # the workflow sent it and wrote the marker
-    subprocess.run([BASH, str(SCRIPT), "mark-notified"], check=True,
-                   env={**os.environ, "USAGE_LIMIT_STATE_DIR": str(d.mock / "usage")})
+    subprocess.run([BASH, SCRIPT.as_posix(), "mark-notified"], check=True,
+                   env={**host_env(), "USAGE_LIMIT_STATE_DIR": str(d.mock / "usage")})
     d.run_issue(ISSUE, env=env)
     assert d.usage_output.count("usage_limit_reached=true") == 1
 
@@ -323,15 +323,15 @@ def test_usage_limit_reached_event_payload(tmp_path):
     curl.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$MOCK_OUT"\nexit "${MOCK_RC:-0}"\n')
     curl.chmod(0o755)
     out = tmp_path / "curl.out"
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "MOCK_OUT": str(out),
+    env = {**host_env(bin_dir.as_posix()), "MOCK_OUT": str(out),
            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/x"}
     ctx = json.dumps({"sessions_today": 10, "limit": 10, "settings_url": "https://example.test/vars"})
-    proc = subprocess.run([BASH, str(NOTIFY), "usage_limit_reached", ctx], env=env, capture_output=True, text=True)
+    proc = subprocess.run([BASH, NOTIFY.as_posix(), "usage_limit_reached", ctx], env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     payload = out.read_text()
     assert "10 of 10" in payload and "00:00 UTC" in payload and "https://example.test/vars" in payload
     assert "Unrecognised" not in proc.stderr
-    failing = subprocess.run([BASH, str(NOTIFY), "usage_limit_reached", ctx], env={**env, "MOCK_RC": "22"},
+    failing = subprocess.run([BASH, NOTIFY.as_posix(), "usage_limit_reached", ctx], env={**env, "MOCK_RC": "22"},
                              capture_output=True, text=True)
     assert failing.returncode != 0
 

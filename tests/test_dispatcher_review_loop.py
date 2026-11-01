@@ -1043,7 +1043,7 @@ def poll_step_resumable(tmp_path, poll: dict, gh_output: str, gh_exit: int = 0) 
     gh.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{(tmp_path / "gh.log").as_posix()}"\n'
                   f'echo "{gh_output}"\nexit {gh_exit}\n', encoding="utf-8", newline="\n")
     gh.chmod(0o755)
-    env = {**os.environ, "PATH": script_path(bin_dir.as_posix()), "POLL_JSON": json.dumps(poll)}
+    env = {**os.environ, **windows_env(), "PATH": script_path(bin_dir.as_posix()), "POLL_JSON": json.dumps(poll)}
     proc = subprocess.run([BASH, "-c", snippet], env=env,
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr

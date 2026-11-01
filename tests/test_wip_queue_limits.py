@@ -9,7 +9,6 @@ The shared check (``scripts/lib/limits.sh``) on its own, the real
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -17,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.dispatcher_fakes import BASH, Dispatcher, needs_tools
-from tests.script_tools import script_path, windows_env
+from tests.script_tools import host_env, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "scripts" / "lib" / "limits.sh"
@@ -33,7 +32,7 @@ pytestmark = needs_tools
 
 def load(**values):
     """Source the shared check with exactly these variables; print what it set."""
-    env = {k: v for k, v in os.environ.items() if k not in VARIABLES}
+    env = {k: v for k, v in host_env().items() if k not in VARIABLES}
     env.update({k: v for k, v in values.items() if v is not None})
     script = f'source "{LIB.as_posix()}"; load_limits && echo "$WIP_LIMIT_IMPLEMENTATION $READY_BUFFER_MIN $READY_BUFFER_MAX"'
     return subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True)

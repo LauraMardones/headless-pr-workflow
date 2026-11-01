@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from tests import script_tools
-from tests.script_tools import find_bash, git_bash_dirs, host_script_path, missing_tools, script_path, windows_env
+from tests.script_tools import (
+    find_bash, git_bash_dirs, host_script_path, missing_tools, script_path, windows_env,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -210,6 +212,23 @@ def test_windows_env_keeps_system_variables_only_on_windows():
     environ = {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:", "SECRET": "x"}
     assert windows_env("nt", environ) == {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:"}
     assert windows_env("posix", environ) == {}
+
+
+def test_windows_env_points_mktemp_at_the_pytest_temp_root():
+    # Git Bash's /tmp can fall back to C:\Program Files\Git\tmp, which only administrators may write.
+    environ = {"PYTEST_DEBUG_TEMPROOT": r"C:\Users\u\Dev\.pytest_tmp", "TEMP": r"C:\Users\u\AppData\Local\Temp"}
+    assert windows_env("nt", environ)["TMPDIR"] == "C:/Users/u/Dev/.pytest_tmp"
+    assert windows_env("nt", {"TEMP": r"C:\t"})["TMPDIR"] == "C:/t"
+    assert "TMPDIR" not in windows_env("nt", {})
+
+
+@pytest.mark.skipif(os.name != "nt" or script_tools.BASH is None, reason="Git Bash on Windows only")
+def test_mktemp_in_git_bash_uses_tmpdir_not_slash_tmp():
+    env = {**windows_env(), "PATH": host_script_path()}
+    proc = subprocess.run([script_tools.BASH, "-c", 'f=$(mktemp) && cygpath -m "$f" && rm -f "$f"'], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().lower().startswith(env["TMPDIR"].lower())
 
 
 def test_requires_skip_reason_names_the_missing_tool(monkeypatch):

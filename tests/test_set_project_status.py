@@ -7,14 +7,13 @@ mutation from a JSON state file, so each failure mode can be switched on.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.script_tools import BASH, host_script_path, requires
+from tests.script_tools import BASH, host_env, requires
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "set-project-status"
@@ -85,8 +84,8 @@ def run(env, *args, token="secret-token-value", extra=None):
         state = json.loads(state_file.read_text(encoding="utf-8"))
         state["next"] = status
         state_file.write_text(json.dumps(state), encoding="utf-8")
-    environ = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY")}
-    environ["PATH"] = host_script_path(str(env["bin"]))
+    environ = {k: v for k, v in host_env(str(env["bin"])).items()
+               if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY")}
     environ["MOCK_DIR"] = str(env["mock"])
     if token:
         environ["GH_TOKEN"] = token
@@ -189,8 +188,7 @@ def test_invalid_arguments_exit_2(env, args):
 
 def test_session_environment_keeps_gh_token_and_drops_anthropic_variables():
     helper = REPO_ROOT / "scripts" / "lib" / "claude-session.sh"
-    environ = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
-    environ["PATH"] = host_script_path()
+    environ = {k: v for k, v in host_env().items() if not k.startswith("ANTHROPIC_")}
     environ.update({"GH_TOKEN": "gh-pat", "ANTHROPIC_AUTH_TOKEN": "x", "ANTHROPIC_BASE_URL": "https://p.test"})
     environ["ANTHROPIC_" + "API_KEY"] = "y"
     proc = subprocess.run(

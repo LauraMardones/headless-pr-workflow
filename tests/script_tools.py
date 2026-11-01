@@ -107,11 +107,24 @@ WINDOWS_ENV = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PROGRAMDATA", "COMSPEC", 
 
 
 def windows_env(os_name: str = os.name, environ: dict[str, str] | None = None) -> dict[str, str]:
-    """The host's Windows system variables to keep in a script's narrow environment; empty elsewhere."""
+    """The host's Windows system variables to keep in a script's environment; empty elsewhere.
+
+    Also sets ``TMPDIR`` for ``mktemp``: Git Bash's ``/tmp`` can resolve to ``C:\\Program Files\\Git\\tmp``,
+    which only administrators may write (issue #384). The pytest temp root is known to be writable.
+    """
     if os_name != "nt":
         return {}
     source = os.environ if environ is None else environ
-    return {name: source[name] for name in WINDOWS_ENV if name in source}
+    kept = {name: source[name] for name in WINDOWS_ENV if name in source}
+    tmpdir = source.get("PYTEST_DEBUG_TEMPROOT") or source.get("TEMP") or source.get("TMP")
+    if tmpdir:
+        kept["TMPDIR"] = PureWindowsPath(tmpdir).as_posix()
+    return kept
+
+
+def host_env(fake_bin: str | None = None) -> dict[str, str]:
+    """A copy of the host environment for a script under test, with the Windows additions above."""
+    return {**os.environ, **windows_env(), "PATH": host_script_path(fake_bin)}
 
 
 BASH = find_bash()
