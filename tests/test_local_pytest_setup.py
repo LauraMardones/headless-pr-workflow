@@ -233,8 +233,41 @@ def test_posix_path_stays_narrow():
 
 def test_windows_env_keeps_system_variables_only_on_windows():
     environ = {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:", "SECRET": "x"}
-    assert windows_env("nt", environ) == {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:"}
+    kept = windows_env("nt", environ)
+    assert "SECRET" not in kept
+    assert {k: kept[k] for k in ("SYSTEMROOT", "SYSTEMDRIVE")} == {"SYSTEMROOT": r"C:\Windows", "SYSTEMDRIVE": "C:"}
     assert windows_env("posix", environ) == {}
+
+
+def test_windows_env_keeps_slash_commands_unconverted_on_windows_only():
+    # Git Bash rewrote "/review #398" to "C:/Program Files/Git/review #398" for jq (issue #398).
+    excluded = windows_env("nt", {})["MSYS2_ARG_CONV_EXCL"].split(";")
+    assert {"/review", "/implement", "/merge", "/cleanup"} <= set(excluded)
+    assert not any(p.startswith("/tmp") or p in ("/", "*") for p in excluded)  # /tmp paths still convert
+    assert "MSYS2_ARG_CONV_EXCL" not in windows_env("posix", {})
+
+
+def test_windows_bash_env_makes_jq_write_lf_on_windows_only():
+    # A native jq.exe ends lines with CRLF; "500\r" never matched "500", so the resume pass
+    # restarted itself without end (issue #398). BASH_ENV defines jq as jq -b.
+    assert windows_env("nt", {})["BASH_ENV"] == script_tools.WINDOWS_BASH_ENV
+    assert "BASH_ENV" not in windows_env("posix", {})
+    raw = Path(script_tools.WINDOWS_BASH_ENV).read_bytes()
+    assert b"\r" not in raw  # bash would read "jq\r" as another name
+    assert b'jq() { command jq -b "$@"; }' in raw
+
+
+@pytest.mark.skipif(os.name != "nt" or script_tools.BASH is None or shutil.which("jq") is None,
+                    reason="Git Bash and jq on Windows only")
+def test_git_bash_scripts_see_jq_output_and_slash_arguments_as_on_linux():
+    env = {**os.environ, **windows_env(), "PATH": host_script_path()}
+    script = (
+        """x=$(echo '[500]' | jq -r '.[]'); [[ "$x" == 500 ]] || { printf 'crlf:%q' "$x"; exit 1; }; """
+        """jq -nr --arg l '/review #398' '$l'; f=$(mktemp); echo '{"a":1}' > "$f"; jq -c .a "$f"; rm -f "$f" """
+    )
+    proc = subprocess.run([script_tools.BASH, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.splitlines() == ["/review #398", "1"]  # /tmp paths still reach jq as Windows paths
 
 
 def test_windows_env_points_mktemp_at_the_pytest_temp_root():

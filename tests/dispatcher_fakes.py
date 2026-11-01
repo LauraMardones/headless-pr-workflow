@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
-from tests.script_tools import BASH, missing_tools, requires, script_path, windows_env
+from tests.script_tools import BASH, missing_tools, requires, run_tree, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INVOKE = REPO_ROOT / "scripts" / "dispatcher-invoke.sh"
@@ -416,9 +415,9 @@ class Dispatcher:
         full_env.update(windows_env())
         full_env.update(env or {})
         (self.mock / "allowance.count").unlink(missing_ok=True)  # ALLOWANCE_SEQ counts per run
-        return subprocess.run(
+        return run_tree(
             [BASH, INVOKE.as_posix(), "--repo", "o/r", *args],
-            env=full_env, capture_output=True, text=True, encoding="utf-8", timeout=300,
+            env=full_env, encoding="utf-8", timeout=300,
         )
 
     def run_issue(self, number: int, *args: str, **kwargs):
