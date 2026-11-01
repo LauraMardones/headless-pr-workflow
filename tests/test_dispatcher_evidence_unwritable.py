@@ -57,11 +57,11 @@ def test_ac1_pending_item_older_than_15_minutes_and_unwritable_story_queues_one_
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     [event] = events(d)
-    assert event["issue"] == STORY and event["delivered"] is False
+    assert event["issue"] == STORY
     assert event["key"].startswith(f"evidence_unwritable:{STORY}:") and "merge-confirmation" in event["key"]
     assert f"[RESUME SKIP] #{STORY}: the merge-confirmation evidence on #{PR} has been missing for 20 min" in proc.stdout
     assert "PO alert queued" in proc.stdout
-    assert d.slack_calls == []  # delivery is the retry script's job
+    assert event["delivered"] is True and len(d.slack_calls) == 1  # the drain between resume items (#349) sends it once
 
 
 def test_ac2_pending_item_younger_than_15_minutes_queues_no_event(d):
