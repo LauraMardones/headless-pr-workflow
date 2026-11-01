@@ -76,6 +76,8 @@ shared fixture or helper) needs a wider set: every test file that uses it, or a
 representative local subset when that set is too large. State any omitted local
 coverage and why in the handoff. The full CI suite is mandatory in either case.
 
+CI also runs the suite on every push to `main`, and `/verify-closure` uses that run for the verified `main` SHA as its full-suite evidence instead of a local full run.
+
 The complete suite is `python -m pytest`. It is slow on Windows (tens of minutes),
 so run it locally only intentionally; `.github/workflows/tests.yml` runs it on every
 PR. Before marking a PR Ready for review, the required `pytest` check must be green

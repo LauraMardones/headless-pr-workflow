@@ -5,6 +5,8 @@ import pytest
 
 from headless_pr_workflow.closure_verification import (
     CheckResult,
+    CiRun,
+    REQUIRED_CHECK_COMMANDS,
     ClosureDeclined,
     ClosurePartialFailure,
     Comment,
@@ -20,6 +22,7 @@ from headless_pr_workflow.closure_verification import (
 
 
 SHA = "a" * 40
+RUN_URL = "https://example.test/actions/runs/1"
 SUMMARY_TIME = "2026-08-09T10:00:00Z"
 CONFIRMATION_TIME = "2026-08-09T10:01:00Z"
 
@@ -42,6 +45,7 @@ def github() -> Mock:
     client.linked_pull_requests.return_value = [PullRequest(20, True, "b" * 40)]
     client.main_sha.return_value = SHA
     client.summary_urls.return_value = []
+    client.ci_pytest_runs.return_value = [CiRun(SHA, "completed", "success", RUN_URL)]
     return client
 
 
@@ -54,7 +58,6 @@ def local() -> Mock:
     ]
     checkout.check_results.return_value = [
         CheckResult("python -m pytest tests/test_verify_closure_command.py", "PASS"),
-        CheckResult("python -m pytest", "PASS"),
     ]
     return checkout
 
@@ -215,7 +218,9 @@ def test_failed_criterion_blocks(github: Mock, local: Mock) -> None:
 
 
 def test_environment_limited_check_blocks(github: Mock, local: Mock) -> None:
-    local.check_results.return_value = [CheckResult("python -m pytest", "BLOCKED")]
+    local.check_results.return_value = [
+        CheckResult("python -m pytest tests/test_verify_closure_command.py", "BLOCKED")
+    ]
     with pytest.raises(VerificationBlocked, match="check is BLOCKED"):
         verify_closure("10", github, local)
 
@@ -229,7 +234,127 @@ def test_missing_required_checks_blocks_arbitrary_passing_command(
     with pytest.raises(VerificationBlocked, match="required check is missing") as error:
         verify_closure("10", github, local)
     assert "python -m pytest tests/test_verify_closure_command.py" in str(error.value)
-    assert "python -m pytest" in str(error.value)
+
+
+def test_full_local_suite_is_not_a_required_check() -> None:
+    assert REQUIRED_CHECK_COMMANDS == {
+        "python -m pytest tests/test_verify_closure_command.py"
+    }
+
+
+def test_success_records_ci_row_with_run_url_and_sha(github: Mock, local: Mock) -> None:
+    result = verify_closure("10", github, local)
+    assert CheckResult(f"CI pytest on {SHA}", "PASS", RUN_URL) in result.checks
+    github.ci_pytest_runs.assert_called_once_with(SHA)
+
+
+def _ci(*runs: CiRun, github: Mock, local: Mock) -> None:
+    github.ci_pytest_runs.return_value = list(runs)
+
+
+@pytest.mark.parametrize(
+    ("runs", "message"),
+    [
+        ([], rf"check is BLOCKED: CI pytest on {SHA} \(no CI run for {SHA}"),
+        (
+            [CiRun("b" * 40, "completed", "success", RUN_URL)],
+            rf"no CI run for {SHA} \(runs found only for {'b' * 40}\)",
+        ),
+        (
+            [CiRun(SHA, "queued", None, RUN_URL)],
+            f"{RUN_URL} is queued; run again when CI finishes",
+        ),
+        (
+            [CiRun(SHA, "in_progress", None, RUN_URL)],
+            f"{RUN_URL} is in_progress; run again when CI finishes",
+        ),
+        ([CiRun(SHA, "completed", "failure", RUN_URL)], f"check is FAIL.*{RUN_URL}"),
+        ([CiRun(SHA, "completed", "timed_out", RUN_URL)], f"check is FAIL.*{RUN_URL}"),
+        (
+            [CiRun(SHA, "completed", "cancelled", RUN_URL)],
+            f"check is BLOCKED.*{RUN_URL}",
+        ),
+        (
+            [CiRun(SHA, "completed", "skipped", RUN_URL)],
+            f"check is BLOCKED.*{RUN_URL}",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "success", RUN_URL, attempt=1),
+                CiRun(SHA, "in_progress", None, "https://example.test/r2", attempt=2),
+            ],
+            "r2 is in_progress",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "failure", RUN_URL, attempt=1),
+                CiRun(SHA, "completed", "success", "https://example.test/r2", attempt=2),
+            ],
+            None,
+        ),
+        (
+            # distinct runs: an older run at attempt 2 must not beat a newer run at attempt 1
+            [
+                CiRun(SHA, "completed", "success", RUN_URL, attempt=2, run_id=10),
+                CiRun(SHA, "in_progress", None, "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            "r2 is in_progress",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "success", RUN_URL, attempt=2, run_id=10),
+                CiRun(SHA, "completed", "failure", "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            "check is FAIL.*r2",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "failure", RUN_URL, attempt=3, run_id=10),
+                CiRun(SHA, "completed", "success", "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            None,
+        ),
+    ],
+)
+def test_ci_failure_modes_fail_closed(
+    github: Mock, local: Mock, runs: list[CiRun], message: str | None
+) -> None:
+    _ci(*runs, github=github, local=local)
+    if message is None:
+        verify_closure("10", github, local)
+        return
+    with pytest.raises(VerificationBlocked, match=message):
+        verify_closure("10", github, local)
+
+
+def test_unreadable_ci_data_blocks_naming_the_failing_read(
+    github: Mock, local: Mock
+) -> None:
+    github.ci_pytest_runs.side_effect = RuntimeError("HTTP 403 check-runs")
+    with pytest.raises(VerificationBlocked, match="CI data cannot be read: HTTP 403"):
+        verify_closure("10", github, local)
+
+
+def test_ci_row_for_another_sha_is_not_accepted(github: Mock, local: Mock) -> None:
+    local.check_results.return_value = [
+        *local.check_results.return_value,
+        CheckResult(f"CI pytest on {'b' * 40}", "PASS", RUN_URL),
+    ]
+    github.ci_pytest_runs.return_value = [CiRun("b" * 40, "completed", "success", RUN_URL)]
+    with pytest.raises(VerificationBlocked, match="no CI run"):
+        verify_closure("10", github, local)
+
+
+def test_tests_workflow_runs_on_pull_request_and_push_to_main() -> None:
+    import re
+    from pathlib import Path
+
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml"
+    ).read_text(encoding="utf-8")
+    assert re.search(r"^on:\n  pull_request:\n(?:    .*\n)*?    branches: \[main\]\n  push:\n    branches: \[main\]\n", workflow, re.M)
+    assert "name: pytest" in workflow
+    assert "run: python -m pytest -n auto" in workflow
 
 
 def test_changed_main_on_final_refresh_blocks(github: Mock, local: Mock) -> None:
@@ -291,7 +416,7 @@ def closure_github() -> Mock:
             SHA,
             SUMMARY_TIME,
             "https://example.test/summary",
-            ("python -m pytest",),
+            ("python -m pytest tests/test_verify_closure_command.py",),
         )
     ]
     client.comments.return_value = [
