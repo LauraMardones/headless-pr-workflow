@@ -751,7 +751,7 @@ notify_closure_if_complete() {
     # ── Feature closure ──────────────────────────────────────────────────────
     local feature_num
     feature_num=$(echo "$TARGET_BODY" \
-        | grep -oP '(?<=Feature group: #)[0-9]+' | head -1 || true)
+        | sed -n 's/.*Feature group: #\([0-9][0-9]*\).*/\1/p' | head -1)
     [[ -z "$feature_num" ]] && return 0
 
     if $DRY_RUN; then
@@ -807,7 +807,7 @@ notify_closure_if_complete() {
     feature_body=$(gh api "repos/$REPO/issues/$feature_num" --jq '.body // ""' 2>/dev/null \
                    || echo "")
     epic_num=$(echo "$feature_body" \
-        | grep -oP '(?<=Parent epic: #)[0-9]+' | head -1 || true)
+        | sed -n 's/.*Parent epic: #\([0-9][0-9]*\).*/\1/p' | head -1)
     [[ -z "$epic_num" ]] && return 0
 
     # Collect all features in the epic from the board (features reference epic via body)

@@ -12,6 +12,7 @@
 #   6. feature_closure_confirmation: last story in feature Done → Slack fired
 #   7. feature closure silent when sibling stories remain
 #   8. epic_closure_approval: last feature in epic Done → Slack fired (requires jq)
+#   (closure tests call the real notify_closure_if_complete; number parsing and no grep -P: #427)
 #   9. EXIT trap fires dispatcher_error on unexpected non-zero exit
 #  10. EXIT trap suppressed when DISPATCH_HANDLED=true
 #  11. EXIT trap suppressed on clean exit (rc=0)
@@ -237,193 +238,31 @@ test_decision_blocker_silent_for_conflict_type() {
         "SLACK_CALLED: decision_blocker"
 }
 
-# ─── Test 6: feature_closure_confirmation fires when all feature stories Done ──
-# Requires jq to query BOARD_DATA.
+# ─── Closure tests (6-8): call the real notify_closure_if_complete ─────────────
+# The function is extracted from scripts/dispatcher-invoke.sh and run with a
+# mocked gh and register_actionable_event (#427). Requires jq.
 
-test_feature_closure_fires_when_all_done() {
-    if ! $JQ_AVAILABLE; then
-        skip_test "feature_closure_confirmation fires when all stories Done"
-        return
-    fi
-
-    local tmpdir
+# run_real_closure_check <target_body> <board_data> <completed_story>
+# Prints one "SLACK_CALLED: <event> <number>" line per registered event.
+run_real_closure_check() {
+    local target_body="$1" board_data="$2" completed="$3" tmpdir call_log fn
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
-
-    local call_log
-    call_log=$(setup_mock_slack "$tmpdir")
-
-    # Minimal BOARD_DATA: 2 stories in Feature group #10; story #4 is Done, #5 just completed
-    local board_data
-    board_data='{"data":{"repository":{"projectsV2":{"nodes":[{"id":"P1","fields":{"nodes":[]},"items":{"nodes":[{"id":"I1","content":{"number":4,"title":"Story A","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}},{"id":"I2","content":{"number":5,"title":"Story B","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}]}}]}}}}'
-
-    bash -c "
+    call_log="$tmpdir/calls.log"
+    fn=$(sed -n '/^notify_closure_if_complete() {/,/^}/p' "$INVOKE_SCRIPT")
+    TARGET_BODY="$target_body" BOARD_DATA="$board_data" bash -c "
         set -euo pipefail
         DRY_RUN=false
         REPO='owner/repo'
-        TARGET_BODY='Feature group: #10'
-        BOARD_DATA='$board_data'
-        COMPLETED_STORY=5
-
+        # Smart mock: passes the --jq filter through real jq
         gh() {
-            echo '{\"title\":\"Feature: Notifications\",\"body\":\"\"}'
-        }
-
-        notify_slack() {
-            echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'
-        }
-
-        notify_closure_if_complete() {
-            local completed_story_num=\"\$1\"
-            local feature_num
-            feature_num=\$(echo \"\$TARGET_BODY\" \
-                | grep -oP '(?<=Feature group: #)[0-9]+' | head -1 || true)
-            [[ -z \"\$feature_num\" ]] && return 0
-            \$DRY_RUN && return 0
-
-            local feature_total feature_done
-            feature_total=\$(echo \"\$BOARD_DATA\" | jq \
-                --arg fn \"\$feature_num\" \
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select(
-                      (.content | type) == \"object\" and
-                      (.content.number != null) and
-                      ((.content.body // \"\") | test(\"Feature group: #\" + \$fn + \"([^0-9]|\$)\"))
-                    )] | length')
-
-            [[ -z \"\$feature_total\" || \"\$feature_total\" -eq 0 ]] && return 0
-
-            feature_done=\$(echo \"\$BOARD_DATA\" | jq \
-                --arg fn \"\$feature_num\" \
-                --argjson cn \"\$completed_story_num\" \
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select(
-                      (.content | type) == \"object\" and
-                      (.content.number != null) and
-                      ((.content.body // \"\") | test(\"Feature group: #\" + \$fn + \"([^0-9]|\$)\")) and
-                      (
-                        .content.number == \$cn or
-                        ([.fieldValues.nodes[]
-                          | select((.field.name? // \"\") == \"Status\" and (.name? // \"\") == \"Done\")
-                        ] | length > 0)
-                      )
-                    )] | length')
-
-            [[ -z \"\$feature_done\" || \"\$feature_done\" -lt \"\$feature_total\" ]] && return 0
-
-            local feature_title feature_url
-            feature_title=\$(gh api \"repos/\$REPO/issues/\$feature_num\" --jq '.title' 2>/dev/null \
-                || echo \"Feature #\$feature_num\")
-            feature_url=\"https://github.com/\$REPO/issues/\$feature_num\"
-            notify_slack 'feature_closure_confirmation' \
-                \"\$(jq -n --arg ft \"\$feature_title\" --arg su \"\$feature_url\" \
-                       '{feature_title: \$ft, summary_url: \$su}')\"
-        }
-
-        notify_closure_if_complete 5
-    " 2>&1 || true
-
-    assert_contains "feature_closure_confirmation fires when all stories Done" \
-        "$(cat "$call_log" 2>/dev/null || true)" \
-        "SLACK_CALLED: feature_closure_confirmation"
-}
-
-# ─── Test 7: feature closure silent when sibling stories remain ────────────────
-# Requires jq.
-
-test_feature_closure_silent_when_stories_remain() {
-    if ! $JQ_AVAILABLE; then
-        skip_test "no feature_closure_confirmation when stories remain"
-        return
-    fi
-
-    local tmpdir
-    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
-
-    local call_log
-    call_log=$(setup_mock_slack "$tmpdir")
-
-    # BOARD_DATA: story #4 Done, story #6 still In implementation
-    local board_data
-    board_data='{"data":{"repository":{"projectsV2":{"nodes":[{"id":"P1","fields":{"nodes":[]},"items":{"nodes":[{"id":"I1","content":{"number":4,"title":"Story A","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}},{"id":"I2","content":{"number":6,"title":"Story C","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}]}}]}}}}'
-
-    bash -c "
-        set -euo pipefail
-        DRY_RUN=false
-        REPO='owner/repo'
-        TARGET_BODY='Feature group: #10'
-        BOARD_DATA='$board_data'
-
-        notify_slack() {
-            echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'
-        }
-
-        notify_closure_if_complete() {
-            local completed_story_num=\"\$1\"
-            local feature_num='10'
-            local feature_total feature_done
-            feature_total=\$(echo \"\$BOARD_DATA\" | jq \
-                --arg fn \"\$feature_num\" \
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select((.content.body // \"\") | test(\"Feature group: #\" + \$fn + \"([^0-9]|\$)\"))
-                ] | length')
-            feature_done=\$(echo \"\$BOARD_DATA\" | jq \
-                --arg fn \"\$feature_num\" \
-                --argjson cn \"\$completed_story_num\" \
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select(
-                      ((.content.body // \"\") | test(\"Feature group: #\" + \$fn + \"([^0-9]|\$)\")) and
-                      (.content.number == \$cn or
-                       ([.fieldValues.nodes[] | select((.field.name? // \"\") == \"Status\" and (.name? // \"\") == \"Done\")] | length > 0))
-                    )] | length')
-            [[ \"\$feature_done\" -lt \"\$feature_total\" ]] && return 0
-            notify_slack 'feature_closure_confirmation' '{}'
-        }
-
-        notify_closure_if_complete 4
-    " 2>&1 || true
-
-    assert_not_contains "no feature_closure_confirmation when stories remain" \
-        "$(cat "$call_log" 2>/dev/null || true)" \
-        "SLACK_CALLED: feature_closure_confirmation"
-}
-
-# ─── Test 8: epic_closure_approval fires when all epic features' stories Done ──
-# Requires jq. BOARD_DATA has:
-#   stories #4 and #5 in Feature group #10 (both Done / just-completed)
-#   feature item #10 with body "Parent epic: #30" (the epic's feature on the board)
-# Mock gh returns the feature body and epic title for API lookups.
-
-test_epic_closure_fires_when_all_done() {
-    if ! $JQ_AVAILABLE; then
-        skip_test "epic_closure_approval fires when all epic features Done"
-        return
-    fi
-
-    local tmpdir call_log
-    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
-    call_log=$(setup_mock_slack "$tmpdir")
-
-    local board_data
-    board_data='{"data":{"repository":{"projectsV2":{"nodes":[{"id":"P1","fields":{"nodes":[]},"items":{"nodes":[{"id":"I1","content":{"number":4,"title":"Story A","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}},{"id":"I2","content":{"number":5,"title":"Story B","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}},{"id":"F1","content":{"number":10,"title":"Feature: Notifications","body":"Parent epic: #30\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}]}}]}}}}'
-
-    bash -c "
-        set -euo pipefail
-        DRY_RUN=false
-        REPO='owner/repo'
-        TARGET_BODY='Feature group: #10'
-        BOARD_DATA='$board_data'
-
-        # Smart mock: passes --jq filter through real jq so callers get correct values
-        gh() {
-            local url=\"\${2:-}\" jq_filter=\"\"
+            local url=\"\${2:-}\" jq_filter=\"\" result
             [[ \"\${3:-}\" == '--jq' ]] && jq_filter=\"\${4:-}\"
-            local result
-            if [[ \"\$url\" == *'issues/10'* ]]; then
+            if [[ \"\$url\" == *'issues/10' ]]; then
                 result='{\"title\":\"Feature: Notifications\",\"body\":\"Parent epic: #30\"}'
-            elif [[ \"\$url\" == *'issues/30'* ]]; then
+            elif [[ \"\$url\" == *'issues/30' ]]; then
                 result='{\"title\":\"Epic: Autonomous Dispatcher\",\"body\":\"\"}'
             else
-                result='{}'
+                result='{\"title\":\"\",\"body\":\"\"}'
             fi
             if [[ -n \"\$jq_filter\" ]]; then
                 echo \"\$result\" | jq -r \"\$jq_filter\"
@@ -431,88 +270,96 @@ test_epic_closure_fires_when_all_done() {
                 echo \"\$result\"
             fi
         }
+        register_actionable_event() { echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'; }
+        $fn
+        notify_closure_if_complete $completed
+    " >/dev/null 2>&1 || true
+    cat "$call_log" 2>/dev/null || true
+}
 
-        notify_slack() {
-            echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'
-        }
+CLOSURE_STORY_A='{"id":"I1","content":{"number":4,"title":"Story A","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}}'
+CLOSURE_STORY_B='{"id":"I2","content":{"number":5,"title":"Story B","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}'
+CLOSURE_FEATURE='{"id":"F1","content":{"number":10,"title":"Feature: Notifications","body":"Parent epic: #30\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}'
 
-        notify_closure_if_complete() {
-            local cn=\"\$1\"
-            local fn
-            fn=\$(echo \"\$TARGET_BODY\" | grep -oP '(?<=Feature group: #)[0-9]+' | head -1 || true)
-            [[ -z \"\$fn\" ]] && return 0
+closure_board() {
+    local IFS=,
+    echo "{\"data\":{\"repository\":{\"projectsV2\":{\"nodes\":[{\"id\":\"P1\",\"fields\":{\"nodes\":[]},\"items\":{\"nodes\":[$*]}}]}}}}"
+}
 
-            local ftotal fdone
-            ftotal=\$(echo \"\$BOARD_DATA\" | jq --arg fn \"\$fn\" \\
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select((.content|type)==\"object\" and (.content.number!=null) and
-                      ((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\")))
-                ] | length')
-            [[ -z \"\$ftotal\" || \"\$ftotal\" -eq 0 ]] && return 0
+# ─── Test 6: feature_closure_confirmation fires when all feature stories Done ──
 
-            fdone=\$(echo \"\$BOARD_DATA\" | jq --arg fn \"\$fn\" --argjson cn \"\$cn\" \\
-                '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select((.content|type)==\"object\" and (.content.number!=null) and
-                      ((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\")) and
-                      (.content.number==\$cn or
-                       ([.fieldValues.nodes[]
-                         | select((.field.name? // \"\")==\"Status\" and (.name? // \"\")==\"Done\")
-                       ] | length > 0)))
-                ] | length')
-            [[ -z \"\$fdone\" || \"\$fdone\" -lt \"\$ftotal\" ]] && return 0
+test_feature_closure_fires_when_all_done() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "feature_closure_confirmation fires when all stories Done"
+        return
+    fi
+    assert_contains "feature_closure_confirmation fires when all stories Done" \
+        "$(run_real_closure_check 'Feature group: #10' \
+            "$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B")" 5)" \
+        "SLACK_CALLED: feature_closure_confirmation 10"
+}
 
-            notify_slack 'feature_closure_confirmation' \\
-                \"\$(jq -n --arg ft \"Feature #\$fn\" --arg su \"url\" '{feature_title:\$ft,summary_url:\$su}')\"
+# ─── Test 7: feature closure silent when sibling stories remain ────────────────
 
-            # Epic closure
-            local fb epic_num
-            fb=\$(gh api \"repos/\$REPO/issues/\$fn\" --jq '.body // \"\"' 2>/dev/null || echo '')
-            epic_num=\$(echo \"\$fb\" | grep -oP '(?<=Parent epic: #)[0-9]+' | head -1 || true)
-            [[ -z \"\$epic_num\" ]] && return 0
+test_feature_closure_silent_when_stories_remain() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "no feature_closure_confirmation when stories remain"
+        return
+    fi
+    # Story #5 is still In implementation and #4 completes
+    local sibling='{"id":"I2","content":{"number":6,"title":"Story C","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"In implementation","field":{"name":"Status"}}]}}'
+    assert_not_contains "no feature_closure_confirmation when stories remain" \
+        "$(run_real_closure_check 'Feature group: #10' \
+            "$(closure_board "$CLOSURE_STORY_A" "$sibling")" 4)" \
+        "SLACK_CALLED: feature_closure_confirmation"
+}
 
-            local epic_fns
-            epic_fns=\$(echo \"\$BOARD_DATA\" | jq -r --arg en \"\$epic_num\" \\
-                '.data.repository.projectsV2.nodes[0].items.nodes[]
-                  | select((.content|type)==\"object\" and (.content.number!=null) and
-                      ((.content.body//\"\") | test(\"Parent epic: #\"+\$en+\"([^0-9]|\$)\")))
-                  | .content.number')
-            [[ -z \"\$epic_fns\" ]] && return 0
+# ─── Test 7b: feature number parsing (#427) ────────────────────────────────────
 
-            local all_done=true
-            while IFS= read -r efn; do
-                local et ed
-                et=\$(echo \"\$BOARD_DATA\" | jq --arg fn \"\$efn\" \\
-                    '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                      | select((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\"))
-                    ] | length')
-                ed=\$(echo \"\$BOARD_DATA\" | jq --arg fn \"\$efn\" --argjson cn \"\$cn\" \\
-                    '[.data.repository.projectsV2.nodes[0].items.nodes[]
-                      | select((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\")) and
-                        (.content.number==\$cn or
-                         ([.fieldValues.nodes[]
-                           | select((.field.name? // \"\")==\"Status\" and (.name? // \"\")==\"Done\")
-                         ] | length > 0))
-                    ] | length')
-                if [[ -n \"\$et\" && \"\$et\" -gt 0 && \"\$ed\" -lt \"\$et\" ]]; then
-                    all_done=false; break
-                fi
-            done <<< \"\$epic_fns\"
+test_feature_number_parsing() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "feature number parsing"
+        return
+    fi
+    local board out
+    board=$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B")
+    assert_contains "feature number read from 'Feature group: #10 Feature: X'" \
+        "$(run_real_closure_check $'Feature group: #10 Feature: X\n' "$board" 5)" \
+        "SLACK_CALLED: feature_closure_confirmation 10"
+    assert_contains "first 'Feature group' match wins" \
+        "$(run_real_closure_check $'Feature group: #10\nFeature group: #99\n' "$board" 5)" \
+        "SLACK_CALLED: feature_closure_confirmation 10"
+    out=$(run_real_closure_check $'No group line here\n' "$board" 5)
+    assert_not_contains "no Slack call without a 'Feature group' line" \
+        "$out" "SLACK_CALLED"
+    assert_not_contains "'Feature group: #100' does not match feature 10" \
+        "$(run_real_closure_check 'Feature group: #100' "$board" 5)" \
+        "SLACK_CALLED"
+}
 
-            \$all_done || return 0
+# ─── Test 7c: no grep -P in the dispatcher (#427) ──────────────────────────────
+# Git for Windows ships GNU grep 3.0, which refuses -P without a locale.
 
-            local et_title et_url
-            et_title=\$(gh api \"repos/\$REPO/issues/\$epic_num\" --jq '.title' 2>/dev/null || echo \"Epic #\$epic_num\")
-            et_url=\"https://github.com/\$REPO/issues/\$epic_num\"
-            notify_slack 'epic_closure_approval' \\
-                \"\$(jq -n --arg et \"\$et_title\" --arg su \"\$et_url\" '{epic_title:\$et,summary_url:\$su}')\"
-        }
+test_dispatcher_has_no_grep_perl_regex() {
+    local hits
+    hits=$(grep -nE 'grep +(-[A-Za-z]*P|--perl-regexp)' "$INVOKE_SCRIPT" || true)
+    assert_not_contains "scripts/dispatcher-invoke.sh has no grep -P" \
+        "$hits" "grep"
+}
 
-        notify_closure_if_complete 5
-    " 2>&1 || true
+# ─── Test 8: epic_closure_approval fires when all epic features' stories Done ──
+# Stories #4 and #5 are in Feature group #10 (Done / just completed); feature
+# item #10 has body "Parent epic: #30".
 
+test_epic_closure_fires_when_all_done() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "epic_closure_approval fires when all epic features Done"
+        return
+    fi
     assert_contains "epic_closure_approval fires when all epic features Done" \
-        "$(cat "$call_log" 2>/dev/null || true)" \
-        "SLACK_CALLED: epic_closure_approval"
+        "$(run_real_closure_check 'Feature group: #10' \
+            "$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B" "$CLOSURE_FEATURE")" 5)" \
+        "SLACK_CALLED: epic_closure_approval 30"
 }
 
 # ─── Test 9: EXIT trap fires dispatcher_error on unexpected non-zero exit ──────
@@ -728,6 +575,8 @@ run_all_tests() {
     test_decision_blocker_wired_passes_fields
     test_feature_closure_fires_when_all_done
     test_feature_closure_silent_when_stories_remain
+    test_feature_number_parsing
+    test_dispatcher_has_no_grep_perl_regex
     test_epic_closure_fires_when_all_done
     test_dispatcher_error_trap_fires_on_unexpected_exit
     test_dispatcher_error_suppressed_when_handled
