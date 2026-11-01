@@ -22,6 +22,7 @@ In:
 - Shared, tested dispatcher building blocks for verified GitHub writes, markers and saved state, and an ADR on where dispatcher logic lives (#368).
 - The cause of implementation sessions that end at the turn limit, and a fix for the main cause (#401).
 - A trustworthy test suite: the local Windows run is green, and every `tests/*.sh` file runs in CI under a required check (#415 with #384, #398, #412).
+- A closure check (`/verify-closure`) takes its full-suite test result from CI for the verified commit, instead of running the full suite on the PO's machine. CI also runs on every push to `main`, so that commit has a run (#415 with #421).
 
 Out:
 
@@ -31,6 +32,7 @@ Out:
 - New dispatcher behaviour.
 - Changing the session guards (reserve, allowance probe, sessions per day).
 - WSL support, and changing `-n auto` in CI or `-n 4` locally.
+- Changing the test command CI runs. Adding the push trigger on `main` (#421) is in scope.
 - Dashboards or scheduled reports of the measure.
 
 ## Acceptance Criteria
@@ -45,6 +47,9 @@ Out:
   - **Verified by:** the PO runs both commands at closure, and the regression test from #384 passes.
 - **E5:** Every test file, including each `tests/*.sh`, runs in CI on every PR under a check that blocks merge. A new `tests/*.sh` file runs with no workflow change.
   - **Verified by:** a deliberately failing shell test turns the required check red.
+
+- **E6:** A closure check runs no full test suite on the PO's machine. It takes the full-suite result from the CI `pytest` run for the exact verified `main` commit, and it does not pass when that run is missing, unfinished or failed. Criterion-specific local checks, such as E4's, stay.
+  - **Verified by:** a `/verify-closure` summary after #421 shows the CI row with run URL and commit SHA, and the tests for a missing, unfinished, failed and wrong-commit run pass.
 
 ## Decisions
 
@@ -71,6 +76,14 @@ Out:
 **Rejected:** Fewer than 10 % of implementation sessions end at the turn limit.
 **Rejected:** "The main cause no longer occurs", with no figure.
 
+### Closure checks use the CI test result (E6) — 2026-11-01 (PO)
+
+**Chosen:** Add #421 to this Epic under Feature #415, with its own criterion E6. It serves the same goal: a story costs less to deliver, and the PO's machine is not blocked for tens of minutes per closure check. It needs #412 first, which is already here.
+**Rejected:** Epic #272 — on 2026-11-01 the PO decided #272 takes no new work.
+**Rejected:** A new Epic — a full spec session and a closure for one small story.
+**Rejected:** Park it in Backlog — every closure check keeps blocking the PO's machine.
+**Note:** A new E6, rather than a wider E5, is the Analyst's proposal: E5 is about which tests CI runs, and a separate criterion keeps each one verifiable on its own. The PO approves it by merging this spec PR.
+
 ## Checked Against
 
 - #160 → Decisions → "Work that no Epic criterion needs gets its own Epic" (2026-11-01) — no conflict. This spec carries out its Option A.
@@ -82,6 +95,8 @@ Out:
 - `docs/MERGE-POLICY.md` and `docs/required-check-policy.json` — `pytest` is the only required check on `main`. If E5 changes the required checks, the same story updates both files.
 - AGENTS.md → Running Tests — no conflict. E4 removes the list of known Windows failures.
 - Epic #272 — holds #364, #365, #366 and #416 from the same analysis. No conflict. The E2 measure shows the combined effect of both Epics.
+- Epic #272 → Decisions → "Finish line" (2026-11-01) — `/verify-closure` work started there, but #272 takes no new work. E6 lives here instead. No conflict.
+- E4 and E6 — no conflict. E6 removes only the full local run from every closure check; E4's own **Verified by:** still asks the PO to run both commands on Windows when this Epic closes.
 - Epic #306 — holds #399 and #400. Out of scope here.
 
 ## Delegated to the Tech Lead
