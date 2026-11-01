@@ -1,6 +1,7 @@
 # GitHub Actions workflow: run the pytest suite on every PR targeting main.
 # Thin wrapper around `python -m pytest` — no bespoke reporting or gating logic —
 # so it can be re-expressed for a non-GitHub CI system. See issue #290.
+# pytest also runs every tests/test_*.sh file, through tests/test_shell_tests.py (issue #412).
 #
 # This workflow runs on every PR but is not yet a required status check. See
 # the "PO Instructions" in issue #290 for the manual step that marks the
