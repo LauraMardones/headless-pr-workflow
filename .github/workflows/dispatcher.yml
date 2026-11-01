@@ -19,6 +19,13 @@
 # non-draft PR), and resumable counts it, so the invoke step reviews that PR on
 # the subscription even when nothing else is due.
 #
+# 2026-10-16 (issue #339, ADR-013): a hosted HTTP cron service starts this
+# workflow every 5 minutes through workflow_dispatch on main; the cron below
+# stays as the backup. The "Check the dispatch trigger" step queues a
+# dispatch_trigger_stopped alert when the newest dispatched run on main is more
+# than 15 minutes old. Triggers, permissions: and concurrency are unchanged.
+# Setup and token rotation: docs/DISPATCHER-CONFIG.md → "Dispatcher trigger".
+#
 # 2026-10-16 (issue #337): the checkout keeps no credentials and has the full
 # history, and a step before the invoke makes plain `git push` authenticate
 # through `gh` with PROJECT_TOKEN. A session no longer needs a git override.
@@ -259,6 +266,21 @@ jobs:
             .dispatcher-usage
             .dispatcher-allowance
           key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Issue #339 (ADR-013): queues one dispatch_trigger_stopped event when the
+      # newest workflow_dispatch run on main is more than 15 minutes old, for
+      # the retry step below to send. Runs on every enabled cycle whatever
+      # started it, before the retry step, with the retry step's conditions. A
+      # non-default ref only reports (--dry-run). It never fails the run on an
+      # API read error.
+      - name: Check the dispatch trigger
+        if: ${{ !cancelled() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' }}
+        run: |
+          TRIGGER_ARGS=(--repo "${{ github.repository }}")
+          if [ "${{ steps.scope.outputs.state_writer }}" != "true" ]; then
+            TRIGGER_ARGS+=(--dry-run)
+          fi
+          bash scripts/dispatcher-trigger-check.sh "${TRIGGER_ARGS[@]}"
 
       # Issue #295: delivers and retries the Slack notifications that need PO
       # action (decision blocker, Feature closure, Epic closure). It runs on
