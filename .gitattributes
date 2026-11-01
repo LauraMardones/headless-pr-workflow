@@ -3,6 +3,3 @@
 # Every file under scripts/ is covered, so a new script needs no new line here.
 *.sh text eol=lf
 scripts/** text eol=lf
-
-# Test shims that Git Bash runs on Windows (issue #398).
-tests/windows_bin/** text eol=lf

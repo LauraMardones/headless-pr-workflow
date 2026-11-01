@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Windows-only test shim (issue #398), first on a script's PATH under Git Bash.
-# A native jq.exe ends each output line with CRLF there, so `$(jq -r ...)` keeps a
-# trailing \r and "500\r" never equals "500". `-b` (jq 1.7+) writes LF, as on Linux.
-exec jq.exe -b "$@"

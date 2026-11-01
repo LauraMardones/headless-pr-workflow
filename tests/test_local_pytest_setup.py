@@ -215,14 +215,14 @@ POWERSHELL_PATH = r"C:\Windows\system32;C:\Program Files\Git\cmd;C:\ProgramData\
 def test_windows_path_from_powershell_gets_git_bash_coreutils_before_the_host_path(bash):
     # A PowerShell PATH has Git's cmd dir only, so dirname/mktemp were "command not found" (issue #384).
     path = script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")
-    assert path[:4] == ["C:/t/bin", script_tools.WINDOWS_BIN, GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
-    assert path[4:] == POWERSHELL_PATH.split(";")  # jq stays reachable, after Git's own timeout and coreutils
+    assert path[:3] == ["C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert path[3:] == POWERSHELL_PATH.split(";")  # jq stays reachable, after Git's own timeout and coreutils
 
 
 def test_host_script_path_keeps_the_host_path_and_adds_git_bash_dirs_on_windows():
     bash = GIT_ROOT + r"\usr\bin\bash.exe"
-    assert host_script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")[:4] == [
-        "C:/t/bin", script_tools.WINDOWS_BIN, GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
+    assert host_script_path("C:/t/bin", "nt", POWERSHELL_PATH, bash=bash).split(";")[:3] == [
+        "C:/t/bin", GIT_ROOT + r"\usr\bin", GIT_ROOT + r"\mingw64\bin"]
     assert host_script_path(None, "posix", "/opt/jq/bin:/usr/bin") == "/opt/jq/bin:/usr/bin"
     assert git_bash_dirs(None) == []
 
@@ -247,14 +247,14 @@ def test_windows_env_keeps_slash_commands_unconverted_on_windows_only():
     assert "MSYS2_ARG_CONV_EXCL" not in windows_env("posix", {})
 
 
-def test_windows_jq_shim_asks_jq_for_lf_and_is_itself_lf():
+def test_windows_bash_env_makes_jq_write_lf_on_windows_only():
     # A native jq.exe ends lines with CRLF; "500\r" never matched "500", so the resume pass
-    # restarted itself without end (issue #398). The shim asks jq for LF with -b.
-    raw = (Path(script_tools.WINDOWS_BIN) / "jq").read_bytes()
-    assert b"\r" not in raw  # Git Bash cannot run a CRLF script
-    assert raw.startswith(b"#!/usr/bin/env bash\n")
-    assert b'exec jq.exe -b "$@"' in raw
-    assert script_tools.WINDOWS_BIN not in script_path("/t/bin", "posix")
+    # restarted itself without end (issue #398). BASH_ENV defines jq as jq -b.
+    assert windows_env("nt", {})["BASH_ENV"] == script_tools.WINDOWS_BASH_ENV
+    assert "BASH_ENV" not in windows_env("posix", {})
+    raw = Path(script_tools.WINDOWS_BASH_ENV).read_bytes()
+    assert b"\r" not in raw  # bash would read "jq\r" as another name
+    assert b'jq() { command jq -b "$@"; }' in raw
 
 
 @pytest.mark.skipif(os.name != "nt" or script_tools.BASH is None or shutil.which("jq") is None,

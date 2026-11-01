@@ -11,11 +11,12 @@ launcher ``C:\\Windows\\System32\\bash.exe`` (and ``subprocess`` resolves a bare
 first. Every function takes ``which``, ``os_name`` and ``isfile`` so the selection
 is testable on any OS.
 
-Two Git Bash habits break scripts that pass on Linux (issue #398). On Windows the
-harness therefore puts ``tests/windows_bin`` right after the fakes on ``PATH``: its
-``jq`` runs ``jq.exe -b``, because a native ``jq.exe`` ends lines with CRLF and
-``$(jq -r ...)`` then keeps a trailing ``\\r``. And ``windows_env`` sets
-``MSYS2_ARG_CONV_EXCL`` for the slash-command names, because Git Bash rewrites an
+Two Git Bash habits break scripts that pass on Linux (issue #398), so on Windows
+``windows_env`` sets two variables. ``BASH_ENV`` points at ``tests/windows_bash_env.sh``,
+which defines ``jq`` as ``jq -b``: a native ``jq.exe`` ends lines with CRLF and
+``$(jq -r ...)`` then keeps a trailing ``\\r``. A function, unlike a wrapper script,
+starts no extra process, so the dispatcher is not slowed down. And
+``MSYS2_ARG_CONV_EXCL`` names the slash commands, because Git Bash rewrites an
 argument such as ``/review #398`` to ``C:/Program Files/Git/review #398`` before a
 native tool sees it. Paths such as ``/tmp/...`` are still converted.
 """
@@ -31,8 +32,8 @@ from pathlib import Path, PureWindowsPath
 
 import pytest
 
-# Windows-only shims that run before the host tools (see the module docstring).
-WINDOWS_BIN = str(Path(__file__).resolve().parent / "windows_bin")
+# Windows-only bash start-up file that makes jq write LF (see the module docstring).
+WINDOWS_BASH_ENV = (Path(__file__).resolve().parent / "windows_bash_env.sh").as_posix()
 
 # Slash commands the scripts pass to native tools, e.g. ``jq --arg label "/review #398"``.
 # Git Bash leaves an argument that starts with one of these unconverted (issue #398).
@@ -104,7 +105,7 @@ def script_path(fake_bin: str, os_name: str = os.name, host_path: str | None = N
     if os_name == "nt":
         host = os.environ.get("PATH", "") if host_path is None else host_path
         dirs = git_bash_dirs(BASH if bash is None else bash)
-        return ";".join(p for p in [fake_bin, WINDOWS_BIN, *dirs, host] if p)
+        return ";".join(p for p in [fake_bin, *dirs, host] if p)
     return ":".join([fake_bin, "/usr/bin", "/bin"])
 
 
@@ -114,7 +115,7 @@ def host_script_path(fake_bin: str | None = None, os_name: str = os.name, host_p
     host = os.environ.get("PATH", "") if host_path is None else host_path
     if os_name == "nt":
         dirs = git_bash_dirs(BASH if bash is None else bash)
-        return ";".join(p for p in [fake_bin, WINDOWS_BIN, *dirs, host] if p)
+        return ";".join(p for p in [fake_bin, *dirs, host] if p)
     return ":".join(p for p in [fake_bin, host] if p)
 
 
@@ -134,6 +135,7 @@ def windows_env(os_name: str = os.name, environ: dict[str, str] | None = None) -
     source = os.environ if environ is None else environ
     kept = {name: source[name] for name in WINDOWS_ENV if name in source}
     kept["MSYS2_ARG_CONV_EXCL"] = ";".join(SLASH_COMMANDS)
+    kept["BASH_ENV"] = WINDOWS_BASH_ENV
     tmpdir = source.get("PYTEST_DEBUG_TEMPROOT") or source.get("TEMP") or source.get("TMP")
     if tmpdir:
         kept["TMPDIR"] = PureWindowsPath(tmpdir).as_posix()
