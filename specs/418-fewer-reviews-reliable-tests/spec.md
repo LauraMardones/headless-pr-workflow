@@ -35,10 +35,16 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <An outcome the PO can verify at Epic closure.>
-  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
-- **E2:** <…>
-  - **Verified by:** <…>
+- **E1:** The PO can see, for the last N merged PRs, how many review requests, Codex reviews, P1 findings and fix commits each PR needed, without manual work.
+  - **Verified by:** the report for PRs #309–#355 matches the manual analysis of 2026-10-15.
+- **E2:** Orchestration and critical-path stories need fewer review and fix rounds: for the first 5 such stories delivered after #367 and #368, the median number of fix rounds per PR is at most half the median for the same kind of stories in PRs #309–#355.
+  - **Verified by:** the E1 report on those 5 PRs, compared with the E1 report on the baseline PRs.
+- **E3:** Fewer implementation sessions end at the turn limit: in the 4 weeks after the fix for the main cause is merged, no story has more than one implementation session that ends with `error_max_turns`.
+  - **Verified by:** the `[SESSION]` lines in the dispatcher runs over those 4 weeks.
+- **E4:** On the PO's Windows machine, `python -m pytest` and `python -m pytest -n 4` finish with no failures and no setup errors. Each test that is skipped on Windows states why. Two runs started at the same time never delete each other's temp files.
+  - **Verified by:** the PO runs both commands at closure, and the regression test from #384 passes.
+- **E5:** Every test file, including each `tests/*.sh`, runs in CI on every PR under a check that blocks merge. A new `tests/*.sh` file runs with no workflow change.
+  - **Verified by:** a deliberately failing shell test turns the required check red.
 
 ## Decisions
 
