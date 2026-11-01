@@ -456,7 +456,7 @@ test_epic_closure_fires_when_all_done() {
                       ((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\")) and
                       (.content.number==\$cn or
                        ([.fieldValues.nodes[]
-                         | select((.field.name?//\"\")==\"Status\" and (.name?//\"\")==\"Done\")
+                         | select((.field.name? // \"\")==\"Status\" and (.name? // \"\")==\"Done\")
                        ] | length > 0)))
                 ] | length')
             [[ -z \"\$fdone\" || \"\$fdone\" -lt \"\$ftotal\" ]] && return 0
@@ -490,7 +490,7 @@ test_epic_closure_fires_when_all_done() {
                       | select((.content.body//\"\") | test(\"Feature group: #\"+\$fn+\"([^0-9]|\$)\")) and
                         (.content.number==\$cn or
                          ([.fieldValues.nodes[]
-                           | select((.field.name?//\"\")==\"Status\" and (.name?//\"\")==\"Done\")
+                           | select((.field.name? // \"\")==\"Status\" and (.name? // \"\")==\"Done\")
                          ] | length > 0))
                     ] | length')
                 if [[ -n \"\$et\" && \"\$et\" -gt 0 && \"\$ed\" -lt \"\$et\" ]]; then
