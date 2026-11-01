@@ -229,13 +229,18 @@ def test_rate_limit_is_a_pause_with_its_own_line(d):
 
 
 def test_session_past_the_wall_clock_is_stopped(d):
-    d.claude_sleeps(120)
+    d.claude_sleeps(180)
 
     started = time.monotonic()
-    # Long enough for the pre-flight before the session on a slow runner.
-    proc = d.run_issue(STORY, env={"AGENT_MAX_WALLCLOCK_SECONDS": "20"})
+    # The budget counts from the job start, so the pre-flight uses it too. 60 s
+    # clears a pre-flight of about 30 s on Windows under `-n 4` (#428).
+    proc = d.run_issue(STORY, env={"AGENT_MAX_WALLCLOCK_SECONDS": "60"})
 
-    assert time.monotonic() - started < 100
+    assert "not started: no time left" not in proc.stderr, (
+        "the pre-flight used the whole wall-clock budget, so the session never started; "
+        "raise AGENT_MAX_WALLCLOCK_SECONDS in this test\n" + proc.stderr)
+    assert d.claude_calls, "the fake Claude Code session was never started\n" + proc.stderr
+    assert time.monotonic() - started < 150
     assert_failed_closed(d, proc)
     assert "stopped by the wall-clock bound" in proc.stderr
 
