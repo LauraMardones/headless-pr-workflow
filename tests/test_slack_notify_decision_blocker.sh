@@ -57,7 +57,7 @@ FULL=$(jq -n --arg u "$URL" '{story_title:"My story", issue_url:$u, blocker_type
     unblocked_when:"PO decides", question:"Ship A or B?",
     options:"A) ship A — fast but risky\nB) ship B — slow but safe", recommendation:"B because safe"}')
 
-p=$(send "$FULL")
+p=$(send "$FULL") || { echo "FAIL: full context send failed"; FAIL=$(( FAIL + 1 )); p=""; }
 t=$(texts "$p")
 check "full: renders story, question, options, recommendation, unblocked-when" \
     bash -c 'grep -qF "My story" <<< "$1" && grep -qF "Ship A or B?" <<< "$1" && grep -qF "A) ship A — fast but risky" <<< "$1" && grep -qF "B) ship B — slow but safe" <<< "$1" && grep -qF "B because safe" <<< "$1" && grep -qF "PO decides" <<< "$1"' _ "$t"
@@ -69,7 +69,7 @@ LONG=$(head -c 5000 /dev/zero | tr '\0' 'x')
 BIG=$(jq -n --arg u "$URL" --arg l "$LONG" '{story_title:$l, issue_url:$u, blocker_type:"decision",
     unblocked_when:$l, question:$l, recommendation:$l,
     options:([range(0;20) | ["A","B","C","D"][. % 4] + ") name" + (.|tostring) + " — " + $l] | join("\n"))}')
-p=$(send "$BIG")
+p=$(send "$BIG") || { echo "FAIL: oversize context send failed"; FAIL=$(( FAIL + 1 )); p=""; }
 t=$(texts "$p")
 check "oversize: every section <= 3000 chars and <= 50 blocks" within_limits "$p"
 check "oversize: issue link and /unblock instruction survive" \

@@ -67,7 +67,7 @@ build_payload() {
             # below 3000. Options are cut consequence-first (letter and name
             # stay); question and recommendation are cut last, with the
             # larger caps. The issue link and resume line are never cut.
-            jq -n --argjson c "$ctx" '
+            printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
                 def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -114,7 +114,7 @@ build_payload() {
             # A blocker the dispatcher posted and only the PO can resolve
             # (issue #359). Every text is capped below Block Kit's 3000
             # characters; the issue link and the resume line are never cut.
-            jq -n --argjson c "$ctx" '
+            printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
                 def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -144,7 +144,7 @@ build_payload() {
             # Required evidence has been missing for a while and the story's
             # comments cannot be written (issue #372). The link and the advice
             # are never cut.
-            jq -n --argjson c "$ctx" '
+            printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
                 def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -311,7 +311,7 @@ build_payload() {
             ;;
 
         dispatch_trigger_stopped)
-            jq -n --argjson c "$ctx" '
+            printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
                 def clean: str | sub("^\\s+"; "") | sub("\\s+$"; "");
