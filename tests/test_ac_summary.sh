@@ -118,3 +118,4 @@ assert_equals "failed gh lookup keeps stdout empty" "" "$CASE_STDOUT"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
+exit 1  # throw-away AC2 check
