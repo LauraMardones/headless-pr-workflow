@@ -260,6 +260,54 @@ test_directory_valued_state_path_is_replaced() {
     check "directory state path: next run delivers once" $(( rc + ($(slack_count) == 1 ? 0 : 1) ))
 }
 
+# Issue #352: a fake cp on PATH fails for the state file while $T/unreadable
+# exists (chmod 000 does not block root or Windows Git Bash).
+make_state_unreadable() {
+    local real; real=$(command -v cp)
+    cat > "$T/bin/cp" <<FAKE
+#!/usr/bin/env bash
+if [[ -e "$T/unreadable" && "\$1" == */actionable-events ]]; then exit 1; fi
+exec "$real" "\$@"
+FAKE
+    chmod +x "$T/bin/cp"
+    : > "$T/unreadable"
+}
+
+test_unreadable_state_file_is_kept() {
+    setup
+    reg_decision 7 2026-10-14T10:00:00Z
+    reg_decision 8 2026-10-14T10:00:00Z
+    cp "$(STATE)" "$T/before"
+    make_state_unreadable
+
+    retry run --repo o/r; rc=$?
+    check "unreadable state, run: exits 1" $(( rc == 1 ? 0 : 1 ))
+    check "unreadable state, run: Error line names the file" $(grep -q "\[NOTIFY\] Error:.*actionable-events" "$T/stderr"; echo $?)
+    check "unreadable state, run: sends nothing" $(( $(slack_count) == 0 ? 0 : 1 ))
+    check "unreadable state, run: file unchanged" $(cmp -s "$T/before" "$(STATE)"; echo $?)
+
+    retry run --repo o/r --drain; rc=$?
+    check "unreadable state, drain: exits 0" $(( rc ))
+    check "unreadable state, drain: Warning line" $(grep -q "\[NOTIFY\] Warning:" "$T/stderr"; echo $?)
+    check "unreadable state, drain: sends nothing" $(( $(slack_count) == 0 ? 0 : 1 ))
+    check "unreadable state, drain: file unchanged" $(cmp -s "$T/before" "$(STATE)"; echo $?)
+
+    retry register --repo o/r --event epic_closure_approval --issue 20 --context '{"epic_title":"E"}'; rc=$?
+    check "unreadable state, register: delivers directly, exit 0" $(( rc + ($(slack_count) == 1 ? 0 : 1) ))
+    check "unreadable state, register: file unchanged" $(cmp -s "$T/before" "$(STATE)"; echo $?)
+
+    touch "$T/slack-fail"
+    retry register --repo o/r --event epic_closure_approval --issue 21 --context '{"epic_title":"E"}'; rc=$?
+    check "unreadable state, register: failed delivery exits 1" $(( rc == 1 ? 0 : 1 ))
+    check "unreadable state, register: file still unchanged" $(cmp -s "$T/before" "$(STATE)"; echo $?)
+    rm "$T/slack-fail"
+
+    rm "$T/unreadable"; : > "$T/slack.log"
+    retry run --repo o/r; rc=$?
+    check "readable again: run exits 0" $(( rc ))
+    check "readable again: both held events delivered" $(( $(slack_count) == 2 ? 0 : 1 ))
+}
+
 test_dry_run_sends_nothing() {
     setup
     reg_decision 7 2026-10-14T10:00:00Z
@@ -378,6 +426,7 @@ test_bad_state_warns_and_continues
 test_malformed_line_keeps_pending_record
 test_unwritable_state_is_observable
 test_directory_valued_state_path_is_replaced
+test_unreadable_state_file_is_kept
 test_dry_run_sends_nothing
 test_evidence_unwritable_on_a_closed_story_stays_unresolved_and_is_sent
 test_evidence_unwritable_resolved_when_the_evidence_is_posted

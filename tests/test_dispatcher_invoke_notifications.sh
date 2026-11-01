@@ -730,6 +730,52 @@ test_decision_blocker_wired_passes_fields() {
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
+# ─── Test 13: a failed register turns the run red (issue #352) ───────────────
+# Runs the real init block, register_actionable_event and _dispatcher_exit_hook
+# from dispatcher-invoke.sh, with a dispatcher-notify-retry.sh whose register
+# exits 1. One event is lost before a chained exec, one after it; the final
+# process exits 0 on its own.
+
+test_failed_register_exits_one_without_dispatcher_error() {
+    local tmpdir h
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    h="$tmpdir/harness.sh"
+    printf '#!/usr/bin/env bash\nexit "${MOCK_REGISTER_EXIT:-1}"\n' > "$tmpdir/dispatcher-notify-retry.sh"
+    {
+        echo 'set -euo pipefail'
+        echo 'REPO=o/r; DRY_RUN=${DRY_RUN:-false}; DISPATCH_HANDLED=false; LAST_ACTION=x'
+        echo "notify_slack() { echo \"SLACK_CALLED: \$1\" >> '$tmpdir/slack.log'; }"
+        sed -n '/^if \[\[ -z "\${DISPATCH_REGISTER_FAILURES_FILE/,/^fi$/p' "$INVOKE_SCRIPT"
+        sed -n '/^_dispatcher_exit_hook() {/,/^}/p' "$INVOKE_SCRIPT"
+        echo 'trap _dispatcher_exit_hook EXIT'
+        sed -n '/^register_actionable_event() {/,/^}/p' "$INVOKE_SCRIPT"
+        cat <<'BODY'
+if [[ "${1:-}" != second ]]; then
+    register_actionable_event decision_blocker 41 "" '{}'
+    DISPATCH_HANDLED=true
+    exec bash "$0" second
+fi
+register_actionable_event epic_closure_approval 7 "" '{}'
+exit 0
+BODY
+    } > "$h"
+    local out rc=0
+    out=$(bash "$h" 2>&1) || rc=$?
+    assert_contains "failed register exits 1 at the end" "rc=$rc" "rc=1"
+    assert_contains "error line names the event before the chained exec" "$out" "decision_blocker #41"
+    assert_contains "error line names the event after the chained exec" "$out" "epic_closure_approval #7"
+    assert_not_contains "no dispatcher_error for a failed register" \
+        "$(cat "$tmpdir/slack.log" 2>/dev/null || true)" "dispatcher_error"
+
+    rc=0
+    out=$(MOCK_REGISTER_EXIT=0 bash "$h" 2>&1) || rc=$?
+    assert_contains "successful register keeps exit 0" "rc=$rc" "rc=0"
+
+    rc=0
+    out=$(DRY_RUN=true MOCK_REGISTER_EXIT=0 bash "$h" 2>&1) || rc=$?
+    assert_contains "dry-run register exits 0" "rc=$rc" "rc=0"
+}
+
 run_all_tests() {
     echo "── Dispatcher notification tests (issue #179) ──────────────────────────"
     test_dry_run_suppresses_notifications
@@ -745,6 +791,7 @@ run_all_tests() {
     test_dispatcher_error_trap_fires_on_unexpected_exit
     test_dispatcher_error_suppressed_when_handled
     test_dispatcher_error_suppressed_on_clean_exit
+    test_failed_register_exits_one_without_dispatcher_error
     echo "──────────────────────────────────────────────────────────────────────"
     echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
     [[ $FAIL -eq 0 ]]

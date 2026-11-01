@@ -85,13 +85,15 @@ Never silently pick a type or apply a wrong label.
 
 **Issue body updated on GitHub** with refined content and **PO status updated** to `Refined` or `Ready for implementation` using the available GitHub operation fallback.
 
+Refinement is not complete until the sub-prompt's `## Refinement Completeness Gate (mandatory)` has run: `python3 scripts/refine-check --issue $ARGUMENTS --repo LauraMardones/headless-pr-workflow` as the last step, after the board write and its read-back. Only exit `0` permits reporting `Refined` or `Ready for implementation`; on exit `1` or `2` the board and the body `PO status:` go back to `In refinement` and the failing checks are listed as blockers. A re-refinement of an issue already `Ready for implementation` runs the same check. A `type:story`, `type:task` or `type:bug` issue needs exactly one existing `executor:` label. Statements about labels or board status come from the check output.
+
 After refining, post a comment on the issue using this structure (omit inapplicable fields):
 
 ```
 ## Session Summary
 Command: refine
 Issue / PR: #<issue-number>
-Checks run: none — refinement only
+Checks run: refine-check — <pass | fail: <check-ids> | unreadable>
 Blockers: <list, or "none">
 Next action: <"Ready for implementation" or "Needs PO decision">
 ```

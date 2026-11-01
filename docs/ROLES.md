@@ -96,6 +96,8 @@ Responsibilities:
 
 Note: Code review is explicitly not part of this role. The Human Approver acts when an AI assistant escalates a decision that should not be automated — not because they are positioned in the review flow.
 
+An escalation to the Human Approver must guarantee what [Human Attention Is Pulled, Not Polled](HEADLESS-PR-WORKFLOW.md#human-attention-is-pulled-not-polled) requires: a named escalation type, an actionable notification, enough to decide, and a decision recorded in GitHub.
+
 ## Product Validator
 
 The product validator tests the delivered product through actual usage and feeds findings back into the workflow as first-class inputs.

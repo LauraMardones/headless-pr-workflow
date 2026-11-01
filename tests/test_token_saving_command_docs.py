@@ -102,3 +102,41 @@ def test_implement_redrafts_ready_pr_until_current_head_pytest_is_green() -> Non
     assert "convert it back to Draft before pushing" in command
     assert "gh pr ready <pr> --undo" in command
     assert command.count("re-draft it if it is Ready for review") == 2
+
+
+REFINE_COMMANDS = [
+    "refine-epic", "refine-feature", "refine-story", "refine-task", "refine-bug",
+]
+
+
+def test_refine_commands_make_refine_check_a_mandatory_gate() -> None:
+    for name in REFINE_COMMANDS:
+        command = read(f".claude/commands/{name}.md")
+
+        assert "## Refinement Completeness Gate (mandatory)" in command, name
+        assert "python3 scripts/refine-check --issue <n>" in command, name
+        assert "Only exit `0` permits reporting `Refined` or `Ready for implementation`" in command, name
+        assert "including a re-refinement of an issue that is already `Ready for implementation`" in command, name
+        assert "require exit `0`: that exit is the board read-back" in command, name
+        assert '--status "In refinement"' in command, name
+        assert "set `PO status: In refinement` in the issue body" in command, name
+        assert "carries exactly one existing `executor:` label" in command, name
+        assert "`none` is not valid for a refinement that reports a status" in command, name
+
+
+def test_refine_dispatcher_command_requires_the_check_and_its_evidence() -> None:
+    command = read(".claude/commands/refine.md")
+
+    assert "python3 scripts/refine-check --issue $ARGUMENTS" in command
+    assert "Checks run: refine-check" in command
+    assert "Checks run: none" not in command
+    assert "A re-refinement of an issue already `Ready for implementation` runs the same check" in command
+    assert "exactly one existing `executor:` label" in command
+
+
+def test_refinement_pipeline_documents_the_completeness_gate() -> None:
+    documentation = read("docs/REFINEMENT-PIPELINE.md")
+
+    assert "## Refinement completeness gate" in documentation
+    assert "scripts/refine-check" in documentation
+    assert "never a pass" in documentation

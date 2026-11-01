@@ -13,6 +13,7 @@ This document defines the normative workflow for assistant-agnostic, GitHub-cent
 - Takeover between assistants, machines, and sessions must be recoverable from GitHub state plus explicit handoff notes.
 - Repo-specific constraints must be implemented through adapters, not core workflow policy.
 - Assistant-specific behaviors must be optional integrations, not normative requirements.
+- The workflow never requires the Human Approver to poll for state; every point that needs human judgment is pulled to them as a decidable notification, see [Human Attention Is Pulled, Not Polled](#human-attention-is-pulled-not-polled).
 
 ## Lifecycle
 
@@ -129,6 +130,7 @@ For a Claude-implemented story (`executor:claude-code-*`), the review is request
 Rules:
 
 - **Fix round classifies first.** Before changing code, `/implement` classifies each unresolved finding as Blocker (fixed in the PR) or Out of scope (a valid observation the story does not own). An Out of scope finding gets a follow-up issue (new draft or existing) and a reply on its thread; the thread stays unresolved. A round with only Out of scope findings pushes nothing, posts no review request and declares one `Type: decision` blocker asking the PO to waive. Only the PO waives, with a PR comment naming each finding and its follow-up issue plus `/unblock`; the PO also resolves each waived thread on GitHub, because a Codex thread on the current head is never superseded by a later review of the same head. The next `/implement` then returns the story to `In review` and posts one new review request. A classification is not a waiver, and no merge gate changes.
+- **Pending waiver holds the story (issue #357).** A story has an *open decision blocker* when its latest comment with `## Blocked Declaration` and `Type: decision` has no later comment by the PO with a line that is exactly `/unblock` (the rule of `docs/PROJECT-STATUS.md`, Decision blockers). While one is open, the `codex-review-bookkeeping` job decides `none` for an `In review` story, whatever the Codex result and without reading the required checks (it reads the blocker first, so a failing checks read cannot turn the hold into a failed run): no review request, no thread resolution, no move, no blocker and no Session Summary. The job reads the blocker again before its first mutation, so a blocker that appears mid-run changes nothing. The PO's `/unblock` lifts the hold and the job decides as usual, for example it posts the one review request for a head that has none. The post-waiver `/implement` pushes nothing: once the session has posted a review request after the PO's `/unblock`, the dispatcher records the fix-round attempt for that head and does not report the missing push as a failure (without that request the head's latest Codex result is still the waived findings, so the dispatcher posts a `Type: external` blocker naming the missing request instead); it does the same for an only-Out-of-scope round that declared the blocker during the session. A round with no such blocker that pushes nothing still ends with the `Type: external` "pushed no new commit" blocker. The post-waiver review request comes once, from the `/implement` session (story `In implementation`) or from the job (story already `In review`), because the job posts only for a head with no request.
 - **Fix round fixes the class.** For each Blocker, `/implement` names the defect class, searches the PR's own change (its diff and the code it calls or is called by) for other instances of that class, and fixes every instance in code or text the PR added or changed, in the same round and before pushing. An instance found only in unchanged code is Out of scope under the rule above, not a reason to widen the PR. The fix-round Session Summary records one `Class check` `--deviation` line per Blocker naming the class, the locations checked, the other locations fixed (or `none`) and any out-of-scope follow-up (or `none`), so the PO and the next reviewer can see where the implementer looked.
 - **Progress comment.** Codex keeps one "Codex Review Summary" comment up to date on the PR. It is not a reply: a request stays pending while it says a review is running.
 - **Bounds.** Two repository variables set the bounds, so the PO changes them without a code change: `CODEX_REVIEW_RETRY_HOURS` (back-off, default `5`, the Codex usage window) and `CODEX_REVIEW_MAX_REQUESTS` (requests the job posts per head, default `3`).
@@ -143,6 +145,28 @@ Rules:
 - **Trigger phrase.** The phrase is written only in a PR conversation comment that requests a review, by `/implement` or by this job (`AGENTS.md` → Codex Review Requests).
 
 `/review` remains the path for `executor:codex` stories and for a separate-session review (path 2).
+
+## Human Attention Is Pulled, Not Polled
+
+**Human attention is pulled, not polled.** The workflow must never require the Human Approver to poll for state. Every point where work requires human judgment:
+
+1. is a **named escalation type**, not an undefined "the agent got stuck" — the five blocker types in `docs/PROJECT-STATUS.md` → Blocker types, plus the notification events of Epic #160 (closure confirmation, Red flow health, reached usage limit, item ready for refinement);
+2. is delivered as an **actionable notification**, and a failed delivery is an error, not silently dropped;
+3. contains **enough to decide** without opening a session: the question, the options, the agent's recommendation, the consequences, and what is blocked;
+4. is resolved by a **decision recorded in GitHub** that the workflow picks up without further manual steps.
+
+Notifications are the doorbell; GitHub is the record.
+
+Where each clause is put into practice, and its state at implementation (2026-10-31):
+
+| Clause | Put into practice by | State |
+|---|---|---|
+| 1 Named escalation type | `docs/PROJECT-STATUS.md` → Blocker types; Epic #160 human touchpoints | in place |
+| 2 Actionable notification; failed delivery is an error | Feature #270 (Notification reliability) | gap — tracked in #270 |
+| 3 Enough to decide | `docs/PROJECT-STATUS.md` → decision-blocker fields (Question, Options, Recommendation); Feature #267 | partly in place — tracked in #267 |
+| 4 Decision recorded in GitHub, picked up without manual steps | `/unblock` resume (#262, in place); Feature #267 | partly in place — tracked in #267 |
+
+A clause marked as a gap or partly in place is still the rule. New work must not widen the gap, and the linked issue closes it.
 
 ## Deterministic Automation
 

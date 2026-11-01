@@ -47,8 +47,13 @@
 # State (issue #257 mechanism, no second store): one JSON object per line in
 # $DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events, restored and saved by
 # actions/cache in .github/workflows/dispatcher.yml, written atomically and
-# only after slack-notify.sh exits 0. Missing, unreadable or malformed state
-# warns and is treated as empty (at most one extra notification).
+# only after slack-notify.sh exits 0. Missing state starts empty, silently.
+# Malformed lines are dropped with a warning while valid lines are kept, and a
+# state path that is a directory is moved aside. A state file that exists as a
+# regular file but cannot be read (issue #352) is never overwritten or removed:
+# the events in it stay recoverable. run sends nothing and exits 1 (run --drain
+# only warns and exits 0); register delivers the new event directly and never
+# writes a state file holding only that event.
 #
 # Persistent failure: each cycle in which an undelivered event fails to send
 # adds 1 to its failed_cycles. At 3 the run exits 1 (red) and one comment is
@@ -99,11 +104,17 @@ EVENTS="$TMP_DIR/events"   # working copy: one JSON object per line
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
+# load_state returns 0 when the state is loaded (or missing, or a non-regular
+# path that save_state sets aside) and 2 when the state file is a regular file
+# that cannot be read. The caller must not save over it then (issue #352).
 load_state() {
     : > "$EVENTS"
     [[ -e "$STATE_FILE" ]] || return 0
     local copy="$TMP_DIR/state-copy"
     if ! cp "$STATE_FILE" "$copy" 2>/dev/null; then
+        if [[ -f "$STATE_FILE" ]]; then
+            return 2
+        fi
         echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; continuing with empty state" >&2
         return 0
     fi
@@ -155,18 +166,21 @@ if [[ "$MODE" == register ]]; then
         echo "[DRY RUN] Would register actionable event: $KEY" >&2
         exit 0
     fi
-    load_state
-    if jq -e --arg k "$KEY" 'select(.key == $k)' "$EVENTS" 2>/dev/null | grep -q .; then
+    STATE_UNREADABLE=false
+    load_state || STATE_UNREADABLE=true
+    if $STATE_UNREADABLE; then
+        echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; not changing it, delivering directly: $KEY" >&2
+    elif jq -e --arg k "$KEY" 'select(.key == $k)' "$EVENTS" 2>/dev/null | grep -q .; then
         exit 0
     fi
     jq -nc --arg k "$KEY" --arg e "$EVENT" --argjson i "$ISSUE" --arg s "$SINCE" --arg c "$CONTEXT" \
         '{key:$k, event:$e, issue:$i, since:$s, context:$c, delivered:false,
           failed_cycles:0, first_failed_at:"", comment_posted:false}' >> "$EVENTS"
-    if ! save_state; then
+    if $STATE_UNREADABLE || ! save_state; then
         # The record cannot be kept for a later cycle, so deliver it now rather
         # than lose a one-time event; a failed delivery fails the call.
         if SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"                 bash "$SCRIPT_DIR/slack-notify.sh" "$EVENT" "$CONTEXT" >/dev/null; then
-            echo "[NOTIFY] State not writable; delivered synchronously: $KEY" >&2
+            echo "[NOTIFY] State not usable; delivered synchronously: $KEY" >&2
             exit 0
         fi
         echo "[NOTIFY] Error: cannot record or deliver actionable event $KEY" >&2
@@ -231,7 +245,15 @@ resolved() {
         <<< "$comments" 2>/dev/null)" == true ]]
 }
 
-load_state
+if ! load_state; then
+    # Saving now would overwrite the events in the file (issue #352).
+    if $DRAIN; then
+        echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; drain sends nothing and leaves it unchanged" >&2
+        exit 0
+    fi
+    echo "[NOTIFY] Error: cannot read actionable event state $STATE_FILE; nothing sent, file left unchanged" >&2
+    exit 1
+fi
 NEXT="$TMP_DIR/next"
 : > "$NEXT"
 RED=false
