@@ -67,6 +67,29 @@ def test_a_session_in_a_sibling_checkout_keeps_the_first_sessions_tree(tmp_path)
     assert (second / "sentinel").read_text() == "alive"
 
 
+# conftest.py before issue #384: an explicit basetemp, which pytest empties at every session start.
+OLD_CONFTEST = '''
+from pathlib import Path
+
+def pytest_configure(config):
+    opts = config.option
+    if not opts.basetemp:
+        basetemp = Path(__file__).parent.parent / ".pytest_tmp"
+        basetemp.mkdir(parents=True, exist_ok=True)
+        opts.basetemp = basetemp
+'''
+
+
+def test_a_run_in_a_sibling_checkout_with_the_old_conftest_keeps_the_new_sessions_tree(tmp_path):
+    # Worktrees made before #384 keep the old conftest.py; a run there emptied ../.pytest_tmp.
+    first = run_session(make_checkout(tmp_path / "main"), tmp_path / "first.txt")
+    old = make_checkout(tmp_path / "hpw-339-merge")
+    (old / "conftest.py").write_text(OLD_CONFTEST, encoding="utf-8")
+    second = run_session(old, tmp_path / "second.txt")
+    assert second.is_relative_to((tmp_path / ".pytest_tmp").resolve())
+    assert (first / "sentinel").read_text() == "alive"
+
+
 def test_a_second_session_in_the_same_checkout_keeps_the_first_sessions_tree(tmp_path):
     checkout = make_checkout(tmp_path / "main")
     first = run_session(checkout, tmp_path / "first.txt")
@@ -81,7 +104,7 @@ def test_a_second_session_in_the_same_checkout_keeps_the_first_sessions_tree(tmp
 def test_session_tree_is_next_to_the_checkout_not_inside_it(tmp_path):
     checkout = make_checkout(tmp_path / "main")
     used = run_session(checkout, tmp_path / "report.txt")
-    assert used.is_relative_to((tmp_path / ".pytest_tmp").resolve())
+    assert used.is_relative_to((tmp_path / ".pytest_sessions").resolve())
     assert not used.is_relative_to(checkout.resolve())
 
 
@@ -99,7 +122,7 @@ def test_pytest_debug_temproot_is_used_when_set(tmp_path):
     custom.mkdir()
     used = run_session(make_checkout(tmp_path / "main"), tmp_path / "report.txt", temproot=str(custom))
     assert used.is_relative_to(custom.resolve())
-    assert not (tmp_path / ".pytest_tmp").exists()
+    assert not (tmp_path / ".pytest_sessions").exists()
 
 
 def test_configure_temproot_keeps_an_explicit_value(tmp_path):
@@ -110,13 +133,13 @@ def test_configure_temproot_keeps_an_explicit_value(tmp_path):
     assert environ == {"PYTEST_DEBUG_TEMPROOT": "C:\\tmp"}
     environ = {}
     configure_temproot(environ, tmp_path / "checkout")
-    assert environ == {"PYTEST_DEBUG_TEMPROOT": str(tmp_path / ".pytest_tmp")}
+    assert environ == {"PYTEST_DEBUG_TEMPROOT": str(tmp_path / ".pytest_sessions")}
 
 
 def test_explicit_basetemp_skips_the_default_root_when_its_parent_is_unavailable(tmp_path):
     from conftest import configure_temproot
 
-    blocked = tmp_path / "not-a-dir"  # a file, so <blocked>/.pytest_tmp cannot be created
+    blocked = tmp_path / "not-a-dir"  # a file, so <blocked>/.pytest_sessions cannot be created
     blocked.write_text("")
     checkout = blocked / "checkout"
     with pytest.raises(OSError):
@@ -128,7 +151,7 @@ def test_explicit_basetemp_skips_the_default_root_when_its_parent_is_unavailable
 
 def test_basetemp_on_the_command_line_runs_where_the_default_root_is_unavailable(tmp_path):
     checkout = make_checkout(tmp_path / "checkout")
-    (tmp_path / ".pytest_tmp").write_text("")  # a file, so the default root cannot be created
+    (tmp_path / ".pytest_sessions").write_text("")  # a file, so the default root cannot be created
     env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_DEBUG_TEMPROOT", "PYTEST_ADDOPTS")}
     env["REPORT"] = str(tmp_path / "report.txt")
     basetemp = tmp_path / "chosen"

@@ -8,8 +8,13 @@ import pytest
 
 
 def default_temproot(conftest_dir: Path) -> Path:
-    """``.pytest_tmp`` one level above the checkout: outside the git working tree."""
-    return conftest_dir.parent / ".pytest_tmp"
+    """``.pytest_sessions`` one level above the checkout: outside the git working tree.
+
+    Not ``.pytest_tmp``: a checkout from before issue #384 uses that folder as an explicit
+    ``basetemp`` and empties it at every session start, which would delete a running
+    session's tree here too.
+    """
+    return conftest_dir.parent / ".pytest_sessions"
 
 
 def configure_temproot(environ: dict[str, str] | os._Environ, conftest_dir: Path,
