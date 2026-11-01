@@ -189,110 +189,51 @@ test_notify_slack_failure_does_not_abort() {
     assert_contains "script continues after adapter failure" "$output" "reached_after_notify"
 }
 
-# ─── Test 4: check_and_notify_decision_blocker fires for Type: decision ────────
-# Requires jq to parse JSON comments.
+# ─── Tests 4–5: check_and_notify_decision_blocker, real function ──────────────
+# Both tests extract the production check_and_notify_decision_blocker and
+# register_decision_blocker_event from dispatcher-invoke.sh, so a change to the
+# Type: decision filter or the registration is caught here. Requires jq.
+
+# Runs the real functions against one mocked comment body and prints the
+# registered events, one "SLACK_CALLED: <event> <context>" line each.
+run_real_decision_blocker_check() {
+    local comment_body="$1" tmpdir call_log fn
+    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
+    call_log="$tmpdir/calls.log"
+    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p;/^register_decision_blocker_event() {/,/^}/p' "$INVOKE_SCRIPT")
+    COMMENT_BODY="$comment_body" bash -c "
+        set -euo pipefail
+        REPO='owner/repo'
+        source '$REPO_ROOT/scripts/lib/decision-blocker.sh'
+        gh() { jq -n --arg b \"\$COMMENT_BODY\" '[{body: \$b}]'; }
+        register_actionable_event() { echo \"SLACK_CALLED: \$1 \$4\" >> '$call_log'; }
+        $fn
+        check_and_notify_decision_blocker 42 'Test Story'
+    " 2>&1 || true
+    cat "$call_log" 2>/dev/null || true
+}
 
 test_decision_blocker_fires_for_decision_type() {
     if ! $JQ_AVAILABLE; then
         skip_test "decision_blocker fires for Type: decision"
         return
     fi
-
-    local tmpdir
-    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
-
-    local call_log
-    call_log=$(setup_mock_slack "$tmpdir")
-
-    bash -c "
-        set -euo pipefail
-        DRY_RUN=false
-        REPO='owner/repo'
-        SLACK_WEBHOOK_URL='https://hooks.example.com/test'
-
-        # Mock gh — returns a decision-type blocked declaration comment
-        gh() {
-            printf '[{\"body\":\"## Blocked Declaration\\nType: decision\\nDeclared by: executor\\nBlocks: #42\\nUnblocked when: PO must decide\\nOwner: PO\"}]'
-        }
-
-        notify_slack() {
-            echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'
-        }
-
-        check_and_notify_decision_blocker() {
-            local issue_num=\"\$1\"
-            local issue_title=\"\$2\"
-            local blocker_body
-            blocker_body=\$(gh api \"repos/\$REPO/issues/\$issue_num/comments\" \
-                | jq -r '[.[] | select(.body | (test(\"## Blocked Declaration\") and test(\"Type: decision\")))]
-                          | last | .body // empty' 2>/dev/null || true)
-            [[ -z \"\$blocker_body\" ]] && return 0
-            local unblocked_when issue_url
-            unblocked_when=\$(printf '%s' \"\$blocker_body\" \
-                | grep -oP '(?<=Unblocked when: ).*' | head -1 | sed 's/[[:space:]]*\$//' \
-                || echo 'condition to be determined by PO')
-            issue_url=\"https://github.com/\$REPO/issues/\$issue_num\"
-            notify_slack 'decision_blocker' \
-                \"\$(jq -n \
-                       --arg st \"\$issue_title\" \
-                       --arg iu \"\$issue_url\" \
-                       --arg bt 'decision' \
-                       --arg uw \"\$unblocked_when\" \
-                       '{story_title: \$st, issue_url: \$iu, blocker_type: \$bt, unblocked_when: \$uw}')\"
-        }
-
-        check_and_notify_decision_blocker '42' 'Test Story'
-    " 2>&1 || true
-
+    local body
+    body=$'## Blocked Declaration\nType: decision\nDeclared by: executor\nBlocks: #42\nUnblocked when: PO must decide\nOwner: PO'
     assert_contains "decision_blocker fires for Type: decision" \
-        "$(cat "$call_log" 2>/dev/null || true)" \
+        "$(run_real_decision_blocker_check "$body")" \
         "SLACK_CALLED: decision_blocker"
 }
-
-# ─── Test 5: check_and_notify_decision_blocker silent for non-decision comment ─
-# Requires jq.
 
 test_decision_blocker_silent_for_conflict_type() {
     if ! $JQ_AVAILABLE; then
         skip_test "no decision_blocker for conflict-type comment"
         return
     fi
-
-    local tmpdir
-    tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
-
-    local call_log
-    call_log=$(setup_mock_slack "$tmpdir")
-
-    bash -c "
-        set -euo pipefail
-        DRY_RUN=false
-        REPO='owner/repo'
-
-        gh() {
-            printf '[{\"body\":\"## Blocked Declaration\\nType: conflict\\nDeclared by: dispatcher\"}]'
-        }
-
-        notify_slack() {
-            echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'
-        }
-
-        check_and_notify_decision_blocker() {
-            local issue_num=\"\$1\"
-            local issue_title=\"\$2\"
-            local blocker_body
-            blocker_body=\$(gh api \"repos/\$REPO/issues/\$issue_num/comments\" \
-                | jq -r '[.[] | select(.body | (test(\"## Blocked Declaration\") and test(\"Type: decision\")))]
-                          | last | .body // empty' 2>/dev/null || true)
-            [[ -z \"\$blocker_body\" ]] && return 0
-            notify_slack 'decision_blocker' '{}'
-        }
-
-        check_and_notify_decision_blocker '99' 'Conflict Story'
-    " 2>&1 || true
-
+    local body
+    body=$'## Blocked Declaration\nType: conflict\nDeclared by: dispatcher'
     assert_not_contains "no decision_blocker for conflict-type comment" \
-        "$(cat "$call_log" 2>/dev/null || true)" \
+        "$(run_real_decision_blocker_check "$body")" \
         "SLACK_CALLED: decision_blocker"
 }
 
@@ -710,7 +651,7 @@ test_decision_blocker_wired_passes_fields() {
     local tmpdir call_log fn
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
     call_log="$tmpdir/calls.log"
-    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p' "$INVOKE_SCRIPT")
+    fn=$(sed -n '/^check_and_notify_decision_blocker() {/,/^}/p;/^register_decision_blocker_event() {/,/^}/p' "$INVOKE_SCRIPT")
     bash -c "
         set -euo pipefail
         REPO='owner/repo'
