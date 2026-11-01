@@ -363,6 +363,14 @@ WIP_LIMIT="$WIP_LIMIT_IMPLEMENTATION"
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
 LAST_ACTION="initializing"
 DISPATCH_HANDLED=false  # set true before any expected exit 1 (blocker posted)
+# Issue #352: events whose registration failed, one "<event> #<issue>" per line.
+# A file named by an exported variable, because `exec bash "$0"` drops shell
+# variables but keeps the environment; the process that exits for good reports
+# them and removes the file.
+if [[ -z "${DISPATCH_REGISTER_FAILURES_FILE:-}" ]]; then
+    DISPATCH_REGISTER_FAILURES_FILE="$(mktemp "${TMPDIR:-/tmp}/dispatcher-register-failures.XXXXXX")"
+    export DISPATCH_REGISTER_FAILURES_FILE
+fi
 FIX_ROUND_SESSION=false  # true while the resume pass starts the /implement of a fix round (issue #293)
 
 # ─── Utility: ISO-8601 timestamp to unix seconds (Linux + macOS) ──────────────
@@ -469,6 +477,19 @@ notify_slack() {
 
 _dispatcher_exit_hook() {
     local rc=$?
+    local lost=""
+    if [[ -s "${DISPATCH_REGISTER_FAILURES_FILE:-}" ]]; then
+        lost="$(cat "$DISPATCH_REGISTER_FAILURES_FILE")"
+    fi
+    rm -f "${DISPATCH_REGISTER_FAILURES_FILE:-}" 2>/dev/null || true
+    if [[ -n "$lost" ]]; then
+        while IFS= read -r line; do
+            echo "Error: actionable event lost, neither recorded nor delivered: $line" >&2
+        done <<< "$lost"
+        # A failed registration turns an otherwise clean run red (issue #352).
+        # No dispatcher_error: the work itself did not fail.
+        [[ $rc -eq 0 ]] && exit 1
+    fi
     [[ $rc -eq 0 ]] && return 0
     $DISPATCH_HANDLED && return 0
     notify_slack "dispatcher_error" \
@@ -483,7 +504,9 @@ trap _dispatcher_exit_hook EXIT
 # decision_blocker, po_blocker, feature_closure_confirmation and
 # epic_closure_approval are recorded in the notification state and delivered, retried and bounded by
 # scripts/dispatcher-notify-retry.sh run, which the workflow runs on every
-# cycle. A registration failure only warns and never aborts the invoke loop.
+# cycle. A registration failure (storage and the direct Slack send both failed)
+# never aborts the invoke loop, but it is recorded and the EXIT hook reports each
+# lost event and makes the run exit 1 at its end (issue #352).
 
 register_actionable_event() {
     local event_type="$1" issue_num="$2" since="$3" context_json="$4"
@@ -492,8 +515,10 @@ register_actionable_event() {
     local args=(register --repo "$REPO" --event "$event_type" --issue "$issue_num"
                 --since "$since" --context "$context_json")
     $DRY_RUN && args+=(--dry-run)
-    bash "$script_dir/dispatcher-notify-retry.sh" "${args[@]}" \
-        || echo "Warning: could not register $event_type for #$issue_num; it will not be delivered" >&2
+    if ! bash "$script_dir/dispatcher-notify-retry.sh" "${args[@]}"; then
+        echo "$event_type #$issue_num" >> "$DISPATCH_REGISTER_FAILURES_FILE" 2>/dev/null || true
+        echo "Error: could not register $event_type for #$issue_num; it will not be delivered" >&2
+    fi
 }
 
 # register_po_blocker <issue> <title> <type> <unblocked-when> <state> [<cause>]
