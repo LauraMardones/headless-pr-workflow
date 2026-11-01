@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
+import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import PureWindowsPath
 
@@ -128,3 +130,38 @@ def host_env(fake_bin: str | None = None) -> dict[str, str]:
 
 
 BASH = find_bash()
+
+
+def run_tree(cmd: list[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """``subprocess.run`` that ends the whole process tree when ``timeout`` expires (issue #398).
+
+    ``subprocess.run`` kills only the direct child; a grandchild that inherited the output
+    pipes keeps them open and ``communicate()`` then waits forever. The child starts in its
+    own process group (POSIX) or process group tree (Windows ``taskkill /T``); on timeout the
+    whole tree is killed, the pipes are drained and ``pytest.fail`` reports the timeout.
+    """
+    if os.name == "nt":
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE if kwargs.pop("capture_output") else None,
+                          stderr=subprocess.PIPE, **kwargs) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+            else:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            proc.kill()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            pytest.fail(f"{cmd[:3]} timed out after {timeout}s; the whole process tree was killed")
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
