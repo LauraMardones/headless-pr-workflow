@@ -13,11 +13,9 @@ from typing import Protocol, Sequence
 
 SUPPORTED_TYPES = frozenset({"type:feature", "type:epic"})
 REQUIRED_CHECK_COMMANDS = frozenset(
-    {
-        "python -m pytest tests/test_verify_closure_command.py",
-        "python -m pytest",
-    }
+    {"python -m pytest tests/test_verify_closure_command.py"}
 )
+CI_CHECK_NAME = "pytest"
 
 
 class VerificationBlocked(ValueError):
@@ -70,6 +68,18 @@ class EvidenceRow:
 class CheckResult:
     command: str
     outcome: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class CiRun:
+    """One attempt of the CI ``pytest`` check run for a commit."""
+
+    sha: str
+    status: str  # queued, in_progress or completed
+    conclusion: str | None
+    url: str
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -136,6 +146,10 @@ class GitHubEvidence(Protocol):
     def main_sha(self) -> str: ...
 
     def summary_urls(self, marker: str) -> Sequence[str]: ...
+
+    def ci_pytest_runs(self, sha: str) -> Sequence[CiRun]:
+        """Return every CI ``pytest`` run attempt for ``sha``; raise if unreadable."""
+        ...
 
 
 class LocalEvidence(Protocol):
@@ -221,10 +235,48 @@ def _inventory(github: GitHubEvidence, target: Issue) -> tuple[InventoryItem, ..
     return tuple(items)
 
 
+def ci_check_command(sha: str) -> str:
+    return f"CI {CI_CHECK_NAME} on {sha}"
+
+
+def ci_check_result(github: GitHubEvidence, sha: str) -> CheckResult:
+    """Classify the CI ``pytest`` run for the exact ``sha``; fail closed.
+
+    Only a successful, newest attempt for the same full SHA is ``PASS``. Runs
+    for another SHA are ignored. Nothing here waits for or starts a run.
+    """
+
+    command = ci_check_command(sha)
+    try:
+        runs = tuple(github.ci_pytest_runs(sha))
+    except Exception as error:
+        return CheckResult(command, "BLOCKED", f"CI data cannot be read: {error}")
+    matching = [run for run in runs if run.sha == sha]
+    if not matching:
+        others = sorted({run.sha for run in runs})
+        suffix = f" (runs found only for {', '.join(others)})" if others else ""
+        return CheckResult(command, "BLOCKED", f"no CI run for {sha}{suffix}")
+    newest = max(matching, key=lambda run: run.attempt)
+    if newest.status != "completed":
+        return CheckResult(
+            command,
+            "BLOCKED",
+            f"{newest.url} is {newest.status}; run again when CI finishes",
+        )
+    if newest.conclusion == "success":
+        return CheckResult(command, "PASS", newest.url)
+    if newest.conclusion in {"failure", "timed_out"}:
+        return CheckResult(command, "FAIL", newest.url)
+    return CheckResult(
+        command, "BLOCKED", f"{newest.url} concluded {newest.conclusion}"
+    )
+
+
 def _validate_evidence(
     declared_criteria: tuple[str, ...],
     rows: tuple[EvidenceRow, ...],
     checks: tuple[CheckResult, ...],
+    main_sha: str,
 ) -> None:
     blockers: list[str] = []
     if not declared_criteria:
@@ -236,12 +288,15 @@ def _validate_evidence(
         if row.result != "PASS" or not row.evidence:
             blockers.append(f"criterion is not proven: {row.criterion}")
     check_commands = {check.command for check in checks}
-    missing_commands = sorted(REQUIRED_CHECK_COMMANDS - check_commands)
+    missing_commands = sorted(
+        (REQUIRED_CHECK_COMMANDS | {ci_check_command(main_sha)}) - check_commands
+    )
     for command in missing_commands:
         blockers.append(f"required check is missing: {command}")
     for check in checks:
         if check.outcome != "PASS":
-            blockers.append(f"check is {check.outcome}: {check.command}")
+            detail = f" ({check.detail})" if check.detail else ""
+            blockers.append(f"check is {check.outcome}: {check.command}{detail}")
     if blockers:
         raise VerificationBlocked(*blockers)
 
@@ -283,8 +338,8 @@ def verify_closure(
             )
 
     evidence = tuple(local.evidence_rows(target))
-    checks = tuple(local.check_results())
-    _validate_evidence(target.declared_criteria, evidence, checks)
+    checks = (*local.check_results(), ci_check_result(github, main_sha))
+    _validate_evidence(target.declared_criteria, evidence, checks, main_sha)
 
     # Model the command's mandatory final refresh immediately before mutation.
     refreshed = github.issue(number)

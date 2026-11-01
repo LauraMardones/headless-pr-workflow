@@ -108,14 +108,34 @@ missing.
 
 ## 6. Run and record checks
 
-Run at least these commands from the verified checkout:
+Run at least this command from the verified checkout:
 
 1. `python -m pytest tests/test_verify_closure_command.py`
-2. `python -m pytest`
+
+Do not run the full suite (`python -m pytest`) locally. CI runs it, including
+every `tests/test_*.sh` file, on every push to `main`. Read the CI `pytest`
+check run for the exact full verified `main` SHA (for example
+`gh api repos/LauraMardones/headless-pr-workflow/commits/<FULL_MAIN_SHA>/check-runs`
+or `gh run list --workflow tests.yml --commit <FULL_MAIN_SHA>`), match by full
+SHA only, never by branch or "latest run on main", and never wait, poll, or
+start a run. Classify it with `ci_check_result` in
+`src/headless_pr_workflow/closure_verification.py`. The newest attempt counts:
+
+| Situation | Result |
+|---|---|
+| Newest run succeeded | `PASS` |
+| No run for the SHA (or only runs for another SHA) | `BLOCKED`, name the SHA and "no CI run" |
+| Queued or in progress | `BLOCKED`, name the run URL, "run again when CI finishes" |
+| Failed or timed out | `FAIL`, name the run URL |
+| Cancelled or skipped | `BLOCKED`, name the run URL |
+| CI data cannot be read | `BLOCKED`, name the failing read |
+
+Record the CI row as ``CI pytest on <full SHA>`` with its run URL.
 
 If the focused test file has been renamed, identify its actual focused command
 from the verified repository and record that exact command instead. Add any
-scope-specific checks necessary to establish individual criteria.
+scope-specific checks necessary to establish individual criteria (for example a
+criterion that names Windows keeps its own local check).
 
 Record every exact command and classify its result as `PASS`, `FAIL`, or
 `BLOCKED`. A non-zero test result is `FAIL`. A command that cannot run because
@@ -136,7 +156,7 @@ Verification passes only when all of the following are true:
 - child and PR inventory is complete and unambiguous;
 - the Epic branch has no open child Feature;
 - every declared criterion row is `PASS`; and
-- every required full, focused, and criterion-specific check is `PASS`.
+- the CI `pytest` run for the verified SHA and every required focused and criterion-specific check is `PASS`.
 
 If any condition fails or is blocked:
 
@@ -186,9 +206,10 @@ post exactly one issue comment in this structure:
 | 1 | ... | PASS | ... |
 
 ### Checks
-| Exact command | Outcome |
+| Check | Result |
 |---|---|
-| `...` | PASS |
+| `python -m pytest tests/test_verify_closure_command.py` | PASS |
+| CI `pytest` on `<full SHA>` — `<run URL>` | PASS |
 
 ### Blockers
 none
