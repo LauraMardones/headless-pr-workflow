@@ -80,6 +80,7 @@ class CiRun:
     conclusion: str | None
     url: str
     attempt: int = 1
+    run_id: int = 1  # workflow run id; grows with run creation, attempts count per run
 
 
 @dataclass(frozen=True)
@@ -256,7 +257,7 @@ def ci_check_result(github: GitHubEvidence, sha: str) -> CheckResult:
         others = sorted({run.sha for run in runs})
         suffix = f" (runs found only for {', '.join(others)})" if others else ""
         return CheckResult(command, "BLOCKED", f"no CI run for {sha}{suffix}")
-    newest = max(matching, key=lambda run: run.attempt)
+    newest = max(matching, key=lambda run: (run.run_id, run.attempt))
     if newest.status != "completed":
         return CheckResult(
             command,

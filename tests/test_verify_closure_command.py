@@ -292,6 +292,28 @@ def _ci(*runs: CiRun, github: Mock, local: Mock) -> None:
             ],
             None,
         ),
+        (
+            # distinct runs: an older run at attempt 2 must not beat a newer run at attempt 1
+            [
+                CiRun(SHA, "completed", "success", RUN_URL, attempt=2, run_id=10),
+                CiRun(SHA, "in_progress", None, "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            "r2 is in_progress",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "success", RUN_URL, attempt=2, run_id=10),
+                CiRun(SHA, "completed", "failure", "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            "check is FAIL.*r2",
+        ),
+        (
+            [
+                CiRun(SHA, "completed", "failure", RUN_URL, attempt=3, run_id=10),
+                CiRun(SHA, "completed", "success", "https://example.test/r2", attempt=1, run_id=20),
+            ],
+            None,
+        ),
     ],
 )
 def test_ci_failure_modes_fail_closed(

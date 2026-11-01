@@ -119,7 +119,8 @@ check run for the exact full verified `main` SHA (for example
 or `gh run list --workflow tests.yml --commit <FULL_MAIN_SHA>`), match by full
 SHA only, never by branch or "latest run on main", and never wait, poll, or
 start a run. Classify it with `ci_check_result` in
-`src/headless_pr_workflow/closure_verification.py`. The newest attempt counts:
+`src/headless_pr_workflow/closure_verification.py`. Pass each run's workflow run id
+and attempt number; the newest run (highest run id) counts, then its newest attempt:
 
 | Situation | Result |
 |---|---|
