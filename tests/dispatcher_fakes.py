@@ -15,6 +15,14 @@ make a command fail (``fail``) or give it a side effect on the fake GitHub
 state (``on_session``), such as a new PR head. The fake ``claude`` also keeps
 the argv, stdin and environment of every call (``claude_calls``), and
 ``claude_stream`` replaces its default stream-json output.
+
+An opt-in fake ``git`` (``fake_git``, issue #439) keeps the pause path off the real
+checkout: it logs every call (argv, one line each) to ``git.log`` (``git_calls``),
+answers only ``rev-parse --abbrev-ref HEAD``, ``rev-list --count`` and
+``status --porcelain`` with the configured unpushed count and dirty state, and fails
+any other subcommand. ``destructive_calls`` is the guard over ``git.log`` and
+``gh.log``: it lists every call that could delete, reset or move a story branch, or
+close or re-point its PR.
 """
 
 from __future__ import annotations
@@ -43,6 +51,44 @@ BOARD_OPTIONS = {
     "In merge": "OPT_MERGE",
     "Done": "OPT_DONE",
 }
+
+FAKE_GIT = r"""#!/usr/bin/env bash
+echo "git $*" >> "$MOCK_DIR/git.log"
+while [[ "${1:-}" == "-C" ]]; do shift 2; done
+case "${1:-}" in
+    rev-parse) [[ "${2:-}" == "--abbrev-ref" && "${3:-}" == "HEAD" ]] && { echo "fake-checkout-branch"; exit 0; } ;;
+    rev-list)  [[ "${2:-}" == "--count" ]] && { cat "$MOCK_DIR/git_unpushed"; exit 0; } ;;
+    status)    [[ "${2:-}" == "--porcelain" ]] && { [[ -s "$MOCK_DIR/git_dirty" ]] && cat "$MOCK_DIR/git_dirty"; exit 0; } ;;
+esac
+echo "fake git: unsupported: $*" >&2
+exit 1
+"""
+
+GIT_READ_ONLY = ("rev-parse", "rev-list", "status")
+
+
+def destructive_calls(git_log: list[str], gh_log: list[str]) -> list[str]:
+    """Calls in the ``git`` and ``gh`` logs that could delete, reset or move a story branch.
+
+    ``git``: allow-list, so a new mutating subcommand fails without a deny-list update.
+    ``gh``: a ``git/refs`` endpoint, or a PATCH of a pull request that sets ``state`` or ``head``.
+    """
+    found = []
+    for line in git_log:
+        words = line.split()[1:]
+        while words[:1] == ["-C"]:
+            words = words[2:]
+        if not words or words[0] not in GIT_READ_ONLY:
+            found.append(line)
+    for line in gh_log:
+        words = line.split()
+        patches_pr = ("-X" in words and words[words.index("-X") + 1:][:1] == ["PATCH"]
+                      and any("/pulls/" in w for w in words)
+                      and any(w.startswith(("state=", "head=", "base=")) for w in words))
+        if "git/refs" in line or patches_pr:
+            found.append(line)
+    return found
+
 
 FAKE_GH = r"""#!/usr/bin/env bash
 set -euo pipefail
@@ -304,6 +350,15 @@ class Dispatcher:
         for name in ("gh.log", "curl.log", "sessions.log", "phases.log", "github_output", "mutations.log", "seq.log"):
             (self.mock / name).write_text("")
 
+    def fake_git(self, unpushed: int = 0, dirty: bool = False) -> None:
+        """Put a fake ``git`` first on ``PATH`` (issue #439): it logs calls to ``git.log``."""
+        path = self.bin / "git"
+        path.write_text(FAKE_GIT, encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+        (self.mock / "git.log").write_text("")
+        (self.mock / "git_unpushed").write_text(f"{unpushed}\n")
+        (self.mock / "git_dirty").write_text(" M file\n" if dirty else "")
+
     # ── fake GitHub state ───────────────────────────────────────────────────
 
     def _write(self, name: str, value) -> None:
@@ -436,6 +491,21 @@ class Dispatcher:
     def sessions(self) -> list[str]:
         """Sessions started, in order, as ``"<command> <target>"``."""
         return [" ".join(line.split()[1:3]) for line in self._log("sessions.log")]
+
+    @property
+    def git_calls(self) -> list[str]:
+        """Calls to the opt-in fake ``git`` (``fake_git``), in order, as ``"git <argv>"``."""
+        return self._log("git.log")
+
+    @property
+    def destructive_calls(self) -> list[str]:
+        """Calls that could delete, reset or move a story branch or close its PR (issue #439)."""
+        return destructive_calls(self.git_calls, self._log("gh.log"))
+
+    @property
+    def pull_requests(self) -> list[dict]:
+        """The fake PRs as stored (number, state, head)."""
+        return self._read("pulls.json")
 
     @property
     def sequence(self) -> list[str]:

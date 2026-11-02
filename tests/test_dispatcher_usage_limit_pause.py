@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from tests.dispatcher_fakes import BASH, HAVE_TOOLS, REPO_ROOT, Dispatcher
+from tests.dispatcher_fakes import BASH, HAVE_TOOLS, REPO_ROOT, Dispatcher, destructive_calls
 
 pytestmark = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
 
@@ -132,7 +132,6 @@ def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
     assert "Branch: branch" in body
     assert f"PR: #{PR}, head `{HEAD}`" in body
     assert f"Resets: {RESET_TEXT}" in body
-    assert "0 commit(s)" in body or "commit(s)" in body
     assert "No PO action is needed." in body
     assert d.slack_calls == [] and d.queued_events == []
     log = proc.stdout + proc.stderr
@@ -209,6 +208,114 @@ def test_a_real_failure_keeps_the_blocker(d):
 
     assert proc.returncode != 0
     assert "Blocked Declaration" in d.posted(STORY)[0]
+
+
+# ── The pause keeps the story branch (issue #439, F308.7 part 1) ────────────
+# Evidence for F308.7 part 1: test_pause_makes_no_destructive_call_on_any_path,
+# test_restart_after_the_stop_makes_no_destructive_call,
+# test_pause_record_counts_the_unpushed_commits_exactly,
+# test_guard_fails_on_each_destructive_call, test_pause_runs_reach_the_git_fake.
+
+
+def pr_identity(dispatcher):
+    return [(p["number"], p["head"]["ref"], p["head"]["sha"], p["state"]) for p in dispatcher.pull_requests]
+
+
+def pause_run(tmp_path, path):
+    d = Dispatcher(tmp_path)
+    d.fake_git(unpushed=2)
+    if path == "new":
+        d.add_story(STORY, "Ready for implementation")
+        d.add_pr(PR, STORY)
+        d.claude_stream(*LIMITED, exit_code=1)
+        return d, lambda: d.run_issue(STORY)
+    if path == "fix-round":
+        d.add_story(STORY, "In implementation")
+        d.add_pr(PR, STORY)
+        d.add_findings(PR, HEAD)
+    else:
+        d.add_story(STORY, "In review", executor="codex")
+        d.add_pr(PR, STORY)
+    d.claude_stream(*LIMITED, exit_code=1)
+    return d, d.resume
+
+
+@pytest.mark.parametrize("path", ["new", "fix-round", "review"])
+def test_pause_makes_no_destructive_call_on_any_path(tmp_path, path):
+    d, run = pause_run(tmp_path, path)
+    before = pr_identity(d)
+
+    proc = run()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY)[0].startswith(PAUSE)
+    assert d.git_calls, "the fake git was not reached"
+    assert d.destructive_calls == []
+    assert pr_identity(d) == before
+
+
+def test_restart_after_the_stop_makes_no_destructive_call(tmp_path):
+    d, run = pause_run(tmp_path, "new")
+    before = pr_identity(d)
+    run()
+    assert d.git_calls, "the fake git was not reached"
+    d.claude_stream(*OK)
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"] * 2
+    first, second = d.claude_calls
+    assert first["stdin"] == second["stdin"]
+    assert d.destructive_calls == []
+    assert pr_identity(d) == before
+
+
+@pytest.mark.parametrize("unpushed,dirty,expected", [
+    (2, False, "- Not pushed when the session stopped: 2 commit(s), no uncommitted changes"),
+    (0, True, "- Not pushed when the session stopped: 0 commit(s), uncommitted changes"),
+])
+def test_pause_record_counts_the_unpushed_commits_exactly(tmp_path, unpushed, dirty, expected):
+    d = Dispatcher(tmp_path)
+    d.fake_git(unpushed=unpushed, dirty=dirty)
+    d.add_story(STORY, "Ready for implementation")
+    d.add_pr(PR, STORY)
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    d.run_issue(STORY)
+
+    assert expected + "\n" in d.posted(STORY)[0]
+
+
+def test_pause_runs_reach_the_git_fake(tmp_path):
+    d, run = pause_run(tmp_path, "new")
+
+    run()
+
+    assert any(" rev-list --count " in call for call in d.git_calls)
+    assert any(call.endswith(" status --porcelain") for call in d.git_calls)
+
+
+@pytest.mark.parametrize("git_log,gh_log", [
+    (["git push --force"], []),
+    (["git -C /r push --force origin b"], []),
+    (["git push origin --delete branch"], []),
+    (["git branch -D branch"], []),
+    (["git reset --hard"], []),
+    (["git checkout -B branch"], []),
+    ([], ["gh api repos/o/r/git/refs/heads/branch -X DELETE"]),
+    ([], ["gh api repos/o/r/pulls/900 -X PATCH -f state=closed"]),
+    ([], ["gh api repos/o/r/pulls/900 -X PATCH -f head=other"]),
+])
+def test_guard_fails_on_each_destructive_call(git_log, gh_log):
+    assert destructive_calls(git_log, gh_log) != []
+
+
+def test_guard_passes_on_the_read_calls_and_other_gh_writes():
+    git_log = ["git -C /r rev-parse --abbrev-ref HEAD", "git -C /r rev-list --count @{upstream}..HEAD",
+               "git -C /r status --porcelain"]
+    gh_log = ["gh api repos/o/r/issues/500/comments -f body=x", "gh api repos/o/r/pulls/900 -X PATCH -f title=t"]
+    assert destructive_calls(git_log, gh_log) == []
 
 
 # ── Restart bound (AC15) ────────────────────────────────────────────────────
