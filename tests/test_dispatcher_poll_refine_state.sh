@@ -333,15 +333,39 @@ test_dry_run_reads_but_never_writes() {
 echo "Running dispatcher-poll refinement-state regression tests..."
 echo ""
 
-test_cross_run_single_notification
-test_multiple_issues_tracked_independently
-test_exit_and_reentry
-test_slack_failure_is_retried
-test_missing_state_is_silent_and_safe
-test_malformed_state_fails_safe
-test_unwritable_state_fails_safe
-test_repository_isolation
-test_dry_run_reads_but_never_writes
+SCENARIOS=(
+    test_cross_run_single_notification
+    test_multiple_issues_tracked_independently
+    test_exit_and_reentry
+    test_slack_failure_is_retried
+    test_missing_state_is_silent_and_safe
+    test_malformed_state_fails_safe
+    test_unwritable_state_fails_safe
+    test_repository_isolation
+    test_dry_run_reads_but_never_writes
+)
+
+# The scenarios share nothing (each has its own directory, cache and Slack log),
+# so they run in parallel. Under Git Bash on Windows one run_poll takes about
+# 18 s, and 25 of them in a row exceeded the 300 s shell-test timeout (#425).
+# Each scenario writes its PASS/FAIL lines to its own file; the totals are
+# counted from those files, and a scenario that exits early counts as a failure.
+PIDS=()
+for scenario in "${SCENARIOS[@]}"; do
+    ( "$scenario" ) >"$GLOBAL_TMP/$scenario.out" 2>&1 &
+    PIDS+=("$!")
+done
+for i in "${!SCENARIOS[@]}"; do
+    scenario="${SCENARIOS[$i]}"
+    rc=0
+    wait "${PIDS[$i]}" || rc=$?
+    cat "$GLOBAL_TMP/$scenario.out"
+    PASS=$(( PASS + $(grep -c '^PASS: ' "$GLOBAL_TMP/$scenario.out" || true) ))
+    FAIL=$(( FAIL + $(grep -c '^FAIL: ' "$GLOBAL_TMP/$scenario.out" || true) ))
+    if [[ "$rc" -ne 0 ]]; then
+        fail "$scenario: scenario exited $rc before it finished"
+    fi
+done
 
 echo ""
 echo "Results: $PASS pass, $FAIL fail"
