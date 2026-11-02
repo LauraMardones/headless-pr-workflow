@@ -55,16 +55,27 @@ merged=$(gh api "repos/$REPO/pulls/$PR" --jq '(.merged_at != null)|tostring' 2>/
 [[ "$merged" == "true" ]] || fail "GitHub does not report PR #$PR as merged; nothing was changed."
 echo "PR #$PR is merged on GitHub; cleaning up for #$ISSUE."
 
+# One line, at most 300 characters: a failing step's error text goes into the
+# report and the Session Summary blocker, which must stay on one line (#408).
+one_line() { local t; t=$(printf '%s' "$*" | tr '\r\n\t' '   ' | tr -s ' '); printf '%s' "${t:0:300}"; }
+
 failed=()
 kept=()
 manual=()
 did=()
 
 # Steps 2-6: the local base branch (stale copy of the PR, fast-forward, verify).
-sync_json=$("$HPW_BIN" post-merge-sync "$PR" --repo "$REPO" --execute --json 2>/dev/null)
+sync_err=$(mktemp)
+branch_err=$(mktemp)
+trap 'rm -f "$sync_err" "$branch_err"' EXIT
+sync_json=$("$HPW_BIN" post-merge-sync "$PR" --repo "$REPO" --execute --json 2>"$sync_err")
 if ! jq -e '(.classification // null) != null and (has("error") | not)' >/dev/null 2>&1 <<< "$sync_json"; then
     # No JSON, or an error report such as {"ok":false,"error":"gh-command-failed"}.
-    failed+=("post-merge-sync produced no report: $(jq -r '.error // empty' <<< "$sync_json" 2>/dev/null)")
+    # Quote the error code, the failing command and its error output (#408); with
+    # no JSON at all, quote the helper's own stderr.
+    sync_detail=$(jq -r '[.error // empty, (if .command then (.command | map(tostring) | join(" ")) else empty end), .stderr // .message // empty] | map(select(. != "")) | join(": ")' <<< "$sync_json" 2>/dev/null)
+    [[ -n "$sync_detail" ]] || sync_detail=$(cat "$sync_err")
+    failed+=("post-merge-sync produced no report: $(one_line "$sync_detail")")
 else
     classification=$(jq -r '.classification' <<< "$sync_json")
     failed_step=$(jq -r '.execution.failed_step // empty' <<< "$sync_json")
@@ -80,14 +91,15 @@ else
 fi
 
 # Steps 7-15: local branches, worktrees and the remote topic branch.
-branch_json=$("$HPW_BIN" branch-cleanup "$PR" --repo "$REPO" --execute --json 2>/dev/null)
+branch_json=$("$HPW_BIN" branch-cleanup "$PR" --repo "$REPO" --execute --json 2>"$branch_err")
 if ! jq -e . >/dev/null 2>&1 <<< "$branch_json"; then
-    failed+=("branch-cleanup produced no report")
+    failed+=("branch-cleanup produced no report: $(one_line "$(cat "$branch_err")")")
 else
     # A valid report with ok=false is a failed step (for example a verified
     # deletion that was refused); its kept entries and manual commands stay.
     if ! jq -e '.ok == true' >/dev/null 2>&1 <<< "$branch_json"; then
-        failed+=("branch-cleanup reported failure: $(jq -r '[.error // empty, .message // empty, (.kept[]? | select(.reason | test("failed")) | "\(.branch): \(.reason)")] | join("; ")' <<< "$branch_json")")
+        branch_detail=$(jq -r '[.error // empty, .message // empty, (.blocking_reasons[]? // empty), (.kept[]? | select(.reason | test("failed")) | "\(.branch): \(.reason)")] | join("; ")' <<< "$branch_json")
+        failed+=("branch-cleanup reported failure: $(one_line "${branch_detail:-no reason in the report}")")
     fi
     while IFS= read -r line; do [[ -n "$line" ]] && did+=("deleted: $line"); done < <(jq -r '.deleted[]?' <<< "$branch_json")
     while IFS= read -r line; do [[ -n "$line" ]] && kept+=("$line"); done < <(jq -r '.kept[]? | "\(.branch) kept: \(.reason)"' <<< "$branch_json")

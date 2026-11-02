@@ -752,3 +752,22 @@ def test_summarize_stale_tracking_warning_included():
     )
     summary = summarize_post_merge_sync(pr, ws, (), mode="dry_run")
     assert any("stale" in w for w in summary.warnings)
+
+
+# Fields accepted by `gh pr view --json` (from `gh pr view --help`, gh 2.50+). #408:
+# `merged` is not one of them, so requesting it made every fetch fail.
+GH_PR_VIEW_JSON_FIELDS = frozenset({
+    "additions", "assignees", "author", "autoMergeRequest", "baseRefName", "baseRefOid", "body",
+    "changedFiles", "closed", "closedAt", "closingIssuesReferences", "comments", "commits", "createdAt",
+    "deletions", "files", "fullDatabaseId", "headRefName", "headRefOid", "headRepository",
+    "headRepositoryOwner", "id", "isCrossRepository", "isDraft", "labels", "latestReviews", "maintainerCanModify",
+    "mergeCommit", "mergeStateStatus", "mergeable", "mergedAt", "mergedBy", "milestone", "number",
+    "potentialMergeCommit", "projectCards", "projectItems", "reactionGroups", "reviewDecision",
+    "reviewRequests", "reviews", "state", "statusCheckRollup", "title", "updatedAt", "url",
+})
+
+
+def test_post_merge_pr_fields_are_all_accepted_by_gh_pr_view():
+    from headless_pr_workflow.post_merge_sync import POST_MERGE_PR_FIELDS
+
+    assert set(POST_MERGE_PR_FIELDS) <= GH_PR_VIEW_JSON_FIELDS
