@@ -207,10 +207,12 @@ The token of a dispatcher-started session is `PROJECT_TOKEN`: the workflow sets 
 
 | Step | Token | Scope that matters | Evidence |
 |---|---|---|---|
-| Board status write (`scripts/set-project-status`) | `PROJECT_TOKEN` | `project` | Pending: live proof run of #318 |
-| `scripts/ac-summary.sh` | `PROJECT_TOKEN` | `repo` | Pending: live proof run of #318 |
-| Review-thread resolution (`resolveReviewThread`) | `PROJECT_TOKEN` | `repo` | Bookkeeping job (Actions); session proof pending |
-| `scripts/merge-gate-summary` | `PROJECT_TOKEN` | `repo`, `read:org`, and **admin access** to read branch protection | Pending: live proof run of #318 |
+| Board status write (`scripts/set-project-status`) | `PROJECT_TOKEN` | `project` | [Dispatcher run 41328774189](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/41328774189/job/124914234657#step:12:96): the `/implement #412` session set "In review" |
+| `scripts/ac-summary.sh` | `PROJECT_TOKEN` | `repo` | [Dispatcher run 41206624527](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/41206624527/job/124552899111#step:12:84): exit `2` (issue read, no checkbox list) in the `/implement #344` session |
+| Review-thread resolution (`resolveReviewThread`) | `PROJECT_TOKEN` | `repo` | Bookkeeping job (Actions): [run 41342523068](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/41342523068/job/124955357930#step:4:40) resolved a thread on PR #424 |
+| `scripts/merge-gate-summary` | `PROJECT_TOKEN` | `repo`, `read:org`, and **admin access** to read branch protection | [Dispatcher run 41350157331](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/41350157331/job/124979233267#step:12:35): `Merge gate: … checks=pass` for PR #430 |
+
+All four were proven on the runner in ordinary runs (issue #414); the evidence is on [#308](https://github.com/LauraMardones/headless-pr-workflow/issues/308#issuecomment-6584021065).
 
 The merge gate reads `repos/<repo>/branches/main/protection`, which GitHub allows only with admin access to the repository. A token without it makes the gate report `checks=fail(required-unavailable)` and `/merge` stops. The built-in `GITHUB_TOKEN` of a job does not have it. If the proof run shows that `PROJECT_TOKEN` cannot read it, the PO picks the token that can (for example a fine-grained token with "Administration: read"); the gate is not weakened.
 
