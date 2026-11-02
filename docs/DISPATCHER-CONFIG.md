@@ -342,7 +342,6 @@ Read the `CREATED` column (the "ago" value of the first row): with the scheduler
 - A manual `workflow_dispatch` run by the PO on `main` uses the same identity and event as the scheduler, so it resets the 15-minute clock once.
 - No alert while `DISPATCHER_ENABLED` is not `true`: the guard skips every step.
 - No alert when the scheduler and the cron both stop (for example a disabled workflow); the service's failure e-mail and the manual check cover that.
-- Until the PR for issue #339 is merged, a stopped scheduler is not alerted.
 
 ---
 
