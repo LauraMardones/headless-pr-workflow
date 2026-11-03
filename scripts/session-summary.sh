@@ -8,6 +8,7 @@ Usage: session-summary.sh --command <implement|review|merge|cleanup> \
   [--issue <N>] [--pr <N>] [--head <sha>] \
   --checks <text> --blockers <text> [--next <action>] \
   [--deviation <text>]...
+  --next for implement: review (default) or implementation
 EOF
 }
 
@@ -79,7 +80,7 @@ done
 case "$command_value" in
     implement)
         default_next="review"
-        allowed_next="review"
+        allowed_next="review implementation"
         ;;
     review)
         default_next="merge"
