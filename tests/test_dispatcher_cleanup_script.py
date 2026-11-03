@@ -151,6 +151,53 @@ def test_helper_without_a_report_is_a_failure(h):
     assert proc.returncode == 1 and "branch-cleanup produced no report" in proc.stdout
 
 
+def test_408_runner_checkout_with_nothing_local_has_no_failed_section(h):
+    h.set("hpw_post-merge-sync.json", json.dumps({
+        "ok": True, "classification": "already_synced", "blocking_reasons": [], "manual_commands": [],
+        "execution": {"failed_step": None}}))
+    h.set("hpw_branch-cleanup.json", json.dumps({"ok": True, "deleted": [], "kept": [], "manual_commands": []}))
+    proc = run(h)
+    assert proc.returncode == 0, proc.stderr
+    assert "Failed:" not in proc.stdout
+    assert "Blockers: none" in h.body(COMMENTS)
+
+
+def test_408_sync_error_report_quotes_the_command_and_stderr(h):
+    h.set("hpw_post-merge-sync.json", json.dumps({
+        "ok": False, "error": "gh-command-failed", "returncode": 1,
+        "command": ["gh", "pr", "view", "77", "--json", "merged"],
+        "stderr": 'Unknown JSON field: "merged"\nAvailable fields: number'}))
+    h.set("hpw_post-merge-sync.rc", "1")
+    proc = run(h)
+    line = "post-merge-sync produced no report: gh-command-failed: gh pr view 77 --json merged: Unknown JSON field"
+    assert proc.returncode == 1 and line in proc.stdout
+    blockers = next(x for x in h.body(COMMENTS).splitlines() if x.startswith("Blockers:"))
+    assert "gh pr view 77 --json merged" in blockers and "Unknown JSON field" in blockers
+
+
+def test_408_branch_cleanup_failure_includes_blocking_reasons(h):
+    h.set("hpw_branch-cleanup.json", json.dumps({
+        "ok": False, "deleted": [], "kept": [], "manual_commands": [],
+        "blocking_reasons": ["GitHub PR fetch failed: Unknown JSON field"]}))
+    h.set("hpw_branch-cleanup.rc", "1")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "branch-cleanup reported failure: GitHub PR fetch failed: Unknown JSON field" in proc.stdout
+
+
+def test_408_step_without_json_quotes_its_stderr(h):
+    h.set("hpw_post-merge-sync.json", "")
+    h.set("hpw_post-merge-sync.stderr", "Traceback: boom")
+    h.set("hpw_post-merge-sync.rc", "2")
+    h.set("hpw_branch-cleanup.json", "")
+    h.set("hpw_branch-cleanup.stderr", "hpw: cannot start")
+    h.set("hpw_branch-cleanup.rc", "2")
+    proc = run(h)
+    assert proc.returncode == 1
+    assert "post-merge-sync produced no report: Traceback: boom" in proc.stdout
+    assert "branch-cleanup produced no report: hpw: cannot start" in proc.stdout
+
+
 @pytest.mark.parametrize("args", [["--issue", "x", "--repo", REPO], ["--issue", "1", "--repo", "bad"], ["--issue", "1", "--repo", REPO, "--pr", "y"]])
 def test_invalid_invocation_exits_2(h, args):
     assert h.run("dispatcher-cleanup.sh", *args).returncode == 2

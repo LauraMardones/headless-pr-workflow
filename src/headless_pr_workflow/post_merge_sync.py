@@ -17,7 +17,6 @@ POST_MERGE_PR_FIELDS: tuple[str, ...] = (
     "title",
     "url",
     "state",
-    "merged",
     "mergedAt",
     "mergeCommit",
     "baseRefName",
