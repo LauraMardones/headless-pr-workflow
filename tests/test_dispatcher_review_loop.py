@@ -34,6 +34,15 @@ def d(tmp_path):
     return Dispatcher(tmp_path)
 
 
+def owned(d: Dispatcher, head: str = HEAD, pr: int = PR) -> None:
+    """The head was pushed by the dispatcher's own /implement: it carries the merge-owner marker.
+
+    Without it, a clean review-loop head "In implementation" or "In review" gets
+    the missing-merge-owner blocker (issue #449 AC 4).
+    """
+    d.add_comment(pr, f"<!-- hpw:dispatcher action=merge-owner pr={pr} head={head} -->")
+
+
 def table(name: str) -> dict[str, str]:
     """Rows of a ``declare -A`` table in dispatcher-invoke.sh."""
     text = INVOKE.read_text(encoding="utf-8") + "\n" + ROUTING_LIB.read_text(encoding="utf-8")
@@ -210,6 +219,7 @@ def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
     assert len(d.posted(STORY)) == 2 and f"action=hand-off-done pr={PR}" in d.posted(STORY)[1]
 
     # Completed once: a story that comes back to "In implementation" is not moved again.
+    owned(d, NEW_HEAD if head_changes else HEAD)  # so only the hand-off rule is checked here
     d.set_status(STORY, "In implementation")
     fourth = d.resume()
     assert fourth.returncode == 0, fourth.stdout + fourth.stderr
@@ -277,6 +287,7 @@ def test_story_in_implementation_without_a_pending_hand_off_is_left_alone(d):
     """A story someone is working on, with a ready PR, is not moved to "In review"."""
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
+    owned(d)
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr=90 head={HEAD} -->")  # another PR
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->",
                   login="someone-else")  # forged
@@ -489,7 +500,8 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (REPO_ROOT / "scripts" / "dispatcher-usage-limit.sh").read_text(encoding="utf-8"),
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
-    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh"):  # sourced (#314, #296, #348, #358)
+    for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh",
+                "conflict-round.sh"):  # sourced (#314, #296, #348, #358, #449)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -665,6 +677,7 @@ def test_ac11_no_fix_round(d, case):
     d.add_story(STORY, "In implementation", executor=executor, labels=labels)
     if case != "no-open-pr":
         d.add_pr(PR, STORY)
+        owned(d)
     if case == "older-head":
         d.add_findings(PR, "c" * 40)
     elif case == "other-account":
@@ -754,6 +767,7 @@ def test_fix_round_that_pushes_nothing_is_recorded_whatever_the_status(d, status
     """The session moved the story on without a commit; the bookkeeping job would move it back."""
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
+    owned(d)
     d.add_findings(PR, HEAD)
     if status_after_session:
         d.session_sets_status("implement", STORY, status_after_session)
@@ -780,6 +794,7 @@ def test_fix_round_that_pushes_nothing_is_recorded_whatever_the_status(d, status
 def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
+    owned(d)
     d.add_findings(PR, HEAD)
     d.fail("implement")
 
@@ -800,6 +815,7 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
+    owned(d)
     if held:
         for head in ("1" * 40, HEAD):
             d.add_findings(PR, head)

@@ -53,9 +53,10 @@
 #   dispatcher-invoke.sh reviews with a /review session: one executor: label
 #   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
 #   open, non-draft PR that closes the story.
-#   conflict_due (issue #409) lists the review-loop stories "In review" (one
-#   executor: label with a CODEX_REVIEW_LOOP_ROUTING row) whose open, non-draft
-#   PR conflicts with main; dispatcher-invoke.sh starts a conflict round.
+#   conflict_due (issue #409, issue #449) lists the review-loop stories
+#   "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) that
+#   are owed a conflict round by the rule of scripts/lib/conflict-round.sh;
+#   dispatcher-invoke.sh starts the round.
 #
 # Prototype divergences from expected behaviour:
 #   D1  Pagination: fetches all project items via cursor pagination, 100 per
@@ -142,6 +143,9 @@ STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
 # The review-path tables, shared with dispatcher-invoke.sh (issue #315).
 # shellcheck source=scripts/lib/review-routing.sh
 source "$SCRIPT_DIR/lib/review-routing.sh"
+# The conflict-round rule, shared with dispatcher-invoke.sh (issue #449).
+# shellcheck source=scripts/lib/conflict-round.sh
+source "$SCRIPT_DIR/lib/conflict-round.sh"
 
 # ─── GraphQL helper ───────────────────────────────────────────────────────────
 
@@ -323,11 +327,43 @@ linked_ready_pr() {
             | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))][0].number // empty'
 }
 
-# Issue #409: conflict_due lists the review-loop stories "In review" (one
-# executor: label with a CODEX_REVIEW_LOOP_ROUTING row) whose open, non-draft
-# PR conflicts with main (mergeable == false or mergeable_state == "dirty"), so
-# the invoke step starts a conflict round. A clean PR, an unknown mergeability
-# (null) and a PR that cannot be read are not listed; a failed read warns.
+# rest_get_all <path> — every page of a REST list as one JSON array; fails
+# when a page cannot be read.
+rest_get_all() {
+    local path="$1" page=1 chunk all='[]'
+    while :; do
+        chunk=$(curl -sf \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$REST/$path?per_page=100&page=$page") || return 1
+        all=$(printf '%s\n%s\n' "$all" "$chunk" | jq -cs 'add') || return 1
+        [[ "$(jq 'length' <<< "$chunk")" -ge 100 ]] || break
+        page=$(( page + 1 ))
+    done
+    echo "$all"
+}
+
+# The token's own login: the dispatcher's account, and the bookkeeping job's
+# unless CODEX_BOOKKEEPING_LOGIN names it (as in dispatcher-invoke.sh).
+TOKEN_LOGIN=""
+load_token_login() {
+    [[ -z "$TOKEN_LOGIN" ]] || return 0
+    TOKEN_LOGIN=$(curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/user" | jq -r '.login // empty') || TOKEN_LOGIN=""
+    [[ -n "$TOKEN_LOGIN" ]]
+}
+# The PO account, as DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh.
+PO_LOGIN="LauraMardones"
+
+# Issue #409, issue #449: conflict_due lists the review-loop stories
+# "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) for
+# which a conflict round is owed, by the rule the invoke step applies too
+# (conflict_round_rule, scripts/lib/conflict-round.sh): the open, non-draft PR
+# conflicts with main, no fix round is due, the story has no open blocker and
+# no conflict-round attempt marker holds for the PR's current head. A PR or a
+# comment list that cannot be read lists nothing and warns.
 REVIEW_DUE='[]'
 CONFLICT_DUE='[]'
 if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
@@ -351,7 +387,17 @@ if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
                 echo "[POLL] Warning: could not read PR #$PR_NUMBER for #$STORY_NUMBER; conflict_due skips it this cycle" >&2
                 continue
             }
-            if echo "$PR_DETAIL" | jq -e '(.mergeable == false) or (.mergeable_state == "dirty")' >/dev/null 2>&1; then
+            echo "$PR_DETAIL" | jq -e '(.mergeable == false) or (.mergeable_state == "dirty")' >/dev/null 2>&1 \
+                || continue
+            if ! load_token_login \
+                    || ! STORY_COMMENTS=$(rest_get_all "repos/$REPO/issues/$STORY_NUMBER/comments") \
+                    || ! PR_COMMENTS=$(rest_get_all "repos/$REPO/issues/$PR_NUMBER/comments"); then
+                echo "[POLL] Warning: could not read the comments of #$STORY_NUMBER or PR #$PR_NUMBER; conflict_due skips it this cycle" >&2
+                continue
+            fi
+            RULE=$(printf '%s\n%s\n%s\n' "$PR_DETAIL" "$STORY_COMMENTS" "$PR_COMMENTS" \
+                | conflict_round_rule "$TOKEN_LOGIN" "${CODEX_BOOKKEEPING_LOGIN:-$TOKEN_LOGIN}" "$PO_LOGIN") || RULE=""
+            if [[ "$RULE" == "owed" ]]; then
                 CONFLICT_DUE=$(echo "$CONFLICT_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
             fi
         fi

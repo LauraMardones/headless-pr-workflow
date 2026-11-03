@@ -345,6 +345,8 @@ source "$SCRIPT_DIR/lib/decision-blocker.sh"
 source "$SCRIPT_DIR/lib/evidence-pending.sh"
 # shellcheck source=scripts/lib/review-routing.sh
 source "$SCRIPT_DIR/lib/review-routing.sh"
+# shellcheck source=scripts/lib/conflict-round.sh
+source "$SCRIPT_DIR/lib/conflict-round.sh"
 
 # ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
 # AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
@@ -377,8 +379,6 @@ FIX_ROUND_SESSION=false  # true while the resume pass starts the /implement of a
 RESUMED_ROUND="fix round"
 RESUMED_ROUND_PLACE='"In implementation"'   # a refused conflict round keeps the story's own status
 CONFLICT_ROUND_SESSION=false
-CONFLICT_ROUND_START_HEAD=""   # the head the conflict round started on, kept across a pause
-CONFLICT_ROUND_PR=""
 SESSION_PRESTART_STATUS=""   # status written just before the session starts
 PRESTART_STATUS_FAILED=false
 
@@ -1610,7 +1610,7 @@ record_session_start() {
 
 paused_comment() {
     local step="$1" target="$2" issue="$3" branch="$4" pr_number="$5" pr_head="$6" \
-          reset_ts="$7" unpushed="$8" dirty="$9" next="${10}"
+          reset_ts="$7" unpushed="$8" dirty="$9" next="${10}" round="${11:-}"
     local reset_text="unknown — the dispatcher checks the allowance on every poll"
     [[ -n "$reset_ts" ]] && reset_text=$(date -u -d "@$reset_ts" +%Y-%m-%dT%H:%MZ 2>/dev/null || echo "$reset_text")
     local pr_text="no PR yet"
@@ -1618,7 +1618,7 @@ paused_comment() {
     local dirty_text="no uncommitted changes"
     [[ "$dirty" == "true" ]] && dirty_text="uncommitted changes"
     printf '## Paused at a provider usage limit\n\n'
-    printf -- '- Step: `/%s %s` for #%s\n' "$step" "$target" "$issue"
+    printf -- '- Step: `/%s %s` for #%s%s\n' "$step" "$target" "$issue" "${round:+ ($round)}"
     printf -- '- Branch: %s\n' "${branch:-unknown}"
     printf -- '- PR: %s\n' "$pr_text"
     printf -- '- Resets: %s\n' "$reset_text"
@@ -1629,8 +1629,7 @@ paused_comment() {
 
 pause_at_usage_limit() {
     local step="$1" target="$2" issue="$3"
-    local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false
-    local rollback_status="Ready for implementation"
+    local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false round=""
     reset_ts="$CLAUDE_LIMIT_RESET_TS"
     LAST_ACTION="pausing #$issue at a provider usage limit"
     pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
@@ -1643,18 +1642,14 @@ pause_at_usage_limit() {
     dirty=false
     [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]] && dirty=true
 
-    if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
-        next="the $RESUMED_ROUND stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
-        # Issue #409: the session may have moved the story to "In review"
-        # (implement.md step 16) before the limit stopped it, and only the
-        # "In implementation" entry resumes a paused conflict round.
-        if $CONFLICT_ROUND_SESSION \
-                && ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "In implementation"; then
-            rollback_failed=true
-            rollback_status="In implementation"
-            echo "Warning: Board status update failed for #$issue to 'In implementation'" >&2
-            next="the board write to \"In implementation\" did not take effect, so #$issue keeps the status the session left it in; the conflict round is tried again once the story is \"In implementation\" again."
-        fi
+    if [[ "$step" == "implement" ]] && $CONFLICT_ROUND_SESSION; then
+        # Issue #449: a stopped conflict round is never resumed. This record is
+        # for the PO's information only: no status is written, and the
+        # dispatcher never reads it back.
+        round="conflict round"
+        next="the story stays where it is. The next run decides from the PR as it is then: a fresh conflict round while the PR still conflicts with main, or one blocker when the PR is clean but its head has no merge-owner evidence."
+    elif [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
+        next="the fix round stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
         if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
@@ -1668,10 +1663,7 @@ pause_at_usage_limit() {
 
     local body newest pr_text="no PR yet"
     [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`$pr_head\`"
-    body=$(paused_comment "$step" "$target" "$issue" "$branch" "$pr_number" "$pr_head" "$reset_ts" "$unpushed" "$dirty" "$next")
-    # Issue #409: a paused conflict round is found again through the start
-    # record written before its session, not through this comment, so a
-    # failed post here does not strand the round.
+    body=$(paused_comment "$step" "$target" "$issue" "$branch" "$pr_number" "$pr_head" "$reset_ts" "$unpushed" "$dirty" "$next" "$round")
     newest=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" \
         | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
     if [[ "$newest" == "## Paused at a provider usage limit"* \
@@ -1684,7 +1676,7 @@ pause_at_usage_limit() {
     fi
     DISPATCH_HANDLED=true
     if $rollback_failed; then
-        echo "#$issue paused at a provider usage limit, but the move to \"$rollback_status\" failed" >&2
+        echo "#$issue paused at a provider usage limit, but the move to \"Ready for implementation\" failed" >&2
         exit 1
     fi
     echo "#$issue paused at a provider usage limit; no other session is started in this run"
@@ -1743,26 +1735,15 @@ invoke_executor_command() {
     task_prompt=$(sed "s/\$ARGUMENTS/$target_arg/g" "$command_file")
 
     if $DRY_RUN; then
-        $CONFLICT_ROUND_SESSION \
-            && echo "[DRY RUN] Would record the conflict round's start on #$ISSUE_NUMBER"
         [[ -n "$SESSION_PRESTART_STATUS" ]] \
             && echo "[DRY RUN] Would set #$ISSUE_NUMBER to \"$SESSION_PRESTART_STATUS\" on project board"
         echo "[DRY RUN] Would start Claude Code ($model) on the subscription for /$slash_command $target_arg"
         return 0
     fi
 
-    # Issue #409: a conflict round records its start and moves the story to its
-    # session status only after the usage limit and the allowance check let the
-    # session start, so a refused start leaves the story where the next run
-    # finds it again. The start record is written before anything else: it is
-    # what leads a later run back to a round that paused, was cancelled or
-    # failed to post its pause record, so no session starts without it.
-    if $CONFLICT_ROUND_SESSION \
-            && ! post_conflict_round_start "$ISSUE_NUMBER" "$CONFLICT_ROUND_PR" "$CONFLICT_ROUND_START_HEAD"; then
-        echo "Warning: could not record the conflict round's start on #$ISSUE_NUMBER; /$slash_command not started." >&2
-        PRESTART_STATUS_FAILED=true
-        return 1
-    fi
+    # Issue #409: a conflict round moves the story to its session status only
+    # after the usage limit and the allowance check let the session start, so
+    # a refused start leaves the story where the next run finds it again.
     if [[ -n "$SESSION_PRESTART_STATUS" ]] \
             && ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "$SESSION_PRESTART_STATUS"; then
         echo "Warning: could not set #$ISSUE_NUMBER to \"$SESSION_PRESTART_STATUS\"; /$slash_command not started." >&2
@@ -2744,8 +2725,9 @@ resume_in_merge_story() {
                     return 0 ;;
                 conflicting)
                     if is_review_loop_story; then
-                        echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$pr_number conflicts with main; the conflict round starts after this run's merges"
-                        queue_conflict_round "$issue_num" "$item_id" "In merge"
+                        # No /merge for a conflicting PR; the rule decides
+                        # whether a conflict round is owed (issue #449).
+                        check_review_loop_pr "$issue_num" "$item_id" "In merge" "$pr_number" || true
                     else
                         block_merge_conflict "$issue_num" "$pr_number" "$pr_head"
                     fi
@@ -2809,19 +2791,9 @@ resume_fix_round() {
         # never act on Codex's answer.
         complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$pr_draft"
         [[ " $HAND_OFF_RESUMED_ISSUES " == *" $issue_num "* ]] && return 0
-        # Issue #409: a conflict round that paused, or one tried before on
-        # this PR that may run again, is started after this run's merges.
-        if conflict_round_owed "$issue_num" "$pr_number" "$pr_head"; then
-            queue_conflict_round "$issue_num" "$item_id" "In implementation"
-        fi
-        return 0
-    fi
-    # Issue #409: findings recorded on this head before an open conflict round
-    # started belong to an earlier, completed fix round; the open conflict
-    # round is resumed instead of the fix-round path, whose attempt marker or
-    # round maximum would otherwise skip the story for good.
-    if conflict_round_open_after_findings "$issue_num" "$pr_number" "$pr_head"; then
-        queue_conflict_round "$issue_num" "$item_id" "In implementation"
+        # Issue #449: the rule decides from the PR as it is now: an owed
+        # conflict round, or one blocker for a clean head with no merge owner.
+        check_review_loop_pr "$issue_num" "$item_id" "In implementation" "$pr_number" || true
         return 0
     fi
 
@@ -2847,6 +2819,9 @@ resume_fix_round() {
             complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$pr_draft"
             return 0
         fi
+        # Issue #449: a completed fix round on this head does not hide an owed
+        # conflict round or a head left without a merge owner.
+        check_review_loop_pr "$issue_num" "$item_id" "In implementation" "$pr_number" && return 0
         echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the fix round was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
         return 0
     fi
@@ -2875,31 +2850,42 @@ resume_fix_round() {
     hand_off_to_codex_review_loop "$pr_head" "$blocker_before"
 }
 
-# ─── Conflict round (issue #409) ─────────────────────────────────────────────
+# ─── Conflict round (issue #409, issue #449) ─────────────────────────────────
 # A merge can make another dispatcher PR conflict with main. A review-loop
 # story (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) whose PR
 # conflicts gets one /implement session, the conflict round: it merges main
 # into the PR branch, resolves the conflict and pushes. The new head gets the
 # merge-owner marker and the usual hand-off to the Codex review loop, so it
 # merges only through the unchanged gates. Rules:
+#   - one rule decides whether a round is owed, from GitHub facts read now
+#     (conflict_round_rule in scripts/lib/conflict-round.sh, which
+#     scripts/dispatcher-poll.sh uses too): the story is "In implementation",
+#     "In review" or "In merge"; its open, non-draft PR conflicts; no fix round
+#     is due; the story has no open blocker; and no conflict-round attempt
+#     marker holds for the PR's current head;
+#   - a stopped round (a usage-limit pause, a cancelled run, a failed write of
+#     the pause record) is never resumed. Nothing records an open round: the
+#     next run applies the same rule to the PR as it is then;
 #   - rounds run at the end of the resume pass, after every /merge of the run,
 #     so each starts from the newest main;
-#   - one round per PR head: a round that fails or pushes nothing posts one
-#     blocker that carries the attempt marker (one po_blocker event);
 #   - the story moves to "In implementation" only once the usage limit and the
 #     allowance check let the session start, so a refused start changes
-#     nothing and the same entry finds the story again;
-#   - before its session starts, a round posts a start record (the PR and the
-#     head it started on); the record stays open until the round posts its
-#     done record or its blocker. An open record leads the "In implementation"
-#     entry back to a round that paused at a usage limit, was cancelled, or
-#     could not post its pause record; the resumed round is judged against the
-#     start head, so a round that pushed before it stopped finishes its
-#     hand-off without another commit;
+#     nothing;
+#   - success is judged from the PR, not from a new head: after a session that
+#     exits 0, a PR that no longer conflicts gets merge-owner evidence for its
+#     current head and the hand-off; a PR that still conflicts, or a failed
+#     session, gets one blocker that carries the attempt marker for the PR's
+#     current head (one po_blocker event);
 #   - a round is not a fix round: only the bookkeeping job's findings markers
 #     count toward CODEX_FIX_ROUND_MAX.
 # Other stories (for example executor:codex) get no session: one blocker per
 # head names the conflict (block_merge_conflict).
+#
+# The same rule finds a review-loop story "In implementation" or "In review"
+# whose PR is clean but whose head has no merge-owner evidence: a session
+# stopped after its push, before the hand-off finished. It gets one blocker
+# per head and no session (block_ownerless_head). A head "In merge" without
+# that evidence belongs to the merge path (ensure_merge_owner, issue #406).
 
 is_review_loop_story() {
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]
@@ -2909,83 +2895,31 @@ conflict_round_attempt_marker() {
     dispatcher_marker "action=conflict-round-attempt pr=$1 head=$2"
 }
 
-# Start and done records (issue #409): hidden markers on the story.
-conflict_round_start_marker() {
-    dispatcher_marker "action=conflict-round-start pr=$1 start=$2"
-}
-
-conflict_round_done_marker() {
-    dispatcher_marker "action=conflict-round-done pr=$1 start=$2"
-}
-
-# post_conflict_round_start <issue> <pr> <start-head> — 1 when the record
-# cannot be posted; the caller then starts no session.
-post_conflict_round_start() {
-    [[ -n "$2" && -n "$3" ]] || return 1
-    post_comment "$1" "$(conflict_round_start_marker "$2" "$3")"
-}
-
-# conflict_round_open_record <issue> <pr> — prints "<start-head> <created_at>"
-# when the newest conflict-round record for <pr> on the story is a start
-# record: no done record and no round blocker came after it. 1 when no round
-# is open or the comments cannot be read.
-conflict_round_open_record() {
-    local issue_num="$1" pr_number="$2" own record
-    own=$(bot_comments_json "$issue_num") || return 1
-    record=$(jq -r --arg start "action=conflict-round-start pr=$pr_number start=" \
-            --arg done "action=conflict-round-done pr=$pr_number " \
-            --arg attempt "action=conflict-round-attempt pr=$pr_number " '
-        [.[] | select((.body // "") | contains($start) or contains($done) or contains($attempt))] | last
-        | if . == null or ((.body // "") | contains($start) | not) then ""
-          else (.body | .[(index($start) + ($start | length)):] | capture("^(?<s>[0-9a-fA-F]+)").s // "") as $s
-               | if $s == "" then "" else "\($s) \(.created_at)" end
-          end' <<< "$own" 2>/dev/null) || return 1
-    [[ -n "$record" ]] || return 1
-    echo "$record"
-}
-
-# conflict_round_open_start <issue> <pr> — prints the start head of the open
-# round; 1 when no round is open.
-conflict_round_open_start() {
-    local record
-    record=$(conflict_round_open_record "$1" "$2") || return 1
-    echo "${record%% *}"
-}
-
-# conflict_round_open_after_findings <issue> <pr> <head> — 0 when a round is
-# open and started after the bookkeeping job's latest findings marker for
-# <head>: those findings belong to an earlier, completed fix round. 1
-# otherwise, and when the comments cannot be read: findings recorded after the
-# round started start a fix round, which also merges main (implement.md).
-conflict_round_open_after_findings() {
-    local issue_num="$1" pr_number="$2" pr_head="$3" record started_at login moves_at
-    record=$(conflict_round_open_record "$issue_num" "$pr_number") || return 1
-    started_at="${record#* }"
-    login=$(bookkeeping_login)
-    [[ -n "$login" ]] || return 1
-    moves_at=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
-        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER${pr_head,,} " '
-            [add // [] | .[] | select((.user.login // "") == $login and ((.body // "") | ascii_downcase | contains($marker))) | .created_at] | max // empty') || return 1
-    [[ -n "$moves_at" && "$started_at" > "$moves_at" ]]
-}
-
-# post_conflict_round_done <issue> <pr> <start-head> — closes the round's start
-# record after its hand-off. Retried; 1 when it cannot be posted. The round
-# then stays open, and a later "In implementation" visit with no fix round due
-# would start it again, so the caller fails the run (an unexpected exit, so the
-# dispatcher sends its dispatcher_error) instead of going on quietly.
-post_conflict_round_done() {
-    local attempt
-    for attempt in 1 2 3; do
-        post_comment "$1" "$(conflict_round_done_marker "$2" "$3")" && return 0
-        sleep "${COMMENT_RETRY_DELAY:-2}"
-    done
-    echo "Error: could not record the end of the conflict round on #$1; the hand-off is done, but a later run may start the round again." >&2
-    return 1
-}
-
 merge_conflict_marker() {
     dispatcher_marker "action=merge-conflict pr=$1 head=$2"
+}
+
+merge_owner_missing_marker() {
+    dispatcher_marker "action=merge-owner-missing pr=$1 head=$2"
+}
+
+# conflict_round_state <issue> <pr> — prints "<word> <head>": the word of
+# conflict_round_rule for the story's PR and the PR head it read. 1 when a
+# login, the PR or a comment list cannot be read.
+conflict_round_state() {
+    local issue_num="$1" pr_number="$2" login detail story_comments pr_comments word
+    resolve_dispatcher_login || return 1
+    login=$(bookkeeping_login)
+    [[ -n "$login" ]] || return 1
+    detail=$(gh api "repos/$REPO/pulls/$pr_number" 2>/dev/null) || return 1
+    story_comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" 2>/dev/null \
+        | jq -s 'add // []') || return 1
+    pr_comments=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+        | jq -s 'add // []') || return 1
+    word=$(printf '%s\n%s\n%s\n' "$detail" "$story_comments" "$pr_comments" \
+        | conflict_round_rule "$DISPATCHER_LOGIN" "$login" "$DECISION_BLOCKER_PO_LOGIN") || return 1
+    [[ -n "$word" ]] || return 1
+    echo "$word $(jq -r '.head.sha // ""' <<< "$detail")"
 }
 
 CONFLICT_ROUND_QUEUE=()
@@ -2998,31 +2932,80 @@ queue_conflict_round() {
     CONFLICT_ROUND_QUEUE+=("$issue_num|$item_id|$from_status")
 }
 
-# conflict_round_owed <issue> <pr> <head> — for a story "In implementation"
-# with no fix round due: 0 when a conflict round on the PR is open (it paused,
-# was cancelled or failed to post its pause record), or when a round was tried on this PR before and the PR still
-# conflicts (the PO's /unblock or a new head allows one new attempt; the
-# attempt marker check in run_conflict_round decides). 1 otherwise, and when
-# the comments or the PR cannot be read.
-conflict_round_owed() {
-    local issue_num="$1" pr_number="$2" pr_head="$3" own
-    conflict_round_open_start "$issue_num" "$pr_number" >/dev/null && return 0
-    own=$(bot_comments_json "$issue_num") || return 1
-    jq -e --arg m "action=conflict-round-attempt pr=$pr_number " \
-        'any(.[]; (.body // "") | contains($m))' <<< "$own" >/dev/null || return 1
-    [[ "$(pr_mergeability "$pr_number" || true)" == "conflicting" ]]
+# check_review_loop_pr <issue> <item> <status> <pr> — the resume pass applies
+# the rule to a review-loop story's linked PR. It queues an owed conflict
+# round, and for a story "In implementation" or "In review" it posts the
+# blocker for a clean head without merge-owner evidence. Returns 0 when the
+# rule found a conflict or an ownerless head (the caller does nothing else for
+# the PR in this run), 1 when the PR needs nothing from this rule or cannot be
+# read.
+check_review_loop_pr() {
+    local issue_num="$1" item_id="$2" status="$3" pr_number="$4" result state head
+    if ! result=$(conflict_round_state "$issue_num" "$pr_number"); then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: could not read PR #$pr_number or the comments; the next run decides again" >&2
+        return 1
+    fi
+    state="${result%% *}"
+    head="${result#* }"
+    case "$state" in
+        owed)
+            echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$pr_number conflicts with main; the conflict round starts after this run's merges"
+            queue_conflict_round "$issue_num" "$item_id" "$status" ;;
+        tried)
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the conflict round was already tried on PR #$pr_number at head ${head:0:7}; waiting for a new head or a PO /unblock line" ;;
+        blocked)
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number conflicts with main, but the story has an open blocker; no conflict round until the PO posts /unblock" ;;
+        ownerless)
+            [[ "$status" != "In merge" ]] || return 1
+            block_ownerless_head "$issue_num" "$pr_number" "$head" ;;
+        *)
+            return 1 ;;
+    esac
+    return 0
 }
 
-# A review-loop story "In review" whose open, non-draft PR conflicts.
-queue_conflict_round_if_conflicting() {
-    local issue_num="$1" item_id="$2" pr_json pr_number
-    [[ " $CONFLICT_ROUND_ISSUES " == *" $issue_num "* ]] && return 0
-    pr_json=$(find_linked_pr_json "$issue_num")
-    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
-    [[ -n "$pr_number" && "$(jq -r '.draft // false' <<< "$pr_json")" != "true" ]] || return 0
-    [[ "$(pr_mergeability "$pr_number" || true)" == "conflicting" ]] || return 0
-    echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$pr_number conflicts with main; the conflict round starts after this run's merges"
-    queue_conflict_round "$issue_num" "$item_id" "In review"
+# block_ownerless_head <issue> <pr> <head> — one blocker per head, sent as one
+# po_blocker event; no session. Posted once per head even after a PO /unblock
+# on the same head: only a new head, or the PO's merge takeover, changes what
+# the dispatcher can do.
+block_ownerless_head() {
+    local issue_num="$1" pr_number="$2" pr_head="$3" marker own unblocked_when state
+    marker=$(merge_owner_missing_marker "$pr_number" "$pr_head")
+    if ! own=$(bot_comments_json "$issue_num"); then
+        echo "Warning: could not read the comments of #$issue_num; the missing merge owner on PR #$pr_number is checked again on the next run" >&2
+        return 0
+    fi
+    if jq -e --arg m "$marker" 'any(.[]; (.body // "") | contains($m))' <<< "$own" >/dev/null; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${pr_head:0:7} has no merge-owner evidence; the blocker is already posted"
+        return 0
+    fi
+    unblocked_when="the PO follows docs/TAKEOVER-RULES.md → Merge Takeover for PR #$pr_number, or pushes a new head and posts /unblock"
+    state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: a session stopped after its push, before the hand-off finished; the dispatcher starts no session for this head"
+    echo "BLOCKED: posting resource blocker on #$issue_num"
+    if ! post_comment "$issue_num" "## Blocked Declaration
+Type: resource
+Declared by: $DECLARED_BY
+Blocks: #$issue_num — $TARGET_TITLE
+Unblocked when: $unblocked_when
+Owner: PO (@LauraMardones)
+State of in-progress work: $state
+
+$marker"; then
+        echo "Warning: could not post the merge-owner blocker on #$issue_num; the next run tries again." >&2
+        return 0
+    fi
+    register_po_blocker "$issue_num" "$TARGET_TITLE" "resource" "$unblocked_when" "$state"
+    echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${pr_head:0:7} has no merge-owner evidence; blocker posted"
+}
+
+# A review-loop story "In review": the Codex review loop answers it, so no
+# /review session starts. The rule may still owe a conflict round or find an
+# ownerless head.
+check_review_loop_story_in_review() {
+    local issue_num="$1" item_id="$2" pr_number
+    pr_number=$(jq -r '.number // empty' <<< "$(find_linked_pr_json "$issue_num")")
+    [[ -n "$pr_number" ]] || return 0
+    check_review_loop_pr "$issue_num" "$item_id" "In review" "$pr_number" || true
 }
 
 # block_merge_conflict <issue> <pr> <head> — a story "In merge" with no
@@ -3040,8 +3023,6 @@ block_merge_conflict() {
 reset_conflict_round_session() {
     FIX_ROUND_SESSION=false
     CONFLICT_ROUND_SESSION=false
-    CONFLICT_ROUND_START_HEAD=""
-    CONFLICT_ROUND_PR=""
     RESUMED_ROUND="fix round"
     RESUMED_ROUND_PLACE='"In implementation"'
     SESSION_PRESTART_STATUS=""
@@ -3062,21 +3043,13 @@ conflict_round_blocker() {
 
 run_conflict_round() {
     local issue_num="$1" item_id="$2" from_status="$3"
-    local pr_json pr_number pr_head start_head blocker_before after_head
+    local pr_json pr_number pr_head blocker_before after_head
     load_story_context "$issue_num" "$item_id" || return 0
     is_review_loop_story || return 0
     pr_json=$(find_linked_pr_json "$issue_num")
     pr_number=$(jq -r '.number // empty' <<< "$pr_json")
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
     [[ -n "$pr_number" && -n "$pr_head" ]] || return 0
-
-    if marker_holds "$issue_num" "$(conflict_round_attempt_marker "$pr_number" "$pr_head")"; then
-        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the conflict round was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
-        return 0
-    fi
-    # An open round is resumed and judged against the head it first started
-    # on: it may have pushed the merge with main before it stopped.
-    start_head=$(conflict_round_open_start "$issue_num" "$pr_number") || start_head="$pr_head"
 
     echo ""
     echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$pr_number conflicts with main; conflict round, /implement on PR #$pr_number"
@@ -3086,8 +3059,6 @@ run_conflict_round() {
     # story's place instead of putting it back to "Ready for implementation".
     FIX_ROUND_SESSION=true
     CONFLICT_ROUND_SESSION=true
-    CONFLICT_ROUND_START_HEAD="$start_head"
-    CONFLICT_ROUND_PR="$pr_number"
     RESUMED_ROUND="conflict round"
     RESUMED_ROUND_PLACE="\"$from_status\""
     PRESTART_STATUS_FAILED=false
@@ -3099,10 +3070,18 @@ run_conflict_round() {
     SESSION_PRESTART_STATUS=""
     if $PRESTART_STATUS_FAILED; then
         reset_conflict_round_session
-        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the conflict round's start record or the move to \"In implementation\" failed; the conflict round on PR #$pr_number is tried again on the next run"
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the move to \"In implementation\" failed; the conflict round on PR #$pr_number is tried again on the next run"
         return 0
     fi
+    # A pause posts the standard record and ends the run; the next run decides
+    # from the PR (issue #449).
     [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
+    # The attempt marker names the head the PR has now: a session may push
+    # before it fails, and that head is the one tried.
+    if ! $DRY_RUN; then
+        after_head=$(jq -r '.head.sha // empty' <<< "$(find_linked_pr_json "$issue_num" 2>/dev/null || true)" 2>/dev/null || true)
+        [[ -n "$after_head" ]] && pr_head="$after_head"
+    fi
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed"
@@ -3110,17 +3089,13 @@ run_conflict_round() {
     reset_conflict_round_session
     echo "✓ /implement completed for #$issue_num (conflict round)"
     notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
-    if ! $DRY_RUN; then
-        after_head=$(jq -r '.head.sha // empty' <<< "$(find_linked_pr_json "$issue_num")" 2>/dev/null || true)
-        if [[ -n "$after_head" && "${after_head,,}" == "${start_head,,}" ]]; then
-            conflict_round_blocker "$pr_number" "$pr_head" \
-                "the conflict round ended on head ${pr_head:0:7} without a new commit"
-        fi
+    # Success is judged from the PR as it is now, not from a new head.
+    if ! $DRY_RUN && pr_conflicts_with_main "$pr_number"; then
+        conflict_round_blocker "$pr_number" "$pr_head" \
+            "the PR still conflicts with main at head ${pr_head:0:7} after the conflict round"
     fi
-    record_merge_owner "$issue_num" "$start_head" || exit 1
-    hand_off_to_codex_review_loop "$start_head" "$blocker_before"
-    $DRY_RUN && return 0
-    post_conflict_round_done "$issue_num" "$pr_number" "$start_head" || exit 1
+    record_merge_owner "$issue_num" || exit 1
+    hand_off_to_codex_review_loop "$(jq -r '.head.sha // empty' <<< "$pr_json")" "$blocker_before"
 }
 
 run_conflict_rounds() {
@@ -3169,10 +3144,11 @@ resume_review_story() {
         return 0
     fi
     # A story that uses the Codex review loop waits for Codex Cloud: no
-    # /review session. Its PR may conflict with main after another merge; a
-    # conflict round then runs after this run's merges (issue #409).
+    # /review session. Its PR may conflict with main after another merge (a
+    # conflict round, issue #409), or a stopped session may have left its head
+    # without a merge owner (one blocker, issue #449).
     if is_review_loop_story; then
-        queue_conflict_round_if_conflicting "$issue_num" "$item_id"
+        check_review_loop_story_in_review "$issue_num" "$item_id"
         return 0
     fi
     if [[ "$STORY_EXECUTOR_LABEL_COUNT" -ne 1 ]]; then
@@ -3558,6 +3534,14 @@ for ((i=0; i < IN_IMPL_COUNT; i++)); do
            || { [[ -n "$pr_head_sha" ]] \
                 && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
             echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
+            continue
+        fi
+        # Issue #449: the conflict-round and missing-merge-owner blockers also
+        # wait for the PO; a rollback would start /implement past them.
+        if [[ -n "$pr_head_sha" ]] \
+           && { marker_holds "$issue_num" "$(conflict_round_attempt_marker "$pr_number" "$pr_head_sha")" 1 \
+                || marker_holds "$issue_num" "$(merge_owner_missing_marker "$pr_number" "$pr_head_sha")" 1; }; then
+            echo "#$issue_num is held by a conflict-round or merge-owner blocker; not treating it as stale."
             continue
         fi
     fi
