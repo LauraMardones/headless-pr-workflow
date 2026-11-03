@@ -393,7 +393,7 @@ def test_ac7_round_paused_at_a_usage_limit_starts_again_on_a_later_run(d):
     assert d.status(STORY) == "In implementation"
     [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
     assert "the conflict round stays in \"In implementation\"" in pause
-    assert f"<!-- hpw:dispatcher action=conflict-round-paused pr={PR} head={HEAD} -->" in pause
+    assert f"<!-- hpw:dispatcher action=conflict-round-paused pr={PR} head={HEAD} start={HEAD} -->" in pause
     assert blockers(d) == [] and d.queued_events == []
     assert not any("conflict-round-attempt" in body for body in d.posted(STORY))
 
@@ -406,6 +406,38 @@ def test_ac7_round_paused_at_a_usage_limit_starts_again_on_a_later_run(d):
     assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
     assert owner_marker(NEW_HEAD) in d.posted(PR)
+
+
+def test_ac7_round_that_pushed_before_the_pause_finishes_without_another_commit(d):
+    """The pause record keeps the start head, so the resumed round is judged against it."""
+    conflicting_story(d, "In merge")
+    session_merges_main(d)  # the merge with main is pushed before the limit stops the session
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
+    assert f"<!-- hpw:dispatcher action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+
+    # The resumed session only finishes CI and readiness: it pushes nothing.
+    (d.mock / "claude_stream.jsonl").unlink()
+    d.on_session("implement", "")
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
+    assert blockers(d) == [] and d.queued_events == []
+    assert not any("conflict-round-attempt" in body for body in d.posted(STORY))
+    assert owner_marker(NEW_HEAD) in d.posted(PR)
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+
+    # Paused again on the new head: the start head is still the original one.
+    d.set_status(STORY, "In implementation")
+    d.claude_stream(*LIMITED, exit_code=1)
+    d.resume()
+    pauses = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
+    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pauses[-1]
 
 
 def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):
