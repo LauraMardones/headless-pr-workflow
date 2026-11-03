@@ -404,7 +404,8 @@ def test_ac7_round_paused_at_a_usage_limit_starts_again_on_a_later_run(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert ROUND_LOG in proc.stdout
     assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    # the pre-start write, the restore at the pause, the hand-off
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In implementation", f"{STORY}=In review"]
     assert owner_marker(NEW_HEAD) in d.posted(PR)
 
 
@@ -430,7 +431,8 @@ def test_ac7_round_that_pushed_before_the_pause_finishes_without_another_commit(
     assert blockers(d) == [] and d.queued_events == []
     assert not any("conflict-round-attempt" in body for body in d.posted(STORY))
     assert owner_marker(NEW_HEAD) in d.posted(PR)
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    # the pre-start write, the restore at the pause, the hand-off
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In implementation", f"{STORY}=In review"]
 
     # Paused again on the new head: the start head is still the original one.
     d.set_status(STORY, "In implementation")
@@ -438,6 +440,58 @@ def test_ac7_round_that_pushed_before_the_pause_finishes_without_another_commit(
     d.resume()
     pauses = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
     assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pauses[-1]
+
+
+def session_merges_main_and_hands_off(d: Dispatcher, pr: int = PR, story: int = STORY) -> None:
+    """The session pushes the merge with main and moves the story to "In review" (step 16)."""
+    session_merges_main(d, pr)
+    with (d.mock / "on_implement.sh").open("a", encoding="utf-8", newline="\n") as script:
+        script.write(f"""jq '. + {{"ITEM_{story}": "In review"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"\n""")
+
+
+def test_ac7_round_paused_after_its_in_review_hand_off_is_resumed(d):
+    """A round that set "In review" before the limit stopped it goes back to "In implementation"."""
+    conflicting_story(d, "In merge")
+    session_merges_main_and_hands_off(d)
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In implementation"
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In implementation"]
+    [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
+    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+
+    # The resumed session pushes nothing; the round still finishes its hand-off.
+    (d.mock / "claude_stream.jsonl").unlink()
+    d.on_session("implement", "")
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
+    assert blockers(d) == [] and d.queued_events == []
+    assert owner_marker(NEW_HEAD) in d.posted(PR)
+    assert d.status(STORY) == "In review"
+
+
+def test_ac7_paused_round_whose_status_restore_fails_says_so_and_exits_1(d):
+    conflicting_story(d, "In merge")
+    session_merges_main_and_hands_off(d)
+    option = d._read("board.json")["options"]["In implementation"]
+    with (d.mock / "on_implement.sh").open("a", encoding="utf-8", newline="\n") as script:
+        script.write(f'touch "$MOCK_DIR/fail_option_{option}"\n')  # only the restore fails
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In review"
+    [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
+    assert 'the board write to "In implementation" did not take effect' in pause
+    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+    assert 'the move to "In implementation" failed' in proc.stderr
+    assert blockers(d) == [] and d.queued_events == []
 
 
 def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):

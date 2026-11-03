@@ -1629,6 +1629,7 @@ paused_comment() {
 pause_at_usage_limit() {
     local step="$1" target="$2" issue="$3"
     local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false
+    local rollback_status="Ready for implementation"
     reset_ts="$CLAUDE_LIMIT_RESET_TS"
     LAST_ACTION="pausing #$issue at a provider usage limit"
     pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
@@ -1643,6 +1644,16 @@ pause_at_usage_limit() {
 
     if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
         next="the $RESUMED_ROUND stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
+        # Issue #409: the session may have moved the story to "In review"
+        # (implement.md step 16) before the limit stopped it, and only the
+        # "In implementation" entry resumes a paused conflict round.
+        if $CONFLICT_ROUND_SESSION \
+                && ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "In implementation"; then
+            rollback_failed=true
+            rollback_status="In implementation"
+            echo "Warning: Board status update failed for #$issue to 'In implementation'" >&2
+            next="the board write to \"In implementation\" did not take effect, so #$issue keeps the status the session left it in; the conflict round is tried again once the story is \"In implementation\" again."
+        fi
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
         if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
@@ -1676,7 +1687,7 @@ pause_at_usage_limit() {
     fi
     DISPATCH_HANDLED=true
     if $rollback_failed; then
-        echo "#$issue paused at a provider usage limit, but the move to \"Ready for implementation\" failed" >&2
+        echo "#$issue paused at a provider usage limit, but the move to \"$rollback_status\" failed" >&2
         exit 1
     fi
     echo "#$issue paused at a provider usage limit; no other session is started in this run"
