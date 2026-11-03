@@ -145,6 +145,8 @@ test_failures() {
     assert_failure "missing blockers" --command cleanup --issue 1 --checks pass
     assert_failure "invalid command" --command deploy --issue 1 --head abc --checks pass --blockers none
     assert_failure "invalid next action" "${base[@]}" --next cleanup
+    assert_failure "implement next merge not allowed" "${base[@]}" --next merge
+    assert_failure "implement next blocked not allowed" "${base[@]}" --next blocked
     assert_failure "unknown flag" "${base[@]}" --unknown value
     assert_failure "missing flag value" "${base[@]}" --next
     assert_failure "empty flag value" "${base[@]}" --next ""
@@ -152,7 +154,16 @@ test_failures() {
     assert_failure "identifier already prefixed" --command cleanup --issue '#1' --checks pass --blockers none
 }
 
+test_implement_blocked_next() {
+    local expected actual
+    expected=$'## Session Summary\nCommand: implement\nIssue/PR: #1 / #2\nHead: abc\nChecks: pass\nBlockers: merge conflict with main on PR #2\nNext: implementation'
+    actual=$("$SUMMARY_SCRIPT" --command implement --issue 1 --pr 2 --head abc \
+        --checks pass --blockers "merge conflict with main on PR #2" --next implementation)
+    assert_equal "implement blocked handoff exact output" "$expected" "$actual"
+}
+
 test_exact_output
+test_implement_blocked_next
 test_identifiers_and_cleanup
 test_commands_and_next_actions
 test_deviations

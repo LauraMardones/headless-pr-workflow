@@ -25,7 +25,8 @@ def test_unresolvable_conflict_keeps_draft_and_reports_the_blocker() -> None:
 
     assert "keep the PR Draft and the story \"In implementation\"" in step
     assert "`merge conflict with main on PR #<n>`" in step
-    assert "without `--next review`" in step
+    assert "generate the handoff with `--next implementation`" in step
+    assert "without `--next review`" not in step
 
 
 def test_absent_check_reads_mergeability() -> None:
