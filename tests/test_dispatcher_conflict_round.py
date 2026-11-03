@@ -68,6 +68,14 @@ def owner_marker(head: str) -> str:
     return f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={head} -->"
 
 
+def start_record(head: str = HEAD) -> str:
+    return f"<!-- hpw:dispatcher action=conflict-round-start pr={PR} start={head} -->"
+
+
+def done_record(head: str = HEAD) -> str:
+    return f"<!-- hpw:dispatcher action=conflict-round-done pr={PR} start={head} -->"
+
+
 # ── AC 1, AC 3: conflict in "In merge" ──────────────────────────────────────
 
 
@@ -393,7 +401,8 @@ def test_ac7_round_paused_at_a_usage_limit_starts_again_on_a_later_run(d):
     assert d.status(STORY) == "In implementation"
     [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
     assert "the conflict round stays in \"In implementation\"" in pause
-    assert f"<!-- hpw:dispatcher action=conflict-round-paused pr={PR} head={HEAD} start={HEAD} -->" in pause
+    assert "conflict-round" not in pause  # the start record, posted before the session, leads back
+    assert d.posted(STORY)[0] == start_record()
     assert blockers(d) == [] and d.queued_events == []
     assert not any("conflict-round-attempt" in body for body in d.posted(STORY))
 
@@ -410,7 +419,7 @@ def test_ac7_round_paused_at_a_usage_limit_starts_again_on_a_later_run(d):
 
 
 def test_ac7_round_that_pushed_before_the_pause_finishes_without_another_commit(d):
-    """The pause record keeps the start head, so the resumed round is judged against it."""
+    """The start record keeps the start head, so the resumed round is judged against it."""
     conflicting_story(d, "In merge")
     session_merges_main(d)  # the merge with main is pushed before the limit stops the session
     d.claude_stream(*LIMITED, exit_code=1)
@@ -419,27 +428,26 @@ def test_ac7_round_that_pushed_before_the_pause_finishes_without_another_commit(
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
-    assert f"<!-- hpw:dispatcher action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+    assert d.posted(STORY).count(start_record()) == 1 and done_record() not in d.posted(STORY)
+
+    # Paused again on the new head: the start head is still the original one.
+    d.on_session("implement", "")
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.posted(STORY).count(start_record()) == 2
+    assert start_record(NEW_HEAD) not in d.posted(STORY)
 
     # The resumed session only finishes CI and readiness: it pushes nothing.
     (d.mock / "claude_stream.jsonl").unlink()
-    d.on_session("implement", "")
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
+    assert d.sessions == [f"implement {STORY}"] * 3
     assert blockers(d) == [] and d.queued_events == []
     assert not any("conflict-round-attempt" in body for body in d.posted(STORY))
     assert owner_marker(NEW_HEAD) in d.posted(PR)
-    # the pre-start write, the restore at the pause, the hand-off
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In implementation", f"{STORY}=In review"]
-
-    # Paused again on the new head: the start head is still the original one.
-    d.set_status(STORY, "In implementation")
-    d.claude_stream(*LIMITED, exit_code=1)
-    d.resume()
-    pauses = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
-    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pauses[-1]
+    assert d.posted(STORY)[-1] == done_record()
+    assert d.status(STORY) == "In review"
 
 
 def session_merges_main_and_hands_off(d: Dispatcher, pr: int = PR, story: int = STORY) -> None:
@@ -461,7 +469,7 @@ def test_ac7_round_paused_after_its_in_review_hand_off_is_resumed(d):
     assert d.status(STORY) == "In implementation"
     assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In implementation"]
     [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
-    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+    assert start_record() in d.posted(STORY)
 
     # The resumed session pushes nothing; the round still finishes its hand-off.
     (d.mock / "claude_stream.jsonl").unlink()
@@ -489,7 +497,7 @@ def test_ac7_paused_round_whose_status_restore_fails_says_so_and_exits_1(d):
     assert d.status(STORY) == "In review"
     [pause] = [body for body in d.posted(STORY) if body.startswith("## Paused at a provider usage limit")]
     assert 'the board write to "In implementation" did not take effect' in pause
-    assert f"action=conflict-round-paused pr={PR} head={NEW_HEAD} start={HEAD} -->" in pause
+    assert start_record() in d.posted(STORY)
     assert 'the move to "In implementation" failed' in proc.stderr
     assert blockers(d) == [] and d.queued_events == []
 
@@ -511,7 +519,7 @@ def test_ac7_paused_round_is_resumed_past_an_earlier_completed_fix_round_on_the_
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.status(STORY) == "In implementation"
-    assert f"action=conflict-round-paused pr={PR} head={HEAD} start={HEAD} -->" in d.posted(STORY)[-1]
+    assert start_record() in d.posted(STORY)
 
     (d.mock / "claude_stream.jsonl").unlink()
     session_merges_main(d)
@@ -547,8 +555,114 @@ def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):
 
     assert proc.returncode == 0, proc.stderr
     assert d.sessions == [] and d.status(STORY) == "In merge"
-    assert d.posted(STORY) == [] and d.queued_events == []
+    assert d.posted(STORY) == [start_record()] and d.queued_events == []
     assert "the conflict round on PR #900 is tried again on the next run" in proc.stdout
+
+
+def test_ac7_failed_start_record_starts_no_session_and_keeps_the_status(d):
+    """No session starts without the record that leads a later run back to it."""
+    conflicting_story(d, "In merge")
+    d.fail_comment_writes(STORY, 1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [] and d.board_writes == [] and d.status(STORY) == "In merge"
+    assert d.posted(STORY) == [] and d.queued_events == []
+    assert "could not record the conflict round's start" in proc.stderr
+    assert "the conflict round on PR #900 is tried again on the next run" in proc.stdout
+
+    session_merges_main(d)
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"] and d.status(STORY) == "In review"
+
+
+def append_to_session(d: Dispatcher, line: str) -> None:
+    with (d.mock / "on_implement.sh").open("a", encoding="utf-8", newline="\n") as script:
+        script.write(line + "\n")
+
+
+@pytest.mark.parametrize("status", ["In merge", "In review"])
+def test_ac7_round_whose_pause_record_cannot_be_posted_is_resumed(d, status):
+    """A first round, no fix-round findings: the pause comment fails, the start record leads back."""
+    conflicting_story(d, status)
+    d.on_session("implement", f'echo 1 > "$MOCK_DIR/fail_posts_{STORY}"')
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In implementation"
+    assert d.posted(STORY) == [start_record()]  # no pause record on GitHub
+    assert "could not post the pause record" in proc.stderr
+
+    (d.mock / "claude_stream.jsonl").unlink()
+    session_merges_main(d)
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ROUND_LOG in proc.stdout
+    assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
+    assert blockers(d) == [] and d.queued_events == []
+    assert owner_marker(NEW_HEAD) in d.posted(PR)
+    assert d.posted(STORY)[-1] == done_record() and d.status(STORY) == "In review"
+
+
+@pytest.mark.parametrize("pushed", [False, True], ids=["before its push", "after its push"])
+def test_ac7_round_cancelled_mid_session_is_resumed(d, pushed):
+    """A cancelled run posts no pause record; the open start record leads back to the round."""
+    conflicting_story(d, "In implementation")
+    d.add_comment(STORY, start_record())
+    if pushed:
+        d.add_pr(PR, STORY, head=NEW_HEAD, mergeable=True, mergeable_state="clean")
+        d.on_session("implement", "")  # the resumed session finishes CI and readiness only
+    else:
+        session_merges_main(d)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ROUND_LOG in proc.stdout
+    assert d.sessions == [f"implement {STORY}"]
+    assert blockers(d) == [] and d.queued_events == []
+    assert owner_marker(NEW_HEAD) in d.posted(PR)
+    assert d.posted(STORY)[-2:] == [start_record(), done_record()]
+    assert d.status(STORY) == "In review"
+
+
+def test_completed_round_is_not_started_again(d):
+    conflicting_story(d, "In implementation", mergeable=True, mergeable_state="clean")
+    d.add_comment(STORY, start_record())
+    d.add_comment(STORY, done_record())
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ROUND_LOG not in proc.stdout and d.sessions == []
+
+
+def test_start_record_from_another_account_is_ignored(d):
+    conflicting_story(d, "In implementation")
+    d.add_comment(STORY, start_record(), login="someone-else")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ROUND_LOG not in proc.stdout and d.sessions == []
+
+
+def test_round_whose_done_record_cannot_be_posted_fails_the_run_after_its_hand_off(d):
+    conflicting_story(d, "In merge")
+    session_merges_main(d)
+    append_to_session(d, f'echo 99 > "$MOCK_DIR/fail_posts_{STORY}"')
+
+    proc = d.resume(env={"COMMENT_RETRY_DELAY": "0"})
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "could not record the end of the conflict round" in proc.stderr
+    assert owner_marker(NEW_HEAD) in d.posted(PR) and d.status(STORY) == "In review"
+    assert done_record() not in d.posted(STORY)
 
 
 def test_story_in_implementation_without_a_round_marker_gets_no_round(d):
