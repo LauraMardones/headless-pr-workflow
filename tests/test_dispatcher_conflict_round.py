@@ -494,6 +494,51 @@ def test_ac7_paused_round_whose_status_restore_fails_says_so_and_exits_1(d):
     assert blockers(d) == [] and d.queued_events == []
 
 
+@pytest.mark.parametrize("earlier_round", ["attempted", "over the maximum"])
+def test_ac7_paused_round_is_resumed_past_an_earlier_completed_fix_round_on_the_head(d, earlier_round):
+    """Findings on the head from before the pause do not route the story to the fix-round path."""
+    conflicting_story(d, "In review")
+    d.add_findings(PR, HEAD)
+    env = {}
+    if earlier_round == "attempted":  # the post-waiver round that pushed nothing
+        d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->")
+    else:
+        d.add_findings(PR, OTHER_HEAD)
+        env = {"CODEX_FIX_ROUND_MAX": "1"}
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume(env=env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.status(STORY) == "In implementation"
+    assert f"action=conflict-round-paused pr={PR} head={HEAD} start={HEAD} -->" in d.posted(STORY)[-1]
+
+    (d.mock / "claude_stream.jsonl").unlink()
+    session_merges_main(d)
+    proc = d.resume(env=env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ROUND_LOG in proc.stdout
+    assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
+    assert blockers(d) == [] and d.queued_events == []
+    assert owner_marker(NEW_HEAD) in d.posted(PR)
+    assert d.status(STORY) == "In review"
+
+
+def test_findings_recorded_after_the_pause_start_the_fix_round(d):
+    conflicting_story(d, "In review")
+    d.claude_stream(*LIMITED, exit_code=1)
+    d.resume()
+    (d.mock / "claude_stream.jsonl").unlink()
+
+    d.add_findings(PR, HEAD)  # the bookkeeping job acted on the head after the pause
+    proc = d.resume("--dry-run")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"[RESUME] #{STORY}: fix round 1 of " in proc.stdout
+    assert ROUND_LOG not in proc.stdout
+
+
 def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):
     conflicting_story(d, "In merge")
     d.fail_status_write("In implementation")

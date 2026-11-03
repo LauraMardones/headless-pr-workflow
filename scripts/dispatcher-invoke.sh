@@ -2808,6 +2808,14 @@ resume_fix_round() {
         fi
         return 0
     fi
+    # Issue #409: findings recorded on this head before a conflict round paused
+    # on it belong to an earlier, completed fix round; the paused conflict
+    # round is resumed instead of the fix-round path, whose attempt marker or
+    # round maximum would otherwise skip the story for good.
+    if conflict_round_paused_after_findings "$issue_num" "$pr_number" "$pr_head"; then
+        queue_conflict_round "$issue_num" "$item_id" "In implementation"
+        return 0
+    fi
 
     # One marker per head: the count is the number of this round.
     round=$(wc -l <<< "$heads" | tr -d '[:space:]')
@@ -2907,6 +2915,24 @@ conflict_round_paused_start() {
         <<< "$own" 2>/dev/null) || return 1
     [[ -n "$start" ]] || return 1
     echo "$start"
+}
+
+# conflict_round_paused_after_findings <issue> <pr> <head> — 0 when a conflict
+# round paused on <head> after the bookkeeping job's latest findings marker for
+# <head>. 1 otherwise, and when the comments cannot be read: findings recorded
+# after the pause start a fix round, which also merges main (implement.md).
+conflict_round_paused_after_findings() {
+    local issue_num="$1" pr_number="$2" pr_head="$3" own login paused_at moves_at
+    own=$(bot_comments_json "$issue_num") || return 1
+    paused_at=$(jq -r --arg p "action=conflict-round-paused pr=$pr_number head=$pr_head start=" '
+        [.[] | select((.body // "") | contains($p)) | .created_at] | max // empty' <<< "$own" 2>/dev/null) || return 1
+    [[ -n "$paused_at" ]] || return 1
+    login=$(bookkeeping_login)
+    [[ -n "$login" ]] || return 1
+    moves_at=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER${pr_head,,} " '
+            [add // [] | .[] | select((.user.login // "") == $login and ((.body // "") | ascii_downcase | contains($marker))) | .created_at] | max // empty') || return 1
+    [[ -n "$moves_at" && "$paused_at" > "$moves_at" ]]
 }
 
 merge_conflict_marker() {
