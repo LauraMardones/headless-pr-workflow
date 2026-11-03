@@ -59,6 +59,7 @@ Required behavior:
    - update the existing PR instead of opening a parallel PR unless explicitly needed
    - keep the story in "In implementation" while implementation or blocker fixes are ongoing
    - if the existing PR is Ready for review (a review-fix run), convert it back to Draft before pushing (for example `gh pr ready <pr> --undo --repo LauraMardones/headless-pr-workflow`), so the dispatcher's draft signal shows the handoff incomplete until the new head's `pytest` check is green
+   - conflict round (issue #409): when the existing PR conflicts with main (`mergeable == false` or `mergeable_state == "dirty"` from `gh api repos/LauraMardones/headless-pr-workflow/pulls/<pr>`) and no review finding on its current head is unresolved, this run only brings the PR up to date with main: merge `origin/main` into the PR branch with a merge commit, resolve the conflict without dropping main's changes or the PR's own changes, make no other change, run the focused tests for the files the conflict touched, push, and finish with step 16 (green `pytest` on the new head, Ready for review, "In review", the Codex review request, the Session Summary); if you cannot resolve the conflict, push nothing and follow step 16's unresolved-conflict rule (`merge conflict with main on PR #<n>`)
 11. Implement only the requested changes.
 12. Add or update deterministic tests as needed.
 13. For mutation work, preserve fresh-refresh and safety checks before mutating behavior.

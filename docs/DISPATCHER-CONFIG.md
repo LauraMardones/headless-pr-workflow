@@ -440,9 +440,14 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` a
 
 | Facts | What the dispatcher does |
 |---|---|
-| A linked open PR that is not a draft | `/merge`, then `Done` and `/cleanup`, then the feature and epic closure check. Log: `[RESUME] #<n>: /merge PR #<pr>` |
+| A linked open PR that is not a draft, and GitHub reports it clean | `/merge`, then `Done` and `/cleanup`, then the feature and epic closure check. Log: `[RESUME] #<n>: /merge PR #<pr>` |
+| That PR conflicts with main, and the story is a review-loop story (one `executor:` label with a `CODEX_REVIEW_LOOP_ROUTING` row) | No `/merge`, no merge-attempt marker, no blocker: a [conflict round](#conflict-round) starts after every `/merge` of the run. Log: `[RESUME] #<n>: PR #<pr> conflicts with main; the conflict round starts after this run's merges` |
+| That PR conflicts with main, and the story has no review-loop row (for example `executor:codex`) | No `/merge` and no session. One `Type: external` blocker that names the merge conflict with main and the PR, once per PR head, sent as a `po_blocker`. Unblocked when: the PR branch is merged with main and the conflict resolved, or the PO posts `/unblock`. |
+| GitHub has not computed the PR's mergeability yet (`mergeable == null`) | Nothing in this run: no `/merge`, no conflict round, no marker, no blocker. Log: `[RESUME SKIP] #<n>: GitHub has not computed mergeability for PR #<pr> yet; trying again on the next run` |
 | No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
 | Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
+
+"Conflicts with main" is the test of the hand-off above: `mergeable == false` or `mergeable_state == "dirty"` from `gh api repos/<repo>/pulls/<n>` (issue #409). When that read fails, `/merge` runs as before and its merge gate decides.
 
 **Evidence that could not be written (issue #348).** The `merge-owner` marker, the merge confirmation and the cleanup closing Session Summary are durable evidence. When a write of one fails (after 3 attempts), the writer leaves one *evidence-pending* comment with the exact text as a hidden base64 payload (`scripts/lib/evidence-pending.sh`; nothing is kept on the runner). The dispatcher posts that text once on a later run. Only comments of the dispatcher's own account count, for the pending comment and for the proof that the text is already posted; a copy written by anyone else proves nothing.
 
@@ -507,22 +512,47 @@ Set it as a repository variable; `.github/workflows/dispatcher.yml` passes it to
 
 **One fix-round attempt per head.** A fix round that fails, or an `/implement` session that ends on the same PR head it started on while the findings for that head are still open, is not repeated on the same head, whatever status the session left the story in. The mid-cycle blocker for `/implement` records the head, and later runs log `[RESUME SKIP] #<n>: the fix round was already tried on PR #<pr> at head <sha>` until the PR has a new head or the PO posts a standalone `/unblock` line.
 
+### Conflict round
+
+When the dispatcher merges one story, another dispatcher PR can start to conflict with `main` (issue #409). For a review-loop story (exactly one `executor:` label with a `CODEX_REVIEW_LOOP_ROUTING` row) the dispatcher then resolves the conflict itself, in a *conflict round*: one `/implement` session under the story's own executor that merges `origin/main` into the PR branch, resolves the conflict, runs the focused tests and pushes (`.claude/commands/implement.md` step 10). It starts when:
+
+- the story is `In merge` and its PR conflicts with main (see [Resume at `In merge`](#resume-at-in-merge)); or
+- the story is `In review` and its open, non-draft PR conflicts with main; or
+- the story is `In implementation` after an earlier conflict round: the round paused at a usage limit on the PR's current head, or a round was tried on this PR before and the PR still conflicts (after the PO's `/unblock` or on a new head).
+
+A clean PR, an unknown mergeability and a PR that cannot be read start nothing. A story in `In implementation` that no conflict round has touched gets none.
+
+What the round does:
+
+- It runs no WIP or file-overlap check: the story already holds its place.
+- It moves the story to `In implementation` just before the session starts, after the usage limit and the allowance check let it start. Log: `[RESUME] #<n>: PR #<pr> conflicts with main; conflict round, /implement on PR #<pr>`.
+- When the session pushes a new head, the dispatcher posts the merge-owner marker for that head (or its evidence-pending copy) and applies the [hand-off](#hand-off-after-implement): `In review`, and the session requests the Codex review. The new head reaches `In merge` only through the bookkeeping job (a clean review on that head, green required checks, a passed approval gate), and a later run merges it with the unchanged script-only `/merge` and `/cleanup`. No PO action is needed.
+- No PO alert is sent while the dispatcher resolves the conflict.
+
+**One conflict round per head.** When the session fails, or ends on the head it started on (it reports `merge conflict with main on PR #<n>`), the dispatcher posts one `Type: external` blocker on the story and exits `1`. The blocker names the merge conflict with main and the PR, says it is the PO's only alert for this conflict, and gives "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" as the unblock condition. It carries a hidden attempt marker for the head and is sent once as a `po_blocker`. Later runs start no second round on that head and log `[RESUME SKIP] #<n>: the conflict round was already tried on PR #<pr> at head <sha7>; waiting for a new head or a PO /unblock line`. A new head, or a standalone `/unblock` line from the PO, allows one new attempt.
+
+**Refused or paused.** The round is a model session, so the usage limit and the allowance reserve apply. When either refuses the start, nothing is written: the story keeps its status (`In merge` or `In review`), no blocker and no attempt marker are posted, and a later run starts the round again. The same holds when the write to `In implementation` fails. When the session stops at a provider usage limit, the pause record on the story carries a hidden marker for the PR head, so the next run's `In implementation` entry starts the round again; no blocker and no attempt marker are posted.
+
+**Not a fix round.** Conflict rounds do not count toward `CODEX_FIX_ROUND_MAX`: only the bookkeeping job's findings markers count. A story without a review-loop row gets no conflict round; see the `In merge` table.
+
 ### Order and entry into a run
 
 Each run handles resumable work before it starts new work:
 
-1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`;
+1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`. A conflicting PR of a review-loop story is only queued here;
 2. fix rounds that are due, and hand-offs that are still pending;
-3. stories in **Ready for implementation**, as before.
+3. stories in `In review` (a `/review` session for a Codex-implemented PR; a conflicting review-loop PR is queued);
+4. the queued conflict rounds. Every `/merge` of the run has run by then, so each round starts from the newest `main`;
+5. stories in **Ready for implementation**, as before.
 
-`scripts/dispatcher-poll.sh` reports the candidates in two more keys of its JSON, `in_merge` and `in_implementation` (each `[{number, title}]`), from the board read it already makes. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** either new list is non-empty:
+`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due` and `conflict_due` (each `[{number, title}]`). `conflict_due` lists the review-loop stories in `In review` whose open, non-draft PR conflicts with main; it costs one PR read per such story per poll. A clean PR, an unknown mergeability or a PR that cannot be read is not listed, and a failed read writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due skips it this cycle`. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** any of these lists is non-empty:
 
 ```
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable work first, then story <n>
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only
 ```
 
-The workflow uses `--resume` when no story is ready for implementation. It runs the invoke step when a story is ready, `In merge` or `In implementation`, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
+The workflow uses `--resume` when no story is ready for implementation. It runs the invoke step when a story is ready, `In merge` or `In implementation`, when `review_due` or `conflict_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
 
 The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
 

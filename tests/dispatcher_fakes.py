@@ -382,9 +382,12 @@ class Dispatcher:
     def add_pr(self, number: int, issue: int, head: str = "a" * 40, draft: bool = False,
                state: str = "open", merged: bool = False, **extra) -> None:
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
+        # A PR is clean unless the test says otherwise (``mergeable`` /
+        # ``mergeable_state``); None is GitHub's "not computed yet" (issue #409).
         pulls.append({"number": number, "body": f"Closes #{issue}", "state": state, "draft": draft,
                       "merged_at": "2026-10-13T09:30:00Z" if merged else None,
-                      "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head}, **extra})
+                      "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head},
+                      "mergeable": True, "mergeable_state": "clean", **extra})
         self._write("pulls.json", pulls)
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")

@@ -45,13 +45,17 @@
 #       "ready_for_refinement":     [{"number": N, "title": "..."}, ...],
 #       "in_merge":                 [{"number": N, "title": "..."}, ...],
 #       "in_implementation":        [{"number": N, "title": "..."}, ...],
-#       "review_due":               [{"number": N, "title": "..."}, ...]
+#       "review_due":               [{"number": N, "title": "..."}, ...],
+#       "conflict_due":             [{"number": N, "title": "..."}, ...]
 #     }
 #   Every key is always present; each value is [] when no items match.
 #   review_due (issue #315) lists the stories "In review" that
 #   dispatcher-invoke.sh reviews with a /review session: one executor: label
 #   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
 #   open, non-draft PR that closes the story.
+#   conflict_due (issue #409) lists the review-loop stories "In review" (one
+#   executor: label with a CODEX_REVIEW_LOOP_ROUTING row) whose open, non-draft
+#   PR conflicts with main; dispatcher-invoke.sh starts a conflict round.
 #
 # Prototype divergences from expected behaviour:
 #   D1  Pagination: fetches all project items via cursor pagination, 100 per
@@ -299,26 +303,57 @@ REVIEW_CANDIDATES=$(echo "$ITEMS" | jq -c '[
   { number: .content.number, title: .content.title,
     executors: [ (.content.labels.nodes // [])[] | .name | select(startswith("executor:")) | ltrimstr("executor:") ] }
 ]')
+# The open-PR list, read once per poll and only when a candidate needs it.
+OPEN_PRS=""
+load_open_prs() {
+    [[ -z "$OPEN_PRS" ]] || return 0
+    OPEN_PRS=$(curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
+        echo "[POLL] Warning: could not read open pull requests; review_due and conflict_due may be incomplete" >&2
+        OPEN_PRS="[]"
+    }
+}
+
+# linked_ready_pr <issue> — the open, non-draft PR that closes the story.
+linked_ready_pr() {
+    echo "$OPEN_PRS" | jq -r --argjson n "$1" '
+        [.[] | select((.draft | not) and ((.body // "") | ascii_downcase
+            | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))][0].number // empty'
+}
+
+# Issue #409: conflict_due lists the review-loop stories "In review" (one
+# executor: label with a CODEX_REVIEW_LOOP_ROUTING row) whose open, non-draft
+# PR conflicts with main (mergeable == false or mergeable_state == "dirty"), so
+# the invoke step starts a conflict round. A clean PR, an unknown mergeability
+# (null) and a PR that cannot be read are not listed; a failed read warns.
 REVIEW_DUE='[]'
+CONFLICT_DUE='[]'
 if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
     REVIEW_ROWS=$(echo "$REVIEW_CANDIDATES" | jq -c '.[]')
-    OPEN_PRS=""
     while IFS= read -r row; do
         mapfile -t EXEC_SUFFIXES < <(echo "$row" | jq -r '.executors[]')
-        review_by_dispatcher_session "${EXEC_SUFFIXES[@]}" || continue
-        if [[ -z "$OPEN_PRS" ]]; then
-            OPEN_PRS=$(curl -sf \
+        STORY_NUMBER=$(echo "$row" | jq '.number')
+        if review_by_dispatcher_session "${EXEC_SUFFIXES[@]}"; then
+            load_open_prs
+            if [[ -n "$(linked_ready_pr "$STORY_NUMBER")" ]]; then
+                REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+            fi
+        elif [[ ${#EXEC_SUFFIXES[@]} -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[${EXEC_SUFFIXES[0]}]:-}" ]]; then
+            load_open_prs
+            PR_NUMBER=$(linked_ready_pr "$STORY_NUMBER")
+            [[ -n "$PR_NUMBER" ]] || continue
+            PR_DETAIL=$(curl -sf \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Accept: application/vnd.github+json" \
-                "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
-                echo "[POLL] Warning: could not read open pull requests; review_due may be incomplete" >&2
-                OPEN_PRS="[]"
+                "$REST/repos/$REPO/pulls/$PR_NUMBER") || {
+                echo "[POLL] Warning: could not read PR #$PR_NUMBER for #$STORY_NUMBER; conflict_due skips it this cycle" >&2
+                continue
             }
-        fi
-        if echo "$OPEN_PRS" | jq -e --argjson n "$(echo "$row" | jq '.number')" '
-            any(.[]; (.draft | not) and ((.body // "") | ascii_downcase
-                | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))' >/dev/null; then
-            REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+            if echo "$PR_DETAIL" | jq -e '(.mergeable == false) or (.mergeable_state == "dirty")' >/dev/null 2>&1; then
+                CONFLICT_DUE=$(echo "$CONFLICT_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+            fi
         fi
     done <<< "$REVIEW_ROWS"
 fi
@@ -477,6 +512,7 @@ jq -n \
     --argjson in_merge "$IN_MERGE" \
     --argjson in_implementation "$IN_IMPLEMENTATION" \
     --argjson review_due "$REVIEW_DUE" \
+    --argjson conflict_due "$CONFLICT_DUE" \
     '{ready_for_implementation: $impl, ready_for_refinement: $refine,
       in_merge: $in_merge, in_implementation: $in_implementation,
-      review_due: $review_due}'
+      review_due: $review_due, conflict_due: $conflict_due}'
