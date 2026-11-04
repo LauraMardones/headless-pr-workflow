@@ -1011,6 +1011,7 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "in_implementation": [{"number": 4, "title": "Story 4"}],
         "review_due": [],
         "conflict_due": [],
+        "owner_missing_due": [],
     }
 
 
@@ -1137,6 +1138,11 @@ def test_ac14_workflow_poll_step_reports_resumable_work():
       "conflict_due": [{"number": 6}]}, "true"),
     ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
       "conflict_due": []}, "false"),
+    # issue #449: a review-loop story "In review" whose clean head has no merge owner
+    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
+      "conflict_due": [], "owner_missing_due": [{"number": 7}]}, "true"),
+    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
+      "conflict_due": [], "owner_missing_due": []}, "false"),
     ({"ready_for_implementation": [{"number": 1}], "in_merge": [], "in_implementation": []}, "false"),
     ({"ready_for_implementation": [], "ready_for_refinement": []}, "false"),
 ])

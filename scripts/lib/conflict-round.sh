@@ -21,7 +21,11 @@
 #     clean          not conflicting; the head has merge-owner evidence
 #     ownerless      not conflicting; the head has no merge-owner evidence
 #                    (the dispatcher's merge-owner marker or its
-#                    evidence-pending copy, issue #348)
+#                    evidence-pending copy, issue #348), and the dispatcher
+#                    has not yet posted the missing-merge-owner blocker for it
+#     ownerless-reported
+#                    as ownerless, but that blocker is already posted for the
+#                    head (it is posted once per head, even after /unblock)
 #     tried          conflicting; a conflict-round attempt marker holds for
 #                    the current head
 #     blocked        conflicting; the story has an open blocker
@@ -75,5 +79,7 @@ conflict_round_rule() {
               else "owed" end
           elif $pr.mergeable == null then "unknown"
           elif $owned then "clean"
+          elif newest($story; $bot; "<!-- hpw:dispatcher action=merge-owner-missing pr=" + $n + " head=" + $head + " -->") != null
+              then "ownerless-reported"
           else "ownerless" end'
 }

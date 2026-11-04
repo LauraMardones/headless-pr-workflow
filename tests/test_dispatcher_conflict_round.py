@@ -405,14 +405,66 @@ def test_ac2_poll_lists_only_review_loop_stories_in_review_with_a_conflicting_pr
                  18: {"mergeable": False, "mergeable_state": "dirty"}},
     )
     assert out["conflict_due"] == [{"number": 1, "title": "Story 1"}, {"number": 2, "title": "Story 2"}]
-    assert "[POLL] Warning: could not read PR #15 for #5; conflict_due skips it this cycle" in stderr
+    assert "[POLL] Warning: could not read PR #15 for #5; conflict_due and owner_missing_due skip it this cycle" in stderr
     assert out["review_due"] == [{"number": 7, "title": "Story 7"}]  # unchanged for the codex story
+    # #449: the clean head of story 3 has no merge-owner evidence (no comments at all)
+    assert out["owner_missing_due"] == [{"number": 3, "title": "Story 3"}]
 
 
 def test_ac2_poll_conflict_due_is_empty_when_nothing_conflicts(tmp_path):
     out, _ = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
-                  details={11: {"mergeable": True, "mergeable_state": "clean"}})
+                  details={11: {"mergeable": True, "mergeable_state": "clean", "head": {"sha": HEAD}}},
+                  comments={11: [comment(owner_marker(HEAD).replace(f"pr={PR}", "pr=11"))]})
+    assert out["conflict_due"] == [] and out["owner_missing_due"] == []
+
+
+# ── #449 AC 4, AC 5: the poll routes an ownerless "In review" head to a run ──
+# A round that stops after it set "In review" leaves only this story: without
+# owner_missing_due the workflow would start no run and the blocker would never
+# be posted (Codex finding on PR #443, head dbd588b).
+
+
+def pr11(marker: str) -> str:
+    return marker.replace(f"pr={PR}", "pr=11")
+
+
+CLEAN = {"mergeable": True, "mergeable_state": "clean", "state": "open", "draft": False}
+OWNER_CONDITIONS = {
+    # condition: (PR fields, story comments, PR comments, listed)
+    "no merge-owner evidence": (CLEAN, [], [comment(pr11(owner_marker(HEAD)))], True),
+    "merge-owner marker": (CLEAN, [], [comment(pr11(owner_marker(NEW_HEAD)))], False),
+    "evidence-pending copy": (CLEAN, [], [comment(
+        f"x\n\n<!-- hpw:dispatcher action=evidence-pending item=merge-owner head={NEW_HEAD} payload=eA== -->")], False),
+    "marker from another account": (CLEAN, [], [comment(pr11(owner_marker(NEW_HEAD)), login="someone")], True),
+    "blocker already posted": (CLEAN, [comment(f"{BLOCKED}\n\n{pr11(ownerless_marker(NEW_HEAD))}")], [], False),
+    "blocker posted for an older head": (CLEAN, [comment(f"{BLOCKED}\n\n{pr11(ownerless_marker(HEAD))}")], [], True),
+    "fix round due": (CLEAN, [], [findings(NEW_HEAD)], False),
+    "unknown mergeability": (UNKNOWN, [], [], False),
+}
+
+
+@pytest.mark.parametrize("condition", list(OWNER_CONDITIONS))
+def test_449_ac4_poll_lists_an_ownerless_head_in_review(tmp_path, condition):
+    fields, story_comments, pr_comments, listed = OWNER_CONDITIONS[condition]
+    out, stderr = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
+                       details={11: {**fields, "head": {"sha": NEW_HEAD}}},
+                       comments={1: story_comments, 11: pr_comments})
+    assert out["owner_missing_due"] == ([{"number": 1, "title": "Story 1"}] if listed else []), stderr
     assert out["conflict_due"] == []
+
+
+def test_449_ac5_a_round_stopped_after_in_review_is_routed_to_a_run(tmp_path):
+    """The only work left on the board is the stopped round: the poll must report it.
+
+    The workflow's own expression turns a non-empty owner_missing_due into
+    resumable=true (test_dispatcher_review_loop.py::test_ac14_workflow_resumable_expression).
+    """
+    out, _ = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
+                  details={11: {**CLEAN, "head": {"sha": NEW_HEAD}}},
+                  comments={1: [comment(f"{PAUSED}\n\n- Step: `/implement 1` for #1 (conflict round)\n")],
+                            11: [comment(pr11(owner_marker(HEAD)))]})
+    assert out["owner_missing_due"] == [{"number": 1, "title": "Story 1"}]
+    assert all(out[key] == [] for key in out if key != "owner_missing_due")
 
 
 POLL_CONDITIONS = {
@@ -446,7 +498,7 @@ def test_449_ac2_poll_lists_nothing_when_the_comments_cannot_be_read(tmp_path):
     out, stderr = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
                        details={11: {**DIRTY, "head": {"sha": HEAD}}})
     assert out["conflict_due"] == []
-    assert "[POLL] Warning: could not read the comments of #1 or PR #11; conflict_due skips it this cycle" in stderr
+    assert "[POLL] Warning: could not read the comments of #1 or PR #11; conflict_due and owner_missing_due skip it this cycle" in stderr
 
 
 # ── #409 AC 4: unknown mergeability waits one run ───────────────────────────

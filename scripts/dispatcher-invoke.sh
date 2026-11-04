@@ -2958,6 +2958,9 @@ check_review_loop_pr() {
         ownerless)
             [[ "$status" != "In merge" ]] || return 1
             block_ownerless_head "$issue_num" "$pr_number" "$head" ;;
+        ownerless-reported)
+            [[ "$status" != "In merge" ]] || return 1
+            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${head:0:7} has no merge-owner evidence; the blocker is already posted" ;;
         *)
             return 1 ;;
     esac

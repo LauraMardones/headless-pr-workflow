@@ -154,8 +154,10 @@ jobs:
           # ready for implementation. Issue #315: so is a story "In review"
           # whose PR a dispatcher /review session reviews (review_due). Issue
           # #409: so is a review-loop story "In review" whose PR conflicts with
-          # main (conflict_due), which gets a conflict round.
-          RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // []) + (.review_due // []) + (.conflict_due // [])) | length > 0')
+          # main (conflict_due), which gets a conflict round. Issue #449: so is
+          # a review-loop story "In review" whose clean head has no merge-owner
+          # evidence (owner_missing_due), which gets one blocker.
+          RESUMABLE=$(echo "$POLL_JSON" | jq -r '((.in_merge // []) + (.in_implementation // []) + (.review_due // []) + (.conflict_due // []) + (.owner_missing_due // [])) | length > 0')
           # Issue #348: a story labelled evidence:pending is Done, so no board
           # state leads back to it, but its cleanup closing summary is still to
           # be posted by dispatcher-invoke.sh. A failed read counts as pending,
