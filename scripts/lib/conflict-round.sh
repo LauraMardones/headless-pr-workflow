@@ -26,8 +26,10 @@
 #     ownerless-reported
 #                    as ownerless, but that blocker is already posted for the
 #                    head (it is posted once per head, even after /unblock)
-#     tried          conflicting; a conflict-round attempt marker holds for
-#                    the current head
+#     tried          a conflict-round attempt marker holds for the current
+#                    head: the PR conflicts, or it is clean but its head has no
+#                    merge-owner evidence (the round's blocker already alerted
+#                    the PO, for example for a pytest check that was not green)
 #     blocked        conflicting; the story has an open blocker
 #     owed           conflicting, and none of the above: a conflict round is owed
 #   Open blocker: a "## Blocked Declaration" by the dispatcher, the PO, a
@@ -79,6 +81,7 @@ conflict_round_rule() {
               else "owed" end
           elif $pr.mergeable == null then "unknown"
           elif $owned then "clean"
+          elif holds("<!-- hpw:dispatcher action=conflict-round-attempt pr=" + $n + " head=" + $head + " -->") then "tried"
           elif newest($story; $bot; "<!-- hpw:dispatcher action=merge-owner-missing pr=" + $n + " head=" + $head + " -->") != null
               then "ownerless-reported"
           else "ownerless" end'

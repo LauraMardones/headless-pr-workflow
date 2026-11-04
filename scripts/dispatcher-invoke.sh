@@ -3032,6 +3032,16 @@ reset_conflict_round_session() {
     PRESTART_STATUS_FAILED=false
 }
 
+# pytest_green_on_head <head> — 0 only when the newest run of the required
+# pytest check on <head> completed with success. 1 when it failed, is still
+# running, is absent, or the check runs cannot be read.
+pytest_green_on_head() {
+    local head="$1" runs
+    runs=$(gh api "repos/$REPO/commits/$head/check-runs?check_name=pytest&per_page=100" 2>/dev/null) || return 1
+    jq -e '[.check_runs[]? | select(.name == "pytest")] | sort_by(.started_at // "") | last
+           | . != null and .status == "completed" and .conclusion == "success"' <<< "$runs" >/dev/null 2>&1
+}
+
 # conflict_round_blocker <pr> <head> <cause> — AC 6: one blocker that names the
 # conflict with main and carries the attempt marker; never returns.
 conflict_round_blocker() {
@@ -3096,6 +3106,13 @@ run_conflict_round() {
     if ! $DRY_RUN && pr_conflicts_with_main "$pr_number"; then
         conflict_round_blocker "$pr_number" "$pr_head" \
             "the PR still conflicts with main at head ${pr_head:0:7} after the conflict round"
+    fi
+    # The round keeps the PR Ready for review even when its pytest check is
+    # not green (implement.md step 10), so a red head must not be handed off:
+    # nothing would request its review.
+    if ! $DRY_RUN && ! pytest_green_on_head "$pr_head"; then
+        conflict_round_blocker "$pr_number" "$pr_head" \
+            "the required pytest check is not green on head ${pr_head:0:7} after the conflict round, so it was not handed to the review loop"
     fi
     record_merge_owner "$issue_num" || exit 1
     hand_off_to_codex_review_loop "$(jq -r '.head.sha // empty' <<< "$pr_json")" "$blocker_before"

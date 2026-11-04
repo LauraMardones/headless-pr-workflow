@@ -156,6 +156,15 @@ path="${endpoint%%\?*}"
 case "$path" in
     user)
         echo "{\"login\": \"$MOCK_BOT\"}" ;;
+    repos/*/commits/*/check-runs)  # the pytest check of a head: green unless checks_<sha> says otherwise (#449)
+        sha="${path#*/commits/}"; sha="${sha%%/*}"
+        result=success
+        [[ -f "$MOCK_DIR/checks_$sha" ]] && result=$(cat "$MOCK_DIR/checks_$sha")
+        case "$result" in
+            absent)  echo '{"total_count": 0, "check_runs": []}' ;;
+            pending) echo '{"total_count": 1, "check_runs": [{"name": "pytest", "status": "in_progress", "conclusion": null, "started_at": "2026-10-13T10:00:00Z"}]}' ;;
+            *)       echo "{\"total_count\": 1, \"check_runs\": [{\"name\": \"pytest\", \"status\": \"completed\", \"conclusion\": \"$result\", \"started_at\": \"2026-10-13T10:00:00Z\"}]}" ;;
+        esac ;;
     repos/*/issues/*/comments)
         n="${path%/comments}"; n="${n##*/}"
         file="$MOCK_DIR/comments_$n.json"
@@ -426,6 +435,10 @@ class Dispatcher:
         """Make the read of a single pull request (``pulls/<n>``) fail (issue #381)."""
         path = self.mock / "fail_pr_read"
         path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def set_pytest(self, head: str, result: str) -> None:
+        """The required pytest check of ``head``: success (the default), failure, pending or absent (#449)."""
+        (self.mock / f"checks_{head}").write_text(result, encoding="utf-8")
 
     def fail_comment_writes(self, target: int, times: int) -> None:
         """The next ``times`` comment writes on issue or PR ``target`` fail (an HTTP 500)."""

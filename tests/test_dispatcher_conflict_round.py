@@ -438,6 +438,7 @@ OWNER_CONDITIONS = {
     "marker from another account": (CLEAN, [], [comment(pr11(owner_marker(NEW_HEAD)), login="someone")], True),
     "blocker already posted": (CLEAN, [comment(f"{BLOCKED}\n\n{pr11(ownerless_marker(NEW_HEAD))}")], [], False),
     "blocker posted for an older head": (CLEAN, [comment(f"{BLOCKED}\n\n{pr11(ownerless_marker(HEAD))}")], [], True),
+    "conflict-round blocker on the head": (CLEAN, [comment(f"{BLOCKED}\n\n{pr11(attempt_marker(NEW_HEAD))}")], [], False),
     "fix round due": (CLEAN, [], [findings(NEW_HEAD)], False),
     "unknown mergeability": (UNKNOWN, [], [], False),
 }
@@ -606,6 +607,40 @@ jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" else . end)' \\
     proc = d.resume()  # the attempt marker names the head the PR has now
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"] and len(blockers(d)) == 1 and len(po_events(d)) == 1
+
+
+@pytest.mark.parametrize("result", ["failure", "pending", "absent"])
+def test_449_ac3_a_clean_head_without_a_green_pytest_check_gets_one_blocker(d, result):
+    """The round keeps the PR Ready even when CI is not green; the dispatcher must not hand it off."""
+    conflicting_story(d, "In review")
+    session_merges_main(d)
+    d.set_pytest(NEW_HEAD, result)
+
+    proc = d.resume()
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert_one_conflict_blocker(d, head=NEW_HEAD)
+    assert f"the required pytest check is not green on head {NEW_HEAD[:7]}" in blockers(d)[0]
+    assert owner_marker(NEW_HEAD) not in d.posted(PR)
+    assert d.board_writes == [f"{STORY}=In implementation"]  # no hand-off to "In review"
+
+    # Later runs on the head: no second round and no second (missing-owner) blocker.
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"] and len(blockers(d)) == 1 and len(po_events(d)) == 1
+    assert f"the conflict round was already tried on PR #{PR} at head {NEW_HEAD[:7]}" in proc.stdout
+
+
+def test_449_the_conflict_round_never_converts_the_pr_to_draft():
+    """A Draft PR is invisible to the rule, so a round stopped while Draft would stay silent."""
+    text = (REPO_ROOT / ".claude" / "commands" / "implement.md").read_text(encoding="utf-8")
+    [bullet] = [line for line in text.splitlines() if line.lstrip().startswith("- conflict round (issue #409)")]
+    assert "keep a PR that is Ready for review as it is for the whole round" in bullet
+    assert "not in step 16 either" in bullet
+    assert ("when the new head's `pytest` check failed, is still pending when the session stops waiting, "
+            "or is absent or unreadable, make no fix and no Draft conversion") in bullet
+    assert "--next implementation" in bullet
+    assert bullet.rstrip().endswith("except that the PR stays Ready for review")  # also an unresolved conflict
 
 
 def test_ac6_po_unblock_allows_one_new_attempt(d):
