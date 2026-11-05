@@ -203,7 +203,25 @@ else
     cat "{tmp_path.as_posix()}/gh/state_$n" 2>/dev/null || echo open
 fi
 ''', newline="\n")
-        for path in (slack, gh):
+        # fake hpw next to the script (its default HPW_BIN): the verified write of
+        # issue #432 reaches the fake gh the way the script's old direct call did.
+        hpw = tmp_path / "scripts" / "hpw"
+        hpw.write_text('''#!/usr/bin/env bash
+[[ "$1 $2 $3" == "dispatcher write comment" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
+shift 3
+repo="" number="" file=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo) repo="$2"; shift 2 ;;
+        --number) number="$2"; shift 2 ;;
+        --body-file) file="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+gh api "repos/$repo/issues/$number/comments" -X POST -f body="$(cat "$file")" >/dev/null 2>&1 || exit 1
+echo '{"ok": true, "block": "write", "operation": "comment", "result": "written", "error": null}'
+''', newline="\n")
+        for path in (slack, gh, hpw):
             path.chmod(0o755)
 
     def env(self):

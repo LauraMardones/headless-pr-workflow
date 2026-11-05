@@ -469,19 +469,21 @@ write_field() {
 # current UTC time under --dry-run, or when the response carries none), so a
 # caller can key an actionable event on it (issue #359). Returns non-zero when
 # the block could not write and verify the comment.
+# post_comment <issue> <body> [<attempts>] — attempts defaults to 3; a caller
+# with its own retry loop (record_merge_owner, B2 until #433) passes 1.
 
 LAST_POSTED_AT=""
 
 post_comment() {
     local issue_num="$1"
-    local body="$2" body_file rc=0
+    local body="$2" attempts="${3:-3}" body_file rc=0
     if $DRY_RUN; then
         echo "[DRY RUN] Would post comment on #$issue_num:"
         echo "$body" | sed 's/^/  /'
     fi
     body_file=$(mktemp) || return 1
     printf '%s' "$body" > "$body_file"
-    dispatcher_write comment --number "$issue_num" --body-file "$body_file" || rc=$?
+    dispatcher_write comment --number "$issue_num" --body-file "$body_file" --attempts "$attempts" || rc=$?
     rm -f "$body_file"
     if [[ $rc -ne 0 ]]; then
         echo "Warning: the comment on #$issue_num was not written ($(write_field error))." >&2
@@ -2207,7 +2209,7 @@ record_merge_owner() {
     local marker attempt
     marker=$(merge_owner_marker "$pr_number" "$head_sha")
     for attempt in 1 2 3; do
-        post_comment "$pr_number" "$marker" && return 0
+        post_comment "$pr_number" "$marker" 1 && return 0  # this loop is the retry
         sleep "${COMMENT_RETRY_DELAY:-2}"
     done
     # Issue #348: leave the marker as an evidence-pending comment, so a later run
@@ -2216,7 +2218,7 @@ record_merge_owner() {
     local pending
     pending=$(evidence_pending_comment "merge-owner" "$head_sha" "$marker")
     for attempt in 1 2 3; do
-        post_comment "$pr_number" "$pending" && return 0
+        post_comment "$pr_number" "$pending" 1 && return 0
         sleep "${COMMENT_RETRY_DELAY:-2}"
     done
     # Neither form is on GitHub, so no later run could tell that this head is
