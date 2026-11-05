@@ -440,9 +440,14 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` a
 
 | Facts | What the dispatcher does |
 |---|---|
-| A linked open PR that is not a draft | `/merge`, then `Done` and `/cleanup`, then the feature and epic closure check. Log: `[RESUME] #<n>: /merge PR #<pr>` |
+| A linked open PR that is not a draft, and GitHub reports it clean | `/merge`, then `Done` and `/cleanup`, then the feature and epic closure check. Log: `[RESUME] #<n>: /merge PR #<pr>` |
+| That PR conflicts with main, and the story is a review-loop story (one `executor:` label with a `CODEX_REVIEW_LOOP_ROUTING` row) | No `/merge` and no merge-attempt marker. When the [conflict-round rule](#conflict-round) owes a round, it starts after every `/merge` of the run. Log: `[RESUME] #<n>: PR #<pr> conflicts with main; the conflict round starts after this run's merges` |
+| That PR conflicts with main, and the story has no review-loop row (for example `executor:codex`) | No `/merge` and no session. One `Type: external` blocker that names the merge conflict with main and the PR, once per PR head, sent as a `po_blocker`. Unblocked when: the PR branch is merged with main and the conflict resolved, or the PO posts `/unblock`. |
+| GitHub has not computed the PR's mergeability yet (`mergeable == null`) | Nothing in this run: no `/merge`, no conflict round, no marker, no blocker. Log: `[RESUME SKIP] #<n>: GitHub has not computed mergeability for PR #<pr> yet; trying again on the next run` |
 | No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
 | Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
+
+"Conflicts with main" is the test of the hand-off above: `mergeable == false` or `mergeable_state == "dirty"` from `gh api repos/<repo>/pulls/<n>` (issue #409). When that read fails, `/merge` runs as before and its merge gate decides.
 
 **Evidence that could not be written (issue #348).** The `merge-owner` marker, the merge confirmation and the cleanup closing Session Summary are durable evidence. When a write of one fails (after 3 attempts), the writer leaves one *evidence-pending* comment with the exact text as a hidden base64 payload (`scripts/lib/evidence-pending.sh`; nothing is kept on the runner). The dispatcher posts that text once on a later run. Only comments of the dispatcher's own account count, for the pending comment and for the proof that the text is already posted; a copy written by anyone else proves nothing.
 
@@ -507,22 +512,54 @@ Set it as a repository variable; `.github/workflows/dispatcher.yml` passes it to
 
 **One fix-round attempt per head.** A fix round that fails, or an `/implement` session that ends on the same PR head it started on while the findings for that head are still open, is not repeated on the same head, whatever status the session left the story in. The mid-cycle blocker for `/implement` records the head, and later runs log `[RESUME SKIP] #<n>: the fix round was already tried on PR #<pr> at head <sha>` until the PR has a new head or the PO posts a standalone `/unblock` line.
 
+### Conflict round
+
+When the dispatcher merges one story, another dispatcher PR can start to conflict with `main` (issue #409). For a review-loop story (exactly one `executor:` label with a `CODEX_REVIEW_LOOP_ROUTING` row) the dispatcher then resolves the conflict itself, in a *conflict round*: one `/implement` session under the story's own executor that merges `origin/main` into the PR branch, resolves the conflict, runs the focused tests and pushes (`.claude/commands/implement.md` step 10).
+
+**The rule (issue #449).** A stopped conflict round is never resumed. The dispatcher keeps no record of an open round. Every run decides from GitHub facts only, with one rule that `scripts/dispatcher-poll.sh` and the resume pass of `scripts/dispatcher-invoke.sh` share (`conflict_round_rule` in `scripts/lib/conflict-round.sh`). A conflict round is owed when all of these hold, and only then:
+
+- the story is a review-loop story in `In implementation`, `In review` or `In merge`;
+- its linked open, non-draft PR conflicts with main (`mergeable == false` or `mergeable_state == "dirty"`);
+- no fix round is due: no bookkeeping `move-in-implementation` marker for the current head without a fix-round attempt marker that holds for it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
+- the story has no open blocker: a `## Blocked Declaration` with no later standalone `/unblock` line from the PO. A dispatcher blocker whose hidden marker names an older PR head is not open;
+- no conflict-round attempt marker holds for the current head.
+
+The poll lists such stories in `In review` under `conflict_due`; stories in `In implementation` and `In merge` are already listed under `in_implementation` and `in_merge`. The next run starts one fresh round.
+
+What the round does:
+
+- It runs no WIP or file-overlap check: the story already holds its place.
+- After the usage limit and the allowance check let the session start, the story moves to `In implementation`. A refused start, or a failed write of that status, changes nothing: the story keeps its status, and the next run applies the rule again. Log: `[RESUME] #<n>: PR #<pr> conflicts with main; conflict round, /implement on PR #<pr>`.
+- The session keeps the PR Ready for review for the whole round (implement.md step 10), also when its `pytest` check fails or is still pending at the end, so a round that stops leaves a PR the rule can read.
+- Success is judged from the PR, not from a new head. After a session that exits `0`, the dispatcher reads the PR again. When it no longer conflicts and the newest run of the required `pytest` check on the current head completed with success, the dispatcher posts the merge-owner marker for the current head (or its evidence-pending copy) and applies the [hand-off](#hand-off-after-implement): `In review`, and the session requests the Codex review. The head reaches `In merge` only through the bookkeeping job (a clean review on that head, green required checks, a passed approval gate), and a later run merges it with the unchanged script-only `/merge` and `/cleanup`. No PO action is needed.
+- No PO alert is sent while the dispatcher resolves the conflict.
+
+**One conflict round per head.** When the session fails, the PR still conflicts after it (the session reports `merge conflict with main on PR #<n>`), or the `pytest` check on the head is not green (failed, still running, absent or unreadable), the dispatcher posts one `Type: external` blocker on the story and exits `1`. The blocker names the merge conflict with main and the PR, says it is the PO's only alert for this conflict, and gives "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" as the unblock condition. It carries a hidden attempt marker for the PR's current head and is sent once as a `po_blocker`. Later runs start no second round on that head and log `[RESUME SKIP] #<n>: the conflict round was already tried on PR #<pr> at head <sha7>; waiting for a new head or a PO /unblock line`. A new head, or a standalone `/unblock` line from the PO, allows one new attempt.
+
+**A stopped round.** A usage-limit pause posts only the standard [pause record](#pause-at-a-provider-usage-limit), with step `conflict round`, for the PO's information; the dispatcher never reads it. A cancelled run or a failed write of the pause record leaves nothing at all. In each case the next run applies the rule to the PR as it is then. While the PR still conflicts, a fresh round starts. When the session pushed before it stopped and the PR is clean, its head has no merge-owner evidence, and the story gets the blocker below. Only pushed commits survive.
+
+**A head left without an owner.** A review-loop story is `In implementation` or `In review`, its linked open non-draft PR is not conflicting, no fix round is due, no hand-off is pending, and the current head has no merge-owner evidence: a session stopped after its push, before the hand-off finished. The dispatcher starts no session. It posts one `Type: resource` blocker, once per head, sent as one `po_blocker`. The blocker says that the merge owner is missing for head `<sha7>` on PR #<pr>, that a session stopped after its push before the hand-off finished, and that the PO can follow [`docs/TAKEOVER-RULES.md` → Merge Takeover](TAKEOVER-RULES.md) or post `/unblock` after pushing a new head. Log: `[RESUME SKIP] #<n>: PR #<pr> head <sha7> has no merge-owner evidence; blocker posted`. A later run on the same head posts nothing more. The poll reports such a story in `In review` under `owner_missing_due` until the blocker is posted, so the workflow runs the invoke step even when nothing else is due; a story in `In implementation` is already reported under `in_implementation`. The blocker applies to every review-loop story, so a fix round or a first `/implement` stopped after its push gets it too. A head in `In merge` without merge-owner evidence is not covered here (issue #406).
+
+**Not a fix round.** Conflict rounds do not count toward `CODEX_FIX_ROUND_MAX`: only the bookkeeping job's findings markers count. A story without a review-loop row gets no conflict round; see the `In merge` table.
+
 ### Order and entry into a run
 
 Each run handles resumable work before it starts new work:
 
-1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`;
+1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`. A conflicting PR of a review-loop story is only queued here;
 2. fix rounds that are due, and hand-offs that are still pending;
-3. stories in **Ready for implementation**, as before.
+3. stories in `In review` (a `/review` session for a Codex-implemented PR; a conflicting review-loop PR is queued);
+4. the queued conflict rounds. Every `/merge` of the run has run by then, so each round starts from the newest `main`;
+5. stories in **Ready for implementation**, as before.
 
-`scripts/dispatcher-poll.sh` reports the candidates in two more keys of its JSON, `in_merge` and `in_implementation` (each `[{number, title}]`), from the board read it already makes. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** either new list is non-empty:
+`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due`, `conflict_due` and `owner_missing_due` (each `[{number, title}]`). `conflict_due` lists the review-loop stories in `In review` that the [conflict-round rule](#conflict-round) owes a round. `owner_missing_due` lists, by the same rule, the review-loop stories in `In review` whose clean head has no merge-owner evidence and no missing-merge-owner blocker yet ([A head left without an owner](#conflict-round)). Together they cost one PR read per review-loop story in `In review` per poll, and two comment reads when GitHub has computed that PR's mergeability. A story whose PR or comments cannot be read is not listed, and the poll writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due and owner_missing_due skip it this cycle` or `[POLL] Warning: could not read the comments of #<n> or PR #<pr>; conflict_due and owner_missing_due skip it this cycle`. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** any of these lists is non-empty:
 
 ```
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable work first, then story <n>
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only
 ```
 
-The workflow uses `--resume` when no story is ready for implementation. It runs the invoke step when a story is ready, `In merge` or `In implementation`, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
+The workflow uses `--resume` when no story is ready for implementation. It runs the invoke step when a story is ready, `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
 
 The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
 
@@ -540,7 +577,8 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself; `scripts/dispatcher-merge.sh` exits 0 only after `hpw merge-pr` confirmed the merge (or GitHub already reported it merged).
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
-- Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above is skipped by the stale check: it waits for the PO.
+- Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above, by a conflict-round blocker or by the missing-merge-owner blocker is skipped by the stale check: it waits for the PO.
+- A session that stops after its push, before the hand-off finished, is not continued. The story gets one `Type: resource` blocker for a head without merge-owner evidence ([conflict round](#conflict-round) → A head left without an owner), and the PO finishes it by a merge takeover or a new head. This applies to every review-loop story in `In implementation` or `In review`, including one whose PR was implemented outside the dispatcher.
 - A story paused at a provider usage limit waits at its step (fix round, `/review`) or in `Ready for implementation` (new `/implement`) until the usage limit and the allowance check allow a start; the run ends at that refused start, before the stale check, so stale recovery does not roll back a fix-round or `/review` story. Only pushed commits survive a pause.
 - The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
 
@@ -649,6 +687,7 @@ A session stopped by the subscription's provider usage limit (issue #316, ADR-01
 | New `/implement` (Step E1) | `Ready for implementation`; the next start continues on the existing branch and PR | the pause record |
 | Fix round | stays `In implementation` | the pause record; no fix-round attempt marker |
 | `/review` of a Codex-implemented PR | stays `In review` | the pause record; no per-head review attempt marker |
+| Conflict round | stays where it is (`In implementation`, or `In review` when the session set it); the next run decides from the PR ([conflict round](#conflict-round)) | the pause record with step `conflict round`, for the PO only; no marker |
 
 No `## Blocked Declaration` is posted, no Slack message is sent and no actionable event is registered.
 

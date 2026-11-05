@@ -45,13 +45,22 @@
 #       "ready_for_refinement":     [{"number": N, "title": "..."}, ...],
 #       "in_merge":                 [{"number": N, "title": "..."}, ...],
 #       "in_implementation":        [{"number": N, "title": "..."}, ...],
-#       "review_due":               [{"number": N, "title": "..."}, ...]
+#       "review_due":               [{"number": N, "title": "..."}, ...],
+#       "conflict_due":             [{"number": N, "title": "..."}, ...],
+#       "owner_missing_due":        [{"number": N, "title": "..."}, ...]
 #     }
 #   Every key is always present; each value is [] when no items match.
 #   review_due (issue #315) lists the stories "In review" that
 #   dispatcher-invoke.sh reviews with a /review session: one executor: label
 #   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
 #   open, non-draft PR that closes the story.
+#   conflict_due (issue #409, issue #449) lists the review-loop stories
+#   "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) that
+#   are owed a conflict round by the rule of scripts/lib/conflict-round.sh;
+#   dispatcher-invoke.sh starts the round.
+#   owner_missing_due (issue #449) lists the review-loop stories "In review"
+#   whose clean PR head has no merge-owner evidence and no missing-merge-owner
+#   blocker yet, by the same rule; dispatcher-invoke.sh posts that blocker.
 #
 # Prototype divergences from expected behaviour:
 #   D1  Pagination: fetches all project items via cursor pagination, 100 per
@@ -138,6 +147,9 @@ STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
 # The review-path tables, shared with dispatcher-invoke.sh (issue #315).
 # shellcheck source=scripts/lib/review-routing.sh
 source "$SCRIPT_DIR/lib/review-routing.sh"
+# The conflict-round rule, shared with dispatcher-invoke.sh (issue #449).
+# shellcheck source=scripts/lib/conflict-round.sh
+source "$SCRIPT_DIR/lib/conflict-round.sh"
 
 # ─── GraphQL helper ───────────────────────────────────────────────────────────
 
@@ -299,26 +311,110 @@ REVIEW_CANDIDATES=$(echo "$ITEMS" | jq -c '[
   { number: .content.number, title: .content.title,
     executors: [ (.content.labels.nodes // [])[] | .name | select(startswith("executor:")) | ltrimstr("executor:") ] }
 ]')
+# The open-PR list, read once per poll and only when a candidate needs it.
+OPEN_PRS=""
+load_open_prs() {
+    [[ -z "$OPEN_PRS" ]] || return 0
+    OPEN_PRS=$(curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
+        echo "[POLL] Warning: could not read open pull requests; review_due, conflict_due and owner_missing_due may be incomplete" >&2
+        OPEN_PRS="[]"
+    }
+}
+
+# linked_ready_pr <issue> — the open, non-draft PR that closes the story.
+linked_ready_pr() {
+    echo "$OPEN_PRS" | jq -r --argjson n "$1" '
+        [.[] | select((.draft | not) and ((.body // "") | ascii_downcase
+            | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))][0].number // empty'
+}
+
+# rest_get_all <path> — every page of a REST list as one JSON array; fails
+# when a page cannot be read.
+rest_get_all() {
+    local path="$1" page=1 chunk all='[]'
+    while :; do
+        chunk=$(curl -sf \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$REST/$path?per_page=100&page=$page") || return 1
+        all=$(printf '%s\n%s\n' "$all" "$chunk" | jq -cs 'add') || return 1
+        [[ "$(jq 'length' <<< "$chunk")" -ge 100 ]] || break
+        page=$(( page + 1 ))
+    done
+    echo "$all"
+}
+
+# The token's own login: the dispatcher's account, and the bookkeeping job's
+# unless CODEX_BOOKKEEPING_LOGIN names it (as in dispatcher-invoke.sh).
+TOKEN_LOGIN=""
+load_token_login() {
+    [[ -z "$TOKEN_LOGIN" ]] || return 0
+    TOKEN_LOGIN=$(curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/user" | jq -r '.login // empty') || TOKEN_LOGIN=""
+    [[ -n "$TOKEN_LOGIN" ]]
+}
+# The PO account, as DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh.
+PO_LOGIN="LauraMardones"
+
+# Issue #409, issue #449: conflict_due lists the review-loop stories
+# "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) for
+# which a conflict round is owed, by the rule the invoke step applies too
+# (conflict_round_rule, scripts/lib/conflict-round.sh): the open, non-draft PR
+# conflicts with main, no fix round is due, the story has no open blocker and
+# no conflict-round attempt marker holds for the PR's current head.
+# owner_missing_due lists, by the same rule, the review-loop stories
+# "In review" whose clean PR head has no merge-owner evidence and no
+# missing-merge-owner blocker yet: a session stopped after its push, and the
+# invoke step posts that blocker once. Stories "In implementation" need no
+# key: in_implementation already starts the invoke step for them. A PR with
+# unknown mergeability is read again on the next poll. A PR or a comment list
+# that cannot be read lists nothing and warns.
 REVIEW_DUE='[]'
+CONFLICT_DUE='[]'
+OWNER_MISSING_DUE='[]'
 if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
     REVIEW_ROWS=$(echo "$REVIEW_CANDIDATES" | jq -c '.[]')
-    OPEN_PRS=""
     while IFS= read -r row; do
         mapfile -t EXEC_SUFFIXES < <(echo "$row" | jq -r '.executors[]')
-        review_by_dispatcher_session "${EXEC_SUFFIXES[@]}" || continue
-        if [[ -z "$OPEN_PRS" ]]; then
-            OPEN_PRS=$(curl -sf \
+        STORY_NUMBER=$(echo "$row" | jq '.number')
+        if review_by_dispatcher_session "${EXEC_SUFFIXES[@]}"; then
+            load_open_prs
+            if [[ -n "$(linked_ready_pr "$STORY_NUMBER")" ]]; then
+                REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+            fi
+        elif [[ ${#EXEC_SUFFIXES[@]} -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[${EXEC_SUFFIXES[0]}]:-}" ]]; then
+            load_open_prs
+            PR_NUMBER=$(linked_ready_pr "$STORY_NUMBER")
+            [[ -n "$PR_NUMBER" ]] || continue
+            PR_DETAIL=$(curl -sf \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Accept: application/vnd.github+json" \
-                "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
-                echo "[POLL] Warning: could not read open pull requests; review_due may be incomplete" >&2
-                OPEN_PRS="[]"
+                "$REST/repos/$REPO/pulls/$PR_NUMBER") || {
+                echo "[POLL] Warning: could not read PR #$PR_NUMBER for #$STORY_NUMBER; conflict_due and owner_missing_due skip it this cycle" >&2
+                continue
             }
-        fi
-        if echo "$OPEN_PRS" | jq -e --argjson n "$(echo "$row" | jq '.number')" '
-            any(.[]; (.draft | not) and ((.body // "") | ascii_downcase
-                | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))' >/dev/null; then
-            REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
+            # Unknown mergeability (null) decides nothing: read again next poll.
+            echo "$PR_DETAIL" | jq -e '.mergeable != null or .mergeable_state == "dirty"' >/dev/null 2>&1 \
+                || continue
+            if ! load_token_login \
+                    || ! STORY_COMMENTS=$(rest_get_all "repos/$REPO/issues/$STORY_NUMBER/comments") \
+                    || ! PR_COMMENTS=$(rest_get_all "repos/$REPO/issues/$PR_NUMBER/comments"); then
+                echo "[POLL] Warning: could not read the comments of #$STORY_NUMBER or PR #$PR_NUMBER; conflict_due and owner_missing_due skip it this cycle" >&2
+                continue
+            fi
+            RULE=$(printf '%s\n%s\n%s\n' "$PR_DETAIL" "$STORY_COMMENTS" "$PR_COMMENTS" \
+                | conflict_round_rule "$TOKEN_LOGIN" "${CODEX_BOOKKEEPING_LOGIN:-$TOKEN_LOGIN}" "$PO_LOGIN") || RULE=""
+            case "$RULE" in
+                owed)
+                    CONFLICT_DUE=$(echo "$CONFLICT_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]') ;;
+                ownerless)
+                    OWNER_MISSING_DUE=$(echo "$OWNER_MISSING_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]') ;;
+            esac
         fi
     done <<< "$REVIEW_ROWS"
 fi
@@ -477,6 +573,9 @@ jq -n \
     --argjson in_merge "$IN_MERGE" \
     --argjson in_implementation "$IN_IMPLEMENTATION" \
     --argjson review_due "$REVIEW_DUE" \
+    --argjson conflict_due "$CONFLICT_DUE" \
+    --argjson owner_missing_due "$OWNER_MISSING_DUE" \
     '{ready_for_implementation: $impl, ready_for_refinement: $refine,
       in_merge: $in_merge, in_implementation: $in_implementation,
-      review_due: $review_due}'
+      review_due: $review_due, conflict_due: $conflict_due,
+      owner_missing_due: $owner_missing_due}'

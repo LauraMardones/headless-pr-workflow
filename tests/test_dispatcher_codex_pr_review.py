@@ -99,6 +99,10 @@ def test_ac11_cases_that_do_nothing(d, case):
                 labels=labels.get(case))
     if case != "no-pr":
         d.add_pr(PR, STORY, draft=(case == "draft"))
+    if case == "claude-tier":
+        # The dispatcher's own /implement pushed the head; without this marker a
+        # clean review-loop head gets the missing-merge-owner blocker (#449 AC 4).
+        d.add_comment(PR, f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={'a' * 40} -->")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [] and d.board_writes == [] and d.posted(STORY) == []
