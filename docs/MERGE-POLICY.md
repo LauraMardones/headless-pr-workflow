@@ -194,6 +194,8 @@ must be supplied explicitly with `--expected-owner` or
 `HPW_EXPECTED_MERGE_OWNER`, optionally bound to the current PR head with
 `--expected-owner-sha` or `HPW_EXPECTED_MERGE_OWNER_SHA`.
 
+On a dispatcher story, a head pushed by a manual session (for example a manual fix round after `fix-round-max`) has no dispatcher owner, and the dispatcher never merges it. The PO's manual `/merge <pr>` session merges it as a Merge Takeover ([`docs/TAKEOVER-RULES.md`](TAKEOVER-RULES.md) → Merge Takeover), and its merge comment (the `Merge gate:` line and Session Summary) is the record; the PO then runs `/cleanup <pr>`.
+
 ## Merge Command Behavior
 
 The merge command must:

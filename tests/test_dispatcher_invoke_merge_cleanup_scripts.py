@@ -55,7 +55,7 @@ def test_resume_with_a_merged_pr_runs_only_cleanup(tmp_path):
 def test_codex_review_session_is_followed_by_two_scripts(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "In review", executor="codex")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, owned=True)
     d.session_sets_status("review", STORY, "In merge")
     proc = d.resume(seq="0,1,1")
     assert proc.returncode == 0, proc.stdout + proc.stderr

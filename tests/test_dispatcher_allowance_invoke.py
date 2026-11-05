@@ -29,7 +29,7 @@ def d(tmp_path):
     """A Claude-implemented story ready for /implement."""
     dispatcher = Dispatcher(tmp_path)
     dispatcher.add_story(ISSUE, "Ready for implementation")
-    dispatcher.add_pr(PR, ISSUE)
+    dispatcher.add_pr(PR, ISSUE, owned=True)
     return dispatcher
 
 
@@ -38,7 +38,7 @@ def r(tmp_path):
     """A Codex-implemented story \"In review\": the resume pass runs /review, which moves it to \"In merge\"."""
     dispatcher = Dispatcher(tmp_path)
     dispatcher.add_story(ISSUE, "In review", executor="codex")
-    dispatcher.add_pr(PR, ISSUE)
+    dispatcher.add_pr(PR, ISSUE, owned=True)
     dispatcher.session_sets_status("review", ISSUE, "In merge")
     return dispatcher
 

@@ -453,7 +453,7 @@ def test_381_unreadable_mergeability_keeps_the_generic_blocker_and_fails(d):
 @needs_tools
 def test_ac4_codex_story_in_review_is_reviewed_on_opus_then_merged(d):
     d.add_story(STORY, "In review", executor="codex")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, owned=True)
     d.session_sets_status("review", STORY, "In merge")
 
     proc = d.resume()
@@ -1287,7 +1287,7 @@ def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_sess
 @needs_tools
 def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_merge(d):
     d.add_story(STORY, "In merge")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, owned=False)
     d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
 
     proc = d.resume()
@@ -1298,7 +1298,7 @@ def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_
 
     # Idempotent: the marker is on the PR now, so a retry posts nothing more.
     d.set_status(STORY, "In merge")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, owned=False)
     assert d.resume().returncode == 0
     assert d.posted(PR) == [OWNER_MARKER]
 
@@ -1822,7 +1822,7 @@ def test_357_declaration_forged_by_an_outsider_does_not_excuse_a_missing_push(d)
 @needs_tools
 def test_357_codex_review_that_leaves_the_story_in_review_runs_no_merge_and_unblock_reviews_again(d):
     d.add_story(STORY, "In review", executor="codex")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, owned=True)
 
     first = d.resume()  # /review exits 0 and leaves the story "In review" (a COMMENT review)
 
