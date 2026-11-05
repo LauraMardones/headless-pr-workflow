@@ -30,7 +30,7 @@ def d(tmp_path):
 
 def codex_in_review(d, story=STORY, pr=PR, draft=False):
     d.add_story(story, "In review", executor="codex")
-    d.add_pr(pr, story, draft=draft)
+    d.add_pr(pr, story, draft=draft, owned=True)
 
 
 # ── Skip at implementation (AC6–AC9) ────────────────────────────────────────

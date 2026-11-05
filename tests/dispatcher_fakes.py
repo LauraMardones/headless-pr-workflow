@@ -389,7 +389,7 @@ class Dispatcher:
                                              "labels": [{"name": name} for name in labels]})
 
     def add_pr(self, number: int, issue: int, head: str = "a" * 40, draft: bool = False,
-               state: str = "open", merged: bool = False, **extra) -> None:
+               state: str = "open", merged: bool = False, owned: bool | None = None, **extra) -> None:
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
         # A PR is clean unless the test says otherwise (``mergeable`` /
         # ``mergeable_state``); None is GitHub's "not computed yet" (issue #409).
@@ -398,6 +398,14 @@ class Dispatcher:
                       "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head},
                       "mergeable": True, "mergeable_state": "clean", **extra})
         self._write("pulls.json", pulls)
+        # A story "In merge" is merged by the dispatcher only for a head it owns
+        # (issue #406): the PR carries the owner marker unless the test says
+        # ``owned=False``.
+        board_item = next((i for i in self._read("board.json")["items"] if i["number"] == issue), None)
+        if owned is None:
+            owned = bool(board_item) and board_item["status"] == "In merge"
+        if owned and not merged:
+            self.add_comment(number, f"<!-- hpw:dispatcher action=merge-owner pr={number} head={head} -->")
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 

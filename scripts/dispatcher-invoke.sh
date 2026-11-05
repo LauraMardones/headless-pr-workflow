@@ -2738,6 +2738,13 @@ resume_in_merge_story() {
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the merge owner marker for PR #$pr_number at head ${pr_head:0:7} is still missing; /merge waits for the retry"
             return 0
         fi
+        # Issue #406: a head with no dispatcher marker (after ensure_merge_owner
+        # posted a pending copy) was pushed outside a dispatcher session. The
+        # gate in dispatcher-merge.sh would refuse it: say so once, run no /merge.
+        if [[ -n "$pr_head" ]] && ! head_has_merge_owner_marker "$pr_number" "$pr_head"; then
+            block_ownerless_head "$issue_num" "$pr_number" "$pr_head" in-merge
+            return 0
+        fi
         echo ""
         echo "${LOG_PREFIX}[RESUME] #$issue_num: /merge PR #$pr_number"
         RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
@@ -2885,7 +2892,8 @@ resume_fix_round() {
 # whose PR is clean but whose head has no merge-owner evidence: a session
 # stopped after its push, before the hand-off finished. It gets one blocker
 # per head and no session (block_ownerless_head). A head "In merge" without
-# that evidence belongs to the merge path (ensure_merge_owner, issue #406).
+# that evidence is checked by resume_in_merge_story itself (issue #406): the
+# same blocker, with the text for a head pushed outside a dispatcher session.
 
 is_review_loop_story() {
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]
@@ -2967,12 +2975,21 @@ check_review_loop_pr() {
     return 0
 }
 
-# block_ownerless_head <issue> <pr> <head> — one blocker per head, sent as one
+# head_has_merge_owner_marker <pr> <head> — 0 only when the dispatcher's own
+# account left the merge-owner marker for exactly this head on the PR. A failed
+# read counts as present: the merge script reads the PR itself and decides.
+head_has_merge_owner_marker() {
+    local own
+    own=$(bot_comments_json "$1") || return 0
+    jq -e --arg m "$(merge_owner_marker "$1" "$2")" 'any(.[]; (.body // "") | contains($m))' <<< "$own" >/dev/null
+}
+
+# block_ownerless_head <issue> <pr> <head> [in-merge] — one blocker per head, sent as one
 # po_blocker event; no session. Posted once per head even after a PO /unblock
 # on the same head: only a new head, or the PO's merge takeover, changes what
 # the dispatcher can do.
 block_ownerless_head() {
-    local issue_num="$1" pr_number="$2" pr_head="$3" marker own unblocked_when state
+    local issue_num="$1" pr_number="$2" pr_head="$3" where="${4:-}" marker own unblocked_when state
     marker=$(merge_owner_missing_marker "$pr_number" "$pr_head")
     if ! own=$(bot_comments_json "$issue_num"); then
         echo "Warning: could not read the comments of #$issue_num; the missing merge owner on PR #$pr_number is checked again on the next run" >&2
@@ -2984,6 +3001,10 @@ block_ownerless_head() {
     fi
     unblocked_when="the PO follows docs/TAKEOVER-RULES.md → Merge Takeover for PR #$pr_number, or pushes a new head and posts /unblock"
     state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: a session stopped after its push, before the hand-off finished; the dispatcher starts no session for this head"
+    if [[ "$where" == "in-merge" ]]; then
+        unblocked_when="the PO merges PR #$pr_number by hand with /merge $pr_number and then runs /cleanup $pr_number (docs/TAKEOVER-RULES.md → Merge Takeover)"
+        state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: the head was not pushed by a dispatcher session (for example a manual fix round, or a session that stopped after its push), so the dispatcher does not merge it"
+    fi
     echo "BLOCKED: posting resource blocker on #$issue_num"
     if ! post_comment "$issue_num" "## Blocked Declaration
 Type: resource
