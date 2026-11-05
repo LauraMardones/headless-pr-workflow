@@ -16,7 +16,7 @@
 # #293) and the dispatcher's finish_story writes "Done" after a merge.
 #
 # Overridable for tests: HPW_BIN, MERGE_GATE_SCRIPT, SESSION_SUMMARY_SCRIPT,
-# COMMENT_RETRY_DELAY.
+# COMMENT_RETRY_DELAY (read by `hpw dispatcher write`).
 
 set -uo pipefail
 
@@ -24,8 +24,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"
 MERGE_GATE_SCRIPT="${MERGE_GATE_SCRIPT:-$SCRIPT_DIR/merge-gate-summary}"
 SESSION_SUMMARY_SCRIPT="${SESSION_SUMMARY_SCRIPT:-$SCRIPT_DIR/session-summary.sh}"
-# shellcheck source=scripts/lib/evidence-pending.sh
-source "$SCRIPT_DIR/lib/evidence-pending.sh"
 
 PR="" REPO="" METHOD="squash"
 while [[ $# -gt 0 ]]; do
@@ -167,28 +165,25 @@ echo "✓ PR #$PR merged at head ${merged_head:0:7}"
 # Merge confirmation comment: the exact gate line, then the generated summary.
 # It is durable evidence and the merged PR is never merged again, so a failure to
 # post it (after retries) fails the phase; the full text goes to the log. The
-# exact text is also left on the PR as an evidence-pending comment (issue #348),
-# so a later dispatcher run posts it once, even though the PR is already merged.
+# verified write (`hpw dispatcher write comment --evidence-item`, issue #432) also
+# leaves the exact text on the PR as an evidence-pending comment (issue #348), so
+# a later dispatcher run posts it once, even though the PR is already merged.
 summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command merge --pr "$PR" --head "$merged_head" \
         --checks "merge gate pass (scripts/merge-gate-summary), hpw merge-pr --execute ($METHOD)" \
         --blockers none --next cleanup) \
     || { echo "PR #$PR is merged, but the merge Session Summary could not be generated; no confirmation comment posted." >&2; exit 1; }
 confirmation="$gate_line"$'\n\n'"$summary"
-posted=false
-for attempt in 1 2 3; do
-    if gh api "repos/$REPO/issues/$PR/comments" -X POST -f body="$confirmation" >/dev/null; then
-        posted=true; break
-    fi
-    sleep "${COMMENT_RETRY_DELAY:-2}"
-done
-if ! $posted; then
+# The verified write (ADR-014 → Block 1, issue #432) tries it up to 3 times,
+# reads it back, and leaves the evidence-pending copy when it still fails.
+body_file=$(mktemp) || { echo "PR #$PR is merged, but a temporary file for the confirmation could not be created." >&2; exit 1; }
+printf '%s' "$confirmation" > "$body_file"
+write_rc=0
+"$HPW_BIN" dispatcher write comment --repo "$REPO" --number "$PR" --body-file "$body_file" \
+    --evidence-item merge-confirmation --evidence-head "$merged_head" >/dev/null || write_rc=$?
+rm -f "$body_file"
+if [[ $write_rc -ne 0 ]]; then
     echo "PR #$PR is merged, but the merge confirmation comment could not be posted after 3 attempts. A later dispatcher run posts it; or post it manually:" >&2
     echo "$confirmation" >&2
-    pending=$(evidence_pending_comment "merge-confirmation" "$merged_head" "$confirmation")
-    for attempt in 1 2 3; do
-        gh api "repos/$REPO/issues/$PR/comments" -X POST -f body="$pending" >/dev/null && break
-        sleep "${COMMENT_RETRY_DELAY:-2}"
-    done
     exit 1
 fi
 

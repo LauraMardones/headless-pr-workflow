@@ -3,7 +3,10 @@
 A fake ``gh`` (board, issues, pull requests, comments), a fake ``claude``
 on ``CLAUDE_BIN`` (Claude sessions, issue #314), a fake ``curl`` (the Slack
 webhook) and a stub allowance script on
-``ALLOWANCE_SCRIPT``. All state lives in files under ``MOCK_DIR``, so a test
+``ALLOWANCE_SCRIPT``. A fake ``hpw`` on ``HPW_BIN`` runs the real verified-write
+block (``hpw dispatcher write``, issue #432) with ``gh`` started as ``bash <fake gh>``
+(``tests/hpw_dispatcher_route.py``), so the block reads and writes the same fake
+state on Linux and Windows. All state lives in files under ``MOCK_DIR``, so a test
 can run the dispatcher several times against the same GitHub state. Issues and
 PRs carry a fixed old activity date, so a story "In implementation" is always
 past the stale threshold.
@@ -32,6 +35,7 @@ import os
 import sys
 from pathlib import Path
 
+from tests.hpw_dispatcher_route import fake_hpw_route
 from tests.script_tools import BASH, missing_tools, requires, run_tree, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -95,7 +99,7 @@ set -euo pipefail
 echo "gh $*" >> "$MOCK_DIR/gh.log"
 [[ "${1:-}" == "api" ]] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
 shift
-endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body="" label_value=""
+endpoint="" jq_expr="" query="" item_id="" option_id="" method="GET" body="" label_value="" number=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f) case "$2" in
@@ -106,6 +110,10 @@ while [[ $# -gt 0 ]]; do
                 labels\[\]=*) label_value="${2#*=}" ;;
                 name=*)     label_value="${2#name=}" ;;
             esac
+            shift 2 ;;
+        -F) case "$2" in number=*) number="${2#number=}" ;; esac; shift 2 ;;
+        --input)  # a JSON request body on stdin, as the write block sends a comment (#432)
+            [[ "$2" == - ]] && { body=$(jq -j '.body + "x"'); body="${body%x}"; }
             shift 2 ;;
         -X) method="$2"; shift 2 ;;
         --jq) jq_expr="$2"; shift 2 ;;
@@ -129,6 +137,17 @@ if [[ "$endpoint" == "graphql" ]]; then
         jq --arg i "$item_id" --arg n "$name" '. + {($i): $n}' "$MOCK_DIR/state.json" > "$MOCK_DIR/state.tmp"
         mv "$MOCK_DIR/state.tmp" "$MOCK_DIR/state.json"
         echo '{}'
+        exit 0
+    fi
+    if [[ "$query" == *projectItems* ]]; then  # one issue's board item, as the write block reads it (#432)
+        jq --slurpfile st "$MOCK_DIR/state.json" --argjson n "$number" '
+            . as $b |
+            {data:{repository:{
+                projectsV2:{nodes:[{id: "PROJ", fields: {nodes: [{id: "STATUS_FIELD", name: "Status",
+                    options: [$b.options | to_entries[] | {id: .value, name: .key}]}]}}]},
+                issue:{projectItems:{nodes:[$b.items[] | select(.number == $n) |
+                    {id: .id, project: {id: "PROJ"}, fieldValueByName: {name: ($st[0][.id] // .status)}}]}}
+            }}}' "$MOCK_DIR/board.json"
         exit 0
     fi
     jq --slurpfile st "$MOCK_DIR/state.json" '
@@ -181,7 +200,7 @@ case "$path" in
             jq --arg b "$body" --arg t "$(tick)" --arg u "$MOCK_BOT" \
                 '. + [{user: {login: $u}, created_at: $t, body: $b, posted: true}]' "$file" > "$file.tmp"
             mv "$file.tmp" "$file"
-            jq -c '.[-1] | {created_at}' "$file"
+            jq -c '.[-1] | {created_at, user, body}' "$file"
         else
             cat "$file"
         fi ;;
@@ -344,6 +363,8 @@ class Dispatcher:
         self.bin = tmp / "bin"
         self.bin.mkdir()
         for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL), ("claude", FAKE_CLAUDE),
+                           ("hpw", "#!/usr/bin/env bash\n" + fake_hpw_route(self.bin / "gh", BASH or "bash")
+                                   + 'echo "fake hpw: unsupported: $*" >&2\nexit 1\n'),
                            ("allowance.sh", FAKE_ALLOWANCE),
                            ("merge.sh", FAKE_PHASE.replace("PHASE_NAME", "merge")),
                            ("cleanup.sh", FAKE_PHASE.replace("PHASE_NAME", "cleanup"))):
@@ -490,6 +511,9 @@ class Dispatcher:
             "ALLOWANCE_SEQ": seq,
             "MERGE_SCRIPT": (self.bin / "merge.sh").as_posix(),
             "CLEANUP_SCRIPT": (self.bin / "cleanup.sh").as_posix(),
+            # The verified-write block (#432) runs for real, with gh as `bash <fake gh>`.
+            "HPW_BIN": (self.bin / "hpw").as_posix(),
+            "COMMENT_RETRY_DELAY": "0",
         }
         full_env.update(windows_env())
         full_env.update(env or {})

@@ -10,6 +10,14 @@
 #   call. Stderr writes are exempt.
 # - dispatch-handled inspects literal `exit 1` paths marked expected/blocker in
 #   their preceding context. Helper/unexpected failure exits are excluded.
+# - verified-write (ADR-014 -> Decision -> 5, issue #432) flags a GitHub write
+#   that does not go through `hpw dispatcher write`: `gh api` with a write method
+#   (-X/--method POST|PATCH|PUT|DELETE), `-f body=` or `--input`; a GraphQL
+#   `mutation(`/`mutation {`; `gh issue|pr comment|edit|close|reopen|ready|merge|review`;
+#   `gh label`; `curl` with a write method. Comment lines, the block's own shim
+#   functions and the VERIFIED_WRITE_ALLOW functions are not checked. It also
+#   applies to scripts/lib/*.sh, which the dispatcher sources; the other checks
+#   do not.
 #
 # Results: PASS|FAIL <path-or-> <check-id> - <reason>
 # Exit 0: all applicable checks pass (including all-SKIP)
@@ -31,7 +39,16 @@ USAGE
 
 die() { printf 'dispatcher-change-check: %s\n' "$*" >&2; exit 2; }
 
-CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled)
+CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write)
+
+# The shims of Block 1 in scripts/dispatcher-invoke.sh: they call the block.
+VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment set_project_status
+    set_project_status_checked set_project_status_ready evidence_retry label_pending_cleanup)
+# Exceptions: one "<function> <check-id>" per "stays" row of ADR-014 -> Decision
+# -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
+VERIFIED_WRITE_ALLOW=(
+    "graphql verified-write"  # dispatcher-poll.sh: read-only GraphQL query sent with curl -X POST
+)
 files=()
 case "${1-}" in
     --help) [[ $# -eq 1 ]] || die '--help does not accept arguments'; usage; exit 0 ;;
@@ -50,7 +67,7 @@ esac
 eligible=()
 for file in "${files[@]}"; do
     base=${file##*/}
-    if [[ $base == dispatcher-*.sh || $base == slack-notify.sh ]]; then
+    if [[ $base == dispatcher-*.sh || $base == slack-notify.sh || $file == *lib/*.sh ]]; then
         [[ -f $file && -r $file ]] || die "eligible file is missing or unreadable: $file"
         eligible+=("$file")
     fi
@@ -88,8 +105,55 @@ logical_source() {
     ' "$1"
 }
 
+# verified_write_hits <logical-source-file> — "<line>:<function>:<text>" for each
+# flagged write outside the shim and allowlisted functions.
+verified_write_hits() {
+    local skip=" ${VERIFIED_WRITE_SHIMS[*]} " entry
+    for entry in "${VERIFIED_WRITE_ALLOW[@]}"; do
+        [[ ${entry#* } == verified-write ]] && skip+="${entry%% *} "
+    done
+    awk -v skip="$skip" '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/ {
+        fn=$0; sub(/^[[:space:]]*(function[[:space:]]+)?/, "", fn); sub(/[[:space:]]*\(.*/, "", fn)
+        if ($0 ~ /}[[:space:]]*$/) { if (index(skip, " " fn " ") == 0) check(); fn=""; next }  # one-line function
+      }
+      /^}/ { if (fn != "" && index(skip, " " fn " ") == 0) check(); fn=""; next }
+      { if (fn == "" || index(skip, " " fn " ") == 0) check() }
+      function check(   l, write_method, body_field) {
+        l=$0
+        # \047 is a single quote; this program is itself single-quoted.
+        write_method="(-X|--method|--request)[[:space:]=]*[\"\047]?(POST|PATCH|PUT|DELETE)"
+        body_field="(-f|--raw-field|-F|--field)[[:space:]]+[\"\047]?body="
+        if ((l ~ /gh[[:space:]]+api/ && (l ~ write_method || l ~ body_field || l ~ /--input([[:space:]]|=)/)) ||
+            l ~ /mutation[[:space:]]*([A-Za-z_][A-Za-z0-9_]*[[:space:]]*)?[({]/ ||
+            l ~ /gh[[:space:]]+(issue|pr)[[:space:]]+(comment|edit|close|reopen|ready|merge|review)([[:space:]]|$)/ ||
+            l ~ /gh[[:space:]]+label([[:space:]]|$)/ ||
+            (l ~ /curl([[:space:]]|$)/ && l ~ write_method))
+          print NR ":" (fn == "" ? "-" : fn) ":" l
+      }
+    ' "$1"
+}
+
 for file in "${eligible[@]}"; do
     base=${file##*/}
+
+    if [[ $file == *lib/*.sh && $base != dispatcher-*.sh ]]; then
+        # A library the dispatcher sources: only the verified-write rule applies.
+        for check in executable slack-guard dry-run stdout-json dispatch-handled; do
+            result SKIP "$file" "$check" 'library file; only verified-write applies'
+        done
+        tmp=$(mktemp)
+        logical_source "$file" >"$tmp"
+        hits=$(verified_write_hits "$tmp")
+        if [[ -z $hits ]]; then
+            result PASS "$file" verified-write 'no GitHub write outside hpw dispatcher write'
+        else
+            result FAIL "$file" verified-write "GitHub write outside hpw dispatcher write at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
+        fi
+        rm -f "$tmp"
+        continue
+    fi
 
     mode=$(git ls-files --stage -- "$file" 2>/dev/null | awk 'NR==1 {print $1}')
     if [[ -n $mode ]]; then
@@ -200,6 +264,21 @@ for file in "${eligible[@]}"; do
             result SKIP "$file" dispatch-handled 'no expected literal exit 1 paths matched'
         else
             result FAIL "$file" dispatch-handled 'an expected exit 1 path lacks DISPATCH_HANDLED=true'
+        fi
+    fi
+
+    if [[ $base == slack-notify.sh ]]; then
+        result SKIP "$file" verified-write 'the Slack adapter writes no GitHub state'
+    elif [[ $base == dispatcher-change-check.sh ]]; then
+        # ADR-014 -> Decision -> 7: the checker itself makes no GitHub call; its
+        # own patterns would match.
+        result SKIP "$file" verified-write 'the checker itself makes no GitHub call'
+    else
+        hits=$(verified_write_hits "$tmp")
+        if [[ -z $hits ]]; then
+            result PASS "$file" verified-write 'no GitHub write outside hpw dispatcher write'
+        else
+            result FAIL "$file" verified-write "GitHub write outside hpw dispatcher write at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
         fi
     fi
     rm -f "$tmp"

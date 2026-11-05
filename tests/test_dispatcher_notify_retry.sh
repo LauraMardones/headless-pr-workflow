@@ -60,7 +60,29 @@ else
     cat "$T/gh/state_\$n" 2>/dev/null || echo open
 fi
 FAKE
-    chmod +x "$T/scripts/"*.sh "$T/bin/gh"
+    # fake hpw next to the script (its default HPW_BIN): the verified write of
+    # issue #432 reaches the fake gh the way the script's old direct call did.
+    cat > "$T/scripts/hpw" <<'FAKE'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == "dispatcher write comment" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
+shift 3
+repo="" number="" file=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo) repo="$2"; shift 2 ;;
+        --number) number="$2"; shift 2 ;;
+        --body-file) file="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if gh api "repos/$repo/issues/$number/comments" -X POST -f body="$(cat "$file")" >/dev/null 2>&1; then
+    echo '{"ok": true, "block": "write", "operation": "comment", "result": "written", "error": null}'
+    exit 0
+fi
+echo '{"ok": false, "block": "write", "operation": "comment", "result": "failed", "error": "write comment: refused"}'
+exit 1
+FAKE
+    chmod +x "$T/scripts/"*.sh "$T/scripts/hpw" "$T/bin/gh"
     export PATH="$T/bin:$PATH" DISPATCHER_STATE_DIR="$T/state"
     export SLACK_WEBHOOK_URL=x
 }

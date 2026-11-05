@@ -2,8 +2,12 @@
 
 A fake ``gh`` serves JSON files from a mock directory (the file name is the
 endpoint without its query, ``/`` as ``_``) and applies ``--jq`` with the real
-``jq``; POSTs are logged. A fake ``hpw`` and a fake merge gate print canned
-output and log their arguments. ``session-summary.sh`` is the real one.
+``jq``; POSTs are logged, and a posted comment is added to the comments file so
+it can be read back (a missing comments file reads as no comments unless
+``comments_unreadable`` exists). A fake ``hpw`` and a fake merge gate print
+canned output and log their arguments; ``hpw dispatcher ...`` instead runs the
+real verified-write block (issue #432) on the fake ``gh``
+(``tests/hpw_dispatcher_route.py``). ``session-summary.sh`` is the real one.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from tests.hpw_dispatcher_route import fake_hpw_route
 from tests.script_tools import BASH, missing_tools, requires, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +38,9 @@ while [[ $# -gt 0 ]]; do
         --jq) jq_expr="$2"; shift 2 ;;
         -X) method="$2"; shift 2 ;;
         -f) case "$2" in body=*) body="${2#body=}" ;; esac; shift 2 ;;
+        --input)  # a JSON request body on stdin, as the write block sends a comment (#432)
+            [[ "$2" == - ]] && { body=$(jq -j '.body + "x"'); body="${body%x}"; }
+            shift 2 ;;
         --paginate) shift ;;
         *) [[ -z "$endpoint" ]] && endpoint="$1"; shift ;;
     esac
@@ -50,9 +58,22 @@ if [[ "$method" == "POST" ]]; then
     echo "POST $endpoint" >> "$MOCK_DIR/posts.log"
     printf '%s' "$body" > "$MOCK_DIR/post_$(echo "${endpoint%%\?*}" | tr / _).body"
     printf '%s\n---\n' "$body" >> "$MOCK_DIR/post_bodies.log"
+    if [[ "$endpoint" == */comments ]]; then  # kept, so the verified write can read it back (#432)
+        file="$MOCK_DIR/$(echo "$endpoint" | tr / _).json"
+        [[ -f "$file" ]] || echo '[]' > "$file"
+        n=$(cat "$MOCK_DIR/clock" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$MOCK_DIR/clock"
+        jq --arg b "$body" --arg t "$(printf '2026-10-14T10:%02d:%02dZ' $((n / 60)) $((n % 60)))" \
+            '. + [{user: {login: "bot"}, body: $b, created_at: $t}]' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        jq -c '.[-1]' "$file"
+    fi
     exit 0
 fi
 file="$MOCK_DIR/$(echo "${endpoint%%\?*}" | tr / _).json"
+# A missing comments file is a PR or issue with no comments, unless the test
+# makes the comments unreadable.
+if [[ ! -f "$file" && "$file" == *_comments.json && ! -f "$MOCK_DIR/comments_unreadable" ]]; then
+    echo '[]' > "$file"
+fi
 [[ -f "$file" ]] || { echo "fake gh: no fixture for $endpoint" >&2; exit 1; }
 if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" "$file"; else cat "$file"; fi
 """
@@ -60,6 +81,7 @@ if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" "$file"; else cat "$file"; fi
 # Prints $MOCK_DIR/hpw_<subcommand>.json, writes hpw_<subcommand>.stderr to stderr
 # and exits with hpw_<subcommand>.rc (default 0).
 FAKE_HPW = r"""#!/usr/bin/env bash
+ROUTE_DISPATCHER
 echo "hpw $*" >> "$MOCK_DIR/hpw.log"
 sub="$1"
 [[ -f "$MOCK_DIR/hpw_$sub.json" ]] && cat "$MOCK_DIR/hpw_$sub.json"
@@ -85,7 +107,8 @@ class PhaseHarness:
         self.bin.mkdir()
         self.mock = tmp / "mock"
         self.mock.mkdir()
-        for name, text in (("gh", FAKE_GH), ("hpw", FAKE_HPW), ("gate", FAKE_GATE)):
+        hpw = FAKE_HPW.replace("ROUTE_DISPATCHER\n", fake_hpw_route(self.bin / "gh", BASH or "bash"))
+        for name, text in (("gh", FAKE_GH), ("hpw", hpw), ("gate", FAKE_GATE)):
             path = self.bin / name
             path.write_text(text, encoding="utf-8", newline="\n")
             path.chmod(0o755)
@@ -114,6 +137,7 @@ class PhaseHarness:
             "MOCK_DIR": self.mock.as_posix(),
             "COMMENT_RETRY_DELAY": "0",
             "HPW_BIN": (self.bin / "hpw").as_posix(),
+            "DISPATCHER_LOGIN": "bot",  # the account the fake gh posts comments with
             "MERGE_GATE_SCRIPT": (self.bin / "gate").as_posix(),
             "GIT_CONFIG_GLOBAL": os.devnull,
         }
