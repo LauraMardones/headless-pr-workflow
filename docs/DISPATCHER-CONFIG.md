@@ -230,6 +230,38 @@ It prints `Status: #<n> <old> -> <new>` (or `already <new>`) and exits `0` only 
 
 ---
 
+## GitHub writes — `hpw dispatcher write`
+
+Every comment, board status and label the dispatcher writes goes through one building block, `scripts/hpw dispatcher write` (ADR-014 → Block 1, issue #432; code in `src/headless_pr_workflow/dispatcher/`). It runs `gh` with the token above, writes, reads the result back from GitHub and retries. A write that is not confirmed by the read-back is a failure, never a success.
+
+```
+scripts/hpw dispatcher write comment      --repo <owner/repo> --number <n> --body-file <path> [--attempts <n>] [--evidence-item <item> --evidence-head <sha|->] [--dry-run]
+scripts/hpw dispatcher write board-status --repo <owner/repo> --issue <n> --status "<name>" [--attempts <n>] [--dry-run]
+scripts/hpw dispatcher write label        --repo <owner/repo> --number <n> (--add|--remove) <name> [--attempts <n>] [--dry-run]
+scripts/hpw dispatcher write retry-pending --repo <owner/repo> --target <n> --item <item> --ref <ref> --story <n> [--expected-head <sha>] [--dry-run]
+```
+
+- **stdout:** one JSON line, on success and on failure: `ok`, `block`, `operation`, `result`, `error` (`"<step>: <reason>"` or `null`), and per operation `url`, `created_at`, `attempts`, or `before`/`after` for a board status.
+- **Exit codes:** `0` `written`, `already` or `dry-run` (`retry-pending`: `none`, `posted`); `1` `pending`, `failed`, `missing` or `stale`; `4` `retry-pending` stopped until the PO's `/unblock` (`gave-up`); `2` invalid arguments. A write never exits `3`.
+- **Bounds:** at most `--attempts` tries (default 3), `COMMENT_RETRY_DELAY` seconds apart (default 2). A comment is posted at most once per call: before a retry the block looks for an identical comment of the dispatcher's own account that was not there before the first try. The comment body is sent on stdin (`gh api --input -`), never on the command line.
+- **Evidence:** with `--evidence-item`, a comment that still fails is left as the evidence-pending comment of issue #348 (up to 3 more tries) and the result is `pending`. `retry-pending` posts that text on a later run, counts a failed run on the story, and returns `gave-up` when `EVIDENCE_RETRY_MAX` (default 3) is reached; the bash caller then posts the give-up blocker.
+- **The token** and request headers are never printed.
+
+The bash functions callers use (`post_comment`, `set_project_status`, `set_project_status_checked`, `set_project_status_ready`, `evidence_retry`, `label_pending_cleanup`) are thin shims around the block in `scripts/dispatcher-invoke.sh`; `HPW_BIN` (default `scripts/hpw`) names the `hpw` to run, as in `dispatcher-merge.sh`. `dispatcher-merge.sh`, `dispatcher-cleanup.sh` and `dispatcher-notify-retry.sh` call the block directly. Each call is a separate process, so a merged change to the block takes effect on the next call (see [The dispatcher script is read completely before any session starts](#the-dispatcher-script-is-read-completely-before-any-session-starts)).
+
+**Board writes fail closed.** A board status that is not written stops its step and leaves a state a later run retries. The shim logs one line: `[BOARD ERROR] #<n>: could not set "<status>" (<error>)`.
+
+| Where | Status | When it is not written |
+|---|---|---|
+| `finish_story` after a merge | `Done` | `/cleanup` does not run; the story stays `In merge`, so the merged-PR resume reruns it on a later run |
+| `finish_story`, cleanup evidence missing | `In merge` | the run fails (non-zero) |
+| Stale-story rollback | `Ready for implementation` | written before the Recovery Comment; no Recovery Comment is posted and the story is not counted as recovered, so the next run tries again without a duplicate comment |
+| Reserve skip and allowance error before `/implement` | `Ready for implementation` | no session starts (as before); the run still ends as handled |
+| Hand-off, fix-round and pause rollbacks | `In review`, `Ready for implementation` | as before: the caller keeps its retryable state |
+| E1, before `/implement` | `In implementation` | **best-effort**: the session still starts and the hand-off keeps the story from starting twice (ADR-014 → Decision → 7) |
+
+**Change check.** `scripts/dispatcher-change-check.sh` has the check id `verified-write`: a `gh api` call with a write method, `-f body=` or `--input`, a GraphQL `mutation`, `gh issue|pr comment|edit|close|reopen|ready|merge|review`, `gh label`, or `curl` with a write method fails the check outside the shims above. It also checks the `scripts/lib/*.sh` files the dispatcher sources. Its exceptions are an allowlist of function name and check id in the script, one per "stays" row of ADR-014 → Decision → 7.
+
 ## Slack Notifications
 
 The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for these events. There are no "story dispatched" or "closed" events: normal transitions are not notified.
@@ -449,7 +481,7 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` a
 
 "Conflicts with main" is the test of the hand-off above: `mergeable == false` or `mergeable_state == "dirty"` from `gh api repos/<repo>/pulls/<n>` (issue #409). When that read fails, `/merge` runs as before and its merge gate decides.
 
-**Evidence that could not be written (issue #348).** The `merge-owner` marker, the merge confirmation and the cleanup closing Session Summary are durable evidence. When a write of one fails (after 3 attempts), the writer leaves one *evidence-pending* comment with the exact text as a hidden base64 payload (`scripts/lib/evidence-pending.sh`; nothing is kept on the runner). The dispatcher posts that text once on a later run. Only comments of the dispatcher's own account count, for the pending comment and for the proof that the text is already posted; a copy written by anyone else proves nothing.
+**Evidence that could not be written (issue #348).** The `merge-owner` marker, the merge confirmation and the cleanup closing Session Summary are durable evidence. When a write of one fails (after 3 attempts), the writer leaves one *evidence-pending* comment with the exact text as a hidden base64 payload (`scripts/lib/evidence-pending.sh` format; the merge confirmation and the closing summary through `hpw dispatcher write comment --evidence-item`; nothing is kept on the runner). The dispatcher posts that text once on a later run. Only comments of the dispatcher's own account count, for the pending comment and for the proof that the text is already posted; a copy written by anyone else proves nothing.
 
 | Item | Pending comment on | Posted by a later run |
 |---|---|---|
@@ -701,4 +733,4 @@ No `## Blocked Declaration` is posted, no Slack message is sent and no actionabl
 
 bash reads a script from the file in pieces, so a session that rewrites `scripts/dispatcher-invoke.sh` while the run waits for it (any story that changes the dispatcher does) could make the run resume in the middle of a line (issue #345). The whole body of the script is therefore one brace group closed by `}; exit $?` on a single line: bash parses it completely before the first session starts, and nothing is read from the file afterwards. Keep it that way: no code after the group.
 
-The `exec bash "$0"` tail calls start a new process on purpose, so the next story runs the code that was just merged. The other files are safe: `scripts/lib/claude-session.sh`, `scripts/lib/decision-blocker.sh` and `scripts/lib/evidence-pending.sh` are sourced once at start, and `dispatcher-usage-limit.sh`, `dispatcher-allowance.sh`, `slack-notify.sh`, `dispatcher-change-check.sh` and `session-summary.sh` run as separate processes that read the file at call time. Any new script the dispatcher sources after a session, or runs for the length of a session, needs the same treatment; check `dispatcher-merge.sh` and `dispatcher-cleanup.sh` (#264) when they land.
+The `exec bash "$0"` tail calls start a new process on purpose, so the next story runs the code that was just merged. The other files are safe: `scripts/lib/claude-session.sh`, `scripts/lib/decision-blocker.sh` and `scripts/lib/evidence-pending.sh` are sourced once at start, and `dispatcher-usage-limit.sh`, `dispatcher-allowance.sh`, `slack-notify.sh`, `dispatcher-change-check.sh`, `session-summary.sh` and `hpw dispatcher write` (issue #432) run as separate processes that read the file at call time. Any new script the dispatcher sources after a session, or runs for the length of a session, needs the same treatment; check `dispatcher-merge.sh` and `dispatcher-cleanup.sh` (#264) when they land.

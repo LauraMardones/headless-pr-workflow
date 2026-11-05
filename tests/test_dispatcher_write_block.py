@@ -10,10 +10,13 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.script_tools import BASH
 
 from headless_pr_workflow.dispatcher import cli
 from headless_pr_workflow.dispatcher.gateway import BoardItem, GatewayError, GhGateway, parse_json_stream
@@ -295,6 +298,19 @@ def test_evidence_pending_comment_matches_the_bash_library_format():
     assert body.endswith(" -->") and "\n\n<!-- hpw:dispatcher action=evidence-pending item=cleanup-summary head=- payload=" in body
     payload = body.rsplit("payload=", 1)[1].removesuffix(" -->")
     assert "\n" not in payload and base64.b64decode(payload).decode("utf-8").endswith("— done")
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_evidence_pending_comment_equals_the_bash_library_output():
+    """``$(evidence_pending_comment ...)`` as the bash callers posted it, byte for byte."""
+    text = 'Merge gate: pass head=abc\n\n## Session Summary\nBlockers: "none" — ok'
+    lib = (Path(__file__).resolve().parent.parent / "scripts" / "lib" / "evidence-pending.sh").as_posix()
+    proc = subprocess.run(
+        [BASH, "-c", f'source "{lib}"; printf "%s" "$(evidence_pending_comment "$1" "$2" "$(cat)")"', "_",
+         "merge-confirmation", "a" * 40],
+        input=text.encode("utf-8"), capture_output=True, check=True,
+    )
+    assert proc.stdout.decode("utf-8") == evidence_pending_comment("merge-confirmation", "a" * 40, text)
 
 
 def test_evidence_pending_write_failing_too_is_failed_naming_the_step(gw, settings):

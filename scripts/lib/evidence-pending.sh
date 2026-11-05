@@ -4,9 +4,12 @@
 # The "evidence pending" comment of issue #348. When the dispatcher's merge or
 # cleanup phase cannot write a comment that is durable evidence, it writes one
 # small comment that carries the exact text as a hidden payload. A later
-# dispatcher run (scripts/dispatcher-invoke.sh, evidence_retry) posts that text
-# once and then treats the item as done. The comment is trusted only when it
-# was written by the dispatcher's own account.
+# dispatcher run (scripts/dispatcher-invoke.sh, evidence_retry, through
+# `hpw dispatcher write retry-pending`) posts that text once and then treats the
+# item as done. The comment is trusted only when it was written by the
+# dispatcher's own account. `hpw dispatcher write comment --evidence-item`
+# (issue #432) writes the same format: evidence_pending_comment() in
+# src/headless_pr_workflow/dispatcher/write.py. Keep the two in step.
 #
 # evidence_pending_comment <item> <head|-> <payload>
 #   Prints the comment body: one visible line, then the hidden marker

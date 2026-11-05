@@ -3752,12 +3752,11 @@ continue_with_next_ready_story() {
 LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
 echo ""
 echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
-# Issue #432: a story whose "In implementation" is not on the board starts no
-# session; it keeps its status and the run ends non-zero, so a later poll retries.
-if ! set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"; then
-    echo "Error: #$ISSUE_NUMBER was not moved to \"In implementation\"; /implement not started, a later poll retries." >&2
-    exit 1
-fi
+# Best-effort (ADR-014 -> Decision -> 7, issue #432): the session still starts
+# when this write fails, as tests/test_dispatcher_review_loop.py::
+# test_failed_first_status_write_does_not_start_the_story_twice requires; the
+# hand-off records the pending hand-off so the story is not started twice.
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation" || true
 # The PR head before the session, if the story already has an open PR: the
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')

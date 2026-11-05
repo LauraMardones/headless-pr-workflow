@@ -69,7 +69,7 @@ Required behavior:
    - run `scripts/ac-summary.sh --issue $ARGUMENTS --repo LauraMardones/headless-pr-workflow` and use the extracted checklist to verify AC/DoD coverage; exit `2` means no checklist was found and requires a manual issue-body fallback, not that coverage passed, while exit `1` is an invocation or lookup failure
    - if `scripts/ac-summary.sh` exits `1` because `gh` or GraphQL is unavailable, read the AC/DoD checklist from the issue body through the available GitHub transport (the same manual fallback as exit `2`) and continue; AC/DoD coverage must still be verified
    - do not copy the extracted AC/DoD checklist into the handoff comment
-   - if any changed file is eligible under `scripts/dispatcher-change-check.sh`, run `bash scripts/dispatcher-change-check.sh --files <changed-files...>`; fix every `FAIL` (exit `1`) before handoff, and treat exit `2` as an invocation or input blocker
+   - if any changed file is eligible under `scripts/dispatcher-change-check.sh` (a `scripts/dispatcher-*.sh` file, `scripts/slack-notify.sh`, or a `scripts/lib/*.sh` file the dispatcher sources), run `bash scripts/dispatcher-change-check.sh --files <changed-files...>`; fix every `FAIL` (exit `1`) before handoff, and treat exit `2` as an invocation or input blocker; name the result of each check id in the Session Summary `--checks`, for example `dispatcher-change-check: executable PASS, slack-guard SKIP, dry-run SKIP, stdout-json SKIP, dispatch-handled PASS, verified-write PASS` (ADR-014 → Decision → 6)
    - confirm the PR body contains `Closes #$ARGUMENTS` and a meaningful description
    - confirm the issue link in the PR references the correct issue number
    - confirm command files use `In implementation`, not the legacy progress-status spelling
