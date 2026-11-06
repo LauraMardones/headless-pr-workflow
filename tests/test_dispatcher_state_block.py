@@ -150,6 +150,16 @@ def test_an_event_file_keeps_its_valid_records_next_to_a_malformed_line(capsys, 
     assert [e["issue"] for e in out["data"]] == [7]
 
 
+def test_an_event_file_keeps_its_valid_records_next_to_an_undecodable_line(capsys, tmp_path):
+    path = path_of(tmp_path, "actionable-events")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(EVENT.encode() + b"\n\xff\n")
+    rc, out, _ = read(capsys, "actionable-events")
+    assert rc == 1 and out["result"] == "malformed" and out["dropped"] == 1
+    assert [e["issue"] for e in out["data"]] == [7]
+    assert path.read_bytes() == EVENT.encode() + b"\n\xff\n"
+
+
 @pytest.mark.parametrize("name", STALE)
 def test_a_file_dated_another_day_is_stale(capsys, tmp_path, name):
     path = put(tmp_path, name, STALE[name])

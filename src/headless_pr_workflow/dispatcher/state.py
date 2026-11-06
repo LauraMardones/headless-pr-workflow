@@ -165,6 +165,13 @@ def parse(name: str, text: str, today: str) -> tuple[str, Any, dict[str, Any]]:
     return "malformed", None, {}
 
 
+def _decode_line(line: bytes) -> str:
+    try:
+        return line.decode("utf-8")
+    except UnicodeDecodeError:
+        return "\ufffd"  # not JSON, so the line counts as a dropped record
+
+
 def read_state(name: str, repo: str, env: Mapping[str, str] | None = None) -> StateResult:
     env = os.environ if env is None else env
     path = state_path(name, repo, env)
@@ -187,6 +194,11 @@ def read_state(name: str, repo: str, env: Mapping[str, str] | None = None) -> St
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
+        if name == "actionable-events":
+            # Decode record by record: an undecodable line is dropped, the valid records next to it are kept (#338).
+            text = "\n".join(_decode_line(line) for line in raw.split(b"\n"))
+            status, data, extra = parse(name, text, today_utc(env))
+            return _result("read", status, name, error=f"read {path}: malformed content", data=data, **extra, **where)
         return _result("read", "malformed", name, error=f"read {path}: not valid UTF-8", data=empty_value(name), **where)
     status, data, extra = parse(name, text, today_utc(env))
     error = None if status == "ok" else f"read {path}: {'malformed content' if status == 'malformed' else 'dated another day'}"
