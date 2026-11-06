@@ -201,36 +201,37 @@ fi
 
 # ─── run ──────────────────────────────────────────────────────────────────────
 
+# own_comments_json <issue-or-pr> [<marker>] — the comments of the dispatcher's
+# own account, as one JSON array (`id`, `created_at`, `body`), through Block 2.
+# Fails when the account or the comments cannot be read.
+own_comments_json() {
+    local out
+    out=$("$HPW_BIN" dispatcher marker list --repo "$REPO" --number "$1" ${2:+--marker="$2"} 2>/dev/null) || return 1
+    jq -ec '.comments' <<< "$out" 2>/dev/null
+}
+
 # resolved <event> <issue> <since>: 0 when the PO no longer needs to act.
 # A failed lookup counts as unresolved so the event is never lost to an API error.
 # evidence_resolved <issue> <context-json>: 0 when the missing evidence is posted
 # on its target or #348's give-up blocker for the item is on the story. Only
 # comments of the dispatcher's own account count; any unreadable fact is 1.
 evidence_resolved() {
-    local issue="$1" ctx="$2" bot target kind text gave story_comments target_comments
-    bot=$(gh api user --jq '.login' 2>/dev/null) || return 1
-    [[ -n "$bot" ]] || return 1
+    local issue="$1" ctx="$2" target kind text gave own_gave target_comments
     target=$(jq -r '.target_number // empty' <<< "$ctx" 2>/dev/null) || return 1
     kind=$(jq -r '.resolve_kind // empty' <<< "$ctx" 2>/dev/null) || return 1
     text=$(jq -r '.resolve_text // ""' <<< "$ctx" 2>/dev/null) || return 1
     gave=$(jq -r '.gave_up_marker // empty' <<< "$ctx" 2>/dev/null) || return 1
     [[ "$target" =~ ^[0-9]+$ && -n "$kind" ]] || return 1
-    story_comments=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
-        || return 1
-    if [[ -n "$gave" ]] && jq -e --arg bot "$bot" --arg g "$gave" \
-            'any(.[]; (.user.login // "") == $bot and ((.body // "") | contains($g)))' <<< "$story_comments" >/dev/null 2>&1; then
-        return 0
+    # The dispatcher's own comments come from Block 2 (`hpw dispatcher marker list`);
+    # an account or comments that cannot be read leave the event unresolved.
+    if [[ -n "$gave" ]]; then
+        own_gave=$(own_comments_json "$issue" "$gave") || return 1
+        jq -e 'length > 0' <<< "$own_gave" >/dev/null 2>&1 && return 0
     fi
-    if [[ "$target" == "$issue" ]]; then
-        target_comments="$story_comments"
-    else
-        target_comments=$(gh api --paginate "repos/$REPO/issues/$target/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
-            || return 1
-    fi
-    jq -e --arg bot "$bot" --arg kind "$kind" --arg text "$text" '
+    target_comments=$(own_comments_json "$target") || return 1
+    jq -e --arg kind "$kind" --arg text "$text" '
         def trim: gsub("^\\s+|\\s+$"; "");
-        any(.[]; (.user.login // "") == $bot
-            and ((.body // "") | contains("action=evidence-pending") | not)
+        any(.[]; ((.body // "") | contains("action=evidence-pending") | not)
             and (if $kind == "merge-gate" then ((.body // "") | test("(^|\n)Merge gate:"))
                  elif $kind == "cleanup-summary" then ((.body // "") | test("(^|\n)Command: cleanup\n"))
                  elif $kind == "payload" and $text != "" then ((.body // "") | trim | contains($text | trim))

@@ -317,7 +317,6 @@ CODEX_FIX_ROUND_MAX="${CODEX_FIX_ROUND_MAX:-3}"
 # Summary it posts after findings. Mirrors MARKER_PREFIX and
 # ACTION_MOVE_IN_IMPLEMENTATION in src/headless_pr_workflow/codex_review_bookkeeping.py
 # (tests/test_dispatcher_review_loop.py checks that the two agree).
-BOOKKEEPING_FIX_MARKER="<!-- hpw:codex-review-bookkeeping action=move-in-implementation head="
 # Account the bookkeeping job posts with. Both workflows authenticate with
 # PROJECT_TOKEN, so the default is the login behind this run's own token.
 CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}"
@@ -699,6 +698,37 @@ DECISION_BLOCKER_PO_LOGIN="LauraMardones"
 DECISION_BLOCKER_CLAIM_MARKER="Attempting to resolve the Type: decision blocker"
 DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
 
+# The visible CLAIM and CONFIRM comments of the resume (shims of Block 2, #433):
+# their text is read back only from the dispatcher's own comments.
+decision_blocker_claim_body() {
+    printf '## Recovery Comment\n%s (standalone `/unblock` line found); attempting the board transition to "Ready for implementation" now.\nProject item version before resume: %s' \
+        "$DECISION_BLOCKER_CLAIM_MARKER" "$1"
+}
+
+decision_blocker_resume_body() {
+    printf '## Recovery Comment\n%s (standalone `/unblock` line found).\nAction: status set to "Ready for implementation".\nNext executor: review the PO'"'"'s decision in the linked comment above before resuming.' \
+        "$DECISION_BLOCKER_RESUME_MARKER"
+}
+
+# decision_blocker_marker_since <issue> claim|resume <since> — "true" when an
+# own comment carrying the CLAIM or CONFIRM text is at or after <since>; 1 when
+# the comments cannot be read.
+decision_blocker_marker_since() {
+    local text own="$DECISION_BLOCKER_RESUME_MARKER"
+    [[ "$2" == "claim" ]] && own="$DECISION_BLOCKER_CLAIM_MARKER"
+    text=$(marker_list_json "$1" "$own") || return 1
+    jq -r --arg since "$3" 'any(.[]; .created_at >= $since)' <<< "$text"
+}
+
+# decision_blocker_claim_version <issue> <since> — the "Project item version
+# before resume" of the newest own CLAIM at or after <since>; empty when none.
+decision_blocker_claim_version() {
+    local own
+    own=$(marker_list_json "$1" "$DECISION_BLOCKER_CLAIM_MARKER") || return 1
+    jq -r --arg since "$2" '[.[] | select(.created_at >= $since)] | last | (.body // "")
+        | capture("Project item version before resume: (?<version>[^\\n]+)").version // empty' <<< "$own"
+}
+
 check_and_resolve_decision_blocker_comment() {
     local issue_num="$1" item_id="$2" project_item_updated_at="$3"
     local comments
@@ -710,14 +740,10 @@ check_and_resolve_decision_blocker_comment() {
         | last | .created_at // empty')
     [[ -z "$blocker_created_at" ]] && return 1
 
+    # The CLAIM and CONFIRM comments count only from the dispatcher's own
+    # account (Block 2); a pasted copy of their text starts and stops nothing.
     local already_resumed
-    already_resumed=$(echo "$comments" | jq -r \
-        --arg marker "$DECISION_BLOCKER_RESUME_MARKER" \
-        --arg since "$blocker_created_at" \
-        '[.[] | select(
-             ((.body // "") | contains($marker)) and
-             .created_at >= $since
-           )] | length > 0')
+    already_resumed=$(decision_blocker_marker_since "$issue_num" resume "$blocker_created_at") || return 1
     [[ "$already_resumed" == "true" ]] && return 1
 
     local resolved
@@ -734,14 +760,7 @@ check_and_resolve_decision_blocker_comment() {
     echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
 
     local claim_project_version
-    claim_project_version=$(echo "$comments" | jq -r \
-        --arg marker "$DECISION_BLOCKER_CLAIM_MARKER" \
-        --arg since "$blocker_created_at" \
-        '[.[] | select(
-             ((.body // "") | contains($marker)) and
-             .created_at >= $since
-           )] | last | (.body // "")
-         | capture("Project item version before resume: (?<version>[^\\n]+)").version // empty')
+    claim_project_version=$(decision_blocker_claim_version "$issue_num" "$blocker_created_at") || return 1
 
     # The claim records the ProjectV2 item's version before the mutation. A
     # failed mutation leaves that version unchanged and is safe to retry. A
@@ -754,9 +773,7 @@ check_and_resolve_decision_blocker_comment() {
     fi
 
     if [[ -z "$claim_project_version" ]]; then
-        post_comment "$issue_num" "## Recovery Comment
-$DECISION_BLOCKER_CLAIM_MARKER (standalone \`/unblock\` line found); attempting the board transition to \"Ready for implementation\" now.
-Project item version before resume: $project_item_updated_at"
+        post_comment "$issue_num" "$(decision_blocker_claim_body "$project_item_updated_at")"
     fi
 
     # The CONFIRM comment ($DECISION_BLOCKER_RESUME_MARKER) is what the
@@ -768,12 +785,7 @@ Project item version before resume: $project_item_updated_at"
         return 1
     fi
 
-    local recovery_comment
-    recovery_comment="## Recovery Comment
-$DECISION_BLOCKER_RESUME_MARKER (standalone \`/unblock\` line found).
-Action: status set to \"Ready for implementation\".
-Next executor: review the PO's decision in the linked comment above before resuming."
-    if ! post_comment "$issue_num" "$recovery_comment"; then
+    if ! post_comment "$issue_num" "$(decision_blocker_resume_body)"; then
         echo "Warning: #$issue_num — board transition succeeded but the CONFIRM comment failed; the versioned CLAIM will prevent the old /unblock from being consumed again after redispatch." >&2
         return 1
     fi
@@ -1045,49 +1057,61 @@ dispatcher_marker() {
 # Markers are honoured only on comments written by the dispatcher's own
 # account (the login behind GH_TOKEN). Anyone can comment on a public
 # repository, and a forged marker must neither stop a fix round nor make the
-# dispatcher write a board status.
+# dispatcher write a board status. The rule lives in Block 2 of ADR-014
+# (`hpw dispatcher marker`, issue #433); the functions below are its shims.
+# marker_block <operation> <args...> runs the block and leaves its one JSON
+# line in MARKER_JSON; its exit code is the block's (`holds`: 0 holds, 1 does
+# not hold, 3 unreadable; `list`/`whoami`: 0 or 3; 2 invalid arguments).
+
+MARKER_JSON=""
+
+marker_block() {
+    local rc=0
+    MARKER_JSON=$(DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}" \
+        CODEX_BOOKKEEPING_LOGIN="${CODEX_BOOKKEEPING_LOGIN:-}" \
+        DECISION_BLOCKER_PO_LOGIN="${DECISION_BLOCKER_PO_LOGIN:-}" \
+        "$HPW_BIN" dispatcher marker "$@" --repo "$REPO") || rc=$?
+    return "$rc"
+}
+
 DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}"
 resolve_dispatcher_login() {
     if [[ -z "$DISPATCHER_LOGIN" ]]; then
-        DISPATCHER_LOGIN=$(gh api user | jq -r '.login // empty' 2>/dev/null || true)
+        marker_block whoami || return 1
+        DISPATCHER_LOGIN=$(jq -r '.dispatcher // empty' <<< "$MARKER_JSON" 2>/dev/null || true)
     fi
     [[ -n "$DISPATCHER_LOGIN" ]]
 }
 
-# marker_holds <issue> <marker> [<on-read-error>] [<cancel-marker>]
+# marker_holds <issue> <marker> <on-read-error> [<cancel-marker>]
 # 0 when the newest dispatcher comment carrying <marker> has no later PO
 # `/unblock` line and no later dispatcher comment carrying <cancel-marker>;
 # 1 when there is no such comment or it was unblocked or cancelled. <marker>
-# is matched as a substring, so a caller may pass a prefix. A failed read (of
-# the comments or of the dispatcher's login) counts as "holds", so an API
-# error never starts a session or posts a second blocker. A caller that acts
-# when the marker holds passes 1 as <on-read-error>, so a failed read does
-# nothing instead.
+# is matched as a substring, so a caller may pass a prefix. <on-read-error>
+# (0 or 1, mandatory) is the answer when the login or the comments cannot be
+# read: a caller that stops when the marker holds passes 0, so an API error
+# never starts a session or posts a second blocker; a caller that acts when
+# the marker holds passes 1, so a failed read does nothing instead.
 marker_holds() {
-    local issue_num="$1" marker="$2" on_read_error="${3:-0}" cancel_marker="${4:-}" comments
-    resolve_dispatcher_login || return "$on_read_error"
-    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return "$on_read_error"
-    jq -e --arg marker "$marker" --arg cancel "$cancel_marker" \
-          --arg bot "$DISPATCHER_LOGIN" --arg login "$DECISION_BLOCKER_PO_LOGIN" '
-        [.[] | select((.user.login // "") == $bot)] as $own
-        | ([$own[] | select((.body // "") | contains($marker))] | last) as $held
-        | if $held == null then false
-          else ([.[] | select(
-                   (.user.login // "") == $login and
-                   .created_at > $held.created_at and
-                   ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
-                )] | length == 0)
-               and
-               ($cancel == "" or
-                ([$own[] | select(.created_at > $held.created_at and ((.body // "") | contains($cancel)))]
-                 | length == 0))
-          end' <<< "$comments" >/dev/null
+    local issue_num="$1" marker="$2" on_read_error="${3:-}" cancel_marker="${4:-}" rc=0 cancel=()
+    if [[ "$on_read_error" != "0" && "$on_read_error" != "1" ]]; then
+        echo "marker_holds: <on-read-error> (0 or 1) is required" >&2
+        return 2
+    fi
+    [[ -n "$cancel_marker" ]] && cancel=(--cancel="$cancel_marker")
+    marker_block holds --number "$issue_num" --marker="$marker" ${cancel[@]+"${cancel[@]}"} || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) echo "Warning: could not read the markers on #$issue_num ($(jq -r '.error // "unreadable"' <<< "$MARKER_JSON" 2>/dev/null)); treating them as $([[ "$on_read_error" == 0 ]] && echo held || echo absent)." >&2
+           return "$on_read_error" ;;
+    esac
 }
 
 # post_blocker_once <issue> <title> <type> <marker> <unblocked-when> <state>
 post_blocker_once() {
     local issue_num="$1" issue_title="$2" blocker_type="$3" marker="$4" unblocked_when="$5" state="$6"
-    if marker_holds "$issue_num" "$marker"; then
+    if marker_holds "$issue_num" "$marker" 0; then
         return 0
     fi
     echo "BLOCKED: posting $blocker_type blocker on #$issue_num"
@@ -1124,13 +1148,27 @@ evidence_gave_up_marker() {
 }
 
 # bot_comments_json <issue-or-pr> — the comments of the dispatcher's own account
-# as one JSON array; fails when they cannot be read.
+# as one JSON array (`id`, `created_at`, `body`); fails when they cannot be read.
 bot_comments_json() {
-    local number="$1" comments
-    resolve_dispatcher_login || return 1
-    comments=$(gh api --paginate "repos/$REPO/issues/$number/comments?per_page=100" | jq -s 'add // []') || return 1
-    jq -c --arg bot "$DISPATCHER_LOGIN" '[.[] | select((.user.login // "") == $bot)]' <<< "$comments"
+    marker_block list --number "$1" || return 1
+    jq -c '.comments' <<< "$MARKER_JSON"
 }
+
+# marker_list_json <issue-or-pr> <marker> [<author>] — the comments of the
+# account <author> (dispatcher by default, or bookkeeping) that carry <marker>,
+# as one JSON array; fails when they cannot be read.
+marker_list_json() {
+    marker_block list --number "$1" --marker="$2" --author "${3:-dispatcher}" || return 1
+    jq -c '.comments' <<< "$MARKER_JSON"
+}
+
+# bookkeeping_fix_marker_init — the marker the codex-review-bookkeeping job
+# writes when it records findings (action=move-in-implementation; the recognizer
+# lives in review_policy.py). Read only through marker_list_json --author bookkeeping.
+bookkeeping_fix_marker_init() {
+    BOOKKEEPING_FIX_MARKER="<!-- hpw:codex-review-bookkeeping action=move-in-implementation head="
+}
+bookkeeping_fix_marker_init
 
 # evidence_failure_count <story> <item> <ref> — failed runs recorded since the
 # last give-up marker for the item.
@@ -1198,7 +1236,7 @@ evidence_record_failure() {
     post_comment "$story" "Dispatcher: $what could not be written to GitHub (failed run $run of $EVIDENCE_RETRY_MAX). It is retried on the next run.
 
 $(evidence_failed_marker "$item" "$ref")" || unwritable=true
-    if [[ $run -ge $EVIDENCE_RETRY_MAX ]] && ! marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
+    if [[ $run -ge $EVIDENCE_RETRY_MAX ]] && ! marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")" 0; then
         post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
             "the evidence ($what) is posted by hand, then the PO posts /unblock" \
             "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
@@ -1496,13 +1534,21 @@ allowance_comment() {
         | join("\n")' <<< "$decision_json"
 }
 
+# newest_own_comment_body <issue> — the body of the newest comment of the
+# dispatcher's own account (Block 2), empty when there is none or the comments
+# cannot be read (the caller then posts, as before).
+newest_own_comment_body() {
+    local own
+    own=$(bot_comments_json "$1" 2>/dev/null) || return 0
+    jq -r 'last | .body // ""' <<< "$own" 2>/dev/null || true
+}
+
 # Posts the allowance comment unless it is already the story's newest comment
 # for this step (issue #293): a resume entry is tried again on every run, and
 # a refusal that repeats must not add a comment each time.
 post_allowance_comment() {
     local step="$1" decision_json="$2" newest
-    newest=$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" \
-        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    newest=$(newest_own_comment_body "$ISSUE_NUMBER")
     if [[ "$newest" == "## Subscription allowance check"* \
           && "$newest" == *"/$step was not started for #$ISSUE_NUMBER:"* ]]; then
         echo "#$ISSUE_NUMBER: the allowance comment for /$step is already the newest comment; not posting it again"
@@ -1587,8 +1633,7 @@ usage_limit_comment() {
 # step: a resume entry is tried again on every run.
 post_usage_limit_comment() {
     local step="$1" count="$2" limit="$3" newest
-    newest=$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" \
-        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    newest=$(newest_own_comment_body "$ISSUE_NUMBER")
     if [[ "$newest" == "## Usage limit"* \
           && "$newest" == *"/$step was not started for #$ISSUE_NUMBER:"* ]]; then
         echo "#$ISSUE_NUMBER: the usage limit comment for /$step is already the newest comment; not posting it again"
@@ -1718,8 +1763,7 @@ pause_at_usage_limit() {
     local body newest pr_text="no PR yet"
     [[ -n "$pr_number" ]] && pr_text="#$pr_number, head \`$pr_head\`"
     body=$(paused_comment "$step" "$target" "$issue" "$branch" "$pr_number" "$pr_head" "$reset_ts" "$unpushed" "$dirty" "$next" "$round")
-    newest=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" \
-        | jq -rs 'add // [] | last | .body // ""' 2>/dev/null || true)
+    newest=$(newest_own_comment_body "$issue")
     if [[ "$newest" == "## Paused at a provider usage limit"* \
           && "$newest" == *"- Step: \`/$step $target\` for #$issue"* \
           && "$newest" == *"- PR: $pr_text"* ]]; then
@@ -1869,7 +1913,8 @@ find_merged_linked_pr() {
 
 bookkeeping_login() {
     if [[ -z "$CODEX_BOOKKEEPING_LOGIN" ]]; then
-        CODEX_BOOKKEEPING_LOGIN=$(gh api user | jq -r '.login // empty' 2>/dev/null || true)
+        marker_block whoami \
+            && CODEX_BOOKKEEPING_LOGIN=$(jq -r '.bookkeeping // empty' <<< "$MARKER_JSON" 2>/dev/null || true)
         [[ -n "$CODEX_BOOKKEEPING_LOGIN" ]] \
             || echo "Warning: could not resolve the bookkeeping job's account; no fix round can be recognised." >&2
     fi
@@ -1877,16 +1922,14 @@ bookkeeping_login() {
 }
 
 fix_round_heads() {
-    local pr_number="$1" login
+    local pr_number="$1" login own
     login=$(bookkeeping_login)
     [[ -n "$login" ]] || return 0
-    gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" \
-        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER" '
-            [ add // [] | .[]
-              | select((.user.login // "") == $login)
-              | (.body // "") | split($marker)[1:][]
-              | capture("^(?<head>[0-9a-fA-F]+)[ ]").head | ascii_downcase
-            ] | unique | .[]' 2>/dev/null || true
+    own=$(marker_list_json "$pr_number" "$BOOKKEEPING_FIX_MARKER" bookkeeping) || return 0
+    jq -r --arg marker "$BOOKKEEPING_FIX_MARKER" '
+        [ .[] | (.body // "") | split($marker)[1:][]
+          | capture("^(?<head>[0-9a-fA-F]+)[ ]").head | ascii_downcase
+        ] | unique | .[]' <<< "$own" 2>/dev/null || true
 }
 
 # head_in_list <head> <newline-separated heads> — 0 when <head> is one of them.
@@ -2284,12 +2327,12 @@ settle_merge_confirmation() {
     gave=$(evidence_gave_up_marker "merge-confirmation-missing" "pr$pr_number")
     if own=$(bot_comments_json "$ISSUE_NUMBER") \
         && jq -e --arg g "$gave" 'any(.[]; (.body // "") | contains($g))' <<< "$own" >/dev/null \
-        && ! marker_holds "$ISSUE_NUMBER" "$gave"; then
+        && ! marker_holds "$ISSUE_NUMBER" "$gave" 0; then
         echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the missing merge confirmation on PR #$pr_number was waived with /unblock"
         return 0
     fi
     # The give-up blocker stands: no further failure is recorded until /unblock.
-    if marker_holds "$ISSUE_NUMBER" "$gave"; then
+    if marker_holds "$ISSUE_NUMBER" "$gave" 0; then
         echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: PR #$pr_number is merged but carries no merge confirmation from the dispatcher; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
         return 2
     fi
@@ -2432,19 +2475,17 @@ fix_round_attempt_marker() {
 # <head> returns 0 when the bookkeeping job posted its move-in-implementation
 # marker for <head> on the PR after the story's latest attempt marker for it.
 fix_round_attempt_superseded() {
-    local issue_num="$1" pr_number="$2" head="$3" login attempt_at moves_at
+    local issue_num="$1" pr_number="$2" head="$3" login attempt_at moves_at own
     login=$(bookkeeping_login)
     [[ -n "$login" ]] || return 1
-    resolve_dispatcher_login || return 1
-    # Only the dispatcher's own marker counts, as in marker_holds: anyone can
-    # copy the visible marker into a later comment.
-    attempt_at=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" 2>/dev/null \
-        | jq -rs --arg bot "$DISPATCHER_LOGIN" --arg marker "$(fix_round_attempt_marker "$pr_number" "$head")" '
-            [add // [] | .[] | select((.user.login // "") == $bot and ((.body // "") | contains($marker))) | .created_at] | max // empty') || return 1
+    # Only the dispatcher's own marker counts (Block 2): anyone can copy the
+    # visible marker into a later comment.
+    own=$(marker_list_json "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$head")") || return 1
+    attempt_at=$(jq -r '[.[].created_at] | max // empty' <<< "$own") || return 1
     [[ -n "$attempt_at" ]] || return 1
-    moves_at=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
-        | jq -rs --arg login "$login" --arg marker "$BOOKKEEPING_FIX_MARKER${head,,} " '
-            [add // [] | .[] | select((.user.login // "") == $login and ((.body // "") | ascii_downcase | contains($marker))) | .created_at] | max // empty') || return 1
+    own=$(marker_list_json "$pr_number" "$BOOKKEEPING_FIX_MARKER" bookkeeping) || return 1
+    moves_at=$(jq -r --arg marker "$BOOKKEEPING_FIX_MARKER${head,,} " '
+        [.[] | select((.body // "") | ascii_downcase | contains($marker)) | .created_at] | max // empty' <<< "$own") || return 1
     [[ -n "$moves_at" && "$moves_at" > "$attempt_at" ]]
 }
 
@@ -2456,7 +2497,9 @@ hand_off_pending_marker() {
 }
 
 hand_off_pending_prefix() {
-    echo "<!-- hpw:dispatcher action=hand-off-pending pr=$1 "
+    local marker
+    marker=$(dispatcher_marker "action=hand-off-pending pr=$1 head=")
+    echo "${marker%head=*}"
 }
 
 hand_off_done_marker() {
@@ -2573,10 +2616,8 @@ no_push_round_is_expected() {
         unblocked_at=$(jq -r '.unblocked_at' <<< "$blocker_json")
         login=$(bookkeeping_login)
         [[ -n "$login" && -n "$pr_number" ]] || return 1
-        moved_after=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
-            | jq -rs --arg login "$login" --arg since "$unblocked_at" --arg marker "$BOOKKEEPING_FIX_MARKER" '
-                [add // [] | .[] | select((.user.login // "") == $login and .created_at > $since
-                                          and ((.body // "") | contains($marker)))] | length') || return 1
+        moved_after=$(marker_list_json "$pr_number" "$BOOKKEEPING_FIX_MARKER" bookkeeping) || return 1
+        moved_after=$(jq -r --arg since "$unblocked_at" '[.[] | select(.created_at > $since)] | length' <<< "$moved_after") || return 1
         [[ "$moved_after" == "0" ]] || return 1
         # The round ends only with a fresh review request: the head's latest
         # review event is still the waived findings result, so without a newer
@@ -2757,7 +2798,7 @@ resume_in_merge_story() {
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
 
     if [[ -n "$pr_number" && "$pr_draft" != "true" ]]; then
-        if [[ -n "$pr_head" ]] && marker_holds "$issue_num" "$(merge_attempt_marker "$pr_number" "$pr_head")"; then
+        if [[ -n "$pr_head" ]] && marker_holds "$issue_num" "$(merge_attempt_marker "$pr_number" "$pr_head")" 0; then
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /merge was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
             return 0
         fi
@@ -2862,7 +2903,7 @@ resume_fix_round() {
     fi
 
     attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
-    if marker_holds "$issue_num" "$attempt_marker" \
+    if marker_holds "$issue_num" "$attempt_marker" 0 \
             && ! fix_round_attempt_superseded "$issue_num" "$pr_number" "$pr_head"; then
         # A round that ended without a push (issue #357) records its attempt
         # before the "In review" write; if that write failed, the pending
@@ -3263,7 +3304,7 @@ resume_review_story() {
     marker=""
     if [[ -n "$pr_head" ]]; then
         marker=$(review_attempt_marker "$pr_number" "$pr_head")
-        if marker_holds "$issue_num" "$marker"; then
+        if marker_holds "$issue_num" "$marker" 0; then
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /review was already tried on PR #$pr_number head ${pr_head:0:7}; waiting for a new head or /unblock"
             return 0
         fi

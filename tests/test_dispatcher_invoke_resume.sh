@@ -134,8 +134,11 @@ REAL_SETTER_FN=$(extract_function set_project_status_ready)
 REAL_CHECK_FN=$(extract_function check_and_resolve_decision_blocker_comment)
 # set_project_status_ready writes through the verified-write shims (issue #432).
 REAL_WRITE_FNS=$(extract_function set_project_status; extract_function dispatcher_write; extract_function write_field)
+# The CLAIM and CONFIRM comments are read through Block 2 (issue #433).
+REAL_MARKER_FNS=$(for fn in marker_block marker_list_json decision_blocker_claim_body decision_blocker_resume_body \
+    decision_blocker_marker_since decision_blocker_claim_version; do extract_function "$fn"; done)
 
-if [[ -z "$REAL_CONSTANTS" || -z "$REAL_SETTER_FN" || -z "$REAL_CHECK_FN" || -z "$REAL_WRITE_FNS" ]]; then
+if [[ -z "$REAL_CONSTANTS" || -z "$REAL_SETTER_FN" || -z "$REAL_CHECK_FN" || -z "$REAL_WRITE_FNS" || -z "$REAL_MARKER_FNS" ]]; then
     echo "FATAL: could not extract check_and_resolve_decision_blocker_comment(), set_project_status_ready(), or DECISION_BLOCKER_* constants from $DISPATCHER_SCRIPT — a rename or reformat broke this test's extraction. Update extract_function()/REAL_CONSTANTS above to match." >&2
     exit 1
 fi
@@ -183,6 +186,15 @@ gh() {
 # The verified-write block (`hpw dispatcher write`, issue #432) on HPW_BIN: the
 # board write succeeds unless MOCK_GRAPHQL_RC is non-zero; --dry-run writes nothing.
 hpw_fake() {
+    if [[ "$1 $2" == "dispatcher marker" && "$3" == "list" ]]; then
+        # Block 2: the comments of the dispatcher's own account (dispatcher-bot) carrying --marker.
+        local marker="" arg
+        for arg in "$@"; do [[ "$arg" == --marker=* ]] && marker="${arg#--marker=}"; done
+        jq -c --arg m "$marker" '{ok: true, block: "marker", operation: "list", result: "read", error: null,
+            comments: [.[] | select((.user.login // "") == "dispatcher-bot" and ((.body // "") | contains($m)))
+                           | {id: 1, created_at: .created_at, body: .body}]}' <<< "$COMMENTS_JSON"
+        return 0
+    fi
     if [[ " $* " == *" --dry-run "* || "${MOCK_GRAPHQL_RC:-0}" -eq 0 ]]; then
         echo '{"ok": true, "block": "write", "operation": "board-status", "result": "written", "error": null}'
         return 0
@@ -198,6 +210,7 @@ RUNNER_HEADER
     printf '%s\n' "$REAL_CONSTANTS"
     printf '\n%s\n' "$REAL_SETTER_FN"
     printf '\n%s\n' "$REAL_WRITE_FNS"
+    printf '\n%s\n' "$REAL_MARKER_FNS"
     printf '\n%s\n' "$REAL_CHECK_FN"
 } >> "$RUNNER"
 
@@ -452,6 +465,10 @@ gh() {
 
 # The verified-write block on HPW_BIN (issue #432): the board write succeeds.
 hpw_fake() {
+    if [[ "\$1 \$2 \$3" == "dispatcher marker list" ]]; then
+        echo '{"ok": true, "block": "marker", "operation": "list", "result": "read", "error": null, "comments": []}'
+        return 0
+    fi
     echo '{"ok": true, "block": "write", "operation": "board-status", "result": "written", "error": null}'
 }
 HPW_BIN=hpw_fake
@@ -461,6 +478,8 @@ $REAL_CONSTANTS
 $REAL_SETTER_FN
 
 $REAL_WRITE_FNS
+
+$REAL_MARKER_FNS
 
 $REAL_CHECK_FN
 

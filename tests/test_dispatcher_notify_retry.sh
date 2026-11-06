@@ -64,6 +64,25 @@ FAKE
     # issue #432 reaches the fake gh the way the script's old direct call did.
     cat > "$T/scripts/hpw" <<'FAKE'
 #!/usr/bin/env bash
+if [[ "$1 $2 $3" == "dispatcher marker list" ]]; then
+    # Block 2 (issue #433): the comments of the dispatcher's own account (the fake gh's login).
+    shift 3
+    repo="" number="" marker=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo) repo="$2"; shift 2 ;;
+            --number) number="$2"; shift 2 ;;
+            --marker=*) marker="${1#--marker=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+    bot=$(gh api user --jq '.login') && [[ -n "$bot" ]] || exit 3
+    comments=$(gh api --paginate "repos/$repo/issues/$number/comments?per_page=100" | jq -s 'add // []') || exit 3
+    jq -c --arg bot "$bot" --arg m "$marker" '{ok: true, block: "marker", operation: "list", result: "read", error: null,
+        comments: [.[] | select((.user.login // "") == $bot and ((.body // "") | contains($m)))
+                       | {id: (.id // 0), created_at: (.created_at // ""), body: (.body // "")}]}' <<< "$comments"
+    exit 0
+fi
 [[ "$1 $2 $3" == "dispatcher write comment" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
 shift 3
 repo="" number="" file=""

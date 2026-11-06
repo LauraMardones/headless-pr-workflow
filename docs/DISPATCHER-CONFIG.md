@@ -262,6 +262,28 @@ The bash functions callers use (`post_comment`, `set_project_status`, `set_proje
 
 **Change check.** `scripts/dispatcher-change-check.sh` has the check id `verified-write`: a `gh api` call with a write method, `-f body=` or `--input`, a GraphQL `mutation`, `gh issue|pr comment|edit|close|reopen|ready|merge|review`, `gh label`, or `curl` with a write method fails the check outside the shims above. It also checks the `scripts/lib/*.sh` files the dispatcher sources. Its exceptions are an allowlist of function name and check id in the script, one per "stays" row of ADR-014 → Decision → 7.
 
+## Markers — `hpw dispatcher marker`
+
+Every hidden dispatcher marker (`<!-- hpw:dispatcher action=<action> key=value ... -->`) is written and read through one building block, `scripts/hpw dispatcher marker` (ADR-014 → Block 2, issue #433). A marker counts only on a comment whose `user.login` is the account that should have written it, so a marker pasted by anyone else never stops a fix round, writes a board status or starts a merge.
+
+```
+scripts/hpw dispatcher marker write  --repo <owner/repo> --number <n> --action <action> [--field key=value ...] [--body-file <path>] [--once] [--attempts <n>] [--dry-run]
+scripts/hpw dispatcher marker holds  --repo <owner/repo> --number <n> --marker <text-or-prefix> [--cancel <marker>] [--author dispatcher|bookkeeping]
+scripts/hpw dispatcher marker list   --repo <owner/repo> --number <n> [--marker <m>] [--author dispatcher|bookkeeping]
+scripts/hpw dispatcher marker whoami --repo <owner/repo>
+```
+
+- **Accounts:** resolved once per process. `dispatcher` is `DISPATCHER_LOGIN` or the login behind `GH_TOKEN`; `bookkeeping` is `CODEX_BOOKKEEPING_LOGIN` or the same login. `--author` defaults to `dispatcher`.
+- **`holds`:** the newest own comment carrying the marker (a substring, so a prefix works) holds unless a later standalone `/unblock` line from `DECISION_BLOCKER_PO_LOGIN`, or a later own comment carrying `--cancel`, follows it. Result words: `holds` (exit `0`), `absent`, `unblocked`, `cancelled` (exit `1`), `unreadable` (exit `3`).
+- **`write`:** posts the marker (after the text of `--body-file`, when given) through the verified write above, read-back included. With `--once` it posts nothing and reports `already` when the same marker holds; when the markers cannot be read it posts nothing and reports `failed`. The marker text is unchanged, so markers already on GitHub stay valid.
+- **`list`:** the own comments (`id`, `created_at`, `body`), optionally only those carrying `--marker`. **`whoami`:** `dispatcher` and `bookkeeping`.
+- **Fail closed:** a login that cannot be resolved (`gh api user` fails or returns an empty login, and `DISPATCHER_LOGIN` is unset) or comments that cannot be read give `unreadable` (exit `3`); no comment from any author then matches. The bash shim `marker_holds <issue> <marker> <on-read-error> [<cancel>]` needs the caller's direction as a mandatory `0` (treat as held) or `1` (treat as absent): a caller that stops when the marker holds passes `0`, one that acts when it holds passes `1`, so a failed read starts no session, posts no second blocker, writes no board status and merges nothing.
+- **Output:** one JSON line on stdout (`ok`, `block: "marker"`, `operation`, `result`, `error`, plus `url`/`created_at` for `holds`, `comments` for `list`, `dispatcher`/`bookkeeping` for `whoami`); log lines on stderr; the token is never printed. Exit `2` is invalid arguments.
+
+The bash functions callers use (`marker_holds`, `resolve_dispatcher_login`, `bookkeeping_login`, `bot_comments_json`, `marker_list_json`, `newest_own_comment_body`, the CLAIM/CONFIRM helpers of the decision-blocker resume) are thin shims in `scripts/dispatcher-invoke.sh`; `dispatcher-merge.sh` reads the owner marker with `holds`, `dispatcher-notify-retry.sh` reads the evidence with `list`, and `dispatcher-poll.sh` takes its login from `whoami`. The "already the newest comment" checks of the allowance, usage-limit and pause comments look at the newest comment of the dispatcher's own account.
+
+**Change check.** `scripts/dispatcher-change-check.sh` has the check id `own-marker`: outside the shims above it flags a literal `hpw:dispatcher` or `hpw:codex-review-bookkeeping`, a `gh api user` or `/user` call, a jq filter on `.user.login`, and a match on `DECISION_BLOCKER_CLAIM_MARKER` or `DECISION_BLOCKER_RESUME_MARKER`. It covers `scripts/dispatcher-*.sh` and `scripts/lib/*.sh`. Its exceptions are an allowlist of function name and check id, one per "stays" row of ADR-014 → Decision → 7.
+
 ## Slack Notifications
 
 The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for these events. There are no "story dispatched" or "closed" events: normal transitions are not notified.
@@ -450,7 +472,7 @@ Under `--dry-run` the check is logged and nothing is counted or sent:
 
 ## Codex review loop hand-off and resume
 
-A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the board status, the linked PR and hidden markers in comments. Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect.
+A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the board status, the linked PR and hidden markers in comments. Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect. Both rules live in `hpw dispatcher marker` (see [Markers](#markers--hpw-dispatcher-marker)).
 
 The `codex-review-bookkeeping` workflow does the part in between. It acts only on a story in `In review`, and moves it to `In merge` after a clean review with green required checks and a passed approval gate, or to `In implementation` after findings. `/implement` posts the review request; the dispatcher posts none.
 

@@ -47,13 +47,13 @@ FIXTURE
     chmod +x "$file"
 }
 
-# Explicit selection: clean file exercises all six checks (verified-write: #432).
+# Explicit selection: clean file exercises all seven checks (verified-write: #432, own-marker: #433).
 clean="$TMP/dispatcher-clean.sh"
 write_clean "$clean"
 run_check "$TMP/out" "$TMP/err" --files "$clean"
 assert_rc 'clean fixture exits zero' 0
-assert_lines 'clean fixture emits six results' "$TMP/out" 6
-for id in executable slack-guard dry-run stdout-json dispatch-handled verified-write; do
+assert_lines 'clean fixture emits seven results' "$TMP/out" 7
+for id in executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker; do
     assert_has "clean fixture passes $id" "$TMP/out" "PASS $clean $id -"
 done
 
@@ -63,7 +63,7 @@ write_clean "$spaced"
 run_check "$TMP/out" "$TMP/err" --files "$spaced"
 assert_rc 'path containing whitespace exits zero' 0
 assert_has 'path containing whitespace is preserved' "$TMP/out" "PASS $spaced executable -"
-assert_lines 'path containing whitespace still emits six results' "$TMP/out" 6
+assert_lines 'path containing whitespace still emits seven results' "$TMP/out" 7
 
 # Missing failure guard.
 unguarded="$TMP/dispatcher-unguarded.sh"
@@ -158,12 +158,12 @@ assert_rc 'minimal dispatcher exits zero' 0
 assert_has 'slack guard can skip' "$TMP/out" "SKIP $minimal slack-guard -"
 assert_has 'dispatch handled can skip' "$TMP/out" "SKIP $minimal dispatch-handled -"
 
-# An unrelated changed set has the exact six global SKIPs.
+# An unrelated changed set has the exact seven global SKIPs.
 printf 'notes\n' >"$TMP/readme.txt"
 run_check "$TMP/out" "$TMP/err" --files "$TMP/readme.txt"
 assert_rc 'no-op file set exits zero' 0
-assert_lines 'no-op file set emits six global results' "$TMP/out" 6
-[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 6 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
+assert_lines 'no-op file set emits seven global results' "$TMP/out" 7
+[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 7 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
 
 # verified-write (issue #432, ADR-014 -> Decision -> 5): each hand-rolled GitHub
 # write form fails; the same write inside a shim of the block passes.
@@ -226,7 +226,7 @@ run_check "$TMP/out" "$TMP/err" --files "$allowed"
 assert_rc 'allowlisted function exits zero' 0
 assert_has 'allowlisted function passes verified-write' "$TMP/out" "PASS $allowed verified-write -"
 
-# A library file the dispatcher sources gets only the verified-write rule.
+# A library file the dispatcher sources gets only the verified-write and own-marker rules.
 mkdir -p "$TMP/lib"
 lib_bad="$TMP/lib/helper.sh"
 write_form "$lib_bad" helper 'gh api "repos/$REPO/issues/$n/comments" -X POST'
@@ -241,6 +241,65 @@ if grep -q ' verified-write - ' "$TMP/out" && ! grep -q '^FAIL .* verified-write
     pass 'current dispatcher scripts pass verified-write'
 else
     fail 'current dispatcher scripts pass verified-write'
+fi
+
+# own-marker (issue #433, ADR-014 -> Decision -> 5): each hand-rolled marker form
+# fails; the same line inside a shim of Block 2 or an allowlisted function passes.
+marker_forms=(
+    'echo "<!-- hpw:dispatcher action=x -->"'
+    'echo "<!-- hpw:codex-review-bookkeeping action=y -->"'
+    'login=$(gh api user | jq -r .login)'
+    'login=$(gh api user --jq ".login")'
+    'login=$(curl -sf "$REST/user" | jq -r .login)'
+    'jq -e --arg bot "$bot" "any(.[]; (.user.login // \"\") == \$bot)" <<< "$comments"'
+    'jq -e --arg m "$DECISION_BLOCKER_CLAIM_MARKER" "any(.[]; .body | contains(\$m))" <<< "$comments"'
+    'jq -e --arg m "$DECISION_BLOCKER_RESUME_MARKER" "any(.[]; .body | contains(\$m))" <<< "$comments"'
+)
+i=0
+for form in "${marker_forms[@]}"; do
+    i=$((i + 1))
+    bad="$TMP/dispatcher-marker-$i.sh"
+    write_form "$bad" read_owner "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$bad"
+    assert_rc "own-marker fails on: $form" 1
+    assert_has "own-marker names the file and check: $form" "$TMP/out" "FAIL $bad own-marker -"
+    shim="$TMP/dispatcher-marker-shim-$i.sh"
+    write_form "$shim" marker_holds "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$shim"
+    assert_has "own-marker PASS inside a shim: $form" "$TMP/out" "PASS $shim own-marker -"
+    allowed_fn="$TMP/dispatcher-marker-allowed-$i.sh"
+    write_form "$allowed_fn" latest_decision_blocker_json "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$allowed_fn"
+    assert_has "own-marker PASS in an allowlisted function: $form" "$TMP/out" "PASS $allowed_fn own-marker -"
+done
+
+# The same forms fail in a library file, and a read through the block is clean.
+lib_marker="$TMP/lib/marker-helper.sh"
+write_form "$lib_marker" helper 'echo "<!-- hpw:dispatcher action=x -->"'
+run_check "$TMP/out" "$TMP/err" --files "$lib_marker"
+assert_rc 'library marker exits one' 1
+assert_has 'library marker is reported' "$TMP/out" "FAIL $lib_marker own-marker -"
+through_block="$TMP/dispatcher-through-block.sh"
+cat >"$through_block" <<'FIXTURE'
+#!/usr/bin/env bash
+read_owner() {
+    # the literal "hpw:dispatcher" in a comment is not a marker read; gh api user was the old way
+    "$HPW_BIN" dispatcher marker holds --repo "$REPO" --number "$n" --marker "action=merge-owner pr=$n head=$sha -->"
+    gh api "repos/$REPO/users/x"
+    jq -r '.user.type' <<< "$comment"
+}
+FIXTURE
+chmod +x "$through_block"
+run_check "$TMP/out" "$TMP/err" --files "$through_block"
+assert_rc 'a read through the block exits zero' 0
+assert_has 'a read through the block passes own-marker' "$TMP/out" "PASS $through_block own-marker -"
+
+# Every current dispatcher script and library passes own-marker.
+run_check "$TMP/out" "$TMP/err" --files "$REPO_ROOT"/scripts/dispatcher-*.sh "$REPO_ROOT"/scripts/lib/*.sh
+if grep -q ' own-marker - ' "$TMP/out" && ! grep -q '^FAIL .* own-marker - ' "$TMP/out"; then
+    pass 'current dispatcher scripts pass own-marker'
+else
+    fail 'current dispatcher scripts pass own-marker'
 fi
 
 # Input and discovery errors are distinct from policy failures.
