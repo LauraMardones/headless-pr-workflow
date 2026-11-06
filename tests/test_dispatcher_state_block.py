@@ -160,6 +160,16 @@ def test_an_event_file_keeps_its_valid_records_next_to_an_undecodable_line(capsy
     assert path.read_bytes() == EVENT.encode() + b"\n\xff\n"
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085", "\u2029", "\x0b", "\x0c", "\x1c"])
+def test_an_event_record_with_a_unicode_line_separator_in_a_string_stays_whole(capsys, tmp_path, separator):
+    record = json.loads(EVENT)
+    record["context"] = f"title{separator}rest"
+    put(tmp_path, "actionable-events", json.dumps(record, ensure_ascii=False) + "\n")
+    rc, out, _ = read(capsys, "actionable-events")
+    assert rc == 0 and out["result"] == "ok" and out["dropped"] == 0
+    assert [e["context"] for e in out["data"]] == [record["context"]]
+
+
 @pytest.mark.parametrize("name", STALE)
 def test_a_file_dated_another_day_is_stale(capsys, tmp_path, name):
     path = put(tmp_path, name, STALE[name])

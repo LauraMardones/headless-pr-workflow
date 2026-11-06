@@ -127,7 +127,8 @@ def parse(name: str, text: str, today: str) -> tuple[str, Any, dict[str, Any]]:
     if name == "actionable-events":
         kept: list[Any] = []
         total = 0
-        for line in text.splitlines():
+        # Split at "\n" only: splitlines() also breaks at U+2028/U+0085, legal inside a JSON string.
+        for line in text.split("\n"):
             if not line.strip():
                 continue
             total += 1
@@ -140,7 +141,9 @@ def parse(name: str, text: str, today: str) -> tuple[str, Any, dict[str, Any]]:
         # A malformed line never discards a valid pending record next to it (#338).
         return ("ok" if len(kept) == total else "malformed"), kept, {"dropped": total - len(kept)}
     if name == "notified-refinement":
-        lines = text.splitlines()
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()
         if all(_ISSUE_NUMBER.match(line) for line in lines):
             return "ok", [int(line) for line in lines], {}
         return "malformed", [], {}
