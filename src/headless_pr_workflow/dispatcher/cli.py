@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker`` only) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker`` and ``state``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -17,6 +17,7 @@ from typing import Callable, Sequence
 
 from .gateway import Gateway, GhGateway, mask_tokens
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
+from .state import FILE_NAMES, read_pending, read_state, write_state
 from .write import (
     DEFAULT_ATTEMPTS,
     EXIT_INVALID,
@@ -118,6 +119,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     m_who = marker_ops.add_parser("whoami", add_help=False)
     common(m_who, attempts=False)
+
+    state = blocks.add_parser("state", add_help=False)
+    state_ops = state.add_subparsers(dest="operation", parser_class=_Parser)
+    s_read = state_ops.add_parser("read", add_help=False)
+    s_read.add_argument("--name", required=True)
+    common(s_read, attempts=False)
+    s_write = state_ops.add_parser("write", add_help=False)
+    s_write.add_argument("--name", required=True)
+    s_write.add_argument("--data-file", required=True)
+    common(s_write, attempts=False)
+    s_pending = state_ops.add_parser("read-pending", add_help=False)
+    s_pending.add_argument("--number", type=_positive, required=True)
+    s_pending.add_argument("--item", required=True)
+    s_pending.add_argument("--expected-head")
+    common(s_pending, attempts=False)
     return parser
 
 
@@ -132,12 +148,22 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker") or not args.operation:
+    if args.block not in ("write", "marker", "state") or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
-            "| hpw dispatcher marker write|holds|list|whoami ...")
+            "| hpw dispatcher marker write|holds|list|whoami ... "
+            "| hpw dispatcher state read|write|read-pending ...")
     if not _REPO.match(args.repo or ""):
         raise InvalidArguments("--repo must be <owner/repo>")
+    if args.block == "state":
+        if args.operation in ("read", "write") and args.name not in FILE_NAMES:
+            raise InvalidArguments(f"--name must be one of {', '.join(FILE_NAMES)}")
+        if args.operation == "read-pending":
+            if not _ITEM.match(args.item):
+                raise InvalidArguments("--item must be a word such as merge-confirmation")
+            if args.expected_head is not None and not _SHA_OR_DASH.match(args.expected_head):
+                raise InvalidArguments("--expected-head must be a commit SHA")
+        return
     if args.block == "marker":
         if args.operation == "write":
             try:
@@ -166,11 +192,11 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state") else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return "marker" if argv and argv[0] == "marker" else "write"
+    return argv[0] if argv and argv[0] in ("marker", "state") else "write"
 
 
 def _emit(result: Result) -> int:
@@ -196,6 +222,18 @@ def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) 
                               attempts=args.attempts, dry_run=args.dry_run, settings=settings))  # fmt: skip
 
 
+def _run_state(args: argparse.Namespace, gateway: Gateway) -> int:
+    if args.operation == "read":
+        return _emit(read_state(args.name, args.repo))
+    if args.operation == "read-pending":
+        return _emit(read_pending(gateway, args.number, args.item, expected_head=args.expected_head))
+    try:
+        text = Path(args.data_file).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _emit(Result("write", "failed", error=f"read data file: {exc}", fields={"name": args.name}, block="state"))
+    return _emit(write_state(args.name, args.repo, text, dry_run=args.dry_run))
+
+
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
     """Run ``hpw dispatcher <argv...>``; returns the exit code."""
 
@@ -214,6 +252,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
 
     if args.block == "marker":
         return _run_marker(args, gateway, settings)
+    if args.block == "state":
+        return _run_state(args, gateway)
 
     if args.operation == "comment":
         try:
