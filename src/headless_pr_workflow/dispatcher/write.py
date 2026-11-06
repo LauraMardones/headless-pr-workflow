@@ -45,6 +45,7 @@ EXIT_OK = 0
 EXIT_NO = 1
 EXIT_INVALID = 2
 EXIT_GAVE_UP = 4
+EXIT_UNREADABLE = 3
 
 _EXIT_BY_RESULT = {
     "written": EXIT_OK,
@@ -57,6 +58,13 @@ _EXIT_BY_RESULT = {
     "stale": EXIT_NO,
     "missing": EXIT_NO,
     "gave-up": EXIT_GAVE_UP,
+    # Block 2 (marker.py)
+    "holds": EXIT_OK,
+    "read": EXIT_OK,
+    "absent": EXIT_NO,
+    "unblocked": EXIT_NO,
+    "cancelled": EXIT_NO,
+    "unreadable": EXIT_UNREADABLE,
 }
 
 _UNBLOCK_LINE = re.compile(r"^\s*/unblock\s*$")
@@ -98,13 +106,14 @@ class Result:
     result: str
     error: str | None = None
     fields: dict[str, Any] = field(default_factory=dict)
+    block: str = BLOCK
 
     @property
     def exit_code(self) -> int:
         return _EXIT_BY_RESULT.get(self.result, EXIT_NO)
 
     def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"ok": self.exit_code == EXIT_OK, "block": BLOCK, "operation": self.operation,
+        data: dict[str, Any] = {"ok": self.exit_code == EXIT_OK, "block": self.block, "operation": self.operation,
                                 "result": self.result}  # fmt: skip
         data.update(self.fields)
         data["error"] = mask_tokens(self.error) if self.error else None
