@@ -18,6 +18,7 @@ import pytest
 
 from tests.dispatcher_fakes import BASH, BOT, PO, REPO_ROOT, Dispatcher, needs_tools
 from tests.phase_script_fakes import PhaseHarness
+from tests.hpw_dispatcher_route import fake_state_route
 from tests.script_tools import script_path, windows_env
 
 pytestmark = needs_tools
@@ -349,6 +350,7 @@ case "$url" in
     f="$DETAIL_DIR/comments_$n.json"; [[ -f "$f" ]] && cat "$f" || echo '[]' ;;
   */pulls/[0-9]*) f="$DETAIL_DIR/pr_${{url##*/}}.json"; [[ -f "$f" ]] || exit 22; cat "$f" ;;
   */pulls*) cat "$PULLS_FILE" ;;
+  *labels=evidence*) echo '[]' ;;
   *) cat "$BOARD_FILE" ;;
 esac
 """, encoding="utf-8", newline="\n")
@@ -356,7 +358,7 @@ esac
     # The token's login comes from Block 2 (`hpw dispatcher marker whoami`, issue #433).
     hpw = bin_dir / "hpw"
     hpw.write_text(f"""#!/usr/bin/env bash
-[[ "$1 $2 $3" == "dispatcher marker whoami" ]] || {{ echo "fake hpw: unsupported: $*" >&2; exit 2; }}
+{fake_state_route()}[[ "$1 $2 $3" == "dispatcher marker whoami" ]] || {{ echo "fake hpw: unsupported: $*" >&2; exit 2; }}
 echo '{{"ok": true, "block": "marker", "operation": "whoami", "result": "read", "error": null, "dispatcher": "{BOT}", "bookkeeping": "{BOT}"}}'
 """, encoding="utf-8", newline="\n")
     hpw.chmod(0o755)
@@ -472,7 +474,8 @@ def test_449_ac5_a_round_stopped_after_in_review_is_routed_to_a_run(tmp_path):
                   comments={1: [comment(f"{PAUSED}\n\n- Step: `/implement 1` for #1 (conflict round)\n")],
                             11: [comment(pr11(owner_marker(HEAD)))]})
     assert out["owner_missing_due"] == [{"number": 1, "title": "Story 1"}]
-    assert all(out[key] == [] for key in out if key != "owner_missing_due")
+    assert all(out[key] == [] for key in out if isinstance(out[key], list) and key != "owner_missing_due")
+    assert out["resumable"] is True and out["next_issue"] is None  # issue #434: the poll reports what the workflow decides
 
 
 POLL_CONDITIONS = {
@@ -498,6 +501,7 @@ def test_449_ac2_poll_applies_the_owed_round_rule(tmp_path, condition):
                        details={11: {**DIRTY, "head": {"sha": HEAD}}},
                        comments={1: story_comments, 11: pr_comments})
     assert out["conflict_due"] == ([{"number": 1, "title": "Story 1"}] if listed else []), stderr
+    assert out["resumable"] is bool(listed)  # issue #434: conflict_due makes the run resumable
 
 
 def test_449_ac2_poll_lists_nothing_when_the_comments_cannot_be_read(tmp_path):

@@ -26,6 +26,17 @@
 #   Comment lines, the block's own shim functions and the OWN_MARKER_ALLOW
 #   functions are not checked. Like verified-write, it covers scripts/lib/*.sh.
 #
+# - saved-state (ADR-014 -> Decision -> 5, issue #434) flags saved state read or
+#   written outside Block 3 (`hpw dispatcher state`): a redirect, `cp`, `mv`,
+#   `rm`, `cat`, `read <` or `mkdir` on a path under `.dispatcher-state`,
+#   `.dispatcher-usage` or `.dispatcher-allowance`, or on a variable named
+#   `*STATE_DIR`, `*STATE_FILE`, `HOLD_FILE`, `SESSIONS_FILE` or `NOTIFIED_FILE`.
+#   Comment lines, the block's own shim functions and the SAVED_STATE_ALLOW
+#   functions are not checked. It covers scripts/lib/*.sh too. It also makes
+#   .github/workflows/dispatcher.yml eligible and flags there an
+#   `actions/cache/save` key without `github.run_attempt`, a cache save whose
+#   `if:` has no `always()`, and a `run:` step that calls `gh` directly.
+#
 # Results: PASS|FAIL <path-or-> <check-id> - <reason>
 # Exit 0: all applicable checks pass (including all-SKIP)
 # Exit 1: at least one policy check fails
@@ -46,7 +57,7 @@ USAGE
 
 die() { printf 'dispatcher-change-check: %s\n' "$*" >&2; exit 2; }
 
-CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker)
+CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker saved-state)
 
 # The shims of Block 1 in scripts/dispatcher-invoke.sh: they call the block.
 VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment set_project_status
@@ -70,6 +81,11 @@ OWN_MARKER_ALLOW=(
     "evidence_pending_comment own-marker"  # builds the evidence-pending text of #348; read back through Block 2
     "resolved own-marker"  # dispatcher-notify-retry.sh: the PO's /unblock line after a blocker event
 )
+# The shims of Block 3 in the dispatcher scripts: they call `hpw dispatcher state`.
+SAVED_STATE_SHIMS=(state_block state_write read_count load_state save_state)
+# Exceptions: one "<function> saved-state" per "stays" row of ADR-014 -> Decision
+# -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
+SAVED_STATE_ALLOW=()
 files=()
 case "${1-}" in
     --help) [[ $# -eq 1 ]] || die '--help does not accept arguments'; usage; exit 0 ;;
@@ -88,7 +104,7 @@ esac
 eligible=()
 for file in "${files[@]}"; do
     base=${file##*/}
-    if [[ $base == dispatcher-*.sh || $base == slack-notify.sh || $file == *lib/*.sh ]]; then
+    if [[ $base == dispatcher-*.sh || $base == slack-notify.sh || $file == *lib/*.sh || $base == dispatcher.yml ]]; then
         [[ -f $file && -r $file ]] || die "eligible file is missing or unreadable: $file"
         eligible+=("$file")
     fi
@@ -184,6 +200,75 @@ own_marker_hits() {
     ' "$1"
 }
 
+# saved_state_hits <logical-source-file> — "<line>:<function>:<text>" for each
+# saved-state read or write outside the shim and allowlisted functions.
+saved_state_hits() {
+    local skip=" ${SAVED_STATE_SHIMS[*]} " entry
+    for entry in "${SAVED_STATE_ALLOW[@]}"; do
+        [[ ${entry#* } == saved-state ]] && skip+="${entry%% *} "
+    done
+    awk -v skip="$skip" '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/ {
+        fn=$0; sub(/^[[:space:]]*(function[[:space:]]+)?/, "", fn); sub(/[[:space:]]*\(.*/, "", fn)
+        if ($0 ~ /}[[:space:]]*$/) { if (index(skip, " " fn " ") == 0) check(); fn=""; next }  # one-line function
+      }
+      /^}/ { if (fn != "" && index(skip, " " fn " ") == 0) check(); fn=""; next }
+      { if (fn == "" || index(skip, " " fn " ") == 0) check() }
+      function check(   l, ref) {
+        l=$0
+        # \047 is a single quote; this program is itself single-quoted.
+        ref="(\\.dispatcher-(state|usage|allowance)|[$][{]?([A-Za-z0-9_]*(STATE_DIR|STATE_FILE)|HOLD_FILE|SESSIONS_FILE|NOTIFIED_FILE)([^A-Za-z0-9_]|$))"
+        if (l ~ ("[<>][<>]?[[:space:]]*[\"\047]?" ref) ||
+            l ~ ("(^|[[:space:];&|(])(cp|mv|rm|cat|mkdir)[[:space:]].*" ref))
+          print NR ":" (fn == "" ? "-" : fn) ":" l
+      }
+    ' "$1"
+}
+
+# workflow_state_hits <workflow-file> — "<step>: <reason>" for each cache save
+# whose key lacks github.run_attempt or whose if: lacks always(), and each run:
+# step that calls gh directly. Not a YAML parser: it reads the step layout the
+# dispatcher workflow uses (steps at six spaces, keys at eight).
+workflow_state_hits() {
+    awk '
+      function finish(   ) {
+        if (is_save) {
+          if (key !~ /github[.]run_attempt/) print name ": the cache save key has no github.run_attempt"
+          if (cond !~ /always[(][)]/) print name ": the cache save if: has no always()"
+        }
+        is_save=0; key=""; cond=""
+      }
+      /^      - / { finish(); name=$0; sub(/^      - (name: )?/, "", name); in_run=0 }
+      /^        if:/ { cond=$0 }
+      /^          key:/ { key=key $0 }
+      /uses:[[:space:]]*actions\/cache\/save/ { is_save=1 }
+      /^        run:/ {
+        in_run=1; run_indent=8
+        l=$0; sub(/^        run:[[:space:]]*/, "", l)
+        if (l ~ /^[|>][-+]?[[:space:]]*$/) next
+        if (l ~ /(^|[[:space:];&|(`])gh[[:space:]]+[A-Za-z]/) print name ": a run: step calls gh directly"
+        in_run=0; next
+      }
+      in_run && /^          / {
+        if ($0 !~ /^[[:space:]]*#/ && $0 ~ /(^|[[:space:];&|(`])gh[[:space:]]+[A-Za-z]/) print name ": a run: step calls gh directly"
+        next
+      }
+      in_run && !/^[[:space:]]*$/ { in_run=0 }
+      END { finish() }
+    ' "$1" | sort -u
+}
+
+report_saved_state() {
+    local file=$1 logical=$2 hits
+    hits=$(saved_state_hits "$logical")
+    if [[ -z $hits ]]; then
+        result PASS "$file" saved-state 'no saved state read or written outside hpw dispatcher state'
+    else
+        result FAIL "$file" saved-state "saved state read or written outside hpw dispatcher state at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
+    fi
+}
+
 report_own_marker() {
     local file=$1 logical=$2 hits
     hits=$(own_marker_hits "$logical")
@@ -211,7 +296,22 @@ for file in "${eligible[@]}"; do
             result FAIL "$file" verified-write "GitHub write outside hpw dispatcher write at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
         fi
         report_own_marker "$file" "$tmp"
+        report_saved_state "$file" "$tmp"
         rm -f "$tmp"
+        continue
+    fi
+
+    if [[ $base == dispatcher.yml ]]; then
+        # The dispatcher workflow: only saved-state applies (cache keys, saves, gh in run:).
+        for check in executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker; do
+            result SKIP "$file" "$check" 'workflow file; only saved-state applies'
+        done
+        hits=$(workflow_state_hits "$file")
+        if [[ -z $hits ]]; then
+            result PASS "$file" saved-state 'every cache save key has github.run_attempt and always(), and no run: step calls gh'
+        else
+            result FAIL "$file" saved-state "$(paste -sd';' - <<<"$hits")"
+        fi
         continue
     fi
 
@@ -348,6 +448,14 @@ for file in "${eligible[@]}"; do
         result SKIP "$file" own-marker 'the checker itself reads no markers'
     else
         report_own_marker "$file" "$tmp"
+    fi
+
+    if [[ $base == slack-notify.sh ]]; then
+        result SKIP "$file" saved-state 'the Slack adapter keeps no saved state'
+    elif [[ $base == dispatcher-change-check.sh ]]; then
+        result SKIP "$file" saved-state 'the checker itself keeps no saved state'
+    else
+        report_saved_state "$file" "$tmp"
     fi
     rm -f "$tmp"
 done

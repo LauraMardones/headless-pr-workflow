@@ -283,9 +283,11 @@ def test_ac8_workflow_wires_the_variable_into_the_invoke_step():
 def test_ac14_ac15_notify_step_runs_in_the_same_run_and_marks_after_a_send():
     body = step("Notify usage limit reached")
     assert "steps.invoke.outputs.usage_limit_reached == 'true'" in step_if(body)
-    send = body.index("slack-notify.sh usage_limit_reached")
-    mark = body.index("dispatcher-usage-limit.sh mark-notified")
-    assert send < mark  # under bash -e a failed send never reaches the marker
+    assert "dispatcher-workflow-step.sh usage-limit-notify" in body
+    script = (REPO_ROOT / "scripts" / "dispatcher-workflow-step.sh").read_text(encoding="utf-8")
+    send = script.index("slack-notify.sh\" usage_limit_reached")
+    mark = script.index("dispatcher-usage-limit.sh\" mark-notified")
+    assert send < mark  # a failed send never reaches the marker (tests/test_dispatcher_workflow_step.py)
     names = [m.group(1).strip() for m in re.finditer(r"^      - name: (.+)$", (REPO_ROOT / ".github/workflows/dispatcher.yml").read_text(), re.M)]
     assert names.index("Run dispatcher invoke") < names.index("Notify usage limit reached") < names.index("Save session state cache")
 
@@ -351,7 +353,7 @@ def test_cache_keys_differ_per_attempt_and_the_save_uses_the_day_it_ends_on():
         assert "${{ github.run_attempt }}" in step(name), name
     assert "env.SAVE_DAY" in step("Save session state cache")
     assert "env.TODAY" not in step("Save session state cache").split("key:", 1)[1]
-    assert "date -u" in step("Set cache save date")
+    assert "dispatcher-workflow-step.sh cache-save-date" in step("Set cache save date")
     assert step_if(step("Set cache save date")).startswith("always()")
 
 
@@ -373,3 +375,66 @@ def test_docs_say_the_script_only_phases_are_not_counted_or_stopped():
     assert "script-only phases" in section
     assert "`/review`, `/merge` and `/cleanup`" not in section
     assert "before `/review`, `/merge` or `/cleanup`" not in section
+
+
+# ── Block 3: a counter that cannot be trusted starts no session (issue #434, ADR-014 → Block 3) ──
+
+
+@pytest.mark.parametrize("content", ["garbage\n", f"{TODAY}:abc\n", f"{TODAY}:\n", "2026-10-1:3\n", f"{TODAY}:1\n{TODAY}:2\n"])
+def test_a_malformed_counter_starts_no_session_and_is_left_alone(tmp_path, content):
+    (tmp_path / "state").mkdir()
+    path = tmp_path / "state" / "sessions"
+    path.write_text(content, newline="\n")
+    for command in ("check", "record"):
+        proc = usage(tmp_path, command)
+        assert proc.returncode == 2, command
+        assert "[USAGE LIMIT ERROR]" in proc.stderr and "starting nothing" in proc.stderr
+    assert path.read_text() == content
+
+
+def test_an_unreadable_counter_starts_no_session(tmp_path):
+    (tmp_path / "state" / "sessions").mkdir(parents=True)  # not a regular file
+    for command in ("check", "record"):
+        proc = usage(tmp_path, command)
+        assert proc.returncode == 2 and "[USAGE LIMIT ERROR]" in proc.stderr
+    assert (tmp_path / "state" / "sessions").is_dir()
+
+
+def test_a_counter_dated_another_day_is_still_the_start_of_a_new_day(tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "sessions").write_text("2026-10-13:5\n")
+    proc = usage(tmp_path, "check")
+    assert proc.returncode == 0 and proc.stdout.split() == ["0", "2"]
+    assert json.loads(usage(tmp_path, "status").stdout) == {"sessions_today": 0, "limit": 2}
+
+
+def test_the_status_line_of_a_malformed_counter_still_prints(tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "sessions").write_text("garbage\n")
+    proc = usage(tmp_path, "status")
+    assert proc.returncode == 0 and json.loads(proc.stdout)["sessions_today"] == 0
+
+
+@pytest.mark.parametrize("content", ["garbage\n", "2026-10-13\n", ""])
+def test_a_malformed_or_stale_marker_notifies_again(tmp_path, content):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "notified").write_text(content)
+    assert usage(tmp_path, "notify-due").returncode == 0
+
+
+def test_an_unreadable_marker_notifies_again_and_a_marker_that_cannot_be_written_fails(tmp_path):
+    (tmp_path / "state" / "notified").mkdir(parents=True)
+    assert usage(tmp_path, "notify-due").returncode == 0
+    assert usage(tmp_path, "mark-notified").returncode == 0  # the block moves the directory aside and writes the marker
+    assert usage(tmp_path, "notify-due").returncode == 1
+    (tmp_path / "blocked").write_text("a file where the directory should be")
+    env = {**host_env(), "USAGE_LIMIT_STATE_DIR": str(tmp_path / "blocked" / "usage"), "USAGE_LIMIT_TODAY": TODAY}
+    proc = subprocess.run([BASH, SCRIPT.as_posix(), "mark-notified"], env=env, capture_output=True, text=True)
+    assert proc.returncode != 0 and "[USAGE LIMIT ERROR] cannot write usage-notified state" in proc.stderr
+
+
+def test_a_malformed_counter_starts_no_session_in_the_dispatcher(d):
+    (d.mock / "usage" / "sessions").write_text("garbage\n", newline="\n")
+    proc = d.run_issue(ISSUE, seq="0,0,0,0")
+    assert d.sessions == []
+    assert "[USAGE LIMIT ERROR]" in proc.stderr

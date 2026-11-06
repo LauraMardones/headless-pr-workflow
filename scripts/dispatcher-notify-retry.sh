@@ -54,8 +54,9 @@
 #
 # State (issue #257 mechanism, no second store): one JSON object per line in
 # $DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events, restored and saved by
-# actions/cache in .github/workflows/dispatcher.yml, written atomically and
-# only after slack-notify.sh exits 0. Missing state starts empty, silently.
+# actions/cache in .github/workflows/dispatcher.yml, read and written only
+# through `hpw dispatcher state` (ADR-014 → Block 3, issue #434), written
+# atomically and only after slack-notify.sh exits 0. Missing state starts empty, silently.
 # Malformed lines are dropped with a warning while valid lines are kept, and a
 # state path that is a directory is moved aside. A state file that exists as a
 # regular file but cannot be read (issue #352) is never overwritten or removed:
@@ -113,53 +114,51 @@ EVENTS="$TMP_DIR/events"   # working copy: one JSON object per line
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
+# state_block <operation> <args...> — Block 3 (`hpw dispatcher state`, ADR-014,
+# issue #434) on this script's state directory. Prints its JSON line.
+state_block() {
+    DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state "$@"
+}
+
 # load_state returns 0 when the state is loaded (or missing, or a non-regular
 # path that save_state sets aside) and 2 when the state file is a regular file
-# that cannot be read. The caller must not save over it then (issue #352).
+# that cannot be read, or the block gives no answer. The caller must not save
+# over it then (issue #352). A malformed line is dropped with a warning while the
+# valid lines are kept: a closure event is not registered again (issue #338).
 load_state() {
     : > "$EVENTS"
-    [[ -e "$STATE_FILE" ]] || return 0
-    local copy="$TMP_DIR/state-copy"
-    if ! cp "$STATE_FILE" "$copy" 2>/dev/null; then
-        if [[ -f "$STATE_FILE" ]]; then
-            return 2
-        fi
-        echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; continuing with empty state" >&2
-        return 0
-    fi
-    # Keep every line that is an object carrying the fields the cycle relies
-    # on; drop the rest. A malformed line must not discard a valid pending
-    # record next to it, since a closure event is not registered again.
-    jq -R -c 'fromjson? | select(type == "object"
-            and (.key|type) == "string" and (.event|type) == "string"
-            and (.issue|type) == "number" and (.context|type) == "string"
-            and (.delivered|type) == "boolean" and (.failed_cycles|type) == "number")' \
-        "$copy" > "$EVENTS" 2>/dev/null || : > "$EVENTS"
-    local total kept
-    total="$(grep -c . "$copy" || true)"
-    kept="$(grep -c . "$EVENTS" || true)"
-    if [[ "$total" != "$kept" ]]; then
-        echo "[NOTIFY] Warning: malformed lines in actionable event state $STATE_FILE; dropped $((total - kept)), kept $kept" >&2
-    fi
+    local out result reason dropped
+    out=$(state_block read --name actionable-events --repo "$REPO" 2>/dev/null) || true
+    result=$(jq -r '.result // empty' <<< "$out" 2>/dev/null) || result=""
+    case "$result" in
+        missing) return 0 ;;
+        ok|malformed)
+            jq -c '.data[]' <<< "$out" > "$EVENTS" 2>/dev/null || { : > "$EVENTS"; return 2; }
+            if [[ "$result" == malformed ]]; then
+                dropped=$(jq -r '.dropped // 0' <<< "$out" 2>/dev/null) || dropped=0
+                echo "[NOTIFY] Warning: malformed lines in actionable event state $STATE_FILE; dropped $dropped, kept $(grep -c . "$EVENTS" || true)" >&2
+            fi
+            return 0 ;;
+        unreadable)
+            reason=$(jq -r '.reason // empty' <<< "$out" 2>/dev/null) || reason=""
+            if [[ "$reason" == not-a-file ]]; then
+                echo "[NOTIFY] Warning: cannot read actionable event state $STATE_FILE; continuing with empty state" >&2
+                return 0
+            fi
+            return 2 ;;
+        *) return 2 ;;
+    esac
 }
 
 # save_state returns 1 when the state cannot be written, so a caller never
-# treats an event as recorded when it exists only in the temporary copy.
+# treats an event as recorded when it exists only in the temporary copy. The
+# block writes a temporary file, renames it into place, reads it back, and moves
+# a path that is not a regular file aside to <file>.unreadable.
 save_state() {
     $DRY_RUN && return 0
-    # mv would move the temporary file into a directory-valued state path and
-    # report success while every later load still fails; set such a path aside.
-    if [[ -e "$STATE_FILE" && ! -f "$STATE_FILE" ]]; then
-        rm -rf "$STATE_FILE.unreadable" 2>/dev/null || true
-        if mv -f "$STATE_FILE" "$STATE_FILE.unreadable" 2>/dev/null; then
-            echo "[NOTIFY] Warning: $STATE_FILE is not a regular file; moved aside to $STATE_FILE.unreadable" >&2
-        fi
-    fi
-    if ! { mkdir -p "$(dirname "$STATE_FILE")" \
-            && cp "$EVENTS" "$STATE_FILE.tmp.$$" \
-            && mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"; } 2>/dev/null; then
-        rm -f "$STATE_FILE.tmp.$$" 2>/dev/null || true
-        echo "[NOTIFY] Warning: cannot write actionable event state $STATE_FILE" >&2
+    local out
+    if ! out=$(state_block write --name actionable-events --repo "$REPO" --data-file "$EVENTS" 2>/dev/null); then
+        echo "[NOTIFY] Warning: cannot write actionable event state $STATE_FILE ($(jq -r '.error // "no answer from the state block"' <<< "$out" 2>/dev/null || echo "no answer from the state block"))" >&2
         return 1
     fi
 }

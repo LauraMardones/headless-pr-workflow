@@ -64,6 +64,17 @@ FAKE
     # issue #432 reaches the fake gh the way the script's old direct call did.
     cat > "$T/scripts/hpw" <<'FAKE'
 #!/usr/bin/env bash
+if [[ "$1 $2" == "dispatcher state" ]]; then
+    # Block 3 (issue #434): the real state block. $T/unreadable makes the actionable-events file
+    # unreadable (chmod 000 does not block root or Windows Git Bash).
+    here="$(cd "$(dirname "$0")/.." && pwd)"
+    if [[ -e "$here/unreadable" && "$3 $4 $5" == "read --name actionable-events" ]]; then
+        echo '{"ok": false, "block": "state", "operation": "read", "result": "unreadable", "name": "actionable-events", "reason": "read-failed", "data": [], "error": "read: Input/output error"}'
+        exit 3
+    fi
+    shift
+    PYTHONPATH="$HPW_TEST_REPO_ROOT/src" exec "$HPW_TEST_PYTHON" -m headless_pr_workflow.dispatcher "$@"
+fi
 if [[ "$1 $2 $3" == "dispatcher marker list" ]]; then
     # Block 2 (issue #433): the comments of the dispatcher's own account (the fake gh's login).
     shift 3
@@ -103,6 +114,7 @@ exit 1
 FAKE
     chmod +x "$T/scripts/"*.sh "$T/scripts/hpw" "$T/bin/gh"
     export PATH="$T/bin:$PATH" DISPATCHER_STATE_DIR="$T/state"
+    export HPW_TEST_REPO_ROOT="$REPO_ROOT" HPW_TEST_PYTHON="${HPW_TEST_PYTHON:-$(command -v python3 || command -v python)}"
     export SLACK_WEBHOOK_URL=x
 }
 
@@ -301,16 +313,8 @@ test_directory_valued_state_path_is_replaced() {
     check "directory state path: next run delivers once" $(( rc + ($(slack_count) == 1 ? 0 : 1) ))
 }
 
-# Issue #352: a fake cp on PATH fails for the state file while $T/unreadable
-# exists (chmod 000 does not block root or Windows Git Bash).
+# Issue #352: the fake hpw reports the state file as unreadable while $T/unreadable exists.
 make_state_unreadable() {
-    local real; real=$(command -v cp)
-    cat > "$T/bin/cp" <<FAKE
-#!/usr/bin/env bash
-if [[ -e "$T/unreadable" && "\$1" == */actionable-events ]]; then exit 1; fi
-exec "$real" "\$@"
-FAKE
-    chmod +x "$T/bin/cp"
     : > "$T/unreadable"
 }
 

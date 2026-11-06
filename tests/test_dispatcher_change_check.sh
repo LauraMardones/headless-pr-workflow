@@ -47,13 +47,13 @@ FIXTURE
     chmod +x "$file"
 }
 
-# Explicit selection: clean file exercises all seven checks (verified-write: #432, own-marker: #433).
+# Explicit selection: clean file exercises all eight checks (verified-write: #432, own-marker: #433, saved-state: #434).
 clean="$TMP/dispatcher-clean.sh"
 write_clean "$clean"
 run_check "$TMP/out" "$TMP/err" --files "$clean"
 assert_rc 'clean fixture exits zero' 0
-assert_lines 'clean fixture emits seven results' "$TMP/out" 7
-for id in executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker; do
+assert_lines 'clean fixture emits eight results' "$TMP/out" 8
+for id in executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker saved-state; do
     assert_has "clean fixture passes $id" "$TMP/out" "PASS $clean $id -"
 done
 
@@ -63,7 +63,7 @@ write_clean "$spaced"
 run_check "$TMP/out" "$TMP/err" --files "$spaced"
 assert_rc 'path containing whitespace exits zero' 0
 assert_has 'path containing whitespace is preserved' "$TMP/out" "PASS $spaced executable -"
-assert_lines 'path containing whitespace still emits seven results' "$TMP/out" 7
+assert_lines 'path containing whitespace still emits eight results' "$TMP/out" 8
 
 # Missing failure guard.
 unguarded="$TMP/dispatcher-unguarded.sh"
@@ -158,12 +158,12 @@ assert_rc 'minimal dispatcher exits zero' 0
 assert_has 'slack guard can skip' "$TMP/out" "SKIP $minimal slack-guard -"
 assert_has 'dispatch handled can skip' "$TMP/out" "SKIP $minimal dispatch-handled -"
 
-# An unrelated changed set has the exact seven global SKIPs.
+# An unrelated changed set has the exact eight global SKIPs.
 printf 'notes\n' >"$TMP/readme.txt"
 run_check "$TMP/out" "$TMP/err" --files "$TMP/readme.txt"
 assert_rc 'no-op file set exits zero' 0
-assert_lines 'no-op file set emits seven global results' "$TMP/out" 7
-[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 7 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
+assert_lines 'no-op file set emits eight global results' "$TMP/out" 8
+[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 8 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
 
 # verified-write (issue #432, ADR-014 -> Decision -> 5): each hand-rolled GitHub
 # write form fails; the same write inside a shim of the block passes.
@@ -300,6 +300,112 @@ if grep -q ' own-marker - ' "$TMP/out" && ! grep -q '^FAIL .* own-marker - ' "$T
     pass 'current dispatcher scripts pass own-marker'
 else
     fail 'current dispatcher scripts pass own-marker'
+fi
+
+# saved-state (issue #434, ADR-014 -> Decision -> 5): each hand-rolled read or
+# write of saved state fails; the same line inside a shim of Block 3, or through
+# the block, passes.
+state_forms=(
+    'echo x > .dispatcher-state/o/r/notified-refinement'
+    'echo x >> "$STATE_DIR/o/r/actionable-events"'
+    'cp "$EVENTS" "$STATE_FILE"'
+    'mv -f "$STATE_FILE.tmp" "$STATE_FILE"'
+    'rm -f "$HOLD_FILE"'
+    'n=$(cat "$SESSIONS_FILE")'
+    'IFS=: read -r d n < "$SESSIONS_FILE"'
+    'mkdir -p .dispatcher-usage'
+    'mkdir -p "$USAGE_LIMIT_STATE_DIR"'
+    'printf x > "${NOTIFIED_FILE}"'
+    'cat .dispatcher-allowance/hold.json'
+)
+i=0
+for form in "${state_forms[@]}"; do
+    i=$((i + 1))
+    bad="$TMP/dispatcher-state-$i.sh"
+    write_form "$bad" save_it "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$bad"
+    assert_rc "saved-state fails on: $form" 1
+    assert_has "saved-state names the file and check: $form" "$TMP/out" "FAIL $bad saved-state -"
+    shim="$TMP/dispatcher-state-shim-$i.sh"
+    write_form "$shim" save_state "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$shim"
+    assert_has "saved-state PASS inside a shim: $form" "$TMP/out" "PASS $shim saved-state -"
+done
+lib_state="$TMP/lib/state-helper.sh"
+write_form "$lib_state" helper 'cp "$EVENTS" "$STATE_FILE"'
+run_check "$TMP/out" "$TMP/err" --files "$lib_state"
+assert_rc 'library saved state exits one' 1
+assert_has 'library saved state is reported' "$TMP/out" "FAIL $lib_state saved-state -"
+state_ok="$TMP/dispatcher-state-ok.sh"
+cat >"$state_ok" <<'FIXTURE'
+#!/usr/bin/env bash
+STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
+NEXT_NOTIFIED_FILE="$TMP/notified-next"
+echo "$n" >> "$NEXT_NOTIFIED_FILE"
+echo "[POLL] Warning: cannot read refinement notification state $STATE_DIR" >&2
+DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name notified-refinement --repo "$REPO"
+FIXTURE
+chmod +x "$state_ok"
+run_check "$TMP/out" "$TMP/err" --files "$state_ok"
+assert_rc 'state read through the block exits zero' 0
+assert_has 'state read through the block passes saved-state' "$TMP/out" "PASS $state_ok saved-state -"
+
+# The dispatcher workflow: cache keys, saves and gh in a run: step.
+wf_dir="$TMP/wf/.github/workflows"
+mkdir -p "$wf_dir"
+write_workflow() {  # write_workflow <file> <key> <if> <run>
+    cat >"$1" <<FIXTURE
+jobs:
+  dispatch:
+    steps:
+      - name: Save state
+        if: $3
+        uses: actions/cache/save@v4
+        with:
+          path: .dispatcher-state
+          key: $2
+
+      - name: Run a step
+        run: $4
+FIXTURE
+}
+good_key='dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}'
+good_if='${{ always() && steps.guard.outputs.enabled == '"'true'"' }}'
+wf_good="$wf_dir/dispatcher.yml"
+write_workflow "$wf_good" "$good_key" "$good_if" 'bash scripts/dispatcher-workflow-step.sh poll'
+run_check "$TMP/out" "$TMP/err" --files "$wf_good"
+assert_rc 'a compliant workflow exits zero' 0
+assert_has 'a compliant workflow passes saved-state' "$TMP/out" "PASS $wf_good saved-state -"
+assert_has 'the workflow is an eligible file' "$TMP/out" "SKIP $wf_good executable -"
+mkdir -p "$TMP/wf2/.github/workflows" "$TMP/wf3/.github/workflows" "$TMP/wf4/.github/workflows" "$TMP/wf5/.github/workflows"
+wf_key="$TMP/wf2/.github/workflows/dispatcher.yml"
+write_workflow "$wf_key" 'dispatcher-state-${{ github.run_id }}' "$good_if" 'bash scripts/dispatcher-workflow-step.sh poll'
+run_check "$TMP/out" "$TMP/err" --files "$wf_key"
+assert_rc 'a cache save key without run_attempt exits one' 1
+assert_has 'a cache save key without run_attempt is reported' "$TMP/out" "no github.run_attempt"
+wf_if="$TMP/wf3/.github/workflows/dispatcher.yml"
+write_workflow "$wf_if" "$good_key" '${{ steps.poll.outcome == '"'success'"' }}' 'bash scripts/dispatcher-workflow-step.sh poll'
+run_check "$TMP/out" "$TMP/err" --files "$wf_if"
+assert_rc 'a state save without always() exits one' 1
+assert_has 'a state save without always() is reported' "$TMP/out" "has no always()"
+wf_gh="$TMP/wf4/.github/workflows/dispatcher.yml"
+write_workflow "$wf_gh" "$good_key" "$good_if" 'gh auth setup-git'
+run_check "$TMP/out" "$TMP/err" --files "$wf_gh"
+assert_rc 'a run: step that calls gh exits one' 1
+assert_has 'a run: step that calls gh is reported' "$TMP/out" "calls gh directly"
+wf_gh_block="$TMP/wf5/.github/workflows/dispatcher.yml"
+write_workflow "$wf_gh_block" "$good_key" "$good_if" '|
+          echo start
+          gh api "repos/$REPO/issues"'
+run_check "$TMP/out" "$TMP/err" --files "$wf_gh_block"
+assert_rc 'a multi-line run: step that calls gh exits one' 1
+
+# The repository's own scripts, libraries and workflow pass saved-state.
+run_check "$TMP/out" "$TMP/err" --files "$REPO_ROOT"/scripts/dispatcher-*.sh "$REPO_ROOT"/scripts/lib/*.sh "$REPO_ROOT/.github/workflows/dispatcher.yml"
+if grep -q ' saved-state - ' "$TMP/out" && ! grep -q '^FAIL .* saved-state - ' "$TMP/out"; then
+    pass 'current dispatcher scripts and workflow pass saved-state'
+else
+    fail 'current dispatcher scripts and workflow pass saved-state'
 fi
 
 # Input and discovery errors are distinct from policy failures.

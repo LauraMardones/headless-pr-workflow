@@ -124,11 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
     state_ops = state.add_subparsers(dest="operation", parser_class=_Parser)
     s_read = state_ops.add_parser("read", add_help=False)
     s_read.add_argument("--name", required=True)
-    common(s_read, attempts=False)
+    s_read.add_argument("--repo", default="")
     s_write = state_ops.add_parser("write", add_help=False)
     s_write.add_argument("--name", required=True)
     s_write.add_argument("--data-file", required=True)
-    common(s_write, attempts=False)
+    s_write.add_argument("--repo", default="")
+    s_write.add_argument("--dry-run", action="store_true")
     s_pending = state_ops.add_parser("read-pending", add_help=False)
     s_pending.add_argument("--number", type=_positive, required=True)
     s_pending.add_argument("--item", required=True)
@@ -153,7 +154,10 @@ def _validate(args: argparse.Namespace) -> None:
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ...")
-    if not _REPO.match(args.repo or ""):
+    # State kept per repository, and the comment state, need the repository; the day files do not.
+    repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
+        "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
+    if not repo_free and not _REPO.match(args.repo or ""):
         raise InvalidArguments("--repo must be <owner/repo>")
     if args.block == "state":
         if args.operation in ("read", "write") and args.name not in FILE_NAMES:
@@ -247,7 +251,7 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return EXIT_INVALID
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
-    gateway = factory(args.repo)
+    gateway = factory(args.repo or "")
     settings = settings or Settings.from_env()
 
     if args.block == "marker":

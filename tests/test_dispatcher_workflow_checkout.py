@@ -60,7 +60,9 @@ def test_checkout_has_no_token_input():
 def test_git_auth_step_runs_gh_setup_git_with_project_token():
     body = step(GIT_AUTH_STEP)
     assert re.search(r"^        env:\n          GH_TOKEN: \$\{\{ secrets\.PROJECT_TOKEN \}\}$", body, re.MULTILINE), body
-    assert re.search(r"^        run: gh auth setup-git\s*$", body, re.MULTILINE), body
+    assert re.search(r"^        run: bash scripts/dispatcher-workflow-step.sh git-auth\s*$", body, re.MULTILINE), body
+    script = (REPO_ROOT / "scripts" / "dispatcher-workflow-step.sh").read_text(encoding="utf-8")
+    assert "gh auth setup-git" in script
 
 
 def test_git_auth_step_has_the_invoke_condition():

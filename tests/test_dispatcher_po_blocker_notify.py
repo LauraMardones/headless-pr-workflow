@@ -16,6 +16,7 @@ import subprocess
 
 import pytest
 
+from tests.hpw_dispatcher_route import fake_state_route
 from tests.dispatcher_fakes import BASH, HAVE_TOOLS, REPO_ROOT, Dispatcher
 
 needs_tools = pytest.mark.skipif(not HAVE_TOOLS, reason="requires bash, jq and timeout")
@@ -206,7 +207,7 @@ fi
         # fake hpw next to the script (its default HPW_BIN): the verified write of
         # issue #432 reaches the fake gh the way the script's old direct call did.
         hpw = tmp_path / "scripts" / "hpw"
-        hpw.write_text('''#!/usr/bin/env bash
+        hpw.write_text("#!/usr/bin/env bash\n" + fake_state_route() + '''
 [[ "$1 $2 $3" == "dispatcher write comment" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
 shift 3
 repo="" number="" file=""

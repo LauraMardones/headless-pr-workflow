@@ -47,9 +47,18 @@
 #       "in_implementation":        [{"number": N, "title": "..."}, ...],
 #       "review_due":               [{"number": N, "title": "..."}, ...],
 #       "conflict_due":             [{"number": N, "title": "..."}, ...],
-#       "owner_missing_due":        [{"number": N, "title": "..."}, ...]
+#       "owner_missing_due":        [{"number": N, "title": "..."}, ...],
+#       "evidence_pending":         true | false,
+#       "next_issue":               N | null,
+#       "resumable":                true | false
 #     }
-#   Every key is always present; each value is [] when no items match.
+#   Every key is always present; each list is [] when no items match.
+#   next_issue (issue #434) is the first story ready for implementation.
+#   evidence_pending is true when a story is labelled evidence:pending (issue
+#   #348) or the label cannot be read: a failed read counts as pending.
+#   resumable is true when any of in_merge, in_implementation, review_due,
+#   conflict_due or owner_missing_due is not empty, or evidence_pending is true;
+#   the workflow runs the invoke step for it (issue #293).
 #   review_due (issue #315) lists the stories "In review" that
 #   dispatcher-invoke.sh reviews with a /review session: one executor: label
 #   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
@@ -144,6 +153,7 @@ REST="https://api.github.com"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
+HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # Block 3, `hpw dispatcher state` (ADR-014, issue #434); overridable for tests
 # The review-path tables, shared with dispatcher-invoke.sh (issue #315).
 # shellcheck source=scripts/lib/review-routing.sh
 source "$SCRIPT_DIR/lib/review-routing.sh"
@@ -466,21 +476,21 @@ echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN
 # Missing, unreadable, or malformed state is never fatal: the poll warns
 # (except for a plain missing file) and continues from empty state.
 
-REFINE_STATE_FILE="$STATE_DIR/$OWNER/$REPO_NAME/notified-refinement"
 PREV_NOTIFIED_FILE="$POLL_TMP_DIR/notified-prev"
 NEXT_NOTIFIED_FILE="$POLL_TMP_DIR/notified-next"
 : > "$PREV_NOTIFIED_FILE"
 : > "$NEXT_NOTIFIED_FILE"
 
-if [[ -e "$REFINE_STATE_FILE" ]]; then
-    if ! cp "$REFINE_STATE_FILE" "$PREV_NOTIFIED_FILE" 2>/dev/null; then
-        echo "[POLL] Warning: cannot read refinement notification state $REFINE_STATE_FILE; continuing with empty state" >&2
-        : > "$PREV_NOTIFIED_FILE"
-    elif grep -qvxE '[0-9]+' "$PREV_NOTIFIED_FILE"; then
-        echo "[POLL] Warning: malformed refinement notification state $REFINE_STATE_FILE; continuing with empty state" >&2
-        : > "$PREV_NOTIFIED_FILE"
-    fi
-fi
+# The notified-refinement state comes from Block 3. A missing file is a normal
+# cache miss; a malformed or unreadable one warns and continues empty, so at
+# most one extra notification is sent.
+REFINE_OUT=$(DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name notified-refinement --repo "$REPO" 2>/dev/null) || true
+case "$(jq -r '.result // empty' <<< "$REFINE_OUT" 2>/dev/null)" in
+    ok)        jq -r '.data[]' <<< "$REFINE_OUT" > "$PREV_NOTIFIED_FILE" ;;
+    missing)   ;;
+    malformed) echo "[POLL] Warning: malformed refinement notification state $(jq -r '.path // "notified-refinement"' <<< "$REFINE_OUT"); continuing with empty state" >&2 ;;
+    *)         echo "[POLL] Warning: cannot read refinement notification state $(jq -r '.path // "notified-refinement"' <<< "$REFINE_OUT" 2>/dev/null || echo notified-refinement); continuing with empty state" >&2 ;;
+esac
 
 if [[ "$REFINE_COUNT" -gt 0 ]]; then
     while IFS= read -r item; do
@@ -513,15 +523,14 @@ if [[ "$REFINE_COUNT" -gt 0 ]]; then
     done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
 fi
 
-# Save the reconciled state atomically. Written even when empty so issues that
-# left "Ready for refinement" are cleared. A write failure only warns: the
-# next poll then re-notifies at most once per issue still waiting.
+# Save the reconciled state through Block 3 (temporary file, rename, read-back).
+# Written even when empty so issues that left "Ready for refinement" are
+# cleared. A write failure only warns: the next poll then re-notifies at most
+# once per issue still waiting.
 if ! $DRY_RUN; then
-    if ! { mkdir -p "$(dirname "$REFINE_STATE_FILE")" \
-            && cp "$NEXT_NOTIFIED_FILE" "$REFINE_STATE_FILE.tmp.$$" \
-            && mv -f "$REFINE_STATE_FILE.tmp.$$" "$REFINE_STATE_FILE"; } 2>/dev/null; then
-        rm -f "$REFINE_STATE_FILE.tmp.$$" 2>/dev/null || true
-        echo "[POLL] Warning: cannot write refinement notification state $REFINE_STATE_FILE" >&2
+    if ! DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state write --name notified-refinement \
+            --repo "$REPO" --data-file "$NEXT_NOTIFIED_FILE" >/dev/null 2>&1; then
+        echo "[POLL] Warning: cannot write refinement notification state under $STATE_DIR/$OWNER/$REPO_NAME" >&2
     fi
 fi
 
@@ -564,6 +573,24 @@ if [[ "$FLOW_HEALTH" == "Red" ]]; then
     fi
 fi
 
+# ─── What the workflow decides from the poll (issues #293, #315, #348, #409, #434) ───
+
+# Issue #348: a story labelled evidence:pending is Done, so no board state
+# leads back to it, but its cleanup closing summary is still to be posted by
+# dispatcher-invoke.sh. A failed or unreadable read counts as pending, so the
+# retry is never skipped because of it.
+EVIDENCE_PENDING=true
+if LABELED=$(curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/repos/$REPO/issues?state=all&labels=evidence%3Apending&per_page=1" 2>/dev/null); then
+    EVIDENCE_PENDING=$(jq -r 'if type == "array" then length > 0 else true end' <<< "$LABELED" 2>/dev/null) || EVIDENCE_PENDING=true
+fi
+[[ "$EVIDENCE_PENDING" == true ]] || EVIDENCE_PENDING=false
+if [[ "$EVIDENCE_PENDING" == true ]]; then
+    echo "[POLL] A story is labelled evidence:pending (or the label could not be read); the invoke step runs" >&2
+fi
+
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────
 
 jq -n \
@@ -574,7 +601,12 @@ jq -n \
     --argjson review_due "$REVIEW_DUE" \
     --argjson conflict_due "$CONFLICT_DUE" \
     --argjson owner_missing_due "$OWNER_MISSING_DUE" \
+    --argjson evidence_pending "$EVIDENCE_PENDING" \
     '{ready_for_implementation: $impl, ready_for_refinement: $refine,
       in_merge: $in_merge, in_implementation: $in_implementation,
       review_due: $review_due, conflict_due: $conflict_due,
-      owner_missing_due: $owner_missing_due}'
+      owner_missing_due: $owner_missing_due,
+      evidence_pending: $evidence_pending,
+      next_issue: ($impl[0].number // null),
+      resumable: ((($in_merge + $in_implementation + $review_due + $conflict_due + $owner_missing_due) | length > 0)
+                  or $evidence_pending)}'
