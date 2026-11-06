@@ -18,6 +18,13 @@
 #   functions and the VERIFIED_WRITE_ALLOW functions are not checked. It also
 #   applies to scripts/lib/*.sh, which the dispatcher sources; the other checks
 #   do not.
+# - own-marker (ADR-014 -> Decision -> 5, issue #433) flags a marker read or
+#   written outside Block 2 (`hpw dispatcher marker`): a literal `hpw:dispatcher`
+#   or `hpw:codex-review-bookkeeping`, a `gh api user` or `/user` call, a jq
+#   filter on `.user.login`, and a match on a visible marker text read from
+#   comments (DECISION_BLOCKER_CLAIM_MARKER, DECISION_BLOCKER_RESUME_MARKER).
+#   Comment lines, the block's own shim functions and the OWN_MARKER_ALLOW
+#   functions are not checked. Like verified-write, it covers scripts/lib/*.sh.
 #
 # Results: PASS|FAIL <path-or-> <check-id> - <reason>
 # Exit 0: all applicable checks pass (including all-SKIP)
@@ -39,7 +46,7 @@ USAGE
 
 die() { printf 'dispatcher-change-check: %s\n' "$*" >&2; exit 2; }
 
-CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write)
+CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker)
 
 # The shims of Block 1 in scripts/dispatcher-invoke.sh: they call the block.
 VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment set_project_status
@@ -48,6 +55,20 @@ VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment set_project_stat
 # -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
 VERIFIED_WRITE_ALLOW=(
     "graphql verified-write"  # dispatcher-poll.sh: read-only GraphQL query sent with curl -X POST
+)
+# The shims of Block 2 in scripts/dispatcher-invoke.sh and the other scripts: they call the block.
+OWN_MARKER_SHIMS=(dispatcher_marker marker_block resolve_dispatcher_login marker_holds bot_comments_json
+    marker_list_json bookkeeping_fix_marker_init bookkeeping_login newest_own_comment_body
+    decision_blocker_claim_body decision_blocker_resume_body decision_blocker_marker_since
+    decision_blocker_claim_version own_comments_json load_token_login)
+# Exceptions: one "<function> own-marker" per "stays" row of ADR-014 -> Decision
+# -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
+OWN_MARKER_ALLOW=(
+    "latest_decision_blocker_json own-marker"  # reads Blocked Declarations and the PO's /unblock, not dispatcher markers
+    "check_and_resolve_decision_blocker_comment own-marker"  # the PO's /unblock line; its CLAIM/CONFIRM text goes through Block 2
+    "conflict_round_rule own-marker"  # pure decision rule over the three logins it is given
+    "evidence_pending_comment own-marker"  # builds the evidence-pending text of #348; read back through Block 2
+    "resolved own-marker"  # dispatcher-notify-retry.sh: the PO's /unblock line after a blocker event
 )
 files=()
 case "${1-}" in
@@ -135,13 +156,51 @@ verified_write_hits() {
     ' "$1"
 }
 
+# own_marker_hits <logical-source-file> — "<line>:<function>:<text>" for each
+# marker read or write outside the shim and allowlisted functions.
+own_marker_hits() {
+    local skip=" ${OWN_MARKER_SHIMS[*]} " entry
+    for entry in "${OWN_MARKER_ALLOW[@]}"; do
+        [[ ${entry#* } == own-marker ]] && skip+="${entry%% *} "
+    done
+    awk -v skip="$skip" '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/ {
+        fn=$0; sub(/^[[:space:]]*(function[[:space:]]+)?/, "", fn); sub(/[[:space:]]*\(.*/, "", fn)
+        if ($0 ~ /}[[:space:]]*$/) { if (index(skip, " " fn " ") == 0) check(); fn=""; next }  # one-line function
+      }
+      /^}/ { if (fn != "" && index(skip, " " fn " ") == 0) check(); fn=""; next }
+      { if (fn == "" || index(skip, " " fn " ") == 0) check() }
+      function check(   l) {
+        l=$0
+        if (l ~ /^[[:space:]]*DECISION_BLOCKER_(CLAIM|RESUME)_MARKER=/) return
+        if (l ~ /hpw:dispatcher/ || l ~ /hpw:codex-review-bookkeeping/ ||
+            l ~ /gh[[:space:]]+api[[:space:]]+user([[:space:]"]|$)/ ||
+            l ~ /\/user(["[:space:])|]|$)/ ||
+            l ~ /\.user\.login/ ||
+            l ~ /DECISION_BLOCKER_(CLAIM|RESUME)_MARKER/)
+          print NR ":" (fn == "" ? "-" : fn) ":" l
+      }
+    ' "$1"
+}
+
+report_own_marker() {
+    local file=$1 logical=$2 hits
+    hits=$(own_marker_hits "$logical")
+    if [[ -z $hits ]]; then
+        result PASS "$file" own-marker 'no marker read or written outside hpw dispatcher marker'
+    else
+        result FAIL "$file" own-marker "marker read or written outside hpw dispatcher marker at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
+    fi
+}
+
 for file in "${eligible[@]}"; do
     base=${file##*/}
 
     if [[ $file == *lib/*.sh && $base != dispatcher-*.sh ]]; then
-        # A library the dispatcher sources: only the verified-write rule applies.
+        # A library the dispatcher sources: only the verified-write and own-marker rules apply.
         for check in executable slack-guard dry-run stdout-json dispatch-handled; do
-            result SKIP "$file" "$check" 'library file; only verified-write applies'
+            result SKIP "$file" "$check" 'library file; only verified-write and own-marker apply'
         done
         tmp=$(mktemp)
         logical_source "$file" >"$tmp"
@@ -151,6 +210,7 @@ for file in "${eligible[@]}"; do
         else
             result FAIL "$file" verified-write "GitHub write outside hpw dispatcher write at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
         fi
+        report_own_marker "$file" "$tmp"
         rm -f "$tmp"
         continue
     fi
@@ -280,6 +340,14 @@ for file in "${eligible[@]}"; do
         else
             result FAIL "$file" verified-write "GitHub write outside hpw dispatcher write at line(s) $(cut -d: -f1 <<<"$hits" | paste -sd, -) (function $(cut -d: -f2 <<<"$hits" | sort -u | paste -sd, -))"
         fi
+    fi
+
+    if [[ $base == slack-notify.sh ]]; then
+        result SKIP "$file" own-marker 'the Slack adapter reads no markers'
+    elif [[ $base == dispatcher-change-check.sh ]]; then
+        result SKIP "$file" own-marker 'the checker itself reads no markers'
+    else
+        report_own_marker "$file" "$tmp"
     fi
     rm -f "$tmp"
 done

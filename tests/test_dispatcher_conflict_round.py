@@ -353,7 +353,14 @@ case "$url" in
 esac
 """, encoding="utf-8", newline="\n")
     curl.chmod(0o755)
-    env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
+    # The token's login comes from Block 2 (`hpw dispatcher marker whoami`, issue #433).
+    hpw = bin_dir / "hpw"
+    hpw.write_text(f"""#!/usr/bin/env bash
+[[ "$1 $2 $3" == "dispatcher marker whoami" ]] || {{ echo "fake hpw: unsupported: $*" >&2; exit 2; }}
+echo '{{"ok": true, "block": "marker", "operation": "whoami", "result": "read", "error": null, "dispatcher": "{BOT}", "bookkeeping": "{BOT}"}}'
+""", encoding="utf-8", newline="\n")
+    hpw.chmod(0o755)
+    env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HPW_BIN": hpw.as_posix(), "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "PULLS_FILE": (tmp_path / "pulls.json").as_posix(),
            "DETAIL_DIR": detail_dir.as_posix(), "CURL_LOG": (tmp_path / "curl.log").as_posix(),

@@ -352,10 +352,9 @@ rest_get_all() {
 TOKEN_LOGIN=""
 load_token_login() {
     [[ -z "$TOKEN_LOGIN" ]] || return 0
-    TOKEN_LOGIN=$(curl -sf \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Accept: application/vnd.github+json" \
-        "$REST/user" | jq -r '.login // empty') || TOKEN_LOGIN=""
+    # Block 2 of ADR-014 (`hpw dispatcher marker whoami`, issue #433).
+    TOKEN_LOGIN=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/hpw}" dispatcher marker whoami --repo "$REPO" 2>/dev/null \
+        | jq -r '.dispatcher // empty') || TOKEN_LOGIN=""
     [[ -n "$TOKEN_LOGIN" ]]
 }
 # The PO account, as DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh.

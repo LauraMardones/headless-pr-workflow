@@ -125,10 +125,14 @@ def test_ac3_a_different_missing_item_on_the_same_story_is_a_separate_event(d):
     d._write(f"comments_{PR}.json", [])
     d.fail_comment_writes(STORY, MANY)
     d.resume()
+    items = {e["key"] for e in events(d)}
     d.add_comment(PR, CONFIRMATION)  # the confirmation is now there: cleanup follows and fails
     d.fail("cleanup")
     d.resume()
-    items = {e["key"] for e in events(d)}
+    # The first event is dropped once its evidence is posted by the dispatcher's own
+    # account (the lookup now reads the account through Block 2, #433); each item
+    # was queued as its own event.
+    items |= {e["key"] for e in events(d)}
     assert len(items) == 2 and any("merge-confirmation-missing" in k for k in items) \
         and any("cleanup-summary-unrecorded" in k for k in items)
 

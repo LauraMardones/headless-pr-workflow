@@ -1082,7 +1082,7 @@ def test_ac15_allowance_never_holds_the_script_only_merge_at_a_resume_entry(d):
 
 def test_fix_round_marker_matches_the_bookkeeping_job():
     text = INVOKE.read_text(encoding="utf-8")
-    declared = re.search(r'^BOOKKEEPING_FIX_MARKER="(.*)"$', text, re.MULTILINE)
+    declared = re.search(r'^\s*BOOKKEEPING_FIX_MARKER="(.*)"$', text, re.MULTILINE)
     assert declared
     marker = bookkeeping.action_marker(bookkeeping.ACTION_MOVE_IN_IMPLEMENTATION, HEAD)
     assert marker.startswith(declared.group(1) + HEAD + " ")
