@@ -331,6 +331,7 @@ USAGE_LIMIT_SCRIPT="${USAGE_LIMIT_SCRIPT:-$SCRIPT_DIR/dispatcher-usage-limit.sh}
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 MERGE_SCRIPT="${MERGE_SCRIPT:-$SCRIPT_DIR/dispatcher-merge.sh}"          # /merge without a session (#264); overridable for tests
 CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-$SCRIPT_DIR/dispatcher-cleanup.sh}"    # /cleanup without a session (#264); overridable for tests
+HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # the building blocks of ADR-014 (`hpw dispatcher ...`); overridable for tests
 COMMANDS_DIR="$REPO_ROOT/.claude/commands"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)
 # Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
@@ -439,26 +440,57 @@ has_handoff_note() {
     return 1
 }
 
+# ─── Utility: the verified GitHub write (ADR-014 → Block 1, issue #432) ──────
+# Every comment, board status and label the dispatcher writes goes through
+# `hpw dispatcher write`, which writes, reads back, retries and fails closed.
+# The functions below are thin shims around it; callers keep their names.
+# dispatcher_write <operation> <args...> runs the block (with --dry-run under
+# --dry-run) and returns its exit code; WRITE_JSON holds its one JSON line and
+# write_field <name> reads one field of it. The block's stderr is the log.
+
+WRITE_JSON=""
+
+dispatcher_write() {
+    local rc=0 dry=()
+    $DRY_RUN && dry=(--dry-run)
+    WRITE_JSON=$(DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}" \
+        DECISION_BLOCKER_PO_LOGIN="${DECISION_BLOCKER_PO_LOGIN:-}" \
+        EVIDENCE_RETRY_MAX="${EVIDENCE_RETRY_MAX:-3}" \
+        "$HPW_BIN" dispatcher write "$@" --repo "$REPO" ${dry[@]+"${dry[@]}"}) || rc=$?
+    return "$rc"
+}
+
+write_field() {
+    jq -r --arg f "$1" '.[$f] // empty | tostring' <<< "$WRITE_JSON" 2>/dev/null || true
+}
+
 # ─── Utility: post a GitHub issue comment ────────────────────────────────────
 # LAST_POSTED_AT holds the created_at GitHub gave the comment just posted (the
 # current UTC time under --dry-run, or when the response carries none), so a
-# caller can key an actionable event on it (issue #359).
+# caller can key an actionable event on it (issue #359). Returns non-zero when
+# the block could not write and verify the comment.
+# post_comment <issue> <body> [<attempts>] — attempts defaults to 3; a caller
+# with its own retry loop (record_merge_owner, B2 until #433) passes 1.
 
 LAST_POSTED_AT=""
 
 post_comment() {
     local issue_num="$1"
-    local body="$2" response
+    local body="$2" attempts="${3:-3}" body_file rc=0
     if $DRY_RUN; then
         echo "[DRY RUN] Would post comment on #$issue_num:"
         echo "$body" | sed 's/^/  /'
-        LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    else
-        response=$(gh api "repos/$REPO/issues/$issue_num/comments" \
-            -X POST -f body="$body") || return 1
-        LAST_POSTED_AT=$(jq -r '.created_at // empty' <<< "$response" 2>/dev/null || true)
-        [[ -n "$LAST_POSTED_AT" ]] || LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
+    body_file=$(mktemp) || return 1
+    printf '%s' "$body" > "$body_file"
+    dispatcher_write comment --number "$issue_num" --body-file "$body_file" --attempts "$attempts" || rc=$?
+    rm -f "$body_file"
+    if [[ $rc -ne 0 ]]; then
+        echo "Warning: the comment on #$issue_num was not written ($(write_field error))." >&2
+        return 1
+    fi
+    LAST_POSTED_AT=$(write_field created_at)
+    [[ -n "$LAST_POSTED_AT" ]] || LAST_POSTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 }
 
 # ─── Utility: send a Slack notification via slack-notify.sh (issue #179) ─────
@@ -911,35 +943,40 @@ get_project_item_id() {
 }
 
 # ─── Utility: set any project board status by name ───────────────────────────
+# set_project_status <item-id> <issue> <status> — writes the status through the
+# block, which reads the board fresh and reads the status back. Returns 1 with
+# one `[BOARD ERROR]` line when the status was not written (issue #432, AC 5):
+# the caller does not move the story on and keeps a state a later run retries.
+# <item-id> is kept for the callers; the block finds the item itself.
+# BOARD_WRITE_SENT is "true" when the block sent a status mutation: a failed
+# write may then still have changed the board (see board_status_kept).
+
+BOARD_WRITE_SENT=""
 
 set_project_status() {
-    local item_id="$1"
     local issue_num="$2"
     local status_name="$3"
-    local option_id
-    option_id=$(get_status_option_id "$status_name")
-    if [[ -z "$STATUS_FIELD_ID" || -z "$option_id" ]]; then
-        echo "Warning: Could not resolve Status field/option IDs for '$status_name'; skipping board update for #$issue_num." >&2
-        return
-    fi
+    BOARD_WRITE_SENT=""
     if $DRY_RUN; then
         echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
-        return
     fi
-    gh api graphql -f query='
-    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: $projectId
-        itemId: $itemId
-        fieldId: $fieldId
-        value: { singleSelectOptionId: $optionId }
-      }) { projectV2Item { id } }
-    }
-    ' -f projectId="$PROJECT_ID" \
-      -f itemId="$item_id" \
-      -f fieldId="$STATUS_FIELD_ID" \
-      -f optionId="$option_id" >/dev/null \
-    || echo "Warning: Board status update failed for #$issue_num to '$status_name'; manual update required." >&2
+    if ! dispatcher_write board-status --issue "$issue_num" --status "$status_name"; then
+        BOARD_WRITE_SENT=$(write_field sent)
+        echo "[BOARD ERROR] #$issue_num: could not set \"$status_name\" ($(write_field error))" >&2
+        return 1
+    fi
+}
+
+# board_status_kept <item-id> <issue> <old-status> — after set_project_status
+# returned 1: 0 when the story is still in <old-status>, because the block sent
+# no mutation or it wrote <old-status> back; 1 when the board may hold the new
+# status (the mutation was sent, its read-back failed) and <old-status> could
+# not be written back either. A caller that waits for a later run to retry
+# from <old-status> does so only on 0 (issue #432).
+board_status_kept() {
+    [[ "$BOARD_WRITE_SENT" == true ]] || return 0
+    echo "${LOG_PREFIX}#$2: the status write was sent but not confirmed; writing \"$3\" back" >&2
+    set_project_status "$1" "$2" "$3"
 }
 
 # ─── Utility: post a mid-cycle blocker comment (reuses Blocked Declaration format) ──
@@ -1175,55 +1212,77 @@ $(evidence_failed_marker "$item" "$ref")" || unwritable=true
 }
 
 # evidence_retry <target> <item> <ref> <story> <title> [<expected-head>]
-# Posts the pending evidence of <item> on <target> (a PR or an issue) once.
+# Posts the pending evidence of <item> on <target> (a PR or an issue) once,
+# through `hpw dispatcher write retry-pending` (issue #432), which also counts a
+# failed run on the story. This shim keeps the return codes and log lines:
 #   0  nothing is pending, it is stale, or the evidence is posted (now or earlier)
 #   1  still missing: this run's write failed, or a read failed; retries remain
 #   2  still missing and retrying has stopped (blocker posted, or /unblock needed)
 # With <expected-head>, evidence recorded for another head is never posted.
+# The give-up blocker is posted here, through post_blocker_once (#433 moves it).
 evidence_retry() {
     local target="$1" item="$2" ref="$3" story="$4" title="$5" expected_head="${6:-}"
-    local own pending pending_at head b64 payload
-    own=$(bot_comments_json "$target") || {
-        echo "Warning: could not read the comments on #$target; the $item evidence is not retried in this run." >&2
-        return 1
-    }
-    pending=$(jq -r --arg m "action=evidence-pending item=$item " \
-        '[.[] | select((.body // "") | contains($m))] | last | .body // empty' <<< "$own")
-    [[ -n "$pending" ]] || return 0
-    pending_at=$(jq -r --arg m "action=evidence-pending item=$item " \
-        '[.[] | select((.body // "") | contains($m))] | last | .created_at // empty' <<< "$own")
-    if [[ "$pending" =~ head=([^[:space:]]+)[[:space:]]payload=([A-Za-z0-9+/=]*) ]]; then
-        head="${BASH_REMATCH[1]}"; b64="${BASH_REMATCH[2]}"
-    else
-        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence-pending comment on #$target is malformed; ignored" >&2
-        return 0
+    local rc=0 result reason head error payload pending_at recorded args unwritable=false
+    args=(retry-pending --target "$target" --item "$item" --ref "$ref" --story "$story")
+    [[ -n "$expected_head" ]] && args+=(--expected-head "$expected_head")
+    dispatcher_write "${args[@]}" || rc=$?
+    # Read every field now: post_blocker_once below writes through the block too,
+    # which replaces WRITE_JSON.
+    result=$(write_field result)
+    reason=$(write_field reason)
+    head=$(write_field head)
+    error=$(write_field error)
+    payload=$(write_field payload)
+    pending_at=$(write_field pending_at)
+    recorded=$(write_field failure_recorded)
+    # The block tried to post the text in this run.
+    if [[ "$reason" == now || "$reason" == write-failed || "$reason" == limit ]]; then
+        echo "${LOG_PREFIX}[RESUME] #$story: posting the missing $item evidence on #$target"
     fi
-    if [[ -n "$expected_head" && "${head,,}" != "${expected_head,,}" ]]; then
-        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is for head ${head:0:7}, not ${expected_head:0:7}; not posted"
-        return 0
+    case "$result" in
+        none)
+            case "$reason" in
+                malformed)   echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence-pending comment on #$target is malformed; ignored" >&2 ;;
+                undecodable) echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence payload on #$target could not be decoded; ignored" >&2 ;;
+            esac
+            return 0 ;;
+        stale)
+            echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is for head ${head:0:7}, not ${expected_head:0:7}; not posted"
+            return 0 ;;
+        posted)
+            return 0 ;;
+        dry-run)
+            echo "${LOG_PREFIX}[RESUME] #$story: posting the missing $item evidence on #$target"
+            echo "[DRY RUN] Would post comment on #$target:"
+            write_field payload | sed 's/^/  /'
+            return 0 ;;
+        missing)
+            if [[ "$reason" == unreadable ]]; then
+                echo "Warning: could not read the comments on #$target; the $item evidence is not retried in this run." >&2
+                return 1
+            fi
+            echo "Warning: the $item evidence on #$target could not be posted; retried on the next run." >&2
+            [[ "$recorded" == true ]] || unwritable=true ;;
+        gave-up)
+            if [[ "$reason" == stopped ]]; then
+                echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is still missing; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
+                return 2
+            fi
+            echo "Warning: the $item evidence on #$target could not be posted; retrying stops after $EVIDENCE_RETRY_MAX runs." >&2
+            [[ "$recorded" == true ]] || unwritable=true
+            post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
+                "the evidence (the $item evidence on #$target) is posted by hand, then the PO posts /unblock" \
+                "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write the $item evidence on #$target; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
+                || unwritable=true ;;
+        *)
+            echo "Warning: the $item evidence on #$target could not be retried ($error); retried on the next run." >&2
+            return 1 ;;
+    esac
+    if $unwritable; then
+        evidence_unwritable_alert "$story" "$title" "$item" "$ref" "$target" "$pending_at" payload "$payload"
     fi
-    payload=$(printf '%s' "$b64" | base64 -d 2>/dev/null) || payload=""
-    if [[ -z "$payload" ]]; then
-        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence payload on #$target could not be decoded; ignored" >&2
-        return 0
-    fi
-    if jq -e --arg p "$payload" '
-            def trim: gsub("^\\s+|\\s+$"; "");
-            any(.[]; ((.body // "") | contains("action=evidence-pending") | not)
-                     and ((.body // "") | trim | contains($p | trim)))' <<< "$own" >/dev/null; then
-        return 0
-    fi
-    if marker_holds "$story" "$(evidence_gave_up_marker "$item" "$ref")"; then
-        echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is still missing; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
-        return 2
-    fi
-    echo "${LOG_PREFIX}[RESUME] #$story: posting the missing $item evidence on #$target"
-    if post_comment "$target" "$payload"; then
-        return 0
-    fi
-    echo "Warning: the $item evidence on #$target could not be posted; retried on the next run." >&2
-    evidence_record_failure "$story" "$title" "$item" "$ref" "the $item evidence on #$target" \
-        "$target" "$pending_at" payload "$payload"
+    [[ "$result" == gave-up ]] && return 2
+    return 1
 }
 
 # The cleanup closing summary is written on a story that is already Done, so no
@@ -1234,17 +1293,13 @@ evidence_retry() {
 EVIDENCE_PENDING_LABEL="evidence:pending"
 EVIDENCE_PENDING_LABEL_PATH="evidence%3Apending"
 
-# label_pending_cleanup <issue> — 0 when the story now carries the label.
+# label_pending_cleanup <issue> — 0 when the story now carries the label. The
+# block creates the label first when the repository does not have it yet.
 label_pending_cleanup() {
     if $DRY_RUN; then
         echo "[DRY RUN] Would add the $EVIDENCE_PENDING_LABEL label to #$1"
-        return 0
     fi
-    # Adding a label the repository does not have fails with 404, so create it
-    # first; a label that already exists answers 422, which is fine.
-    gh api "repos/$REPO/labels" -X POST -f "name=$EVIDENCE_PENDING_LABEL" -f "color=d93f0b" \
-        -f "description=Dispatcher: a cleanup closing summary is still to be posted (#348)" >/dev/null 2>&1 || true
-    gh api "repos/$REPO/issues/$1/labels" -X POST -f "labels[]=$EVIDENCE_PENDING_LABEL" >/dev/null
+    dispatcher_write label --number "$1" --add "$EVIDENCE_PENDING_LABEL"
 }
 
 # retry_pending_cleanup_summaries — posts the pending closing summary of every
@@ -1264,9 +1319,8 @@ retry_pending_cleanup_summaries() {
         evidence_retry "$n" "cleanup-summary" "issue$n" "$n" "$title" || rc=$?
         # 0: posted now or earlier, or nothing of the dispatcher's own is pending.
         [[ $rc -eq 0 ]] || continue
-        if $DRY_RUN; then
-            echo "[DRY RUN] Would remove the $EVIDENCE_PENDING_LABEL label from #$n"
-        elif ! gh api "repos/$REPO/issues/$n/labels/$EVIDENCE_PENDING_LABEL_PATH" -X DELETE >/dev/null 2>&1; then
+        $DRY_RUN && echo "[DRY RUN] Would remove the $EVIDENCE_PENDING_LABEL label from #$n"
+        if ! dispatcher_write label --number "$n" --remove "$EVIDENCE_PENDING_LABEL"; then
             echo "Warning: could not remove the $EVIDENCE_PENDING_LABEL label from #$n; removed on a later run." >&2
         fi
     done
@@ -1479,7 +1533,7 @@ check_subscription_allowance() {
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: $RESUMED_ROUND not started; story stays in $RESUMED_ROUND_PLACE and the $RESUMED_ROUND is tried again on a later run"
         elif [[ "$step" == "implement" ]]; then
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
-            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
         else
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /$step not started; commenting on the story"
             post_allowance_comment "$step" "$decision_json"
@@ -1492,7 +1546,7 @@ check_subscription_allowance() {
     if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
         echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run" >&2
     elif [[ "$step" == "implement" ]]; then
-        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
     else
         post_allowance_comment "$step" "$decision_json"
     fi
@@ -1561,7 +1615,7 @@ check_usage_limit() {
         if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
             echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run"
         elif [[ "$step" == "implement" ]]; then
-            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
         else
             post_usage_limit_comment "$step" "$count" "$limit"
         fi
@@ -1575,7 +1629,7 @@ check_usage_limit() {
     if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
         echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run" >&2
     elif [[ "$step" == "implement" ]]; then
-        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation"
+        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
     else
         post_usage_limit_comment "$step" "" ""
     fi
@@ -2179,7 +2233,7 @@ record_merge_owner() {
     local marker attempt
     marker=$(merge_owner_marker "$pr_number" "$head_sha")
     for attempt in 1 2 3; do
-        post_comment "$pr_number" "$marker" && return 0
+        post_comment "$pr_number" "$marker" 1 && return 0  # this loop is the retry
         sleep "${COMMENT_RETRY_DELAY:-2}"
     done
     # Issue #348: leave the marker as an evidence-pending comment, so a later run
@@ -2188,7 +2242,7 @@ record_merge_owner() {
     local pending
     pending=$(evidence_pending_comment "merge-owner" "$head_sha" "$marker")
     for attempt in 1 2 3; do
-        post_comment "$pr_number" "$pending" && return 0
+        post_comment "$pr_number" "$pending" 1 && return 0
         sleep "${COMMENT_RETRY_DELAY:-2}"
     done
     # Neither form is on GitHub, so no later run could tell that this head is
@@ -2302,7 +2356,17 @@ finish_story() {
     LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
     echo ""
     echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
-    set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"
+    # Issue #432: without "Done" on the board /cleanup does not run; the story
+    # stays "In merge", so the merged-PR resume reruns it on a later run. When
+    # "Done" may have landed and "In merge" cannot be written back, no later
+    # run resumes the story, so /cleanup runs now.
+    if ! set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"; then
+        if board_status_kept "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"; then
+            echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: \"Done\" was not written; /cleanup not run, the story stays \"In merge\" for a later run" >&2
+            return 0
+        fi
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: \"Done\" may be on the board and \"In merge\" could not be written back; /cleanup runs now" >&2
+    fi
     # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
     if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
         echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
@@ -2319,7 +2383,7 @@ finish_story() {
                 "$ISSUE_NUMBER" "$merged_at" cleanup-summary || rc=$?
             if [[ $rc -eq 1 ]]; then
                 echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the cleanup closing summary is not on GitHub; back to \"In merge\" so the next run reruns cleanup" >&2
-                set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"
+                set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge" || return 1
                 return 0
             fi
         fi
@@ -2399,29 +2463,11 @@ hand_off_done_marker() {
     dispatcher_marker "action=hand-off-done pr=$1"
 }
 
-# set_project_status_checked — like set_project_status(), but returns 1 when
-# the write did not happen, so the caller can keep a retryable state.
+# set_project_status_checked — the name the hand-off and fix-round callers use;
+# set_project_status() itself now returns 1 when the write did not happen, so
+# the caller can keep a retryable state.
 set_project_status_checked() {
-    local item_id="$1" issue_num="$2" status_name="$3" option_id
-    option_id=$(get_status_option_id "$status_name")
-    [[ -n "$item_id" && -n "$STATUS_FIELD_ID" && -n "$option_id" ]] || return 1
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
-        return 0
-    fi
-    gh api graphql -f query='
-    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: $projectId
-        itemId: $itemId
-        fieldId: $fieldId
-        value: { singleSelectOptionId: $optionId }
-      }) { projectV2Item { id } }
-    }
-    ' -f projectId="$PROJECT_ID" \
-      -f itemId="$item_id" \
-      -f fieldId="$STATUS_FIELD_ID" \
-      -f optionId="$option_id" >/dev/null
+    set_project_status "$@"
 }
 
 fix_round_due() {
@@ -3471,37 +3517,18 @@ READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
 # any "this is resolved/consumed" state on a 1, or a transient/config
 # failure would be indistinguishable from success and could permanently
 # strand a story. Callers that only want best-effort board sync with no
-# such downstream state (e.g. the stale-recovery loop below) should guard
-# the call with `|| true` so a warning here does not abort the script
-# under `set -euo pipefail`.
+# such downstream state must still not report success on a 1 (issue #432): the
+# stale-recovery loop below posts its Recovery Comment only after this
+# returns 0.
 set_project_status_ready() {
     local item_id="$1"
     local issue_num="$2"
+    BOARD_WRITE_SENT=""
     if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
         echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
         return 1
     fi
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would set #$issue_num to \"Ready for implementation\" on project board"
-        return 0
-    fi
-    if gh api graphql -f query='
-    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: $projectId
-        itemId: $itemId
-        fieldId: $fieldId
-        value: { singleSelectOptionId: $optionId }
-      }) { projectV2Item { id } }
-    }
-    ' -f projectId="$PROJECT_ID" \
-      -f itemId="$item_id" \
-      -f fieldId="$STATUS_FIELD_ID" \
-      -f optionId="$READY_FOR_IMPL_OPTION_ID" >/dev/null; then
-        return 0
-    fi
-    echo "Warning: Board status update failed for #$issue_num; manual update required." >&2
-    return 1
+    set_project_status "$item_id" "$issue_num" "Ready for implementation"
 }
 
 LAST_ACTION="stale story detection"
@@ -3606,8 +3633,19 @@ Action: status rolled back to \"Ready for implementation\".
 Branch: $branch — existing commits intact.
 Next executor: review branch state before pulling."
 
+    # Issue #432: the status first. When it is not written, no Recovery Comment
+    # is posted and the story is not counted, so the next run tries again
+    # without a duplicate comment. When the rollback may have landed and "In
+    # implementation" cannot be written back, the next run would not see the
+    # story as stale, so the Recovery Comment is posted now.
+    if ! set_project_status_ready "$item_id" "$issue_num"; then
+        if board_status_kept "$item_id" "$issue_num" "In implementation"; then
+            echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
+            continue
+        fi
+        echo "#$issue_num: the rollback to \"Ready for implementation\" may be on the board and \"In implementation\" could not be written back; Recovery Comment posted." >&2
+    fi
     post_comment "$issue_num" "$recovery_comment"
-    set_project_status_ready "$item_id" "$issue_num" || true
 
     STALE_COUNT=$(( STALE_COUNT + 1 ))
 done
@@ -3751,7 +3789,11 @@ continue_with_next_ready_story() {
 LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
 echo ""
 echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation"
+# Best-effort (ADR-014 -> Decision -> 7, issue #432): the session still starts
+# when this write fails, as tests/test_dispatcher_review_loop.py::
+# test_failed_first_status_write_does_not_start_the_story_twice requires; the
+# hand-off records the pending hand-off so the story is not started twice.
+set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation" || true
 # The PR head before the session, if the story already has an open PR: the
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')

@@ -17,15 +17,14 @@
 # Exit 0: cleanup ran; kept items are reported. Exit 1: the PR is not confirmed
 # merged, or a step failed. Exit 2: invalid invocation. Nothing is forced.
 #
-# Overridable for tests: HPW_BIN, SESSION_SUMMARY_SCRIPT, COMMENT_RETRY_DELAY.
+# Overridable for tests: HPW_BIN, SESSION_SUMMARY_SCRIPT, COMMENT_RETRY_DELAY (read by
+# `hpw dispatcher write`).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"
 SESSION_SUMMARY_SCRIPT="${SESSION_SUMMARY_SCRIPT:-$SCRIPT_DIR/session-summary.sh}"
-# shellcheck source=scripts/lib/evidence-pending.sh
-source "$SCRIPT_DIR/lib/evidence-pending.sh"
 
 ISSUE="" PR="" REPO=""
 while [[ $# -gt 0 ]]; do
@@ -121,22 +120,21 @@ checks="hpw post-merge-sync --execute, hpw branch-cleanup --execute"
 # dispatcher logs it as a warning; the story is already Done) with the text logged.
 if summary=$(bash "$SESSION_SUMMARY_SCRIPT" --command cleanup --issue "$ISSUE" --pr "$PR" \
         --checks "$checks" --blockers "$blockers" --next done); then
-    posted=false
-    for attempt in 1 2 3; do
-        if gh api "repos/$REPO/issues/$ISSUE/comments" -X POST -f body="$summary" >/dev/null; then
-            posted=true; break
-        fi
-        sleep "${COMMENT_RETRY_DELAY:-2}"
-    done
-    if ! $posted; then
+    # The verified write (ADR-014 → Block 1, issue #432): up to 3 attempts, read
+    # back, and on failure the exact text is left on the issue as an
+    # evidence-pending comment (issue #348), so a later run posts it once.
+    write_rc=0
+    if body_file=$(mktemp); then
+        printf '%s' "$summary" > "$body_file"
+        "$HPW_BIN" dispatcher write comment --repo "$REPO" --number "$ISSUE" --body-file "$body_file" \
+            --evidence-item cleanup-summary --evidence-head - >/dev/null || write_rc=$?
+        rm -f "$body_file"
+    else
+        write_rc=1
+    fi
+    if [[ $write_rc -ne 0 ]]; then
         echo "The closing comment on #$ISSUE could not be posted after 3 attempts. A later dispatcher run posts it; or post it manually:" >&2
         echo "$summary" >&2
-        # Issue #348: leave the exact text on the issue so a later run posts it once.
-        pending=$(evidence_pending_comment "cleanup-summary" "-" "$summary")
-        for attempt in 1 2 3; do
-            gh api "repos/$REPO/issues/$ISSUE/comments" -X POST -f body="$pending" >/dev/null && break
-            sleep "${COMMENT_RETRY_DELAY:-2}"
-        done
         failed+=("closing comment not posted")
     fi
 else

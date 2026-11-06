@@ -901,7 +901,7 @@ def test_449_ac5_cancelled_run_gets_a_round_or_one_blocker(d, status, pr_fields,
 
 def test_449_ac5_failed_write_of_the_pause_record_gets_a_fresh_round(d):
     conflicting_story(d, "In review")
-    d.on_session("implement", f'echo 1 > "$MOCK_DIR/fail_posts_{STORY}"')
+    d.on_session("implement", f'echo 3 > "$MOCK_DIR/fail_posts_{STORY}"')  # the block's 3 attempts (#432)
     stop_the_session_at_the_usage_limit(d)
 
     proc = d.resume()

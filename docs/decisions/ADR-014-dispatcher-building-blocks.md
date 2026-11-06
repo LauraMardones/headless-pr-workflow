@@ -42,7 +42,7 @@ Every building block has the same contract:
 | **Operations** | `comment --number <n> --body-file <path>`; `board-status --issue <n> --status "<name>"`; `label --number <n> (--add \| --remove) <name>`; `retry-pending --target <n> --item <item> --ref <ref> --story <n> [--expected-head <sha>]` |
 | **Inputs** | The target and the content. `--attempts <n>` (default 3) and `--evidence-item <item> --evidence-head <sha\|->` for a comment that is durable evidence (#348). |
 | **What it does** | Writes, then reads the result back from GitHub. For a comment, the dispatcher's own account wrote it and its body is the text that was sent. For a board status, the item's Status is the requested name (as `scripts/set-project-status` does today). For a label, the issue has (or no longer has) the label. When the read-back shows nothing was written, it retries. Before it retries a comment, it looks for an identical own comment created since the first attempt, so a write whose response was lost is not posted twice. |
-| **Result** | `written`, `already` (nothing to change), `pending` (the write failed and the evidence-pending comment was left), `failed`, `dry-run`; plus `url`, `created_at`, `attempts`, `before`/`after` for a status. `retry-pending` adds `none`, `posted`, `stale`, `missing` and `gave-up` (the existing `evidence_retry` bound and give-up blocker, `EVIDENCE_RETRY_MAX`). |
+| **Result** | `written`, `already` (nothing to change), `pending` (the write failed and the evidence-pending comment was left), `failed`, `dry-run`; plus `url`, `created_at`, `attempts`, `before`/`after` and `sent` (a status mutation was sent, so a failed write may still have changed the board) for a status. `retry-pending` adds `none`, `posted`, `stale`, `missing` and `gave-up` (the existing `evidence_retry` bound and give-up blocker, `EVIDENCE_RETRY_MAX`). |
 | **Exit codes** | `0` written, already or dry-run; `1` pending, failed or missing; `4` (`retry-pending` only) retrying stopped until the PO's `/unblock`; `2` invalid arguments. |
 | **Evidence it posts** | A comment write is its own evidence. With `--evidence-item`, a write that still fails leaves the evidence-pending comment of #348 (`scripts/lib/evidence-pending.sh` format), and a later run posts it with `retry-pending`. Board and label writes post nothing; the board is the record (ADR-010), and the caller names the change in its own comment or Session Summary. |
 | **Fail-closed result** | Exit `1` means "not done". The caller does not record the step as done, does not move the story on, and keeps a state the next run can retry. A caller may ignore exit `1` only for a write listed as best-effort in the inventory below. |
@@ -114,15 +114,15 @@ Source: `main` at `976e95f`. **B1** = verified write, **B2** = own-account marke
 
 | Variant (line) | Block | Note |
 |---|---|---|
-| **`post_comment`** (449) | B1 | Unchecked comment POST; becomes the shim for `write comment` |
-| **`set_project_status`** (915) | B1 | Board write that only warns |
-| **`set_project_status_checked`** (2404) | B1 | Returns 1 on a refused call but never reads back |
-| **`set_project_status_ready`** (3477) | B1 | As above, for "Ready for implementation" |
-| **`evidence_retry`** (1183) | B1 | Becomes `write retry-pending`; reads its payload through B3 `read-pending` |
-| `evidence_record_failure` (1157) | B1 | The retry bound and give-up blocker of `retry-pending` |
-| `settle_merge_confirmation` (2215) | B1 | Confirmation evidence after a merge |
-| `label_pending_cleanup` (1238) | B1 | Label create and add |
-| `retry_pending_cleanup_summaries` (1253) | B1 | Inline label `DELETE` |
+| **`post_comment`** (449) | B1 | Moved (#432): the shim for `write comment`; sets `LAST_POSTED_AT` from the block's `created_at` |
+| **`set_project_status`** (915) | B1 | Moved (#432): the shim for `write board-status`; returns 1 with a `[BOARD ERROR]` line when the status is not written |
+| **`set_project_status_checked`** (2404) | B1 | Moved (#432): calls `set_project_status` |
+| **`set_project_status_ready`** (3477) | B1 | Moved (#432): calls `set_project_status` with "Ready for implementation" |
+| **`evidence_retry`** (1183) | B1 | Moved (#432): the shim for `write retry-pending`, which reads its payload with inline code until #434 adds B3 `read-pending`; the shim posts the give-up blocker through `post_blocker_once` (B2) |
+| `evidence_record_failure` (1157) | B1 | Moved (#432): `write retry-pending` counts the failed run and reports the bound itself. The function stays for its two other callers (`merge-confirmation-missing`, `cleanup-summary-unrecorded`); its writes go through `post_comment`, and its marker reads are B2 (#433) |
+| `settle_merge_confirmation` (2215) | B1 | Moved (#432): its writes go through `evidence_retry` and `evidence_record_failure` |
+| `label_pending_cleanup` (1238) | B1 | Moved (#432): the shim for `write label --add`, which creates a missing repository label |
+| `retry_pending_cleanup_summaries` (1253) | B1 | Moved (#432): `write label --remove`. **Best-effort:** a refused removal is logged and retried on a later run; the label is only an index |
 | `post_conflict_blocker` (885), `post_mid_cycle_blocker` (947) | stays | They only build the text; the write goes through `post_comment` (B1) |
 | `dispatcher_marker` (1004) | B2 | The marker format |
 | **`resolve_dispatcher_login`** (1013) | B2 | `whoami`; today an empty login is caught only by the callers |
@@ -153,12 +153,12 @@ Other scripts:
 | Variant (file, line) | Block | Note |
 |---|---|---|
 | Owner-marker check: `gh api user` plus jq on `.l == $bot` (`dispatcher-merge.sh`, 116–128) | B2 | `holds --marker "action=merge-owner pr=<n> head=<sha>"` |
-| Merge confirmation POST with retry and pending copy (`dispatcher-merge.sh`, 175–193) | B1 | `write comment --evidence-item merge-confirmation` |
+| Merge confirmation POST with retry and pending copy (`dispatcher-merge.sh`, 175–193) | B1 | Moved (#432): `write comment --evidence-item merge-confirmation` |
 | `gh api graphql` viewer check (`dispatcher-merge.sh`, 79) | stays | Read-only capability check |
-| Closing summary POST with retry and pending copy (`dispatcher-cleanup.sh`, 122–140) | B1 | `write comment --evidence-item cleanup-summary` |
+| Closing summary POST with retry and pending copy (`dispatcher-cleanup.sh`, 122–140) | B1 | Moved (#432): `write comment --evidence-item cleanup-summary` |
 | Merged-PR lookup (`dispatcher-cleanup.sh`, 47–54) | stays | Read-only |
 | **`load_state`** (118), **`save_state`** (147) and the `register` path (167–195) (`dispatcher-notify-retry.sh`) | B3 | `actionable-events` |
-| Delivery-failure comment POST (`dispatcher-notify-retry.sh`, 325) | B1 | Today success is assumed from the exit code only |
+| Delivery-failure comment POST (`dispatcher-notify-retry.sh`, 325) | B1 | Moved (#432): `write comment`; a write that is not read back leaves `comment_posted` false, so the next cycle retries |
 | `evidence_resolved` (208), `resolved` (239) (`dispatcher-notify-retry.sh`) | B2 | Own-login filter and the PO `/unblock` rule, written again here |
 | **`load_token_login`** (`dispatcher-poll.sh`, 353) | B2 | `whoami`, today through `curl` |
 | Refinement state read (470–483) and write (518–527) (`dispatcher-poll.sh`) | B3 | `notified-refinement` |
@@ -167,7 +167,20 @@ Other scripts:
 | `read_limit` (`dispatcher-usage-limit.sh`, 52) | stays | Reads configuration, not state |
 | `HOLD_FILE` read (143–150) and write (274–286) (`dispatcher-allowance.sh`) | B3 | `allowance-hold` |
 | `gh run list` (`dispatcher-trigger-check.sh`, 48) | stays | Read-only; the event it queues goes through `dispatcher-notify-retry.sh` |
-| `dispatcher-change-check.sh` | stays | The checker itself; it makes no GitHub call |
+| `dispatcher-change-check.sh` | stays | The checker itself; it makes no GitHub call. `verified-write` reports it as SKIP, because its own patterns would match |
+| `graphql` (`dispatcher-poll.sh`, 156) | stays | A read-only GraphQL query sent with `curl -X POST`: the `verified-write` allowlist entry `graphql verified-write` |
+
+**Best-effort writes (#432).** A caller may ignore a Block 1 exit `1` only for these writes. Each logs the block's error.
+
+| Write (function or step) | Status or object | Why a failure is not fatal | Test |
+|---|---|---|---|
+| E1 before `/implement` (`dispatcher-invoke.sh`) | Board: "In implementation" | The session still starts; the hand-off records a pending hand-off, so the story is not started twice | `tests/test_dispatcher_review_loop.py::test_failed_first_status_write_does_not_start_the_story_twice` asserts that the session starts |
+| Reserve skip and allowance error before `/implement` (`check_subscription_allowance`, `check_usage_limit`) | Board: "Ready for implementation" | No session starts either way and the run ends as handled; the story is picked up again as stale or ready | `tests/test_dispatcher_board_fail_closed.py::test_refused_ready_at_the_allowance_starts_no_session_and_is_handled` |
+| `retry_pending_cleanup_summaries` | Label `evidence:pending` removed | The label is only an index; a later run removes it | — |
+
+Comment writes whose failure a caller ignores are all B2 rows above, moved by #433: the CLAIM comment of `check_and_resolve_decision_blocker_comment`, `post_allowance_comment`, `post_usage_limit_comment`, the pause record in `pause_at_usage_limit`, `record_pending_hand_off`, `complete_pending_hand_off`, the fix-round attempt marker in `hand_off_to_codex_review_loop` (`fix_round_attempt_marker`) and the review attempt marker in `resume_review_story` (`review_attempt_marker`).
+
+The board writes of `finish_story` ("Done", and "In merge" when the cleanup evidence is missing) and of the stale-story rollback ("Ready for implementation") fail closed since #432; `docs/DISPATCHER-CONFIG.md` → "GitHub writes" lists what each does instead. When such a write may have landed (`sent`) without being confirmed, the caller writes the old status back before it waits for a later run, and acts as if the new status holds when that write-back fails too. No new B1 variant was found on #432's base (`3b5cae6`).
 
 `.github/workflows/dispatcher.yml`:
 

@@ -47,13 +47,13 @@ FIXTURE
     chmod +x "$file"
 }
 
-# Explicit selection: clean file exercises all five checks.
+# Explicit selection: clean file exercises all six checks (verified-write: #432).
 clean="$TMP/dispatcher-clean.sh"
 write_clean "$clean"
 run_check "$TMP/out" "$TMP/err" --files "$clean"
 assert_rc 'clean fixture exits zero' 0
-assert_lines 'clean fixture emits five results' "$TMP/out" 5
-for id in executable slack-guard dry-run stdout-json dispatch-handled; do
+assert_lines 'clean fixture emits six results' "$TMP/out" 6
+for id in executable slack-guard dry-run stdout-json dispatch-handled verified-write; do
     assert_has "clean fixture passes $id" "$TMP/out" "PASS $clean $id -"
 done
 
@@ -63,7 +63,7 @@ write_clean "$spaced"
 run_check "$TMP/out" "$TMP/err" --files "$spaced"
 assert_rc 'path containing whitespace exits zero' 0
 assert_has 'path containing whitespace is preserved' "$TMP/out" "PASS $spaced executable -"
-assert_lines 'path containing whitespace still emits five results' "$TMP/out" 5
+assert_lines 'path containing whitespace still emits six results' "$TMP/out" 6
 
 # Missing failure guard.
 unguarded="$TMP/dispatcher-unguarded.sh"
@@ -158,12 +158,90 @@ assert_rc 'minimal dispatcher exits zero' 0
 assert_has 'slack guard can skip' "$TMP/out" "SKIP $minimal slack-guard -"
 assert_has 'dispatch handled can skip' "$TMP/out" "SKIP $minimal dispatch-handled -"
 
-# An unrelated changed set has the exact five global SKIPs.
+# An unrelated changed set has the exact six global SKIPs.
 printf 'notes\n' >"$TMP/readme.txt"
 run_check "$TMP/out" "$TMP/err" --files "$TMP/readme.txt"
 assert_rc 'no-op file set exits zero' 0
-assert_lines 'no-op file set emits five global results' "$TMP/out" 5
-[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 5 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
+assert_lines 'no-op file set emits six global results' "$TMP/out" 6
+[[ $(grep -c '^SKIP - ' "$TMP/out") -eq 6 ]] && pass 'no-op results are all SKIP' || fail 'no-op results are not all SKIP'
+
+# verified-write (issue #432, ADR-014 -> Decision -> 5): each hand-rolled GitHub
+# write form fails; the same write inside a shim of the block passes.
+write_form() {  # write_form <file> <function> <line>
+    printf '#!/usr/bin/env bash\n%s() {\n    %s\n}\n' "$2" "$3" >"$1"
+    chmod +x "$1"
+}
+forms=(
+    'gh api "repos/$REPO/issues/$n/comments" -X POST -f "x=1"'
+    'gh api "repos/$REPO/issues/$n/labels/x" --method DELETE'
+    'gh api "repos/$REPO/issues/$n/comments" -f body="$body"'
+    'gh api "repos/$REPO/issues/$n/comments" --input "$file"'
+    "gh api graphql -f query='mutation(\$id: ID!) { x }'"
+    'gh issue comment "$n" --body x'
+    'gh issue edit "$n" --add-label x'
+    'gh issue close "$n"'
+    'gh issue reopen "$n"'
+    'gh pr ready "$n"'
+    'gh pr merge "$n" --squash'
+    'gh pr review "$n" --approve'
+    'gh pr comment "$n" --body x'
+    'gh label create x'
+    'curl -s -X POST "https://api.github.com/repos/$REPO/issues/$n/comments" --data "$json"'
+)
+i=0
+for form in "${forms[@]}"; do
+    i=$((i + 1))
+    bad="$TMP/dispatcher-write-$i.sh"
+    write_form "$bad" notify_story "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$bad"
+    assert_rc "verified-write fails on: $form" 1
+    assert_has "verified-write names the file and check: $form" "$TMP/out" "FAIL $bad verified-write -"
+    shim="$TMP/dispatcher-shim-$i.sh"
+    write_form "$shim" post_comment "$form"
+    run_check "$TMP/out" "$TMP/err" --files "$shim"
+    assert_rc "verified-write passes inside a shim: $form" 0
+    assert_has "verified-write PASS inside a shim: $form" "$TMP/out" "PASS $shim verified-write -"
+done
+
+# A read, a comment line and a message that names a mutation are not writes.
+reads="$TMP/dispatcher-reads.sh"
+cat >"$reads" <<'FIXTURE'
+#!/usr/bin/env bash
+read_story() {
+    # gh api "repos/$REPO/issues/$n/comments" -X POST is how it was done before
+    gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100"
+    gh api graphql -f query='query { viewer { login } }'
+    echo "No GitHub mutation was made."
+}
+FIXTURE
+chmod +x "$reads"
+run_check "$TMP/out" "$TMP/err" --files "$reads"
+assert_rc 'reads exit zero' 0
+assert_has 'reads pass verified-write' "$TMP/out" "PASS $reads verified-write -"
+
+# The allowlist: the read-only GraphQL query of dispatcher-poll.sh is sent with curl -X POST.
+allowed="$TMP/dispatcher-allowed.sh"
+write_form "$allowed" graphql 'curl -sf -X POST --data "$payload" "$GRAPHQL"'
+run_check "$TMP/out" "$TMP/err" --files "$allowed"
+assert_rc 'allowlisted function exits zero' 0
+assert_has 'allowlisted function passes verified-write' "$TMP/out" "PASS $allowed verified-write -"
+
+# A library file the dispatcher sources gets only the verified-write rule.
+mkdir -p "$TMP/lib"
+lib_bad="$TMP/lib/helper.sh"
+write_form "$lib_bad" helper 'gh api "repos/$REPO/issues/$n/comments" -X POST'
+run_check "$TMP/out" "$TMP/err" --files "$lib_bad"
+assert_rc 'library write exits one' 1
+assert_has 'library write is reported' "$TMP/out" "FAIL $lib_bad verified-write -"
+assert_has 'library file skips the other checks' "$TMP/out" "SKIP $lib_bad executable -"
+
+# Every current dispatcher script and library passes verified-write.
+run_check "$TMP/out" "$TMP/err" --files "$REPO_ROOT"/scripts/dispatcher-*.sh "$REPO_ROOT"/scripts/lib/*.sh
+if grep -q ' verified-write - ' "$TMP/out" && ! grep -q '^FAIL .* verified-write - ' "$TMP/out"; then
+    pass 'current dispatcher scripts pass verified-write'
+else
+    fail 'current dispatcher scripts pass verified-write'
+fi
 
 # Input and discovery errors are distinct from policy failures.
 run_check "$TMP/out" "$TMP/err" --files

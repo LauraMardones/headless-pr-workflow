@@ -243,6 +243,7 @@ def test_real_hpw_merge_owner_reports_the_failing_gh_call(h):
 
 def test_unreadable_comments_block(h):
     (h.mock / f"repos_{REPO.replace('/', '_')}_issues_{PR}_comments.json").unlink()
+    h.set("comments_unreadable", "")  # the fake gh reads a missing comments file as no comments otherwise
     proc = run(h)
     assert proc.returncode == 1 and "ownership cannot be verified" in proc.stderr
     assert_no_mutation(h)

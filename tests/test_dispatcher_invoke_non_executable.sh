@@ -194,6 +194,42 @@ echo '{"decision":"start","source":"probe","reason":""}'
 EOF
 chmod +x "$FAKE_BIN/allowance-start.sh"
 
+# Fake hpw on HPW_BIN (issue #432): `hpw dispatcher write comment|board-status`
+# reaches the fake gh with the calls the script made itself before the verified
+# write existed, so the gh.log lines (POST, MUTATION) stay what they were.
+cat > "$FAKE_BIN/hpw" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-} ${2:-}" == "dispatcher write" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
+op="$3"; shift 3
+repo="" number="" file="" status="" dry=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo) repo="$2"; shift 2 ;;
+        --number|--issue) number="$2"; shift 2 ;;
+        --body-file) file="$2"; shift 2 ;;
+        --status) status="$2"; shift 2 ;;
+        --dry-run) dry=true; shift ;;
+        *) shift ;;
+    esac
+done
+fail() { echo "{\"ok\": false, \"block\": \"write\", \"operation\": \"$op\", \"result\": \"failed\", \"error\": \"$1\"}"; exit 1; }
+if $dry; then
+    echo "{\"ok\": true, \"block\": \"write\", \"operation\": \"$op\", \"result\": \"dry-run\", \"error\": null}"; exit 0
+fi
+case "$op" in
+    comment)
+        gh api "repos/$repo/issues/$number/comments" -X POST -f body="$(cat "$file")" >/dev/null || fail "write comment" ;;
+    board-status)
+        item=$(jq -r --argjson n "$number" '.items[] | select(.number == $n) | .id' "$MOCK_DIR/board.json")
+        option=$(jq -r --arg s "$status" '.options[$s] // empty' "$MOCK_DIR/board.json")
+        [[ -n "$item" && -n "$option" ]] || fail "resolve status"
+        gh api graphql -f query='mutation' -f itemId="$item" -f optionId="$option" >/dev/null || fail "write status" ;;
+    *) echo "fake hpw: unsupported: $op" >&2; exit 2 ;;
+esac
+echo "{\"ok\": true, \"block\": \"write\", \"operation\": \"$op\", \"result\": \"written\", \"created_at\": \"2026-10-13T10:00:00Z\", \"error\": null}"
+EOF
+chmod +x "$FAKE_BIN/hpw"
+
 # ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 # new_env — fresh mock dir; echoes its path
@@ -244,6 +280,7 @@ run_dispatcher() {
         CLAUDE_CODE_OAUTH_TOKEN="fake-subscription-token" CLAUDE_BIN="$FAKE_BIN/claude" \
         OPENAI_API_KEY_CODEX="fake-openai" \
         USAGE_LIMIT_STATE_DIR="$d/usage" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
+        HPW_BIN="$FAKE_BIN/hpw" \
         USAGE_LIMIT_SESSIONS_PER_DAY="${USAGE_LIMIT:-1000}" \
         WIP_LIMIT_IMPLEMENTATION=2 READY_BUFFER_MIN=3 READY_BUFFER_MAX=5 \
         AGENT_MAX_TURNS=3 AGENT_MAX_WALLCLOCK_SECONDS=600 \

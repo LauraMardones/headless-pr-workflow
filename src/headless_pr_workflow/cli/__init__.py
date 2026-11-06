@@ -71,6 +71,13 @@ def _print_next_action(target: str | None, *, repo: str | None, as_json: bool, p
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    if arguments[:1] == ["dispatcher"]:
+        # The dispatcher building blocks (ADR-014) have their own parser and JSON contract.
+        from ..dispatcher.cli import main as dispatcher_main
+
+        return dispatcher_main(arguments[1:])
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

@@ -80,6 +80,7 @@ DECISION_BLOCKER_PO_LOGIN="${DECISION_BLOCKER_PO_LOGIN:-LauraMardones}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
+HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # the verified write of ADR-014 (issue #432); overridable for tests
 
 die() { echo "Error: $*" >&2; exit 2; }
 
@@ -322,12 +323,18 @@ while IFS= read -r rec; do
             first=$(jq -r '.first_failed_at' <<< "$rec")
             body="## Slack notification not delivered
 The Slack notification \`$event\` for #$issue could not be delivered for $cycles dispatcher cycles in a row (first failed attempt: $first). The dispatcher keeps retrying and Slack will get it as soon as delivery recovers; this issue needs the PO's attention in the meantime. Check the \`SLACK_WEBHOOK_URL\` secret and the Slack webhook."
-            if gh api "repos/$REPO/issues/$issue/comments" -X POST -f body="$body" >/dev/null 2>&1; then
+            # The verified write (ADR-014 → Block 1, issue #432): the comment is
+            # read back, so success is no longer assumed from the exit code.
+            body_file=$(mktemp) && printf '%s' "$body" > "$body_file" || body_file=""
+            if [[ -n "$body_file" ]] \
+                && "$HPW_BIN" dispatcher write comment --repo "$REPO" --number "$issue" \
+                       --body-file "$body_file" >/dev/null; then
                 rec=$(jq -c '.comment_posted = true' <<< "$rec")
                 echo "[NOTIFY] Posted delivery-failure comment on #$issue" >&2
             else
                 echo "[NOTIFY] Warning: cannot post delivery-failure comment on #$issue; will retry next cycle" >&2
             fi
+            [[ -z "$body_file" ]] || rm -f "$body_file"
         fi
     fi
     echo "$rec" >> "$NEXT"

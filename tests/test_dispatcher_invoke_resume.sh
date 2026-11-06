@@ -132,8 +132,10 @@ extract_function() {
 REAL_CONSTANTS=$(grep -E '^DECISION_BLOCKER_(PO_LOGIN|CLAIM_MARKER|RESUME_MARKER)=' "$DISPATCHER_SCRIPT")
 REAL_SETTER_FN=$(extract_function set_project_status_ready)
 REAL_CHECK_FN=$(extract_function check_and_resolve_decision_blocker_comment)
+# set_project_status_ready writes through the verified-write shims (issue #432).
+REAL_WRITE_FNS=$(extract_function set_project_status; extract_function dispatcher_write; extract_function write_field)
 
-if [[ -z "$REAL_CONSTANTS" || -z "$REAL_SETTER_FN" || -z "$REAL_CHECK_FN" ]]; then
+if [[ -z "$REAL_CONSTANTS" || -z "$REAL_SETTER_FN" || -z "$REAL_CHECK_FN" || -z "$REAL_WRITE_FNS" ]]; then
     echo "FATAL: could not extract check_and_resolve_decision_blocker_comment(), set_project_status_ready(), or DECISION_BLOCKER_* constants from $DISPATCHER_SCRIPT — a rename or reformat broke this test's extraction. Update extract_function()/REAL_CONSTANTS above to match." >&2
     exit 1
 fi
@@ -177,12 +179,25 @@ gh() {
     echo "unexpected gh invocation: $*" >&2
     return 1
 }
+
+# The verified-write block (`hpw dispatcher write`, issue #432) on HPW_BIN: the
+# board write succeeds unless MOCK_GRAPHQL_RC is non-zero; --dry-run writes nothing.
+hpw_fake() {
+    if [[ " $* " == *" --dry-run "* || "${MOCK_GRAPHQL_RC:-0}" -eq 0 ]]; then
+        echo '{"ok": true, "block": "write", "operation": "board-status", "result": "written", "error": null}'
+        return 0
+    fi
+    echo '{"ok": false, "block": "write", "operation": "board-status", "result": "failed", "error": "write status: refused"}'
+    return 1
+}
+HPW_BIN=hpw_fake
 RUNNER_HEADER
 
 {
     printf '\n# ─── Extracted verbatim from %s ───\n' "$DISPATCHER_SCRIPT"
     printf '%s\n' "$REAL_CONSTANTS"
     printf '\n%s\n' "$REAL_SETTER_FN"
+    printf '\n%s\n' "$REAL_WRITE_FNS"
     printf '\n%s\n' "$REAL_CHECK_FN"
 } >> "$RUNNER"
 
@@ -435,9 +450,17 @@ gh() {
     return 1
 }
 
+# The verified-write block on HPW_BIN (issue #432): the board write succeeds.
+hpw_fake() {
+    echo '{"ok": true, "block": "write", "operation": "board-status", "result": "written", "error": null}'
+}
+HPW_BIN=hpw_fake
+
 $REAL_CONSTANTS
 
 $REAL_SETTER_FN
+
+$REAL_WRITE_FNS
 
 $REAL_CHECK_FN
 
