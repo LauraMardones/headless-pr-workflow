@@ -136,10 +136,19 @@ if [[ "$endpoint" == "graphql" ]]; then
         echo "$item_id=$name" >> "$MOCK_DIR/mutations.log"
         jq --arg i "$item_id" --arg n "$name" '. + {($i): $n}' "$MOCK_DIR/state.json" > "$MOCK_DIR/state.tmp"
         mv "$MOCK_DIR/state.tmp" "$MOCK_DIR/state.json"
+        if [[ -f "$MOCK_DIR/lost_option_$option_id" ]]; then  # the write landed; the next reads fail
+            mv "$MOCK_DIR/lost_option_$option_id" "$MOCK_DIR/fail_item_reads"
+        fi
         echo '{}'
         exit 0
     fi
     if [[ "$query" == *projectItems* ]]; then  # one issue's board item, as the write block reads it (#432)
+        reads=$(cat "$MOCK_DIR/fail_item_reads" 2>/dev/null || echo 0)
+        if [[ "$reads" -gt 0 ]]; then
+            echo $((reads - 1)) > "$MOCK_DIR/fail_item_reads"
+            echo "fake gh: forced board read failure" >&2
+            exit 1
+        fi
         jq --slurpfile st "$MOCK_DIR/state.json" --argjson n "$number" '
             . as $b |
             {data:{repository:{
@@ -459,6 +468,11 @@ class Dispatcher:
         """Make the board write of ``status`` fail (a GraphQL error)."""
         path = self.mock / f"fail_option_{self._read('board.json')['options'][status]}"
         path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def lose_status_read_back(self, status: str, reads: int) -> None:
+        """The next board write of ``status`` lands, then the next ``reads`` board item reads fail."""
+        option = self._read("board.json")["options"][status]
+        (self.mock / f"lost_option_{option}").write_text(str(reads), encoding="utf-8")
 
     def fail_pr_read(self, failing: bool = True) -> None:
         """Make the read of a single pull request (``pulls/<n>``) fail (issue #381)."""

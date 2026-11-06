@@ -948,17 +948,35 @@ get_project_item_id() {
 # one `[BOARD ERROR]` line when the status was not written (issue #432, AC 5):
 # the caller does not move the story on and keeps a state a later run retries.
 # <item-id> is kept for the callers; the block finds the item itself.
+# BOARD_WRITE_SENT is "true" when the block sent a status mutation: a failed
+# write may then still have changed the board (see board_status_kept).
+
+BOARD_WRITE_SENT=""
 
 set_project_status() {
     local issue_num="$2"
     local status_name="$3"
+    BOARD_WRITE_SENT=""
     if $DRY_RUN; then
         echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
     fi
     if ! dispatcher_write board-status --issue "$issue_num" --status "$status_name"; then
+        BOARD_WRITE_SENT=$(write_field sent)
         echo "[BOARD ERROR] #$issue_num: could not set \"$status_name\" ($(write_field error))" >&2
         return 1
     fi
+}
+
+# board_status_kept <item-id> <issue> <old-status> — after set_project_status
+# returned 1: 0 when the story is still in <old-status>, because the block sent
+# no mutation or it wrote <old-status> back; 1 when the board may hold the new
+# status (the mutation was sent, its read-back failed) and <old-status> could
+# not be written back either. A caller that waits for a later run to retry
+# from <old-status> does so only on 0 (issue #432).
+board_status_kept() {
+    [[ "$BOARD_WRITE_SENT" == true ]] || return 0
+    echo "${LOG_PREFIX}#$2: the status write was sent but not confirmed; writing \"$3\" back" >&2
+    set_project_status "$1" "$2" "$3"
 }
 
 # ─── Utility: post a mid-cycle blocker comment (reuses Blocked Declaration format) ──
@@ -2339,10 +2357,15 @@ finish_story() {
     echo ""
     echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
     # Issue #432: without "Done" on the board /cleanup does not run; the story
-    # stays "In merge", so the merged-PR resume reruns it on a later run.
+    # stays "In merge", so the merged-PR resume reruns it on a later run. When
+    # "Done" may have landed and "In merge" cannot be written back, no later
+    # run resumes the story, so /cleanup runs now.
     if ! set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"; then
-        echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: \"Done\" was not written; /cleanup not run, the story stays \"In merge\" for a later run" >&2
-        return 0
+        if board_status_kept "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"; then
+            echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: \"Done\" was not written; /cleanup not run, the story stays \"In merge\" for a later run" >&2
+            return 0
+        fi
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: \"Done\" may be on the board and \"In merge\" could not be written back; /cleanup runs now" >&2
     fi
     # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
     if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
@@ -3500,6 +3523,7 @@ READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
 set_project_status_ready() {
     local item_id="$1"
     local issue_num="$2"
+    BOARD_WRITE_SENT=""
     if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
         echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
         return 1
@@ -3611,10 +3635,15 @@ Next executor: review branch state before pulling."
 
     # Issue #432: the status first. When it is not written, no Recovery Comment
     # is posted and the story is not counted, so the next run tries again
-    # without a duplicate comment.
+    # without a duplicate comment. When the rollback may have landed and "In
+    # implementation" cannot be written back, the next run would not see the
+    # story as stale, so the Recovery Comment is posted now.
     if ! set_project_status_ready "$item_id" "$issue_num"; then
-        echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
-        continue
+        if board_status_kept "$item_id" "$issue_num" "In implementation"; then
+            echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
+            continue
+        fi
+        echo "#$issue_num: the rollback to \"Ready for implementation\" may be on the board and \"In implementation\" could not be written back; Recovery Comment posted." >&2
     fi
     post_comment "$issue_num" "$recovery_comment"
 

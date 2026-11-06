@@ -54,6 +54,7 @@ class FakeGateway:
         self.list_failures = 0
         self.statuses: dict[int, str | None] = {}
         self.status_modes: list[str] = []
+        self.board_read_modes: list[str] = []
         self.options = dict(OPTIONS)
         self.labels: dict[int, set[str]] = {}
         self.repo_labels: set[str] = set()
@@ -105,6 +106,8 @@ class FakeGateway:
 
     def board_item(self, issue: int) -> BoardItem:
         self.calls.append(f"board {issue}")
+        if (self.board_read_modes.pop(0) if self.board_read_modes else "ok") == "fail":
+            raise GatewayError("read board", self.error_text)
         if issue not in self.statuses:
             return BoardItem(project_id="P", field_id="F", options=self.options)
         return BoardItem(project_id="P", field_id="F", options=self.options, item_id=f"ITEM_{issue}",
@@ -360,6 +363,25 @@ def test_board_status_read_back_then_match_is_written(gw, settings):
     gw.status_modes = ["noop", "ok"]
     result = write_board_status(gw, 5, "Done", settings=settings)
     assert result.result == "written" and result.fields["attempts"] == 2 and gw.statuses[5] == "Done"
+
+
+def test_board_status_reports_whether_a_mutation_was_sent(gw, settings):
+    """``sent``: a failed result may still have changed the board (#432 review)."""
+    gw.statuses[5] = "In merge"
+    gw.board_read_modes = ["ok", "fail", "fail", "fail"]  # the mutation lands, every later read fails
+    result = write_board_status(gw, 5, "Done", settings=settings)
+    assert result.result == "failed" and result.fields["sent"] is True and gw.statuses[5] == "Done"
+    assert result.error.startswith("read back:") or result.error.startswith("read board")
+
+    gw2 = FakeGateway()
+    gw2.statuses[5] = "In merge"
+    gw2.board_read_modes = ["fail"] * 3  # the board is never read, so nothing is sent
+    result = write_board_status(gw2, 5, "Done", settings=settings)
+    assert result.result == "failed" and result.fields["sent"] is False and gw2.statuses[5] == "In merge"
+
+    gw.statuses[6] = "In merge"
+    assert write_board_status(gw, 6, "Done", settings=settings).fields["sent"] is True
+    assert write_board_status(gw, 6, "Done", settings=settings).fields["sent"] is False  # already
 
 
 def test_board_status_unknown_option_fails_without_retry(gw, settings):

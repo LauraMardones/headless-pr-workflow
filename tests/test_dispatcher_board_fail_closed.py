@@ -46,6 +46,42 @@ def test_refused_done_runs_no_cleanup_and_leaves_the_story_in_merge(d):
     assert d.phases == [f"cleanup {STORY}"] and d.status(STORY) == "Done"
 
 
+# A board write tries 3 times: the landed write's read-back and the next two
+# reads fail with 3 failed reads; the write-back of the old status fails too
+# with 6.
+@needs_tools
+def test_unconfirmed_done_is_written_back_to_in_merge_and_cleanup_waits(d):
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.lose_status_read_back("Done", 3)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert board_error("Done") in proc.stderr
+    assert d.board_writes == [f"{STORY}=Done", f"{STORY}=In merge"]
+    assert "cleanup" not in " ".join(d.phases) and d.status(STORY) == "In merge"
+
+    later = d.resume()
+    assert later.returncode == 0, later.stdout + later.stderr
+    assert d.phases == [f"cleanup {STORY}"] and d.status(STORY) == "Done"
+
+
+@needs_tools
+def test_unconfirmed_done_that_cannot_be_written_back_still_runs_cleanup(d):
+    """Codex review of #452: a Done story is never resumed, so /cleanup must not wait for a later run."""
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY, state="closed", merged=True)
+    d.lose_status_read_back("Done", 6)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert board_error("Done") in proc.stderr and board_error("In merge") in proc.stderr
+    assert '"In merge" could not be written back; /cleanup runs now' in proc.stderr
+    assert d.phases == [f"cleanup {STORY}"] and d.status(STORY) == "Done"
+
+
 @needs_tools
 def test_refused_in_merge_after_a_failed_cleanup_returns_non_zero(d):
     d.add_story(STORY, "In merge")
@@ -86,6 +122,33 @@ def test_refused_stale_rollback_posts_no_recovery_comment(d):
     d.fail_status_write("Ready for implementation", False)
     d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
     assert [c for c in d.posted(STORY) if "## Recovery Comment" in c][:1]
+    assert len([c for c in d.posted(STORY) if "## Recovery Comment" in c]) == 1
+
+
+@needs_tools
+def test_unconfirmed_stale_rollback_is_written_back_without_a_recovery_comment(d):
+    stale_story(d)
+    d.lose_status_read_back("Ready for implementation", 3)
+
+    proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"{STORY}=Ready for implementation" in d.board_writes
+    assert f"{STORY}=In implementation" in d.board_writes
+    assert d.posted(STORY) == [] and d.status(STORY) == "In implementation"
+
+
+@needs_tools
+def test_unconfirmed_stale_rollback_that_cannot_be_written_back_posts_the_recovery_comment(d):
+    stale_story(d)
+    d.lose_status_read_back("Ready for implementation", 6)
+
+    proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert board_error("Ready for implementation") in proc.stderr and board_error("In implementation") in proc.stderr
+    # The rollback landed and nothing was written back; the story is ready again.
+    assert [w for w in d.board_writes if w.startswith(f"{STORY}=")][0] == f"{STORY}=Ready for implementation"
     assert len([c for c in d.posted(STORY) if "## Recovery Comment" in c]) == 1
 
 

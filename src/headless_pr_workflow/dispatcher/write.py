@@ -279,11 +279,15 @@ def write_board_status(
 ) -> Result:
     settings = settings or Settings.from_env()
     if dry_run:
-        return Result("board-status", "dry-run", fields={"issue": issue, "before": None, "after": status, "attempts": 0})
+        return Result("board-status", "dry-run", fields={"issue": issue, "before": None, "after": status, "attempts": 0,
+                                                         "sent": False})  # fmt: skip
 
     before: str | None = None
     after: str | None = None
     wrote = False
+    # A status mutation was sent, whatever its response: a failed result with
+    # ``sent`` may still have changed the board (issue #432).
+    sent = False
     error = "write status: not attempted"
     used = 0
     for attempt in range(1, attempts + 1):
@@ -308,7 +312,8 @@ def write_board_status(
         if item.status == status:
             result = "written" if wrote else "already"
             return Result("board-status", result, fields={"issue": issue, "before": before, "after": after,
-                                                          "attempts": attempt if wrote else 0})  # fmt: skip
+                                                          "attempts": attempt if wrote else 0, "sent": sent})  # fmt: skip
+        sent = True
         try:
             gateway.set_board_status(item, option)
             wrote = True
@@ -321,9 +326,11 @@ def write_board_status(
             error = f"read back: {exc}"
             continue
         if after == status:
-            return Result("board-status", "written", fields={"issue": issue, "before": before, "after": after, "attempts": attempt})
+            return Result("board-status", "written", fields={"issue": issue, "before": before, "after": after,
+                                                             "attempts": attempt, "sent": sent})  # fmt: skip
         error = f"read back: wrote '{status}' for #{issue} but the board shows '{after or '(none)'}'"
-    return Result("board-status", "failed", error=error, fields={"issue": issue, "before": before, "after": after, "attempts": used})
+    return Result("board-status", "failed", error=error, fields={"issue": issue, "before": before, "after": after,
+                                                                 "attempts": used, "sent": sent})  # fmt: skip
 
 
 # ── label ─────────────────────────────────────────────────────────────────────

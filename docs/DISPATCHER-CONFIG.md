@@ -241,7 +241,7 @@ scripts/hpw dispatcher write label        --repo <owner/repo> --number <n> (--ad
 scripts/hpw dispatcher write retry-pending --repo <owner/repo> --target <n> --item <item> --ref <ref> --story <n> [--expected-head <sha>] [--dry-run]
 ```
 
-- **stdout:** one JSON line, on success and on failure: `ok`, `block`, `operation`, `result`, `error` (`"<step>: <reason>"` or `null`), and per operation `url`, `created_at`, `attempts`, or `before`/`after` for a board status.
+- **stdout:** one JSON line, on success and on failure: `ok`, `block`, `operation`, `result`, `error` (`"<step>: <reason>"` or `null`), and per operation `url`, `created_at`, `attempts`, or `before`/`after` and `sent` for a board status (`sent` is `true` when a status mutation was sent, so a failed write may still have changed the board).
 - **Exit codes:** `0` `written`, `already` or `dry-run` (`retry-pending`: `none`, `posted`); `1` `pending`, `failed`, `missing` or `stale`; `4` `retry-pending` stopped until the PO's `/unblock` (`gave-up`); `2` invalid arguments. A write never exits `3`.
 - **Bounds:** at most `--attempts` tries (default 3), `COMMENT_RETRY_DELAY` seconds apart (default 2). A comment is posted at most once per call: before a retry the block looks for an identical comment of the dispatcher's own account that was not there before the first try. The comment body is sent on stdin (`gh api --input -`), never on the command line.
 - **Evidence:** with `--evidence-item`, a comment that still fails is left as the evidence-pending comment of issue #348 (up to 3 more tries) and the result is `pending`. `retry-pending` posts that text on a later run, counts a failed run on the story, and returns `gave-up` when `EVIDENCE_RETRY_MAX` (default 3) is reached; the bash caller then posts the give-up blocker.
@@ -253,9 +253,9 @@ The bash functions callers use (`post_comment`, `set_project_status`, `set_proje
 
 | Where | Status | When it is not written |
 |---|---|---|
-| `finish_story` after a merge | `Done` | `/cleanup` does not run; the story stays `In merge`, so the merged-PR resume reruns it on a later run |
+| `finish_story` after a merge | `Done` | `/cleanup` does not run; the story stays `In merge`, so the merged-PR resume reruns it on a later run. When the write was sent but not confirmed, `In merge` is written back first; if that fails too, `Done` may be on the board and no later run would resume the story, so `/cleanup` runs now |
 | `finish_story`, cleanup evidence missing | `In merge` | the run fails (non-zero) |
-| Stale-story rollback | `Ready for implementation` | written before the Recovery Comment; no Recovery Comment is posted and the story is not counted as recovered, so the next run tries again without a duplicate comment |
+| Stale-story rollback | `Ready for implementation` | written before the Recovery Comment; no Recovery Comment is posted and the story is not counted as recovered, so the next run tries again without a duplicate comment. When the write was sent but not confirmed, `In implementation` is written back first; if that fails too, the rollback may be on the board, so the Recovery Comment is posted |
 | Reserve skip and allowance error before `/implement` | `Ready for implementation` | no session starts (as before); the run still ends as handled |
 | Hand-off, fix-round and pause rollbacks | `In review`, `Ready for implementation` | as before: the caller keeps its retryable state |
 | E1, before `/implement` | `In implementation` | **best-effort**: the session still starts and the hand-off keeps the story from starting twice (ADR-014 → Decision → 7) |
