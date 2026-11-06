@@ -75,12 +75,10 @@ def test_retry_step_runs_every_enabled_cycle_even_without_work():
     assert "issue_number" not in condition
     assert "resumable" not in condition
     assert "steps.invoke" not in condition
-    assert "dispatcher-notify-retry.sh" in block
-    assert re.search(
-        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
-        r"\s+RETRY_ARGS\+=\(--dry-run\)",
-        block,
-    ), "non-default-ref runs must not send or record"
+    assert "dispatcher-workflow-step.sh retry" in block
+    # non-default-ref runs must not send or record: the step script adds --dry-run
+    # (tests/test_dispatcher_workflow_step.py)
+    assert "STATE_WRITER: ${{ steps.scope.outputs.state_writer }}" in block
 
 
 def test_retry_does_not_record_delivery_when_state_will_not_be_saved():
@@ -117,13 +115,12 @@ def test_only_default_branch_runs_write_state():
 
     scope = _step(SCOPE)
     assert re.search(r"^\s+id:\s*scope\s*$", scope, re.MULTILINE)
-    writer = _field(scope, "STATE_WRITER")
-    assert "github.event_name == 'schedule'" in writer
-    assert (
-        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
-        in writer
-    )
-    assert "state_writer=$STATE_WRITER" in scope
+    # Issue #434: the state-writer rule is in the step script (tests/test_dispatcher_workflow_step.py);
+    # the step passes it the three facts.
+    assert _field(scope, "EVENT_NAME") == "${{ github.event_name }}"
+    assert _field(scope, "REF") == "${{ github.ref }}"
+    assert _field(scope, "DEFAULT_BRANCH") == "${{ github.event.repository.default_branch }}"
+    assert "dispatcher-workflow-step.sh scope" in scope
 
     # Restore is not gated by ref: non-default refs read the default-branch
     # snapshot (cache fallback) so their dry-run poll reflects shared state.
@@ -133,12 +130,9 @@ def test_only_default_branch_runs_write_state():
     assert "steps.scope.outputs.state_writer == 'true'" in save_condition
 
     poll = _step(POLL)
-    assert re.search(
-        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
-        r"\s+POLL_ARGS\+=\(--dry-run\)",
-        poll,
-    ), "non-default-ref polls must run with --dry-run (no Slack, no state write)"
-    assert 'dispatcher-poll.sh "${POLL_ARGS[@]}"' in poll
+    # non-default-ref polls run with --dry-run (no Slack, no state write): the step script decides
+    assert "STATE_WRITER: ${{ steps.scope.outputs.state_writer }}" in poll
+    assert "dispatcher-workflow-step.sh poll" in poll
 
 
 def test_cache_actions_paths_and_keys():

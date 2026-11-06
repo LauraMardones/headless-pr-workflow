@@ -118,7 +118,7 @@ Source: `main` at `976e95f`. **B1** = verified write, **B2** = own-account marke
 | **`set_project_status`** (915) | B1 | Moved (#432): the shim for `write board-status`; returns 1 with a `[BOARD ERROR]` line when the status is not written |
 | **`set_project_status_checked`** (2404) | B1 | Moved (#432): calls `set_project_status` |
 | **`set_project_status_ready`** (3477) | B1 | Moved (#432): calls `set_project_status` with "Ready for implementation" |
-| **`evidence_retry`** (1183) | B1 | Moved (#432): the shim for `write retry-pending`, which reads its payload with inline code until #434 adds B3 `read-pending`; the shim posts the give-up blocker through `post_blocker_once` (B2) |
+| **`evidence_retry`** (1183) | B1 | Moved (#432): the shim for `write retry-pending`, which reads its payload through B3 `read-pending` (#434); the shim posts the give-up blocker through `post_blocker_once` (B2) |
 | `evidence_record_failure` (1157) | B1 | Moved (#432): `write retry-pending` counts the failed run and reports the bound itself. The function stays for its two other callers (`merge-confirmation-missing`, `cleanup-summary-unrecorded`); its writes go through `post_comment`, and its marker reads are B2 (#433) |
 | `settle_merge_confirmation` (2215) | B1 | Moved (#432): its writes go through `evidence_retry` and `evidence_record_failure` |
 | `label_pending_cleanup` (1238) | B1 | Moved (#432): the shim for `write label --add`, which creates a missing repository label |
@@ -160,15 +160,15 @@ Other scripts:
 | `gh api graphql` viewer check (`dispatcher-merge.sh`, 79) | stays | Read-only capability check |
 | Closing summary POST with retry and pending copy (`dispatcher-cleanup.sh`, 122–140) | B1 | Moved (#432): `write comment --evidence-item cleanup-summary` |
 | Merged-PR lookup (`dispatcher-cleanup.sh`, 47–54) | stays | Read-only |
-| **`load_state`** (118), **`save_state`** (147) and the `register` path (167–195) (`dispatcher-notify-retry.sh`) | B3 | `actionable-events` |
+| **`load_state`** (118), **`save_state`** (147) and the `register` path (167–195) (`dispatcher-notify-retry.sh`) | B3 | Moved (#434): thin shims for `state read|write` on `actionable-events`; a malformed line is dropped and the valid lines are kept |
 | Delivery-failure comment POST (`dispatcher-notify-retry.sh`, 325) | B1 | Moved (#432): `write comment`; a write that is not read back leaves `comment_posted` false, so the next cycle retries |
 | `evidence_resolved` (208), `resolved` (239) (`dispatcher-notify-retry.sh`) | B2 | Own-login filter and the PO `/unblock` rule, written again here |
 | **`load_token_login`** (`dispatcher-poll.sh`, 353) | B2 | `whoami`, today through `curl` |
-| Refinement state read (470–483) and write (518–527) (`dispatcher-poll.sh`) | B3 | `notified-refinement` |
+| Refinement state read (470–483) and write (518–527) (`dispatcher-poll.sh`) | B3 | Moved (#434): `state read|write` on `notified-refinement` |
 | `graphql` (156), `rest_get_all` (336), `load_open_prs` (316), `status_items` (282) (`dispatcher-poll.sh`) | stays | Read-only. The poll passes the comments it reads to `conflict_round_rule`, which filters by login |
-| `read_count` (41), `record`, `notify-due`, `mark-notified` (71–89) (`dispatcher-usage-limit.sh`) | B3 | `usage-sessions`, `usage-notified` |
+| `read_count` (41), `record`, `notify-due`, `mark-notified` (71–89) (`dispatcher-usage-limit.sh`) | B3 | Moved (#434): `state read|write` on `usage-sessions` and `usage-notified`; a malformed or unreadable counter starts no session |
 | `read_limit` (`dispatcher-usage-limit.sh`, 52) | stays | Reads configuration, not state |
-| `HOLD_FILE` read (143–150) and write (274–286) (`dispatcher-allowance.sh`) | B3 | `allowance-hold` |
+| `HOLD_FILE` read (143–150) and write (274–286) (`dispatcher-allowance.sh`) | B3 | Moved (#434): `state read|write` on `allowance-hold` |
 | `gh run list` (`dispatcher-trigger-check.sh`, 48) | stays | Read-only; the event it queues goes through `dispatcher-notify-retry.sh` |
 | `dispatcher-change-check.sh` | stays | The checker itself; it makes no GitHub call. `verified-write` reports it as SKIP, because its own patterns would match |
 | `graphql` (`dispatcher-poll.sh`, 156) | stays | A read-only GraphQL query sent with `curl -X POST`: the `verified-write` allowlist entry `graphql verified-write` |
@@ -189,12 +189,12 @@ The board writes of `finish_story` ("Done", and "In merge" when the cleanup evid
 
 | Variant (step, line) | Block | Note |
 |---|---|---|
-| "Resolve notification state scope" (114) | B3 | Rule 3 (state writer) |
-| "Restore refinement notification state" (128), "Save poll notification state" (173), "Save refinement notification state" (316) | B3 | Rules 1 and 2 |
-| "Set cache date" (180), "Restore session state cache" (184), "Set cache save date" (261), "Save session state cache" (265) | B3 | Rules 1 and 2 |
-| Inline `gh api` read of the `evidence:pending` label (165, in "Run dispatcher poll") | B3 | The comment-state index; #434 moves the read into a script |
-| "Notify usage limit reached" (246), `mark-notified` | B3 | `usage-notified` |
-| The `RESUMABLE` jq expression (in "Run dispatcher poll") | stays | It decides no write, marker or state, so no block replaces it. #434 moves it into `dispatcher-poll.sh` under #368 → F6 |
+| "Resolve notification state scope" (114) | B3 | Moved (#434): `dispatcher-workflow-step.sh scope`; rule 3 (state writer) |
+| "Restore refinement notification state" (128), "Save poll notification state" (173), "Save refinement notification state" (316) | B3 | Moved (#434): rules 1 and 2 hold; "Save poll notification state" gained `always()` |
+| "Set cache date" (180), "Restore session state cache" (184), "Set cache save date" (261), "Save session state cache" (265) | B3 | Moved (#434): the dates are `dispatcher-workflow-step.sh cache-date` and `cache-save-date`; rules 1 and 2 hold |
+| Inline `gh api` read of the `evidence:pending` label (165, in "Run dispatcher poll") | B3 | Moved (#434): `dispatcher-poll.sh` reads the label and reports `evidence_pending`; a failed read counts as pending |
+| "Notify usage limit reached" (246), `mark-notified` | B3 | Moved (#434): `dispatcher-workflow-step.sh usage-limit-notify` |
+| The `RESUMABLE` jq expression (in "Run dispatcher poll") | stays | It decides no write, marker or state, so no block replaces it. Moved (#434) into `dispatcher-poll.sh` under #368 → F6: the poll reports `resumable` and `next_issue` |
 
 ## Options Considered
 

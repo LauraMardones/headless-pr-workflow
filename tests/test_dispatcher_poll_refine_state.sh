@@ -149,7 +149,7 @@ slack_count() {  # slack_count [issue-number]
 
 assert_clean_json() {
     local label="$1"
-    if jq -e 'type == "object" and (keys == ["conflict_due","in_implementation","in_merge","owner_missing_due","ready_for_implementation","ready_for_refinement","review_due"])' \
+    if jq -e 'type == "object" and (keys == ["conflict_due","evidence_pending","in_implementation","in_merge","next_issue","owner_missing_due","ready_for_implementation","ready_for_refinement","resumable","review_due"])' \
             <<<"$LAST_STDOUT" >/dev/null 2>&1; then
         pass "$label: stdout is the documented JSON object only"
     else

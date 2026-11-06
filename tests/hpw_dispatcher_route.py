@@ -31,6 +31,20 @@ def fake_hpw_route(fake_gh: Path, bash: str) -> str:
     )
 
 
+def fake_state_route() -> str:
+    """Bash lines for a fake ``hpw``: ``hpw dispatcher state ...`` runs the real Block 3 (issue #434).
+
+    Block 3 reads and writes local files only, so it needs no ``gh`` fake.
+    """
+
+    python = Path(sys.executable).as_posix()
+    return (
+        'if [[ "${1:-} ${2:-}" == "dispatcher state" ]]; then\n'
+        f'    shift; PYTHONPATH="{(REPO_ROOT / "src").as_posix()}" exec "{python}" -m headless_pr_workflow.dispatcher "$@"\n'
+        "fi\n"
+    )
+
+
 def main(argv: list[str]) -> int:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     from headless_pr_workflow.dispatcher.cli import main as dispatcher_main

@@ -197,8 +197,13 @@ chmod +x "$FAKE_BIN/allowance-start.sh"
 # Fake hpw on HPW_BIN (issue #432): `hpw dispatcher write comment|board-status`
 # reaches the fake gh with the calls the script made itself before the verified
 # write existed, so the gh.log lines (POST, MUTATION) stay what they were.
-cat > "$FAKE_BIN/hpw" << 'EOF'
+cat > "$FAKE_BIN/hpw" << EOF
 #!/usr/bin/env bash
+if [[ "\${1:-} \${2:-}" == "dispatcher state" ]]; then  # Block 3 (issue #434): the real block, local files only
+    shift; PYTHONPATH="$SCRIPT_DIR/src" exec "\$(command -v python3 || command -v python)" -m headless_pr_workflow.dispatcher "\$@"
+fi
+EOF
+cat >> "$FAKE_BIN/hpw" << 'EOF'
 [[ "${1:-} ${2:-}" == "dispatcher write" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
 op="$3"; shift 3
 repo="" number="" file="" status="" dry=false

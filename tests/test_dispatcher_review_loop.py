@@ -968,7 +968,7 @@ def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
     assert "all 2 stories Done" not in proc.stdout and d.slack_calls == []
 
 
-def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None) -> dict:
+def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evidence: str = "[]") -> dict:
     """Run the real dispatcher-poll.sh against a fake ``curl`` that serves one board page.
 
     An item is ``(number, status)`` or ``(number, status, [labels])``; ``pulls`` is the open-PR list.
@@ -985,13 +985,15 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None) -> 
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
     curl = bin_dir / "curl"
     (tmp_path / "pulls.json").write_text(json.dumps(pulls or []), encoding="utf-8")
-    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  */pulls*) cat "$PULLS_FILE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
+    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  */pulls*) cat "$PULLS_FILE" ;;\n'
+                    '  *labels=evidence*) [ "$EVIDENCE" = fail ] && exit 22; echo "$EVIDENCE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
                     encoding="utf-8", newline="\n")
     curl.chmod(0o755)
     env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
-           "PULLS_FILE": (tmp_path / "pulls.json").as_posix(),
+           "PULLS_FILE": (tmp_path / "pulls.json").as_posix(), "EVIDENCE": evidence,
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
+           "HPW_BIN": (REPO_ROOT / "scripts" / "hpw").as_posix(),
            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5", **windows_env()}
     proc = subprocess.run(
         [BASH, (REPO_ROOT / "scripts" / "dispatcher-poll.sh").as_posix(), "--repo", "o/r", "--dry-run"],
@@ -1012,6 +1014,9 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "review_due": [],
         "conflict_due": [],
         "owner_missing_due": [],
+        "evidence_pending": False,
+        "next_issue": 1,
+        "resumable": True,
     }
 
 
@@ -1121,73 +1126,42 @@ def test_ac14_workflow_steps_run_on_resumable_work(name, prefix):
 
 
 def test_ac14_workflow_poll_step_reports_resumable_work():
-    body = workflow_step("Run dispatcher poll")
-    assert ".in_merge" in body and ".in_implementation" in body
-    assert 'echo "resumable=$RESUMABLE" >> "$GITHUB_OUTPUT"' in body
-    assert 'echo "issue_number=$NEXT_ISSUE" >> "$GITHUB_OUTPUT"' in body
+    assert "bash scripts/dispatcher-workflow-step.sh poll" in workflow_step("Run dispatcher poll")
+    script = (REPO_ROOT / "scripts" / "dispatcher-workflow-step.sh").read_text(encoding="utf-8")
+    assert 'echo "resumable=$resumable" >> "$GITHUB_OUTPUT"' in script
+    assert 'echo "issue_number=$next" >> "$GITHUB_OUTPUT"' in script
 
 
 @needs_tools
-@pytest.mark.parametrize("poll,expected", [
-    ({"ready_for_implementation": [], "in_merge": [{"number": 3}], "in_implementation": []}, "true"),
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [{"number": 4}]}, "true"),
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [{"number": 5}]}, "true"),
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": []}, "false"),
-    # issue #409: a review-loop story "In review" whose PR conflicts with main
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
-      "conflict_due": [{"number": 6}]}, "true"),
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
-      "conflict_due": []}, "false"),
-    # issue #449: a review-loop story "In review" whose clean head has no merge owner
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
-      "conflict_due": [], "owner_missing_due": [{"number": 7}]}, "true"),
-    ({"ready_for_implementation": [], "in_merge": [], "in_implementation": [], "review_due": [],
-      "conflict_due": [], "owner_missing_due": []}, "false"),
-    ({"ready_for_implementation": [{"number": 1}], "in_merge": [], "in_implementation": []}, "false"),
-    ({"ready_for_implementation": [], "ready_for_refinement": []}, "false"),
+@pytest.mark.parametrize("items,pulls,key", [
+    ([(3, "In merge")], None, "in_merge"),
+    ([(4, "In implementation")], None, "in_implementation"),
+    ([(5, "In review", ["executor:codex"])], [open_pr(15, 5)], "review_due"),
 ])
-def test_ac14_workflow_resumable_expression(poll, expected):
-    """The jq expression in the poll step, run as written."""
-    expression = re.search(r"RESUMABLE=\$\(echo \"\$POLL_JSON\" \| jq -r '(.+)'\)", workflow_step("Run dispatcher poll"))
-    assert expression
-    proc = subprocess.run(["jq", "-r", expression.group(1)], input=json.dumps(poll),
-                          capture_output=True, text=True)
-    assert proc.stdout.strip() == expected, proc.stderr
-
-
-def poll_step_resumable(tmp_path, poll: dict, gh_output: str, gh_exit: int = 0) -> tuple[str, str]:
-    """Runs the poll step's lines from RESUMABLE= up to its output, as written, with a fake ``gh``."""
-    body = workflow_step("Run dispatcher poll")
-    start = body.index("          RESUMABLE=")
-    end = body.index('          echo "resumable=$RESUMABLE"')
-    snippet = textwrap.dedent(body[start:end]).replace("${{ github.repository }}", "o/r") + 'echo "$RESUMABLE"\n'
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    gh = bin_dir / "gh"
-    gh.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{(tmp_path / "gh.log").as_posix()}"\n'
-                  f'echo "{gh_output}"\nexit {gh_exit}\n', encoding="utf-8", newline="\n")
-    gh.chmod(0o755)
-    env = {**os.environ, **windows_env(), "PATH": script_path(bin_dir.as_posix()), "POLL_JSON": json.dumps(poll)}
-    proc = subprocess.run([BASH, "-c", snippet], env=env,
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-    log = (tmp_path / "gh.log").read_text(encoding="utf-8") if (tmp_path / "gh.log").exists() else ""
-    return proc.stdout.strip(), log
-
-
-NOTHING_ON_THE_BOARD = {"ready_for_implementation": [], "in_merge": [], "in_implementation": []}
+def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, key):
+    """The RESUMABLE rule of issue #293, now in the poll (issue #434); conflict_due and owner_missing_due
+    are covered in test_dispatcher_conflict_round.py."""
+    out = poll_json(tmp_path, items, pulls=pulls)
+    assert out[key] and out["resumable"] is True and out["evidence_pending"] is False
 
 
 @needs_tools
-@pytest.mark.parametrize("gh_output,gh_exit,expected", [
-    ("true", 0, "true"),    # a Done story carries evidence:pending
-    ("false", 0, "false"),  # nothing to retry
-    ("", 1, "true"),        # the label could not be read: the retry is not skipped
+def test_ac14_poll_is_not_resumable_with_nothing_to_resume(tmp_path):
+    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")])
+    assert out["resumable"] is False and out["next_issue"] == 1
+
+
+@needs_tools
+@pytest.mark.parametrize("evidence,expected", [
+    ('[{"number": 9}]', True),   # a Done story carries evidence:pending
+    ("[]", False),               # nothing to retry
+    ("fail", True),              # the label could not be read: the retry is not skipped
+    ("not json", True),          # an unreadable answer counts as pending too
+    ('{"message": "Bad credentials"}', True),
 ])
-def test_348_workflow_resumes_for_a_story_labelled_evidence_pending(tmp_path, gh_output, gh_exit, expected):
-    resumable, log = poll_step_resumable(tmp_path, NOTHING_ON_THE_BOARD, gh_output, gh_exit)
-    assert resumable == expected
-    assert "repos/o/r/issues?state=all&labels=evidence%3Apending" in log
+def test_348_poll_resumes_for_a_story_labelled_evidence_pending(tmp_path, evidence, expected):
+    out = poll_json(tmp_path, [], evidence=evidence)
+    assert out["evidence_pending"] is expected and out["resumable"] is expected
 
 
 def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
@@ -1195,8 +1169,7 @@ def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
     env_block, run_block = body.split("        run:", 1)
     assert "CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}" in env_block
     assert "NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}" in env_block
-    assert re.search(r'if \[ -n "\$NEXT_ISSUE" \]; then\n\s+bash scripts/dispatcher-invoke\.sh .*--issue "\$NEXT_ISSUE"\n'
-                     r'\s+else\n\s+bash scripts/dispatcher-invoke\.sh .*--resume\n', run_block), run_block
+    assert run_block.strip().splitlines()[0] == "bash scripts/dispatcher-workflow-step.sh invoke"
 
 
 # ── Docs (AC16) ─────────────────────────────────────────────────────────────

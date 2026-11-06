@@ -94,13 +94,10 @@ def test_invoke_runs_dry_run_when_not_the_state_writer():
     # Issue #320: the session count is saved to this ref's cache scope, so a
     # run on a non-default ref must not start sessions the scheduled
     # default-branch runs cannot count.
+    # Issue #434: the --dry-run and --issue/--resume choices are in the step script
+    # (tests/test_dispatcher_workflow_step.py); the step passes the state-writer fact to it.
     body = step("Run dispatcher invoke")
-    assert re.search(
-        r'if \[ "\$\{\{ steps\.scope\.outputs\.state_writer \}\}" != "true" \]; then\s*\n'
-        r"\s+INVOKE_ARGS\+=\(--dry-run\)",
-        body,
-    ), body
-    assert 'dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --issue "$NEXT_ISSUE"' in body
-    assert 'dispatcher-invoke.sh "${INVOKE_ARGS[@]}" --resume' in body
+    assert "STATE_WRITER: ${{ steps.scope.outputs.state_writer }}" in body
+    assert "bash scripts/dispatcher-workflow-step.sh invoke" in body
     names = [n for n, _ in steps()]
     assert names.index("Resolve notification state scope") < names.index("Run dispatcher invoke")

@@ -48,7 +48,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/claude-session.sh"
 
 STATE_DIR="${ALLOWANCE_STATE_DIR:-$REPO_ROOT/.dispatcher-allowance}"
-HOLD_FILE="$STATE_DIR/hold.json"
+HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # Block 3, `hpw dispatcher state` (ADR-014, issue #434); overridable for tests
 PROBE_TIMEOUT="${ALLOWANCE_PROBE_TIMEOUT:-120}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
@@ -140,23 +140,26 @@ fi
 # script probes. A bad hold file can therefore only cause a probe, never a start.
 
 NOW=$(date -u +%s)
-if [[ -r "$HOLD_FILE" ]]; then
-    HOLD=$(jq -cse --argjson rf "$RES_FIVE" --argjson rw "$RES_WEEK" --argjson now "$NOW" '
-        if length == 1 then .[0] else empty end
-        | select(type == "object"
+# The block reads the allowance-hold file: a missing, malformed or unreadable
+# one gives no data, so only the reserve and expiry rules below can hold.
+HOLD_OUT=$(ALLOWANCE_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name allowance-hold 2>/dev/null) || HOLD_OUT=""
+HOLD=""
+if [[ "$(jq -r '.result // empty' <<< "$HOLD_OUT" 2>/dev/null)" == ok ]]; then
+    HOLD=$(jq -ce --argjson rf "$RES_FIVE" --argjson rw "$RES_WEEK" --argjson now "$NOW" '
+        .data | select(type == "object"
                and (.until | type) == "number"
                and .reserve_five_hour_percent == $rf
                and .reserve_weekly_percent == $rw
-               and $now < .until)' "$HOLD_FILE" 2>/dev/null || true)
-    if [[ -n "$HOLD" ]]; then
-        FIVE_UTIL=$(jq -c '.five_hour.utilization | if type == "number" then . else null end' <<< "$HOLD")
-        FIVE_RESETS=$(jq -c '.five_hour.resets_at | if type == "number" then . else null end' <<< "$HOLD")
-        WEEK_UTIL=$(jq -c '.weekly.utilization | if type == "number" then . else null end' <<< "$HOLD")
-        WEEK_RESETS=$(jq -c '.weekly.resets_at | if type == "number" then . else null end' <<< "$HOLD")
-        UNTIL_TXT=$(jq -r '.until | floor | strftime("%Y-%m-%dT%H:%MZ")' <<< "$HOLD")
-        emit "refuse" "hold" "below reserve until $(jq -r '.until | floor | todate' <<< "$HOLD"); not probing" 1 \
-            "[RESERVE HOLD] below reserve until $UNTIL_TXT; not probing"
-    fi
+               and $now < .until)' <<< "$HOLD_OUT" 2>/dev/null || true)
+fi
+if [[ -n "$HOLD" ]]; then
+    FIVE_UTIL=$(jq -c '.five_hour.utilization | if type == "number" then . else null end' <<< "$HOLD")
+    FIVE_RESETS=$(jq -c '.five_hour.resets_at | if type == "number" then . else null end' <<< "$HOLD")
+    WEEK_UTIL=$(jq -c '.weekly.utilization | if type == "number" then . else null end' <<< "$HOLD")
+    WEEK_RESETS=$(jq -c '.weekly.resets_at | if type == "number" then . else null end' <<< "$HOLD")
+    UNTIL_TXT=$(jq -r '.until | floor | strftime("%Y-%m-%dT%H:%MZ")' <<< "$HOLD")
+    emit "refuse" "hold" "below reserve until $(jq -r '.until | floor | todate' <<< "$HOLD"); not probing" 1 \
+        "[RESERVE HOLD] below reserve until $UNTIL_TXT; not probing"
 fi
 
 # ─── 4. Probe (AC4, AC5) ─────────────────────────────────────────────────────
@@ -271,19 +274,21 @@ BELOW=$(jq -r '.below' <<< "$DECISION")
 UNTIL=$(jq -c '.until' <<< "$DECISION")
 if [[ "$UNTIL" != "null" ]]; then
     # Best effort: a failed write only means the next poll probes again.
-    if mkdir -p "$STATE_DIR" 2>/dev/null \
-        && jq -n --argjson until "$UNTIL" --argjson rf "$RES_FIVE" --argjson rw "$RES_WEEK" \
+    HOLD_DATA=$(mktemp 2>/dev/null) || HOLD_DATA=""
+    if [[ -n "$HOLD_DATA" ]] \
+        && jq -nc --argjson until "$UNTIL" --argjson rf "$RES_FIVE" --argjson rw "$RES_WEEK" \
               --argjson fu "$FIVE_UTIL" --argjson fr "$FIVE_RESETS" \
               --argjson wu "$WEEK_UTIL" --argjson wr "$WEEK_RESETS" \
               '{until: $until, reserve_five_hour_percent: $rf, reserve_weekly_percent: $rw,
                 five_hour: {utilization: $fu, resets_at: $fr},
-                weekly: {utilization: $wu, resets_at: $wr}}' > "$HOLD_FILE.tmp" 2>/dev/null \
-        && mv "$HOLD_FILE.tmp" "$HOLD_FILE" 2>/dev/null; then
+                weekly: {utilization: $wu, resets_at: $wr}}' > "$HOLD_DATA" 2>/dev/null \
+        && ALLOWANCE_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state write --name allowance-hold \
+              --data-file "$HOLD_DATA" >/dev/null 2>&1; then
         :
     else
-        rm -f "$HOLD_FILE.tmp" 2>/dev/null || true
-        echo "[ALLOWANCE] Warning: could not write $HOLD_FILE; the next poll will probe again" >&2
+        echo "[ALLOWANCE] Warning: could not write the allowance hold in $STATE_DIR; the next poll will probe again" >&2
     fi
+    [[ -z "$HOLD_DATA" ]] || rm -f "$HOLD_DATA"
 fi
 
 emit "refuse" "probe" "$BELOW" 1 "[RESERVE SKIP] $BELOW"

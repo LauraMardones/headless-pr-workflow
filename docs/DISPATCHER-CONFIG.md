@@ -284,6 +284,36 @@ The bash functions callers use (`marker_holds`, `resolve_dispatcher_login`, `boo
 
 **Change check.** `scripts/dispatcher-change-check.sh` has the check id `own-marker`: outside the shims above it flags a literal `hpw:dispatcher` or `hpw:codex-review-bookkeeping`, a `gh api user` or `/user` call, a jq filter on `.user.login`, and a match on `DECISION_BLOCKER_CLAIM_MARKER` or `DECISION_BLOCKER_RESUME_MARKER`. It covers `scripts/dispatcher-*.sh` and `scripts/lib/*.sh`. Its exceptions are an allowlist of function name and check id, one per "stays" row of ADR-014 → Decision → 7.
 
+## Saved state — `hpw dispatcher state`
+
+The state the dispatcher keeps between runs is read, checked and written through one building block, `scripts/hpw dispatcher state` (ADR-014 → Block 3, issue #434). A broken file is never used as if it were good and never overwrites good state, and a cancelled or re-run workflow does not lose state.
+
+```
+scripts/hpw dispatcher state read         --name <name> [--repo <owner/repo>]
+scripts/hpw dispatcher state write        --name <name> --data-file <path> [--repo <owner/repo>] [--dry-run]
+scripts/hpw dispatcher state read-pending --number <n> --item <item> [--expected-head <sha>] --repo <owner/repo>
+```
+
+| Name | File (formats and paths unchanged) | Malformed or unreadable |
+|---|---|---|
+| `actionable-events` | `.dispatcher-state/<owner>/<repo>/actionable-events` (`DISPATCHER_STATE_DIR`) | the retry step sends nothing and leaves the file; a malformed *line* is dropped while valid lines are kept; a new event is delivered directly |
+| `notified-refinement` | `.dispatcher-state/<owner>/<repo>/notified-refinement` | the poll continues empty (at most one extra notification) |
+| `usage-sessions` | `.dispatcher-usage/sessions` (`YYYY-MM-DD:<count>`, `USAGE_LIMIT_STATE_DIR`) | **starts no session**: `[USAGE LIMIT ERROR]`, exit `2`. A file dated another day is the normal start of a new day: 0 sessions |
+| `usage-notified` | `.dispatcher-usage/notified` (`YYYY-MM-DD`) | the notification is sent again |
+| `allowance-hold` | `.dispatcher-allowance/hold.json` (`ALLOWANCE_STATE_DIR`) | the allowance check probes again |
+
+- **`read`** never changes the file. Result words and exit codes: `ok`, `missing` (the name's empty value) exit `0`; `malformed`, `stale` (another day, for the two day files) exit `1`; `unreadable` (not a regular file, or it cannot be read) exit `3`. `read` prints `reason` (`not-a-file` or `read-failed`) for `unreadable`.
+- **`write`** checks the data against the name's format, writes a temporary file, renames it into place and reads it back (`written`, exit `0`; `failed`, exit `1`, with one stderr line naming the file and the step). A path that is not a regular file, or a file that cannot be read, is moved aside to `<file>.unreadable` and never overwritten. A write stopped before the rename leaves the old file whole. `--dry-run` writes nothing and returns `dry-run`.
+- **`read-pending`** finds the dispatcher's own evidence-pending comment through Block 2 and returns `none`, `ok` (with `payload`), `stale-head` (the payload was recorded for another head), `malformed` or `unreadable`. `write retry-pending` reads its payload through it.
+- **Output:** one JSON line (`ok`, `block: "state"`, `operation`, `result`, `name`, `data` or `payload`, `error`); exit `2` is an unknown name or invalid arguments. The block adds no wait and no retry.
+- The bash callers are thin shims: `load_state` and `save_state` in `dispatcher-notify-retry.sh`, the refinement state in `dispatcher-poll.sh`, `read_count`, `record`, `notify-due` and `mark-notified` in `dispatcher-usage-limit.sh`, and the hold in `dispatcher-allowance.sh`.
+
+**Workflow rules** (`.github/workflows/dispatcher.yml`): every `actions/cache/save` key contains `${{ github.run_id }}-${{ github.run_attempt }}`, so a re-run never collides with the first attempt, and restores match by prefix, so the newest snapshot wins; every state save has `always()` in its `if:`, so it also runs after a failed or cancelled step; only the state writer (a scheduled run, or a run on the default branch) saves `.dispatcher-state`, and other refs run the poll, invoke, trigger-check and retry steps with `--dry-run`.
+
+**Workflow steps are scripts.** Every `run:` in `dispatcher.yml` is one command: `bash scripts/dispatcher-workflow-step.sh <step>`, or the pinned `npm install`. The step script holds the guard (`guard`), the state-writer rule (`scope`), the cache dates (`cache-date`, `cache-save-date`), `gh auth setup-git` (`git-auth`), the `--dry-run` and `--issue`/`--resume` choices (`poll`, `invoke`, `trigger-check`, `retry`) and the usage-limit notification context (`usage-limit-notify`). The poll reports `next_issue`, `evidence_pending` and `resumable` in its JSON; a failed read of the `evidence:pending` label counts as pending.
+
+**Change check.** `scripts/dispatcher-change-check.sh` has the check id `saved-state`: outside the shims above it flags a redirect, `cp`, `mv`, `rm`, `cat`, `read <` or `mkdir` on a path under `.dispatcher-state`, `.dispatcher-usage` or `.dispatcher-allowance`, or on a variable named `*STATE_DIR`, `*STATE_FILE`, `HOLD_FILE`, `SESSIONS_FILE` or `NOTIFIED_FILE`. On `dispatcher.yml` it flags an `actions/cache/save` key without `github.run_attempt`, a cache save whose `if:` has no `always()`, and a `run:` step that calls `gh` directly.
+
 ## Slack Notifications
 
 The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for these events. There are no "story dispatched" or "closed" events: normal transitions are not notified.

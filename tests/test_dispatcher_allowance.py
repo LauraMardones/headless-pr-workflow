@@ -493,3 +493,13 @@ def test_malformed_hold_probes(env, content):
     proc, out = env.run()
     assert env.calls == 1
     assert out["source"] == "probe" and proc.returncode == 0
+
+
+def test_unreadable_hold_probes_and_the_write_moves_it_aside(env):
+    """Block 3 (issue #434): a hold path that is not a regular file is never trusted and never overwritten."""
+    env.lines(init_line(), rate_limit_line(0.99, 0.99), result_line())
+    env.hold.mkdir(parents=True)
+    proc, out = env.run()
+    assert env.calls == 1 and out["source"] == "probe" and proc.returncode == 1
+    assert env.hold.is_file() and json.loads(env.hold.read_text())["until"]
+    assert Path(f"{env.hold}.unreadable").is_dir()

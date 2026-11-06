@@ -17,7 +17,6 @@ Result words and exit codes:
 from __future__ import annotations
 
 import base64
-import binascii
 import os
 import re
 import sys
@@ -461,26 +460,21 @@ def retry_pending(
     except GatewayError as exc:
         return Result("retry-pending", "missing", error=str(exc), fields={**base, "reason": "unreadable"})
 
+    from .state import read_pending  # Block 3 imports this module
+
     marker = f"action=evidence-pending item={item} "
-    pending_comments = [c for c in own if marker in str(c.get("body") or "")]
-    if not pending_comments:
+    rows = [{"created_at": c.get("created_at"), "body": c.get("body")} for c in own if marker in str(c.get("body") or "")]
+    pending = read_pending(gateway, target, item, expected_head=expected_head, own=rows)
+    if pending.result == "none":
         return Result("retry-pending", "none", fields=base)
-    pending = pending_comments[-1]
-    pending_at = str(pending.get("created_at") or "")
-    base["pending_at"] = pending_at
-    match = _PENDING_FIELDS.search(str(pending.get("body") or ""))
-    if match is None:
-        return Result("retry-pending", "none", fields={**base, "reason": "malformed"})
-    head, encoded = match.group(1), match.group(2)
-    base["head"] = head
-    if expected_head and head.lower() != expected_head.lower():
+    base["pending_at"] = pending.fields.get("pending_at")
+    if pending.fields.get("head"):
+        base["head"] = pending.fields["head"]
+    if pending.result == "stale-head":
         return Result("retry-pending", "stale", fields={**base, "reason": "other-head"})
-    try:
-        payload = base64.b64decode(encoded, validate=True).decode("utf-8")
-    except (binascii.Error, ValueError):
-        payload = ""
-    if not payload:
-        return Result("retry-pending", "none", fields={**base, "reason": "undecodable"})
+    if pending.result != "ok":
+        return Result("retry-pending", "none", fields={**base, "reason": pending.fields.get("reason")})
+    payload = pending.fields["payload"]
 
     wanted = payload.strip()
     if any("action=evidence-pending" not in str(c.get("body") or "") and wanted in str(c.get("body") or "").strip()

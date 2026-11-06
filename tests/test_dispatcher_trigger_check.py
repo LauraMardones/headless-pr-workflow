@@ -68,6 +68,7 @@ class Sandbox:
             "MOCK_DIR": str(self.mock),
             "DISPATCHER_STATE_DIR": str(self.state),
             "SLACK_WEBHOOK_URL": "x",
+            "HPW_BIN": str(REPO_ROOT / "scripts" / "hpw"),  # Block 3 (issue #434): the real launcher
         }
         self.set_runs(None)
 
@@ -311,8 +312,8 @@ def test_workflow_step_order_and_conditions():
     cond = lambda b: re.search(r"^        if: (.+)$", b, re.MULTILINE).group(1)
     assert cond(steps[check]) == cond(steps[retry])
     assert "steps.guard.outputs.enabled == 'true'" in cond(steps[check])
-    assert "scripts/dispatcher-trigger-check.sh" in steps[check]
-    assert '--dry-run' in steps[check] and "state_writer" in steps[check]
+    assert "dispatcher-workflow-step.sh trigger-check" in steps[check]  # issue #434: the --dry-run choice is in the step script
+    assert "STATE_WRITER: ${{ steps.scope.outputs.state_writer }}" in steps[check]
 
 
 def test_workflow_triggers_concurrency_permissions_unchanged():
