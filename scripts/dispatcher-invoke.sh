@@ -1204,13 +1204,19 @@ $(evidence_failed_marker "$item" "$ref")" || unwritable=true
 # The give-up blocker is posted here, through post_blocker_once (#433 moves it).
 evidence_retry() {
     local target="$1" item="$2" ref="$3" story="$4" title="$5" expected_head="${6:-}"
-    local rc=0 result reason head args unwritable=false
+    local rc=0 result reason head error payload pending_at recorded args unwritable=false
     args=(retry-pending --target "$target" --item "$item" --ref "$ref" --story "$story")
     [[ -n "$expected_head" ]] && args+=(--expected-head "$expected_head")
     dispatcher_write "${args[@]}" || rc=$?
+    # Read every field now: post_blocker_once below writes through the block too,
+    # which replaces WRITE_JSON.
     result=$(write_field result)
     reason=$(write_field reason)
     head=$(write_field head)
+    error=$(write_field error)
+    payload=$(write_field payload)
+    pending_at=$(write_field pending_at)
+    recorded=$(write_field failure_recorded)
     # The block tried to post the text in this run.
     if [[ "$reason" == now || "$reason" == write-failed || "$reason" == limit ]]; then
         echo "${LOG_PREFIX}[RESUME] #$story: posting the missing $item evidence on #$target"
@@ -1238,24 +1244,24 @@ evidence_retry() {
                 return 1
             fi
             echo "Warning: the $item evidence on #$target could not be posted; retried on the next run." >&2
-            [[ "$(write_field failure_recorded)" == true ]] || unwritable=true ;;
+            [[ "$recorded" == true ]] || unwritable=true ;;
         gave-up)
             if [[ "$reason" == stopped ]]; then
                 echo "${LOG_PREFIX}[RESUME SKIP] #$story: the $item evidence on #$target is still missing; retrying stopped after $EVIDENCE_RETRY_MAX runs, waiting for a PO /unblock line"
                 return 2
             fi
             echo "Warning: the $item evidence on #$target could not be posted; retrying stops after $EVIDENCE_RETRY_MAX runs." >&2
-            [[ "$(write_field failure_recorded)" == true ]] || unwritable=true
+            [[ "$recorded" == true ]] || unwritable=true
             post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
                 "the evidence (the $item evidence on #$target) is posted by hand, then the PO posts /unblock" \
                 "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write the $item evidence on #$target; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
                 || unwritable=true ;;
         *)
-            echo "Warning: the $item evidence on #$target could not be retried ($(write_field error)); retried on the next run." >&2
+            echo "Warning: the $item evidence on #$target could not be retried ($error); retried on the next run." >&2
             return 1 ;;
     esac
     if $unwritable; then
-        evidence_unwritable_alert "$story" "$title" "$item" "$ref" "$target" "$(write_field pending_at)" payload "$(write_field payload)"
+        evidence_unwritable_alert "$story" "$title" "$item" "$ref" "$target" "$pending_at" payload "$payload"
     fi
     [[ "$result" == gave-up ]] && return 2
     return 1

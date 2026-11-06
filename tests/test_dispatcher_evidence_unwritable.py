@@ -149,3 +149,14 @@ def test_ac8_dry_run_registers_nothing(d):
     proc = d.resume("--dry-run")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert events(d) == []
+
+
+def test_ac1_the_last_retry_run_keeps_the_pending_time_when_the_give_up_blocker_fails(d):
+    """The failed give-up blocker write must not replace the retry's pending_at and payload (#432)."""
+    pending_confirmation_setup(d, 20)
+    proc = d.resume(env={"EVIDENCE_RETRY_MAX": "1"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "start of the missing" not in proc.stderr
+    [event] = events(d)
+    assert "merge-confirmation" in event["key"]
+    assert "PO alert queued" in proc.stdout
