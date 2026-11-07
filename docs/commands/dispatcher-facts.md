@@ -26,11 +26,11 @@ Exit `1` is not used.
 
 One JSON line on stdout: `{"ok", "block": "facts", "operation": "read", "result": "read" | "unreadable", "epics", "issues", "error"}`. Log lines go to stderr; tokens are masked.
 
-Each Epic: `number`, `title`, `prio`, `spec`, `record`, `stale`.
+Each Epic: `number`, `title`, `prio`, `spec`, `record`, `stale`, `refinement`, `decision_blocker`. The last two follow the rules below for a Feature or story; both are `null` when the Epic's comments cannot be read (stderr names the step).
 
 - `spec.state`: `merged` (with `path`, the newest `commit` on `main` that changed it and its `committed_at`), `missing` (no `specs/<epic>-*/spec.md` on `main`) or `ambiguous` (more than one). The last two carry a `reason` naming `specs/<epic>-*/spec.md`.
 
-Each Feature or story (Story, Task, Bug): `number`, `title`, `type`, `prio`, `epic`, `feature` (the `Feature group:` of a story), `criterion_prefix` (Feature only), `record`, `refinement`, `decision_blocker`, `dependencies` (stories), `refined`, `ready`, `stale`, `reasons`. `prio` is the `prio:` label.
+Each Feature or story (Story, Task, Bug): `number`, `title`, `type`, `prio`, `epic`, `feature` (the `Feature group:` of a story), `criterion_prefix` (Feature only), `record`, `refinement`, `decision_blocker`, `dependencies` (stories), `files_affected`, `refined`, `ready`, `stale`, `reasons`. `prio` is the `prio:` label.
 
 ## Facts
 
@@ -51,6 +51,8 @@ Each Feature or story (Story, Task, Bug): `number`, `title`, `type`, `prio`, `ep
 **Trusted authors.** `refinement` and `decision_blocker` count only comments by `DECISION_BLOCKER_PO_LOGIN`, an `OWNER`, `MEMBER` or `COLLABORATOR`, or a Bot (the rule of `latest_decision_blocker_json`). Any other author is ignored.
 
 **`dependencies`** lists each issue under `Hard depends on:` as `closed`, `open` or `unresolvable` (not found, or its read failed); `None.` means none. `dependencies.state` is `unreadable` when the `## Dependencies` section or the line is missing. A close reason is not used: closed is closed.
+
+**`files_affected`** (Feature or story) lists the paths under `## Files affected`, parsed as `extract_files` in `scripts/dispatcher-invoke.sh` does: the section runs from the first line starting with `## Files affected` to the next line starting with `##`, each `- ` item loses its backticks and a `(note)`. It is `null` when the section is missing and `[]` when it has no items. `hpw dispatcher scheduler next` uses it for the file-overlap check ([dispatcher-scheduler.md](dispatcher-scheduler.md)).
 
 **`refined`** (Feature or story) is true only when all hold:
 

@@ -10,13 +10,15 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from headless_pr_workflow.dispatcher import cli
-from headless_pr_workflow.dispatcher.facts import SPEC_LINE, hard_dependencies, parse_sections, read_facts
+from headless_pr_workflow.dispatcher.facts import SPEC_LINE, files_affected, hard_dependencies, parse_sections, read_facts
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 
 PO = "LauraMardones"
@@ -534,6 +536,66 @@ def test_no_token_in_stdout_or_stderr(gw, capsys, monkeypatch):
     out, err = capsys.readouterr()
     gw.list_open_issues = original
     assert rc == 3 and TOKEN not in out + err
+
+
+# ── files affected and the Epic's own refinement (issue #473, AC 13) ─────────
+
+
+def test_files_affected_for_features_and_stories(gw, capsys):
+    body = story_body() + "\n## Files affected\n\n- `src/a.py`\n- tests/b.py (new)\n  - `docs/c.md` (update)\n\n## Notes\n- x\n"
+    story(gw, 30, body=body)
+    story(gw, 31)
+    gw.add_issue(20, ["type:feature"], story_body().replace("Feature group:", "X:") + "\n## Files affected\n\nnone\n")
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["files_affected"] == ["src/a.py", "tests/b.py", "docs/c.md"]
+    assert facts_of(out, 31)["files_affected"] is None  # no section
+    assert facts_of(out, 20)["files_affected"] == []  # a section with no items
+
+
+def test_epic_refinement_and_decision_blocker(gw, capsys):
+    gw.add_issue(11, ["type:epic"], "")
+    gw.add_issue(12, ["type:epic"], "")
+    gw.comment(10, summary("fail: spec_record", command="refine-epic"))
+    gw.comment(10, BLOCKER)
+    gw.comment(11, summary())
+    gw.comment(11, BLOCKER, login="stranger")
+    gw.comment(12, BLOCKER)
+    gw.comment(12, "/unblock")
+    _, out, _ = run(capsys, gw)
+    epics = {e["number"]: e for e in out["epics"]}
+    assert epics[10]["refinement"]["refine_check"] == "fail" and epics[10]["decision_blocker"]["state"] == "open"
+    assert epics[11]["refinement"]["refine_check"] == "pass" and epics[11]["decision_blocker"]["state"] == "none"
+    assert epics[12]["refinement"]["refine_check"] == "none" and epics[12]["decision_blocker"]["state"] == "unblocked"
+
+
+def test_epic_comments_unreadable(gw, capsys):
+    gw.fail.add("comments 10")
+    rc, out, err = run(capsys, gw)
+    epic = out["epics"][0]
+    assert rc == 0 and epic["refinement"] is None and epic["decision_blocker"] is None
+    assert epic["record"]["state"] == "current" and "[FACTS] epic #10 unreadable: read comments on #10" in err
+
+
+FILES_BODIES = [
+    "## Files affected\n\n- `a.py`\n- b.py (new, see #3)\n  - c/d.md\n* e.py\n-f.py\n- `g.py` (x) (y)\n- \n## Next\n- h.py\n",
+    "## Files affected (estimate)\n- a.py\n### Sub\n- b.py\n",
+    "## Goal\n- a.py\n",
+    "## Files affected\n",
+    "\r\n".join(["## Files affected", "", "- `a.py`  ", "- b.py\t(note)", "## End"]),
+    "```\n## Files affected\n- a.py\n```\n- b.py\n",
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+@pytest.mark.parametrize("body", FILES_BODIES)
+def test_files_affected_agrees_with_extract_files(body):
+    script = (ROOT / "scripts" / "dispatcher-invoke.sh").read_text(encoding="utf-8")
+    function = script[script.index("extract_files() {"):]
+    function = function[:function.index("\n}\n") + 3]
+    run_ = subprocess.run(["bash", "-c", function + 'extract_files "$1"', "bash", body], capture_output=True,
+                          text=True, check=True)  # fmt: skip
+    expected = [line for line in run_.stdout.split("\n") if line]
+    assert (files_affected(body) or []) == expected
 
 
 # ── parity with scripts/refine-check ──────────────────────────────────────────

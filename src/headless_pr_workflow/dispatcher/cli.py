@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state`` and ``facts``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts`` and ``scheduler``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
+from .scheduler import next_action
 from .state import FILE_NAMES, read_pending, read_state, write_state
 from .write import (
     DEFAULT_ATTEMPTS,
@@ -50,6 +51,12 @@ def _positive(text: str) -> int:
     if not re.fullmatch(r"[1-9][0-9]*", text or ""):
         raise argparse.ArgumentTypeError(f"must be a positive integer: {text!r}")
     return int(text)
+
+
+def _issue_list(text: str) -> list[int]:
+    if not (text or "").strip():
+        return []
+    return [_positive(part.strip()) for part in text.split(",")]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,6 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     f_read.add_argument("--repo", required=True)
     f_read.add_argument("--epic", type=_positive)
     f_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
+    scheduler = blocks.add_parser("scheduler", add_help=False)
+    scheduler_ops = scheduler.add_subparsers(dest="operation", parser_class=_Parser)
+    s_next = scheduler_ops.add_parser("next", add_help=False)
+    s_next.add_argument("--repo", required=True)
+    s_next.add_argument("--facts-file")
+    s_next.add_argument("--in-implementation", type=_issue_list, default=[])
+    s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     marker = blocks.add_parser("marker", add_help=False)
     marker_ops = marker.add_subparsers(dest="operation", parser_class=_Parser)
@@ -157,12 +172,13 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker", "state", "facts") or not args.operation:
+    if args.block not in ("write", "marker", "state", "facts", "scheduler") or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ... "
-            "| hpw dispatcher facts read ...")
+            "| hpw dispatcher facts read ... "
+            "| hpw dispatcher scheduler next ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -205,11 +221,11 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler") else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return argv[0] if argv and argv[0] in ("marker", "state", "facts") else "write"
+    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler") else "write"
 
 
 def _emit(result: Result) -> int:
@@ -247,6 +263,17 @@ def _run_state(args: argparse.Namespace, gateway: Gateway) -> int:
     return _emit(write_state(args.name, args.repo, text, dry_run=args.dry_run))
 
 
+def _run_scheduler(args: argparse.Namespace, gateway: Gateway) -> int:
+    facts = None
+    if args.facts_file:
+        try:
+            facts = json.loads(Path(args.facts_file).read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            facts = {"result": "unreadable", "error": f"read facts file: {exc}"}
+    return _emit(next_action(None if facts is not None else gateway, args.repo,
+                             in_implementation=args.in_implementation, facts=facts))  # fmt: skip
+
+
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
     """Run ``hpw dispatcher <argv...>``; returns the exit code."""
 
@@ -269,6 +296,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_state(args, gateway)
     if args.block == "facts":
         return _emit(read_facts(gateway, args.repo, epic=args.epic))
+    if args.block == "scheduler":
+        return _run_scheduler(args, gateway)
 
     if args.operation == "comment":
         try:
