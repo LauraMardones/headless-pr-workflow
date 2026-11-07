@@ -51,9 +51,23 @@ stale-state blocker.
 
 ## 3. Extract the verification contract
 
-- Read the target's `## Goal` and every item under `## Success Criteria` or
-  `## Acceptance Criteria` from the fresh GitHub body.
-- Preserve criterion order and wording in the evidence matrix.
+- A Feature: read the target's `## Goal` and every item under
+  `## Success Criteria` or `## Acceptance Criteria` from the fresh GitHub body.
+- An Epic: look for `specs/<n>-*/spec.md` (`<n>` = the Epic number) in the
+  checkout. Section 2 pinned it to the verified `main` SHA, so read it there,
+  not from GitHub (`read_epic_spec` in the model).
+  - Exactly one match: the Epic has a merged spec. The goal is the spec's
+    `## Goal`. The criteria are the list items under the spec's
+    `## Acceptance Criteria` that start with `**E<n>:**`, each with its nested
+    **Verified by:** line. The Epic issue body is not read for criteria.
+  - No match: read the goal and criteria from the Epic body as for a Feature,
+    and record `Spec: none found — criteria taken from the issue body` in the
+    summary (or in the blocker report, when verification is blocked).
+    `PO CHECK` is not allowed on this path.
+  - More than one match, a spec that cannot be read, a spec with no `## Goal`,
+    or a spec with no `**E<n>:**` criterion is a blocker; post no comment.
+- Preserve criterion order and wording in the evidence matrix; an Epic row
+  names the spec's id and wording (`E1: ...`).
 - Missing goal or missing criteria is a blocker. Verification must not invent,
   rewrite, or silently omit criteria.
 
@@ -93,13 +107,26 @@ Use fresh GitHub data, not assistant memory or local notes.
 
 ## 5. Construct the criterion evidence matrix
 
-Create exactly one row per declared criterion. A row may be `PASS` only when it
+Create exactly one row per declared criterion, in order. For an Epic with a
+merged spec the rows must match the spec's criteria exactly. A row may be `PASS` only when it
 cites one or more concrete, reproducible evidence items:
 
 - repository file paths with line ranges at the verified SHA;
 - exact test commands with recorded passing outcomes;
 - merged PR or issue URLs/numbers tied to delivered work; or
 - durable runtime evidence with its source and observation date.
+
+A criterion whose **Verified by:** line contains "the PO" (whole words, any
+case) may get the result `PO CHECK` instead of `PASS`, only for an Epic with a
+merged spec:
+
+- Prove and cite in the row every part the verifier can prove (evidence
+  comments, test runs, coverage output). A `PO CHECK` row with no evidence is a
+  blocker.
+- Write the PO's steps for the row (see `### PO hands-on checks` in section 9).
+  A `PO CHECK` row without steps is a blocker.
+- A `PO CHECK` row on a criterion whose **Verified by:** line does not contain
+  "the PO", or on any path other than an Epic with a merged spec, is a blocker.
 
 Narrative confidence, issue state alone, a planned file, an unmerged PR, stale
 local content, or an environment-limited check is not passing evidence. Mark an
@@ -111,6 +138,15 @@ missing.
 Run at least this command from the verified checkout:
 
 1. `python -m pytest tests/test_verify_closure_command.py`
+
+For an Epic with a merged spec, also run, as a required check:
+
+`scripts/criteria-check --epic $ARGUMENTS --repo LauraMardones/headless-pr-workflow --ref <FULL_MAIN_SHA>`
+
+Exit `0` is `PASS`, exit `1` is `FAIL`, exit `2` is `BLOCKED`
+(`criteria_check_result` in the model). A missing run is a blocker. Keep its
+text output for the `### Coverage check` section. A Feature, or an Epic with no
+merged spec, does not run it.
 
 Do not run the full suite (`python -m pytest`) locally. CI runs it, including
 every `tests/test_*.sh` file, on every push to `main`. Read the CI `pytest`
@@ -156,7 +192,8 @@ Verification passes only when all of the following are true:
 - preflight and final freshness checks pass;
 - child and PR inventory is complete and unambiguous;
 - the Epic branch has no open child Feature;
-- every declared criterion row is `PASS`; and
+- every declared criterion row is `PASS`, or `PO CHECK` where the rules of
+  section 5 allow it; and
 - the CI `pytest` run for the verified SHA and every required focused and criterion-specific check is `PASS`.
 
 If any condition fails or is blocked:
@@ -195,6 +232,8 @@ post exactly one issue comment in this structure:
 - Target: #<number> — <title>
 - Type: `type:feature` or `type:epic`
 - Verified `main`: `<full SHA>`
+- Spec: <path> @ <FULL_MAIN_SHA> (Epic with a merged spec), or
+  Spec: none found — criteria taken from the issue body (Epic with no merged spec)
 
 ### Child and merged PR inventory
 | Child | Type | State | Merged PR evidence |
@@ -206,11 +245,30 @@ post exactly one issue comment in this structure:
 |---|---|---|---|
 | 1 | ... | PASS | ... |
 
+For an Epic with a merged spec, `#` is the spec's id (`E1`) and Result is
+`PASS` or `PO CHECK`.
+
+### Coverage check
+(Epic with a merged spec only)
+```
+<text output of scripts/criteria-check>
+```
+
 ### Checks
 | Check | Result |
 |---|---|
 | `python -m pytest tests/test_verify_closure_command.py` | PASS |
+| `scripts/criteria-check --epic <n> --repo LauraMardones/headless-pr-workflow --ref <FULL_MAIN_SHA>` (Epic with a merged spec only) | PASS |
 | CI `pytest` on `<full SHA>` — `<run URL>` | PASS |
+
+### PO hands-on checks
+(only when a row is `PO CHECK`; one numbered block per `PO CHECK` row)
+1. `E<n>`
+   1. What to do and where.
+   2. ...
+   - Post: the exact text to post, or "nothing".
+   - Expected: the expected result.
+   - Pass if / fail if: how the PO tells pass from fail.
 
 ### Blockers
 none
@@ -221,6 +279,10 @@ none
 ### Next action
 Reply with exactly "yes" to confirm and close, or "no" to send it back.
 ```
+
+When a row is `PO CHECK`, the next action reads instead: "Do the PO checks
+below; reply `yes` only if every check gave the expected result, otherwise
+`no`."
 
 After posting, return only a concise human-readable result containing the issue
 URL, full verified SHA, `PASS`, the new comment URL, and the exact reply
@@ -326,9 +388,14 @@ path, post:
 - Technical summary: <immutable comment URL>
 - PO confirmation: `<author>` at `<created timestamp>` — <immutable comment URL>
 - Checks: <checks recorded in the technical summary>
+- PO hands-on checks: E<n>, … confirmed by the PO's reply
 - Blockers: none
 - Close result: closed
 ```
+
+Include the `- PO hands-on checks:` line only when the technical summary had
+`PO CHECK` rows; it names those criteria, which the PO's `yes` confirms. The
+reply rules are unchanged.
 
 The evidence records the PO's comment; it must not claim that the verifier made
 the product judgment. Return a concise human-readable result with target URL,
