@@ -328,11 +328,16 @@ def payload(tmp_path, context: dict) -> dict:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     out = tmp_path / "payload.json"
+    context_file = tmp_path / "context.json"
+    # Python hands the context to bash through a file, not a command-line argument: Git Bash
+    # cuts a quoted argument that Python passes it at 8,186 characters on Windows (#448).
+    context_file.write_text(json.dumps(context), encoding="utf-8", newline="\n")
     curl = bin_dir / "curl"
     curl.write_text(f'#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ "$1" == --data ]] && printf %s "$2" > "{out.as_posix()}"; shift; done\n',
                     newline="\n")
     curl.chmod(0o755)
-    proc = subprocess.run([BASH, (SCRIPTS / "slack-notify.sh").as_posix(), "po_blocker", json.dumps(context)],
+    proc = subprocess.run([BASH, "-c", 'exec "$BASH" "$0" po_blocker "$(cat "$1")"',
+                           (SCRIPTS / "slack-notify.sh").as_posix(), context_file.as_posix()],
                           capture_output=True, text=True, timeout=60,
                           env={**os.environ, "SLACK_WEBHOOK_URL": "https://hooks.slack.test/x",
                                "PATH": f"{bin_dir.as_posix()}{os.pathsep}{os.environ['PATH']}"})
