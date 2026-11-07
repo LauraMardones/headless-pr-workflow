@@ -192,6 +192,19 @@ Both sessions ran `/implement` on a small task written for the trial, on Sonnet,
 
 Cost. The two sessions ran at the same time, so the 0.02 rise in the five-hour window is their sum plus two Haiku probe turns, not the cost of either one. The PO's usage page before both: session 4%, week 2%, campaign credit US$20 of US$100 left, usage credits 0 EUR. After both: session 8%, week 3%, campaign credit still shown as US$20 of US$100, usage credits 0 EUR. So all trial work on 2026-10-10 together moved the five-hour window by at most 4 points and the week by 1 point. That total also includes the PO's desktop Claude Code session that ran the spike. The split between campaign credit and plan allowance for candidate A could not be established: the credit is shown in whole dollars and did not change, so session A cost less than the display can show, or was not charged to the credit. No finding in this ADR depends on the campaign credit except the cost of candidate A, which is not chosen. Session B reported 11 turns in 45 seconds.
 
+### Refinement session (issue #319)
+
+Issue #319 added `dispatcher-invoke.sh --refine <n>` and the `refine_issue` input of the Dispatcher workflow (`docs/DISPATCHER-CONFIG.md` → Refinement sessions). The proof run is a PO-triggered run on the runner: one refinement session on a low-risk issue, started through `refine_issue` with no PO action after setup.
+
+| Item | Record |
+|---|---|
+| Run URL | not yet run |
+| Issue refined | not yet run |
+| Allowance before and after | not yet run |
+| Decision blocker, `/unblock` and next session | not yet run |
+
+This row set is filled in when the run has happened; criterion 8 stays open for refinement until then.
+
 ## Findings per criterion
 
 | # | Criterion | A: routine, cloud session | B: Actions runner, OAuth token |
@@ -203,7 +216,7 @@ Cost. The two sessions ran at the same time, so the 0.02 rise in the five-hour w
 | 5 | Pauses cleanly at a limit | **Not observed.** Documented: further runs are rejected until the window resets. | **Not observed.** Documented: requests are blocked until the reset; a `claude -p` run ends with error `rate_limit`. Work already pushed stays on the branch. |
 | 6 | Simple for the PO | One routine per kind of work, set up in a web form; connectors must be removed by hand; research preview. | One secret, one workflow. A token saved with stray whitespace fails with an unexplained 401. The token lasts one year. |
 | 7 | `gh` with GraphQL | **Fail.** 403 by design; `scripts/merge-gate-summary` cannot run. | **Pass.** |
-| 8 | All three session kinds | Implementation tried. Refinement and review not tried. `/merge` cannot run here (criterion 7). | Implementation tried. Refinement and review not tried; nothing found that would prevent them. |
+| 8 | All three session kinds | Implementation tried. Refinement and review not tried. `/merge` cannot run here (criterion 7). | Implementation tried. Review not tried; nothing found that would prevent it. Refinement: the start step exists since issue #319 (see [Refinement session](#refinement-session-issue-319)); the proof run is not yet recorded. |
 | 9 | Isolation and safety | Isolated VM; GitHub credentials stay outside the session. | Fresh runner per job, but the session holds `PROJECT_TOKEN`, which can merge. Only the instructions and branch protection stop it. |
 
 Not established, by PO decision of 2026-10-10 not to spend more allowance on the trial: behavior at a real usage limit (criterion 5, now #316), a refinement session (#319) and the review of a Codex-implemented story (#315). Criteria 5 and 8 stay open until those stories land.

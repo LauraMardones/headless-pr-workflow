@@ -52,6 +52,11 @@
 # after that red step. The state save also runs after a cancellation. An
 # unreadable actionable-events file is never overwritten; the retry step fails red.
 #
+# 2026-11-07 (issue #319): the optional workflow_dispatch input refine_issue
+# runs only dispatcher-invoke.sh --refine <n> in the invoke step, behind the same
+# guard, session state cache and Claude Code install; the poll's choice is
+# ignored for that run. With the input empty the run is unchanged.
+#
 # 2026-11-06 (issue #434, ADR-014 → Block 3): every run: is one command. The
 # decisions of the steps (guard, state-writer rule, cache dates, --dry-run and
 # --issue/--resume choices, usage-limit context, gh auth setup-git) are in
@@ -77,6 +82,12 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      refine_issue:
+        description: "Issue number to refine: runs only dispatcher-invoke.sh --refine <n> (issue #319)"
+        type: string
+        required: false
+        default: ""
 
 # One dispatcher run at a time per repository: scheduled and manual runs share
 # the same group, and queued runs wait instead of cancelling an in-progress
@@ -161,7 +172,7 @@ jobs:
         run: bash scripts/dispatcher-workflow-step.sh cache-date
 
       - name: Restore session state cache
-        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' || inputs.refine_issue != '')
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -178,19 +189,19 @@ jobs:
       # model aliases mean change only on a deliberate bump; see
       # docs/DISPATCHER-CONFIG.md → "Subscription allowance and reserve".
       - name: Install Claude Code
-        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' || inputs.refine_issue != '')
         run: npm install -g @anthropic-ai/claude-code@2.1.296
 
       # Issue #337: git asks gh for credentials, so a session's plain git push
       # authenticates with PROJECT_TOKEN and no token is written to git config.
       - name: Configure git to authenticate through gh
-        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' || inputs.refine_issue != '')
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: bash scripts/dispatcher-workflow-step.sh git-auth
 
       - name: Run dispatcher invoke
-        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        if: steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' || inputs.refine_issue != '')
         id: invoke
         env:
           WIP_LIMIT_IMPLEMENTATION: ${{ vars.WIP_LIMIT_IMPLEMENTATION }}
@@ -202,6 +213,7 @@ jobs:
           RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
           CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}
           NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}
+          REFINE_ISSUE: ${{ inputs.refine_issue }}
           STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
           REPO: ${{ github.repository }}
         run: bash scripts/dispatcher-workflow-step.sh invoke
@@ -227,7 +239,7 @@ jobs:
         run: bash scripts/dispatcher-workflow-step.sh cache-save-date
 
       - name: Save session state cache
-        if: always() && steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')
+        if: always() && steps.guard.outputs.enabled == 'true' && (steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' || inputs.refine_issue != '')
         uses: actions/cache/save@v4
         with:
           path: |

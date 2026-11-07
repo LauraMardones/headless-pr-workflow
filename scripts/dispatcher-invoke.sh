@@ -41,6 +41,8 @@
 #                         the two resume entries: "In merge" and fix rounds)
 #             issue #314 (every Claude session runs Claude Code on the runner,
 #                         signed in with the PO's subscription token; ADR-012)
+#             issue #319 (--refine <n>: one refinement session on the
+#                         subscription, behind the same gates)
 #             issue #315 (the metered API path is removed; executor:codex is
 #                         skipped at implementation; a Codex-implemented PR
 #                         "In review" is reviewed on the subscription)
@@ -51,9 +53,15 @@
 #       --repo <owner/repo> --issue <issue-number> [--dry-run]
 #   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
 #       --repo <owner/repo> --resume [--dry-run]
+#   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
+#       --repo <owner/repo> --refine <issue-number> [--dry-run]
 #
 # --issue handles resumable work first, then the given story. --resume handles
 # only resumable work, for a run in which no story is ready for implementation.
+# --refine starts exactly one /refine session for the given issue (issue #319,
+# F2.5) and nothing else: no resume pass, no /implement, no branch, no PR and
+# no board write by the dispatcher. Epic and Feature issues run on opus, every
+# other issue on sonnet. It cannot be combined with --issue or --resume.
 #
 # Environment:
 #   CODEX_FIX_ROUND_MAX — most fix rounds the dispatcher starts per PR
@@ -245,6 +253,8 @@ DRY_RUN=false
 # passed by callers.
 NON_EXECUTABLE_ISSUES=""
 RESUME_ONLY=false  # --resume: handle resumable work only (issue #293)
+REFINE_ISSUE=""    # --refine <n>: start one refinement session for #n (issue #319)
+REFINE_REQUESTED=false
 # Internal loop state, carried across the recursive exec: the resume pass runs
 # once per run, not once per chained story.
 RESUME_PASS_DONE=false
@@ -259,6 +269,9 @@ while [[ $# -gt 0 ]]; do
             ISSUE_NUMBER="$2"; shift 2 ;;
         --resume)
             RESUME_ONLY=true; shift ;;
+        --refine)
+            [[ $# -ge 2 ]] || { echo "Error: --refine requires a value." >&2; exit 1; }
+            REFINE_ISSUE="$2"; REFINE_REQUESTED=true; shift 2 ;;
         --resume-pass-done)
             RESUME_PASS_DONE=true; shift ;;
         --dry-run)
@@ -272,7 +285,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$REPO" ]]         || { echo "Error: --repo <owner/repo> is required." >&2;    exit 1; }
-if $RESUME_ONLY; then
+if $REFINE_REQUESTED; then
+    [[ "$REFINE_ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "Error: --refine requires a positive issue number; got '$REFINE_ISSUE'." >&2; exit 1; }
+    { [[ -z "$ISSUE_NUMBER" ]] && ! $RESUME_ONLY; } || { echo "Error: --refine cannot be combined with --issue or --resume." >&2; exit 1; }
+    ISSUE_NUMBER="$REFINE_ISSUE"   # the gates comment on this issue
+elif $RESUME_ONLY; then
     [[ -z "$ISSUE_NUMBER" ]] || { echo "Error: --resume and --issue cannot be combined." >&2; exit 1; }
 else
     [[ -n "$ISSUE_NUMBER" ]] || { echo "Error: --issue <issue-number> is required." >&2; exit 1; }
@@ -1790,6 +1807,8 @@ pause_at_usage_limit() {
         else
             next+=" The story is \"${board_status}\" on the board."
         fi
+    elif [[ "$step" == "refine" ]]; then
+        next="a later \`--refine $issue\` starts a fresh session from the issue as it is on GitHub then, once the usage limit and the allowance check allow it. Nothing is written to the board."
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
         if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
@@ -2143,6 +2162,56 @@ find_next_ready_story() {
     done <<< "$_all_ready"
     return 0  # empty output: all Ready stories are excluded
 }
+
+# ─── Refinement session (issue #319, F2.5) ───────────────────────────────────
+# --refine <n> starts one /refine session and ends the run. It reuses
+# invoke_executor_command(), so the usage limit, the allowance check, the token
+# cleaning and the session count are the implementation session's. It runs no
+# resume pass, no /implement, no branch, no push, no PR and no board write: the
+# /refine command writes the board status itself. A refinement decision blocker
+# answered with /unblock needs nothing here: a fresh session reads the answer.
+# The tier comes from the issue's type, not from its executor: label.
+
+refine_executor_label() {
+    local labels="$1" native="$2" lbl t=""
+    for lbl in $labels; do
+        [[ "$lbl" == type:* ]] && { t="${lbl#type:}"; break; }
+    done
+    [[ -n "$t" ]] || t=$(tr '[:upper:]' '[:lower:]' <<< "$native")
+    case "$t" in
+        epic|feature) echo "claude-code-opus" ;;
+        *)            echo "claude-code-sonnet" ;;
+    esac
+}
+
+run_refine() {
+    local n="$REFINE_ISSUE" issue title labels native label rc=0
+    LAST_ACTION="refinement of #$n"
+    issue=$(gh api "repos/$REPO/issues/$n") || {
+        echo "Error: Could not fetch issue #$n from $REPO." >&2; exit 1; }
+    title=$(jq -r '.title // ""' <<< "$issue")
+    labels=$(jq -r '[.labels[].name] | join(" ")' <<< "$issue")
+    native=$(jq -r '.type.name? // ""' <<< "$issue")
+    label=$(refine_executor_label "$labels" "$native")
+    $DRY_RUN || echo "[REFINE] #$n: starting /refine on ${EXECUTOR_MODEL[$label]}"
+    invoke_executor_command "refine" "$n" "$label" || rc=$?
+    [[ $rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "refine" "$n" "$n"
+    if [[ $rc -ne 0 ]]; then
+        check_and_notify_decision_blocker "$n" "$title"
+        post_mid_cycle_blocker "$n" "$title" "refine"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    $DRY_RUN || echo "[REFINE] #$n: /refine finished"
+    notify_open_decision_blocker "$n" "$title"
+    drain_actionable_events
+    DISPATCH_HANDLED=true
+    exit 0
+}
+
+if [[ -n "$REFINE_ISSUE" ]]; then
+    run_refine
+fi
 
 # ─── Fetch project board data (paginated) ──────────────────────────────────────
 

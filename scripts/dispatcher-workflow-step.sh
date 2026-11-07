@@ -18,13 +18,14 @@
 #   poll                dispatcher-poll.sh (--dry-run unless STATE_WRITER=true); outputs
 #                       issue_number (the poll's next_issue) and resumable
 #   invoke              dispatcher-invoke.sh (--dry-run unless STATE_WRITER=true) with
+#                       --refine $REFINE_ISSUE when it is set (issue #319), else
 #                       --issue $NEXT_ISSUE, or --resume when there is none
 #   trigger-check       dispatcher-trigger-check.sh (--dry-run unless STATE_WRITER=true)
 #   retry               dispatcher-notify-retry.sh run (--dry-run unless STATE_WRITER=true)
 #   usage-limit-notify  the usage_limit_reached Slack notification, then mark-notified
 #
 # Environment: GITHUB_OUTPUT and GITHUB_ENV (files the runner provides), REPO
-# (<owner/repo>, the steps pass github.repository), STATE_WRITER, NEXT_ISSUE,
+# (<owner/repo>, the steps pass github.repository), STATE_WRITER, NEXT_ISSUE, REFINE_ISSUE,
 # and the variables named per step above. Output goes to those files and to
 # stderr; stdout stays empty.
 #
@@ -116,7 +117,9 @@ step_invoke() {
     local args=(--repo "$REPO") flag
     flag=$(dry_run_unless_writer)
     [[ -z "$flag" ]] || args+=("$flag")
-    if [[ -n "${NEXT_ISSUE:-}" ]]; then
+    if [[ -n "${REFINE_ISSUE:-}" ]]; then
+        bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --refine "$REFINE_ISSUE"
+    elif [[ -n "${NEXT_ISSUE:-}" ]]; then
         bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --issue "$NEXT_ISSUE"
     else
         bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --resume
