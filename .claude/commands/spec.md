@@ -164,8 +164,10 @@ item 5).
 ## 6. Definition of Ready check
 
 Before opening the PR, check every item of the Definition of Ready in
-`specs/README.md` against the pushed `spec.md` (and `plan.md`), by reading the
-files:
+`specs/README.md` against the pushed `spec.md` (and `plan.md`). Run `scripts/spec-check specs/<number>-<slug>/spec.md` on the pushed
+`spec.md` for the heading item and the Open Questions item; a non-zero exit
+(`1` for a failed check, `2` when a file cannot be read) is a failed item and
+stops the PR. Check the other items by reading the files:
 
 - [ ] Every heading from `specs/_template/spec.md` is present and no template
       placeholder (`<…>`) is left.
