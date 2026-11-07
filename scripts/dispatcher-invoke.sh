@@ -2172,16 +2172,21 @@ find_next_ready_story() {
 # answered with /unblock needs nothing here: a fresh session reads the answer.
 # The tier comes from the issue's type, not from its executor: label.
 
+# Executor tier of a refinement session by issue type (data, not logic): Epic and
+# Feature refinement slice scope and write criteria, the rest fills a known format.
+declare -A REFINE_TIER_BY_TYPE=(
+    ["epic"]="claude-code-opus"
+    ["feature"]="claude-code-opus"
+    ["default"]="claude-code-sonnet"
+)
+
 refine_executor_label() {
     local labels="$1" native="$2" lbl t=""
     for lbl in $labels; do
         [[ "$lbl" == type:* ]] && { t="${lbl#type:}"; break; }
     done
     [[ -n "$t" ]] || t=$(tr '[:upper:]' '[:lower:]' <<< "$native")
-    case "$t" in
-        epic|feature) echo "claude-code-opus" ;;
-        *)            echo "claude-code-sonnet" ;;
-    esac
+    echo "${REFINE_TIER_BY_TYPE[$t]:-${REFINE_TIER_BY_TYPE[default]}}"
 }
 
 run_refine() {
