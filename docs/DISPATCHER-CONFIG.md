@@ -771,6 +771,7 @@ A session stopped by the subscription's provider usage limit (issue #316, ADR-01
 | New `/implement` (Step E1) | `Ready for implementation`; the next start continues on the existing branch and PR | the pause record |
 | Fix round, no new head | stays `In implementation`; the same round starts again on a later poll | the pause record; no fix-round attempt marker, no merge-owner marker |
 | Fix round that pushed a new head (issue #446) | `In review`, the Codex review requested for the new head | in the same run: the merge-owner marker for the new head, the usual hand-off, then the pause record saying the head was handed off; no fix-round attempt marker, nothing read back later |
+| Fix round that pushed a new head while the PR is still a draft (issue #446) | stays `In implementation` | the pause record says the head is not ready for review; no merge-owner marker, no hand-off, no blocker (a draft PR is outside the missing-merge-owner rule) |
 | `/review` of a Codex-implemented PR | stays `In review` | the pause record; no per-head review attempt marker |
 | Conflict round | stays where it is (`In implementation`, or `In review` when the session set it); the next run decides from the PR ([conflict round](#conflict-round)) | the pause record with step `conflict round`, for the PO only; no marker |
 

@@ -414,6 +414,20 @@ def test_fix_round_that_pushed_a_head_is_handed_off_at_the_pause(tmp_path):
     assert "no merge-owner evidence" not in second.stdout
 
 
+def test_fix_round_that_pushed_to_a_draft_pr_posts_no_blocker_and_no_hand_off(tmp_path):
+    d = pushed_fix_round(tmp_path)
+    d.add_pr(PR, STORY, draft=True)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [b for b in d.posted(PR) if "action=merge-owner" in b]
+    assert "[HANDOFF]" not in proc.stdout and d.status(STORY) == "In implementation"
+    posted = d.posted(STORY)
+    assert len(posted) == 1 and posted[0].startswith(PAUSE) and "still a draft" in posted[0]
+    assert "Blocked Declaration" not in "".join(posted)
+
+
 def test_fix_round_without_a_push_posts_no_owner_and_no_hand_off(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "In implementation")

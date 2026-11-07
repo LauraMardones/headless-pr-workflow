@@ -1758,12 +1758,19 @@ pause_at_usage_limit() {
         # Issue #446: a fix round that pushed a new head before the stop is
         # finished here, from GitHub facts read now: merge owner for the new
         # head, then the usual hand-off. Nothing is read back on a later run.
+        # A PR that is still a draft was re-drafted by the round and never made
+        # ready (its pytest check was not confirmed): the head is not ready for
+        # review, so nothing is recorded and no blocker is posted.
         if [[ -n "$FIX_ROUND_START_HEAD" && -n "$pr_head" && "${pr_head,,}" != "${FIX_ROUND_START_HEAD,,}" ]]; then
+          if [[ "$(jq -r '.draft // false' <<< "${pr_json:-null}" 2>/dev/null)" == "true" ]]; then
+            next="the fix round pushed head \`${pr_head}\` but the PR is still a draft, so the head is not ready for review: no merge owner is recorded and nothing is handed off. The story stays in \"In implementation\" with the draft PR; the unfinished handoff is not continued by this run."
+          else
             FIX_ROUND_SESSION=false
             record_merge_owner "$issue" "$FIX_ROUND_START_HEAD" || exit 1
             hand_off_to_codex_review_loop "$FIX_ROUND_START_HEAD" "$FIX_ROUND_BLOCKER_BEFORE"
             next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run. Codex reviews it, and any findings start a new fix round."
             FIX_ROUND_SESSION=true
+          fi
         fi
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
