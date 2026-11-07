@@ -199,7 +199,7 @@ def test_dry_run_runs_no_script(tmp_path):
 
 def test_only_implement_and_review_go_through_invoke_executor_command():
     calls = re.findall(r'invoke_executor_command "(\w+)"', INVOKE)
-    assert sorted(set(calls)) == ["implement", "review"]
+    assert sorted(set(calls)) == ["implement", "refine", "review"]  # refine: issue #319
 
 
 def test_merge_and_cleanup_path_does_not_use_sessions_allowance_or_budget():

@@ -758,6 +758,30 @@ The hold lives in the same `actions/cache` entry as the usage limit's session co
 
 An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumented `rate_limit_event` shape has changed, or the token has expired. Each such run fails visibly in Actions (and in GitHub's failed-run email) but sends no Slack message. The remedy is to set `DISPATCHER_ENABLED=false`, read the reason in the log, and either renew the token or revisit ADR-012.
 
+## Refinement sessions
+
+`bash scripts/dispatcher-invoke.sh --repo <owner/repo> --refine <n> [--dry-run]` starts one refinement session for issue `<n>` (issue #319, ADR-012, Feature #460 criterion F2.5). It runs `.claude/commands/refine.md` with `$ARGUMENTS` set to `<n>` through `invoke_executor_command()`, so the token cleaning, the `ANTHROPIC_*` scrub, `CLAUDE_SESSION_ARGS`, the session count and the log lines are the implementation session's. `<n>` must be a positive whole number; `--refine` cannot be combined with `--issue` or `--resume` (exit `1`, nothing starts).
+
+**How it starts.** The scheduler calls this step after #474; until then only a manual run starts it: **Actions → Dispatcher → Run workflow**, with the input `refine_issue` set to the issue number. With `refine_issue` set the run passes the guard, installs Claude Code, restores the session state cache and runs only `dispatcher-invoke.sh --refine <refine_issue>` in the "Run dispatcher invoke" step, whatever the poll found; the usage-limit notification step is unchanged. With `refine_issue` empty the run is as before.
+
+**Tier.** The model comes from the issue's type, not from its `executor:` label: `type:epic` and `type:feature` run on `opus`, every other issue (`type:story`, `type:task`, `type:bug`, or no `type:` label) on `sonnet`. The rule is fixed in `refine_executor_label()`; there is no repository variable for it.
+
+**Gates, reused.** The pause switch (`DISPATCHER_ENABLED` not `true`: the workflow guard starts nothing, also with `refine_issue` set), the usage limit ([Usage limit](#usage-limit): a refinement session counts once, when it starts) and the allowance check ([Subscription allowance and reserve](#subscription-allowance-and-reserve): below the reserve in either window, no session starts). A refused start posts the same one comment on the issue as for `/review` and exits as for any session.
+
+**One session, no branch.** The mode starts exactly one model session and then exits: no resume pass, no `/implement`, no `/review`, no `/merge`, no `/cleanup`, no chained story. The dispatcher runs no `git push`, no `git checkout -b` and no `gh pr create` and writes no board status; the `/refine` command writes the board status, and never the dispatcher moves the issue to "Ready for implementation". The workflow's `concurrency` group still serializes runs.
+
+**Outcomes and log lines.**
+
+| Outcome | Run | Written |
+|---|---|---|
+| Session finished (`result` success) | exit `0`, `[REFINE] #<n>: /refine finished` | if the session left an open decision blocker, one `decision_blocker` event (as after `/implement`) |
+| Provider usage limit (`rate_limit`) | exit `0`, `[SESSION RATE LIMIT] /refine #<n> ...` | one `## Paused at a provider usage limit` comment with step `/refine <n>`; no board write, no `dispatcher_error`; a later `--refine <n>` starts a new session from the issue as it is |
+| Failed session, wall-clock stop or 401 | exit `1`, `[SESSION ERROR]` line | the failure blocker and `po_blocker` event of a failed `/implement`; the 401 text is the same (run `claude setup-token` again and save the secret with nothing before or after it) |
+
+`[REFINE] #<n>: starting /refine on <model>` is logged before the gates run. `--dry-run` prints `[DRY RUN] Would start Claude Code (<model>) on the subscription for /refine <n>` and starts nothing.
+
+**After `/unblock`.** A refinement decision blocker answered with a standalone `/unblock` line is resumed by a fresh `--refine <n>` session that reads the answer (`refine.md` → Tech Lead rules → Resume after `/unblock`). The mode posts no CLAIM or CONFIRM marker and moves nothing; the stale-recovery and decision-blocker resume of the implementation pass read only "In implementation" stories and do not see a story in "In refinement". Deciding when that session is due is #473.
+
 ## Pause at a provider usage limit
 
 A session stopped by the subscription's provider usage limit (issue #316, ADR-012) is not a failure and needs no PO action: the limit ends by itself at the reset.

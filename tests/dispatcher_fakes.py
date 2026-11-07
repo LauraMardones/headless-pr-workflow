@@ -299,8 +299,10 @@ case "$first_line" in
     "Review PR #"*)       command=review ;;
     "Merge PR #"*)        command=merge ;;
     "Clean up"*)          command=cleanup ;;
+    "Act as the Tech Lead"*) command=refine ;;
     *)                    command=unknown ;;
 esac
+[[ "$command" == refine ]] && first_line=$(grep -m1 '^Refine GitHub issue #' "$MOCK_DIR/claude_$n.stdin")
 target=$(sed -E 's/^[^#]*#([0-9]+).*/\1/' <<< "$first_line")
 echo "session $command $target claude-code" >> "$MOCK_DIR/sessions.log"
 echo "session $command $target" >> "$MOCK_DIR/seq.log"
@@ -539,6 +541,9 @@ class Dispatcher:
 
     def run_issue(self, number: int, *args: str, **kwargs):
         return self.run("--issue", str(number), *args, **kwargs)
+
+    def run_refine(self, number: int | str, *args: str, **kwargs):
+        return self.run("--refine", str(number), *args, **kwargs)
 
     def resume(self, *args: str, **kwargs):
         return self.run("--resume", *args, **kwargs)

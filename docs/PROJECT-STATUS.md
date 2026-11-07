@@ -307,6 +307,7 @@ Decision blockers require immediate PO involvement:
 When a blocker is resolved:
 
 1. **Decision blockers:** the PO replies with their decision in a comment that includes a standalone line — trimmed of surrounding whitespace — that is exactly `/unblock`. The word "unblock"/"unblocked" appearing in ordinary prose does not count; only a full line equal to `/unblock` qualifies. The dispatcher detects this automatically on its next poll and returns the story to **Ready for implementation** — no manual board-status change is required.
+   A decision blocker raised by a refinement (a story in "In refinement") is not resumed this way: a new refinement session (`dispatcher-invoke.sh --refine <n>`, `docs/DISPATCHER-CONFIG.md` → Refinement sessions) reads the answer, and the issue is never moved to **Ready for implementation** by the resume.
 2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration, and the story status is moved back manually to **Refined** (if hard dependencies remain) or **Ready for implementation** (if all dependencies are resolved).
 3. The executor label is reapplied as appropriate.
 

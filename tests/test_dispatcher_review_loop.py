@@ -1105,7 +1105,8 @@ def test_invoke_script_never_writes_the_review_trigger_or_the_legacy_status():
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "dispatcher.yml"
 WORK_CONDITION = ("steps.guard.outputs.enabled == 'true' && "
-                  "(steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true')")
+                  "(steps.poll.outputs.issue_number != '' || steps.poll.outputs.resumable == 'true' "
+                  "|| inputs.refine_issue != '')")  # issue #319: a manual refinement run
 
 
 def workflow_step(name: str) -> str:
