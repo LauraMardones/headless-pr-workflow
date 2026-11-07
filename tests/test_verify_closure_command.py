@@ -1071,3 +1071,24 @@ def test_command_file_describes_spec_coverage_and_po_checks() -> None:
         "- PO hands-on checks:",
     ):
         assert needle in text, needle
+
+
+def test_command_file_reads_ci_before_local_criterion_checks() -> None:
+    text = (
+        Path(__file__).resolve().parent.parent / ".claude/commands/verify-closure.md"
+    ).read_text(encoding="utf-8")
+    section = text[text.index("## 6. Run and record checks") : text.index("## 7.")]
+
+    # CI is read before any criterion-specific local check is chosen or run.
+    assert section.index("CI `pytest` check run") < section.index("Then run only these")
+    assert section.index("Record the CI row") < section.index("Then run only these")
+    # The open-ended sentence is gone; the local list is closed.
+    assert "Add any scope-specific checks" not in text
+    assert "Only the criterion checks that CI cannot give" in section
+    # A criterion test file that CI executes is cited from that run, not rerun.
+    assert "not run locally, not even as a short extra check" in section
+    assert (
+        'passed in the CI `pytest` run on the verified SHA (Checks)' in section
+    )
+    assert "valid only when the CI row in `### Checks` is `PASS`" in section
+    assert "passed in the CI `pytest` run on the verified SHA (Checks) |" in text
