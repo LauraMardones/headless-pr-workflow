@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker`` and ``state``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state`` and ``facts``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .state import FILE_NAMES, read_pending, read_state, write_state
@@ -90,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     pending.add_argument("--expected-head")
     common(pending, attempts=False)
 
+    facts = blocks.add_parser("facts", add_help=False)
+    facts_ops = facts.add_subparsers(dest="operation", parser_class=_Parser)
+    f_read = facts_ops.add_parser("read", add_help=False)
+    f_read.add_argument("--repo", required=True)
+    f_read.add_argument("--epic", type=_positive)
+    f_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
     marker = blocks.add_parser("marker", add_help=False)
     marker_ops = marker.add_subparsers(dest="operation", parser_class=_Parser)
 
@@ -149,11 +157,12 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker", "state") or not args.operation:
+    if args.block not in ("write", "marker", "state", "facts") or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
-            "| hpw dispatcher state read|write|read-pending ...")
+            "| hpw dispatcher state read|write|read-pending ... "
+            "| hpw dispatcher facts read ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -196,11 +205,11 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts") else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return argv[0] if argv and argv[0] in ("marker", "state") else "write"
+    return argv[0] if argv and argv[0] in ("marker", "state", "facts") else "write"
 
 
 def _emit(result: Result) -> int:
@@ -258,6 +267,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_marker(args, gateway, settings)
     if args.block == "state":
         return _run_state(args, gateway)
+    if args.block == "facts":
+        return _emit(read_facts(gateway, args.repo, epic=args.epic))
 
     if args.operation == "comment":
         try:

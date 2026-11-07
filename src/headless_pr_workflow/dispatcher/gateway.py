@@ -98,6 +98,18 @@ class Gateway(Protocol):
 
     def create_label(self, name: str, color: str, description: str) -> None: ...
 
+    # Read operations of the facts reader (``facts.py``, issue #283).
+
+    def list_open_issues(self) -> list[dict[str, Any]]: ...
+
+    def issue_state(self, number: int) -> str: ...
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]: ...
+
+    def newest_commit(self, path: str) -> dict[str, str] | None: ...
+
+    def compare_commits(self, base: str, head: str) -> str: ...
+
 
 def parse_json_stream(text: str) -> list[Any]:
     """The JSON values in ``text``, one after another (``gh api --paginate`` prints one per page)."""
@@ -153,16 +165,57 @@ class GhGateway:
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         step = f"read comments on #{number}"
         output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
-        try:
-            pages = parse_json_stream(output)
-        except json.JSONDecodeError:
-            raise GatewayError(step, "GitHub returned comments that could not be parsed") from None
-        comments: list[dict[str, Any]] = []
-        for page in pages:
-            if not isinstance(page, list):
-                raise GatewayError(step, "GitHub returned comments that could not be parsed")
-            comments.extend(item for item in page if isinstance(item, dict))
-        return comments
+        return self._pages(step, output, what="comments")
+
+    def list_open_issues(self) -> list[dict[str, Any]]:
+        """Every open issue of the repository; pull requests (which the issues API also lists) are left out."""
+
+        step = "read open issues"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues?state=open&per_page=100"])
+        return [item for item in self._pages(step, output) if "pull_request" not in item]
+
+    def issue_state(self, number: int) -> str:
+        step = f"read state of #{number}"
+        payload = self._json(step, ["api", f"repos/{self.repo}/issues/{number}"])
+        state = payload.get("state") if isinstance(payload, dict) else None
+        if state not in ("open", "closed"):
+            raise GatewayError(step, "GitHub returned an issue that could not be parsed")
+        return str(state)
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        """The entries of a folder on ``main``; raises with ``not_found`` when the folder does not exist."""
+
+        step = f"list {path} on main"
+        payload = self._json(step, ["api", f"repos/{self.repo}/contents/{path}?ref=main"])
+        if not isinstance(payload, list):
+            raise GatewayError(step, "GitHub returned a folder listing that could not be parsed")
+        return [item for item in payload if isinstance(item, dict)]
+
+    def newest_commit(self, path: str) -> dict[str, str] | None:
+        """``{"sha", "date"}`` of the newest commit on ``main`` that changed ``path``; ``None`` when none did."""
+
+        step = f"read newest commit of {path}"
+        payload = self._json(step, ["api", f"repos/{self.repo}/commits?path={path}&sha=main&per_page=1"])
+        if not isinstance(payload, list):
+            raise GatewayError(step, "GitHub returned commits that could not be parsed")
+        if not payload:
+            return None
+        commit = payload[0] if isinstance(payload[0], dict) else {}
+        sha = commit.get("sha")
+        date = ((commit.get("commit") or {}).get("committer") or {}).get("date")
+        if not sha or not date:
+            raise GatewayError(step, "GitHub returned a commit that could not be parsed")
+        return {"sha": str(sha), "date": str(date)}
+
+    def compare_commits(self, base: str, head: str) -> str:
+        """GitHub's compare status of ``head`` against ``base``; raises with ``not_found`` for an unknown commit."""
+
+        step = f"compare {base} with {head}"
+        payload = self._json(step, ["api", f"repos/{self.repo}/compare/{base}...{head}"])
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if status not in ("identical", "ahead", "behind", "diverged"):
+            raise GatewayError(step, "GitHub returned a comparison that could not be parsed")
+        return str(status)
 
     def board_item(self, issue: int) -> BoardItem:
         step = "read board"
@@ -250,6 +303,19 @@ class GhGateway:
         self._run("create label", args)
 
     # ── plumbing ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pages(step: str, output: str, *, what: str = "a list") -> list[dict[str, Any]]:
+        try:
+            pages = parse_json_stream(output)
+        except json.JSONDecodeError:
+            raise GatewayError(step, f"GitHub returned {what} that could not be parsed") from None
+        items: list[dict[str, Any]] = []
+        for page in pages:
+            if not isinstance(page, list):
+                raise GatewayError(step, f"GitHub returned {what} that could not be parsed")
+            items.extend(item for item in page if isinstance(item, dict))
+        return items
 
     def _json(self, step: str, arguments: list[str]) -> Any:
         output = self._run(step, arguments)
