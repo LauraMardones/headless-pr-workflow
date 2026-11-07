@@ -150,13 +150,15 @@ def host_env(fake_bin: str | None = None) -> dict[str, str]:
 BASH = find_bash()
 
 
-def run_tree(cmd: list[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+def run_tree(cmd: list[str], *, timeout: float, timeout_message=None, **kwargs) -> subprocess.CompletedProcess:
     """``subprocess.run`` that ends the whole process tree when ``timeout`` expires (issue #398).
 
     ``subprocess.run`` kills only the direct child; a grandchild that inherited the output
     pipes keeps them open and ``communicate()`` then waits forever. The child starts in its
     own process group (POSIX) or process group tree (Windows ``taskkill /T``); on timeout the
     whole tree is killed, the pipes are drained and ``pytest.fail`` reports the timeout.
+    ``timeout_message``, when given, is called with the stdout drained after the kill and
+    returns the failure message (issue #440); without it the message is unchanged.
     """
     if os.name == "nt":
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -177,9 +179,12 @@ def run_tree(cmd: list[str], *, timeout: float, **kwargs) -> subprocess.Complete
                 except ProcessLookupError:
                     pass
             proc.kill()
+            drained = ""
             try:
-                proc.communicate(timeout=10)
+                drained, _ = proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+            if timeout_message is not None:
+                pytest.fail(timeout_message(drained or ""))
             pytest.fail(f"{cmd[:3]} timed out after {timeout}s; the whole process tree was killed")
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
