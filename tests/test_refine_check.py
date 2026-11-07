@@ -178,6 +178,21 @@ def test_open_question_blocks_ready_only(mod):
     assert failing(env.run()) == []
 
 
+@pytest.mark.parametrize("q", [
+    "- https://github.com/owner/repo/issues/5#issuecomment-1",
+    "Blocked: https://github.com/owner/repo/issues/5#issuecomment-1",
+])
+def test_decision_blocker_link_blocks_ready_only(mod, q):
+    assert failing(Env(mod, make_issue(mod, questions=q)).run()) == ["open_questions"]
+    env = Env(mod, make_issue(mod, status="In refinement", questions=q), board="In refinement")
+    assert failing(env.run()) == []
+
+
+@pytest.mark.parametrize("q", ["None.", "none", "- None."])
+def test_none_open_questions_pass_ready(mod, q):
+    assert failing(Env(mod, make_issue(mod, questions=q)).run()) == []
+
+
 def test_parent_refs_required_for_ready(mod):
     issue = make_issue(mod)
     issue = mod.Issue(5, issue.title, issue.body.replace("Parent epic: #10 Epic\n", ""), issue.labels, "OPEN")

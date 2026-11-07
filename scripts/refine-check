@@ -318,6 +318,8 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
         checks.append(Check("open_questions", "pass", f"only enforced for {READY}"))
     elif re.search(r"^###\s+\S", questions, re.M):
         checks.append(Check("open_questions", "fail", "Open Questions still contains a '### ' question"))
+    elif not re.fullmatch(r"(?:[-*]\s*)?none\.?", questions.strip(), re.I) and questions.strip():
+        checks.append(Check("open_questions", "fail", "Open Questions lists an unresolved item (a decision blocker link); it must read 'None.'"))
     else:
         checks.append(Check("open_questions", "pass", "no open question"))
 

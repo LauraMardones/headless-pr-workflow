@@ -195,7 +195,7 @@ Refinement is complete when the feature has:
 
 Questions for the PO are not written here for the PO to answer in the session. A product question becomes a `Type: decision` Blocked Declaration posted on the issue (`.claude/commands/refine.md` → Tech Lead rules → Decision blockers), after the search for an existing answer in `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating.
 
-The `## Open Questions` section of the issue body lists the link to each blocker comment, or reads `None.`.
+The `## Open Questions` section of the issue body lists the link to each blocker comment while the issue is blocked, and reads `None.` before it moves to `Ready for implementation` (`scripts/refine-check` fails `open_questions` otherwise).
 
 ## Decisions Format
 
