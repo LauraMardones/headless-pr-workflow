@@ -94,12 +94,12 @@ Each decision must be structured as:
 
 - Use only existing GitHub labels.
 - Apply `type:task` if not already set.
-- If priority, area, or milestone is unclear, the Tech Lead chooses among the existing values and records the choice under `## Decisions`; a choice that needs a product decision becomes a `Type: decision` Blocked Declaration.
+- If priority or area is unclear, the Tech Lead chooses among the existing labels and records the choice under `## Decisions`; a choice that needs a product decision becomes a `Type: decision` Blocked Declaration.
 
 ## Milestone Handling
 
 - Use an existing milestone only when delivery timing is clear.
-- Otherwise leave milestone unchanged and record the decision under `## Decisions`; a milestone that needs a product decision becomes a `Type: decision` Blocked Declaration.
+- Otherwise leave milestone unchanged and record the milestone decision under `## Decisions`; a milestone that needs a product decision becomes a `Type: decision` Blocked Declaration.
 
 ## Dependency Handling
 

@@ -20,14 +20,13 @@ Exit `0`: every applicable check passes. Exit `1`: a check fails and is named. E
 
 ## Normative Strategy: Rolling, Just-in-Time Refinement
 
-Rolling, just-in-time refinement is the required strategy. Big-bang refinement — refining all issues for an Epic or Feature before implementation begins — is explicitly not the default.
+Rolling, just-in-time refinement is the required strategy. Story refinement is always just-in-time against the ready buffer; there is no big-bang refinement, in which all stories of an Epic or Feature are refined before implementation begins. A small Epic simply has all its stories in the buffer at once (ADR-009; Epic #306 → Decisions "No big-bang refinement").
 
 **Why rolling refinement:**
 
 - The bottleneck is refinement quality and human review bandwidth, not implementation speed.
 - Usage feedback from early implementations contains product signal that cannot be anticipated upfront. Refining ahead of that signal produces stale, over-specified requirements.
 - Rolling refinement keeps the ready buffer small and fresh, reducing the cost of changing direction.
-- Big-bang refinement creates a false sense of completeness and defers product learning to the end of delivery.
 
 ---
 
@@ -39,14 +38,14 @@ The range is set by the repository variables `READY_BUFFER_MIN` (currently 3) an
 
 **Why not fewer than 3:**
 
-- A buffer of 0–2 creates pipeline stalls: if refinement is slow or a Human Approver decision is needed, implementation blocks waiting for ready work.
+- A buffer of 0–2 creates pipeline stalls: if refinement is slow or a decision blocker is open, implementation blocks waiting for ready work.
 
 **Why not more than 5:**
 
 - A buffer larger than 5 increases the risk of refining against stale product understanding. Usage feedback from recent implementations may invalidate over-refined issues before they are pulled.
 - Large buffers create a hidden backlog of in-flight refinement work that is difficult to prune without waste.
 
-The PO may document a buffer adjustment as a project decision if the scope or cadence requires it.
+The buffer is changed through the repository variables, not through a project decision.
 
 ---
 
@@ -60,39 +59,45 @@ Before beginning refinement on the next issue in a Feature or Epic, check for PO
 
 ### What to look for
 
-- GitHub comments posted by the Product Validator on issues or PRs closed or merged within the last 14 days under the same Feature or Epic.
+- GitHub comments posted by the PO on issues or PRs closed or merged within the last 14 days under the same Feature or Epic.
 - Comments that identify a behavior gap, a misaligned assumption, or a product direction change.
 
 The 14-day lookback window is the default. The PO may adjust this as a documented project decision.
 
 ### How to incorporate findings
 
-If a usage finding is present:
-1. Assess whether it affects acceptance criteria or scope for the issue about to be refined.
-2. If affected: incorporate the finding into the refinement before creating or updating the issue.
-3. If not affected: proceed with refinement and note in the issue that recent usage feedback was reviewed and found not applicable.
+The Tech Lead classifies each usage finding (`.claude/commands/refine.md` → Step 0):
 
-Usage findings posted by the Product Validator carry the same weight as review blockers. They are valid workflow inputs that must be addressed before a story closes.
+- A finding that affects scope or an acceptance criterion becomes a `Type: decision` Blocked Declaration on the issue being refined; the affected criterion stays unchanged until the PO answers.
+- Any other finding is noted under the issue's `## Decisions` and refinement continues.
+
+A finding is never incorporated into the refinement directly: one that changes scope is a product decision, and only the PO makes it. Usage findings posted by the PO carry the same weight as review blockers.
 
 ---
 
 ## Pipeline Shape
 
-The full discovery-driven flow, from intake to feedback:
+The flow, from the merged spec to feedback:
 
 ```
-spec-kit
+/spec                    ← the Analyst and the PO write the spec
   │
   ▼
-gh issue create          ← normative upstream intake; epic/feature issues created here
+spec PR merged by the PO ← the merge is the PO's approval of the spec
   │
   ▼
-/refine-epic or
-/refine-feature          ← sub-issues created, parent links set
+spec check               ← scripts/spec-check; a failure is a decision blocker
+  │
+  ▼
+/refine-epic             ← Feature slices, parent links set
+  │
+  ▼
+/refine-feature          ← Feature criteria, Story / Task / Bug seeds
   │
   ▼
 /refine-story /
-/refine-task             ← acceptance criteria, scope, files affected, ACs finalized
+/refine-task /
+/refine-bug              ← acceptance criteria, scope, files affected, mapping to Feature criteria
   │
   ▼
 Ready for implementation ← buffer maintained at 3–5 issues
@@ -107,17 +112,21 @@ Ready for implementation ← buffer maintained at 3–5 issues
 /merge                   ← merge owner merges approved SHA
   │
   ▼
-PO usage findings        ← Product Validator tests delivery, posts GitHub comments
+usage findings           ← the PO tests the delivery and posts GitHub comments
   │
   ▼
-/refine next             ← findings feed into next refinement cycle (see Usage-Feedback Loop)
+next refinement          ← findings feed into it (see Usage-Feedback Loop)
 ```
 
-`spec-kit → gh issue create` is the normative upstream intake pattern. Issues created outside this path must still be triaged against the same refinement standards before entering the ready buffer.
+Refinement starts only from a merged spec (`.claude/commands/refine.md` → Tech Lead rules). An Epic without one is not refined.
 
-### `/refine-story`: Epic and Feature Requirements Mapping
+### `/refine-story`, `/refine-task` and `/refine-bug`: Epic and Feature Requirements Mapping
 
-`/refine-story` writes a `## Epic and Feature Requirements Mapping` section into every refined Story. The refiner reads the parent Epic's merged spec (the approved scope, ADR-008; the Epic issue body only as a legacy fallback when no spec exists) and the parent Feature's body, and lists each requirement that applies to the story as exactly one of: an acceptance criterion (by number), or an entry under `Not in this story` with a reason — `deferred to #N` or `not applicable`. A deferred requirement must link an existing follow-up issue before the story moves to `Ready for implementation`; the refiner creates it, or lists it under Open Questions when it cannot. Time bounds, delivery guarantees and similar statements an executor needs must be copied into the story's Scope or Acceptance Criteria, not only referenced. When a story adds a new script, a workflow step and docs together, the refiner records a `Split decision:` line in `## Decisions`. Every acceptance criterion of the story appears in the mapping and names the Feature criterion it serves (ADR-009); a criterion without a Feature parent is not allowed. The mapping points to requirements; it does not restate the Epic spec.
+`/refine-story`, `/refine-task` and `/refine-bug` write a `## Epic and Feature Requirements Mapping` section into every refined Story, Task and Bug; `scripts/refine-check` fails `required_sections` for all three types when it is missing or empty. The refiner reads the parent Epic's merged spec (the approved scope, ADR-008; the Epic issue body only as a legacy fallback when no spec exists) and the parent Feature's body, and lists each requirement that applies to the issue as exactly one of: an acceptance criterion (by number), or an entry under `Not in this story` (`Not in this task`, `Not in this bug`) with a reason — `deferred to #N` or `not applicable`. A deferred requirement must link an existing follow-up issue before the story moves to `Ready for implementation`; the refiner creates it, or raises a `Type: decision` Blocked Declaration when it cannot. Time bounds, delivery guarantees and similar statements an executor needs must be copied into the story's Scope or Acceptance Criteria, not only referenced. When a story adds a new script, a workflow step and docs together, the refiner records a `Split decision:` line in `## Decisions`. Every acceptance criterion of the story appears in the mapping as `AC <n> serves F<k>.<m>` and names the Feature criterion it serves (ADR-009); a criterion without a Feature parent is not allowed. The mapping points to requirements; it does not restate the Epic spec.
+
+### Epic coverage check
+
+`scripts/criteria-check --epic <n> [--repo <owner/repo>] [--ref <git-ref>] [--json]` reads the Epic's merged `specs/<n>-*/spec.md` (Epic criteria `E<n>`), the Feature criteria of each child `type:feature` issue (`**F<k>.<m>** (serves E<n>, …)`) and the Story, Task and Bug criteria of each child issue with their `AC <n> serves F<k>.<m>` mapping lines. It reports every Epic criterion no Feature criterion covers and every criterion that names no parent or an unknown one. Exit `0`: no finding. Exit `1`: one or more findings. Exit `2`: a read failed, the spec is missing or ambiguous, or the arguments are invalid; never a pass. The refine commands do not run it; `/verify-closure` does.
 
 ---
 
@@ -133,31 +142,13 @@ Implementation of this requirement in the `/refine-epic` and `/refine-feature` c
 
 ## Escalation Triggers
 
-The following conditions warrant interrupting the Human Approver. Do not resolve these conditions autonomously.
+The following conditions need a decision from the PO. The Tech Lead does not resolve them and asks nothing in the session. Each action is a `Type: decision` Blocked Declaration on the issue being refined, in the [Blocked Status Protocol](PROJECT-STATUS.md#blocked-status-protocol) format, posted after the search for an existing answer in `docs/`, the ADRs and the parent `## Decisions`.
 
 | Condition | Action |
 |---|---|
-| A PO usage finding contradicts an existing acceptance criterion on an open story | Stop. Post the conflict as a GitHub comment. Escalate to Human Approver for resolution. |
-| Refinement of a story would change the scope of a story already in implementation | Stop. Report the overlap. Escalate to Human Approver before updating either story. |
-| A dependency decision required for refinement has not been made and cannot be deferred | Stop. Document the open decision in the issue. Escalate to Human Approver. |
-| The ready buffer drops to zero and no issue can be refined without an unresolved dependency | Stop. Report the pipeline stall. Escalate to Human Approver. |
-| A usage finding indicates a product direction change that affects multiple open issues | Stop. Do not refine further under the affected Feature or Epic until Human Approver confirms the new direction. |
-| An acceptance criterion cannot be determined without product, legal, or release judgment | Stop. Document the open question. Escalate to Human Approver. |
-
----
-
-## When Big-Bang Refinement May Be Appropriate
-
-Big-bang refinement — refining the full set of stories for a Feature or Epic before implementation begins — is appropriate only when:
-
-- The Feature or Epic is small (≤5 stories) and unlikely to generate usage feedback that would change scope before implementation completes.
-- The team has explicit prior knowledge of the domain that makes upfront refinement low-risk.
-- A hard external deadline requires full scope visibility before work starts.
-
-**Trade-offs:**
-
-- Big-bang refinement produces a complete picture of scope upfront, which can aid planning and communication.
-- It increases the risk of refining against stale product understanding. The larger the Feature or Epic, the higher this risk.
-- It defers the usage-feedback loop until all stories are delivered, removing the option to incorporate early findings.
-
-When big-bang refinement is chosen, document it as a project decision with the rationale. The usage-feedback loop still applies: check for findings before the next big-bang cycle.
+| A PO usage finding contradicts an existing acceptance criterion on an open story | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined naming the conflict. |
+| Refinement of a story would change the scope of a story already in implementation | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined naming the overlap; update neither story. |
+| A dependency decision required for refinement has not been made and cannot be deferred | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined naming the open decision. |
+| The ready buffer drops to zero and no issue can be refined without an unresolved dependency | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined naming the pipeline stall. |
+| A usage finding indicates a product direction change that affects multiple open issues | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined; refine nothing further under the affected Feature or Epic until the PO answers. |
+| An acceptance criterion cannot be determined without product, legal, or release judgment | Stop. Post a `Type: decision` Blocked Declaration on the issue being refined naming the criterion. |
