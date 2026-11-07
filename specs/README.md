@@ -19,7 +19,7 @@ A spec PR is merged only when every item below holds. The aim is that refinement
 - [ ] **Dependencies** on other Epics or external work are listed.
 - [ ] **Open questions: none.** Every question is answered under Decisions or delegated.
 
-The section headings and an empty Open Questions section are checkable by script. The rest is checked by the PO and the Analyst in the spec session before the PR is opened.
+The section headings and an empty Open Questions section are checked by `scripts/spec-check`, which `/spec` runs on the pushed `spec.md`. The rest is checked by the PO and the Analyst in the spec session before the PR is opened.
 
 ## Acceptance Criteria Levels
 

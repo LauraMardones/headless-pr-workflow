@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Check the scriptable part of a spec's Definition of Ready.
+
+Usage:
+  scripts/spec-check <spec-path> [--ref <commit>] [--template <path>] [--json]
+
+Checks that every level-2 heading (`## ...`) of the template, read at run time
+(default specs/_template/spec.md), is present exactly once in the spec, and that
+the text of `## Open Questions` reads exactly `None.` once leading and trailing
+blank space is removed. Lines inside fenced code blocks are never headings.
+Heading order and spec content are not checked.
+
+--ref <commit> reads the spec and the template as they are at that commit
+(`git show <commit>:<path>`, paths relative to the repository root); without it
+both are read from the working tree. The script reads files and git only.
+
+The first output line is the verdict (`spec-check: pass|fail|error <path>`), then
+one line per check: `<check-id>: pass|fail - <detail>`. Check ids are
+`heading:<Heading text>` and `open-questions`.
+
+Exit codes:
+  0  every check passes.
+  1  one or more checks fail; each failure is named.
+  2  the spec or the template could not be read (missing file, unknown --ref,
+     path not in that commit), the template has no level-2 heading, or the
+     arguments are invalid. Never a pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+DEFAULT_TEMPLATE = "specs/_template/spec.md"
+OPEN_QUESTIONS = "Open Questions"
+H2 = re.compile(r"^##[ \t]+(.*\S)[ \t]*$")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+class ReadError(Exception):
+    """A file could not be read; the check cannot pass."""
+
+
+@dataclass(frozen=True)
+class Check:
+    id: str
+    status: str  # pass | fail
+    detail: str
+
+
+def read_text(path: str, ref: str | None) -> str:
+    if ref is None:
+        try:
+            return Path(path).read_text(encoding="utf-8").lstrip("﻿")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ReadError(f"cannot read {path}: {error.__class__.__name__}") from error
+    if ref.startswith("-") or not ref.strip():
+        raise ReadError(f"invalid --ref {ref!r}")
+    if Path(path).is_absolute():
+        raise ReadError(f"with --ref the path must be repository-relative: {path}")
+    spec = f"{ref}:{path.removeprefix('./')}"
+    try:
+        result = subprocess.run(["git", "show", spec], capture_output=True, check=False)
+    except FileNotFoundError as error:
+        raise ReadError("git is not installed") from error
+    if result.returncode != 0:
+        detail = " ".join(result.stderr.decode("utf-8", "replace").split())[:200] or f"exit {result.returncode}"
+        raise ReadError(f"cannot read {spec}: {detail}")
+    try:
+        return result.stdout.decode("utf-8").lstrip("﻿")
+    except UnicodeDecodeError as error:
+        raise ReadError(f"cannot read {spec}: not UTF-8") from error
+
+
+def level2_headings(text: str) -> list[tuple[str, int]]:
+    """Return (heading text, line index) for each level-2 heading outside fenced code."""
+    found: list[tuple[str, int]] = []
+    fence: str | None = None
+    for index, line in enumerate(text.splitlines()):
+        marker = FENCE.match(line)
+        if marker:
+            char = marker.group(1)
+            if fence is None:
+                fence = char
+            elif char[0] == fence[0] and len(char) >= len(fence) and not line.strip().strip(char[0]):
+                fence = None
+            continue
+        if fence is None:
+            match = H2.match(line)
+            if match:
+                found.append((match.group(1), index))
+    return found
+
+
+def run_checks(spec_text: str, template_headings: list[str]) -> list[Check]:
+    headings = level2_headings(spec_text)
+    checks: list[Check] = []
+    for name in template_headings:
+        count = sum(1 for text, _ in headings if text == name)
+        if count == 0:
+            checks.append(Check(f"heading:{name}", "fail", "missing"))
+        elif count > 1:
+            checks.append(Check(f"heading:{name}", "fail", f"appears {count} times"))
+        else:
+            checks.append(Check(f"heading:{name}", "pass", "present"))
+
+    starts = [i for text, i in headings if text == OPEN_QUESTIONS]
+    if not starts:
+        checks.append(Check("open-questions", "fail", f"no '## {OPEN_QUESTIONS}' section"))
+        return checks
+    lines = spec_text.splitlines()
+    following = [i for _, i in headings if i > starts[0]]
+    end = following[0] if following else len(lines)
+    body = "\n".join(lines[starts[0] + 1:end]).strip()
+    if body == "None.":
+        checks.append(Check("open-questions", "pass", "reads exactly 'None.'"))
+    elif not body:
+        checks.append(Check("open-questions", "fail", "section is empty"))
+    else:
+        quoted = " ".join(body.split())[:80]
+        checks.append(Check("open-questions", "fail", f"found: {quoted}"))
+    return checks
+
+
+def build_report(path: str, ref: str | None, template: str) -> tuple[int, list[Check], str | None]:
+    try:
+        template_text = read_text(template, ref)
+        spec_text = read_text(path, ref)
+    except ReadError as error:
+        return 2, [], str(error)
+    names: list[str] = []
+    for name, _ in level2_headings(template_text):
+        if name not in names:
+            names.append(name)
+    if not names:
+        return 2, [], f"template {template} has no level-2 heading"
+    checks = run_checks(spec_text, names)
+    return (1 if any(c.status == "fail" for c in checks) else 0), checks, None
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):  # exit 2 is argparse's default; keep the message on stderr
+        self.print_usage(sys.stderr)
+        print(f"spec-check: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("path", help="path of the spec file")
+    parser.add_argument("--ref", help="read the spec and the template at this commit")
+    parser.add_argument("--template", default=DEFAULT_TEMPLATE, help=f"template file (default: {DEFAULT_TEMPLATE})")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    code, checks, error = build_report(args.path, args.ref, args.template)
+    verdict = {0: "pass", 1: "fail", 2: "error"}[code]
+    if args.json:
+        report: dict[str, object] = {
+            "path": args.path, "ref": args.ref, "template": args.template, "verdict": verdict,
+            "exit_code": code, "checks": [{"id": c.id, "status": c.status, "detail": c.detail} for c in checks],
+        }
+        if error is not None:
+            report["error"] = error
+        print(json.dumps(report))
+    elif error is not None:
+        print(f"spec-check: error {args.path} - {error}")
+    else:
+        print(f"spec-check: {verdict} {args.path}")
+        for c in checks:
+            print(f"{c.id}: {c.status} - {c.detail}")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

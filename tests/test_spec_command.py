@@ -88,3 +88,18 @@ def test_agents_lists_spec_command() -> None:
     workflow_commands = agents.split("## Workflow Commands", maxsplit=1)[1]
 
     assert "`.claude/commands/spec.md`" in workflow_commands
+
+
+def test_spec_command_runs_spec_check_for_headings_and_open_questions() -> None:
+    command = spec_command()
+
+    assert "Run `scripts/spec-check specs/<number>-<slug>/spec.md` on the pushed `spec.md`" in command
+    assert "a non-zero exit" in command
+    assert "is a failed item and stops the PR" in command
+
+
+def test_specs_readme_names_spec_check_in_definition_of_ready() -> None:
+    readme = " ".join(read("specs/README.md").split())
+
+    assert "`scripts/spec-check`" in readme
+    assert "`/spec` runs" in readme
