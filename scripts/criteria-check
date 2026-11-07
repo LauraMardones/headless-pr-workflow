@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+"""Check that every criterion in one Epic is covered and names a valid parent.
+
+Usage:
+  scripts/criteria-check --epic <n> [--repo <owner/repo>] [--ref <git-ref>] [--json]
+
+--repo defaults to $GITHUB_REPOSITORY. --ref is the branch, tag or commit the
+merged spec is read from (default: the repository's default branch). The script
+only reads GitHub.
+
+Inputs:
+  Epic criteria     list items `**E<n>:**` under `## Acceptance Criteria` in
+                    specs/<epic>-*/spec.md (exactly one folder).
+  Feature criteria  list items `**F<k>.<m>** (serves E<n>, ...)` under
+                    `## Success Criteria` of each child `type:feature` issue,
+                    which carries a `Criterion prefix: F<k>` line.
+  Story criteria    top-level list items under `## Acceptance Criteria` of each
+                    child `type:story|task|bug` issue (`Feature group: #<m>`);
+                    the parent comes from `AC <n> serves F<k>.<m>` phrases in
+                    `## Epic and Feature Requirements Mapping`.
+  Child issues      every issue with a `Parent epic: #<epic>` body line, except
+                    issues closed as not planned.
+
+Findings (each exit 1): spec-no-epic-criteria, epic-criterion-uncovered,
+feature-prefix-missing, feature-prefix-duplicate, feature-criterion-unparsed,
+feature-criterion-wrong-prefix, feature-criterion-no-parent,
+feature-criterion-unknown-parent, criterion-duplicate, issue-feature-missing,
+story-criterion-no-parent, story-criterion-unknown-parent.
+
+Exit codes:
+  0  no finding.
+  1  one or more findings.
+  2  a read failed, the issue list may be cut off, the spec is missing or
+     ambiguous, the Epic is not type:epic, or the arguments are invalid.
+     Never a pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+from dataclasses import dataclass, field
+
+
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+ISSUE_LIMIT = 2000
+IMPLEMENTATION_TYPES = ("story", "task", "bug")
+
+
+class ReadError(Exception):
+    """A GitHub read failed; the check cannot pass."""
+
+
+@dataclass(frozen=True)
+class Issue:
+    number: int
+    title: str
+    body: str
+    labels: tuple[str, ...]
+    state: str
+    state_reason: str = ""
+
+
+@dataclass(frozen=True)
+class Finding:
+    id: str
+    issue: int | None
+    criterion: str | None
+    detail: str
+
+
+@dataclass(frozen=True)
+class Criterion:
+    id: str | None  # None when the item carries no id
+    text: str
+
+
+@dataclass
+class Result:
+    spec_path: str
+    spec_ref: str
+    coverage: list[tuple[str, list[tuple[str, int]]]] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
+    skipped: list[tuple[int, str]] = field(default_factory=list)
+
+
+# --- GitHub reads (stubbed in tests) -------------------------------------------------
+
+def _gh(args: list[str], what: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", *args], capture_output=True, encoding="utf-8", check=False,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+    except FileNotFoundError as error:
+        raise ReadError(f"{what}: gh is not installed") from error
+    if result.returncode != 0:
+        detail = " ".join(result.stderr.split())[:200] or f"exit {result.returncode}"
+        raise ReadError(f"{what}: {detail}")
+    return result.stdout
+
+
+def _parse_issue(raw: dict) -> Issue:
+    return Issue(
+        number=int(raw["number"]), title=str(raw.get("title") or ""), body=str(raw.get("body") or ""),
+        labels=tuple(str(label["name"]) for label in raw["labels"]), state=str(raw["state"]),
+        state_reason=str(raw.get("stateReason") or ""),
+    )
+
+
+def read_issue(repo: str, number: int) -> Issue:
+    out = _gh(["issue", "view", str(number), "--repo", repo, "--json", "number,title,body,labels,state"],
+              f"issue #{number}")
+    try:
+        return _parse_issue(json.loads(out))
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"issue #{number}: payload could not be parsed ({error})") from error
+
+
+def read_issue_list(repo: str, limit: int) -> list[Issue]:
+    out = _gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", str(limit), "--json",
+               "number,title,body,labels,state,stateReason"], "issue list")
+    try:
+        return [_parse_issue(raw) for raw in json.loads(out)]
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"issue list: payload could not be parsed ({error})") from error
+
+
+def read_spec(repo: str, epic: int, ref: str | None) -> tuple[str, str, str]:
+    """Return (path, text, ref) of specs/<epic>-*/spec.md; ref None means the default branch."""
+    if ref is None:
+        ref = _gh(["api", f"repos/{repo}", "--jq", ".default_branch"], "default branch").strip()
+        if not ref:
+            raise ReadError("default branch: empty answer")
+    query = "?ref=" + urllib.parse.quote(ref, safe="")
+    out = _gh(["api", f"repos/{repo}/contents/specs{query}"], f"specs folder at {ref}")
+    try:
+        names = [str(item["name"]) for item in json.loads(out) if item.get("type") == "dir"]
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise ReadError(f"specs folder at {ref}: payload could not be parsed ({error})") from error
+    folders = sorted(name for name in names if name.startswith(f"{epic}-"))
+    if len(folders) != 1:
+        found = ", ".join(folders) if folders else "none"
+        raise ReadError(f"spec for #{epic} at {ref}: expected exactly one specs/{epic}-* folder, found {found}")
+    path = f"specs/{folders[0]}/spec.md"
+    text = _gh(["api", "-H", "Accept: application/vnd.github.raw",
+                f"repos/{repo}/contents/{path}{query}"], f"{path} at {ref}")
+    return path, text, ref
+
+
+# --- body parsing --------------------------------------------------------------------
+
+def parse_sections(body: str) -> dict[str, str]:
+    """Map each `## ` heading to its text; headings inside code fences are ignored."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    fenced = False
+    for line in body.replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        match = None if fenced else re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1)
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def list_items(text: str) -> list[str]:
+    """Top-level list items of a section; indented lines continue the previous item."""
+    items: list[list[str]] = []
+    fenced = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        match = None if fenced else re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?(.*)$", line)
+        if match:
+            items.append([match.group(1)])
+        elif items and (fenced or line.startswith((" ", "\t"))):
+            items[-1].append(line.strip())
+    return [" ".join(part for part in item if part).strip() for item in items]
+
+
+def body_issue_ref(body: str, label: str) -> int | None:
+    match = re.search(rf"^[ \t]*{label}:\s*#(\d+)\b", body.replace("\r\n", "\n"), re.I | re.M)
+    return int(match.group(1)) if match else None
+
+
+def issue_types(issue: Issue) -> list[str]:
+    return [label.split(":", 1)[1] for label in issue.labels if label.startswith("type:")]
+
+
+def epic_criteria(spec_text: str) -> list[str]:
+    section = parse_sections(spec_text).get("Acceptance Criteria", "")
+    ids: list[str] = []
+    for item in list_items(section):
+        match = re.match(r"\*\*E(\d+):\*\*", item)
+        if match and f"E{match.group(1)}" not in ids:
+            ids.append(f"E{match.group(1)}")
+    return ids
+
+
+def story_criteria(body: str) -> list[Criterion]:
+    section = parse_sections(body).get("Acceptance Criteria", "")
+    criteria = []
+    for position, item in enumerate(list_items(section), start=1):
+        match = re.match(r"\*\*AC\s*(\d+)", item)
+        criteria.append(Criterion(f"AC {match.group(1)}" if match else f"AC {position}", item))
+    return criteria
+
+
+_MAPPING = re.compile(
+    r"\bAC\s*(\d+(?:\s*(?:,|and)\s*(?:AC\s*)?\d+)*)\s+serves\s+"
+    r"([FE]\d+(?:\.\d+)?(?:\s*(?:,|and)\s*[FE]\d+(?:\.\d+)?)*)", re.I)
+
+
+def story_mapping(body: str) -> dict[str, list[str]]:
+    """Map `AC <n>` to the parent ids of its `AC <n> serves ...` phrases."""
+    text = parse_sections(body).get("Epic and Feature Requirements Mapping", "")
+    text = re.split(r"^\s*Not in this story:", text, maxsplit=1, flags=re.M)[0]
+    text = re.sub(r"\([^)\n]*\)|\[[^\]\n]*\]", " ", text)
+    mapping: dict[str, list[str]] = {}
+    for match in _MAPPING.finditer(text):
+        parents = re.findall(r"[FE]\d+(?:\.\d+)?", match.group(2).upper())
+        for number in re.findall(r"\d+", match.group(1)):
+            mapping.setdefault(f"AC {int(number)}", []).extend(parents)
+    return mapping
+
+
+# --- the check -----------------------------------------------------------------------
+
+def check_epic(epic: int, spec_path: str, spec_ref: str, spec_text: str, issues: list[Issue]) -> Result:
+    result = Result(spec_path, spec_ref)
+    add = lambda *args: result.findings.append(Finding(*args))  # noqa: E731
+
+    epic_ids = epic_criteria(spec_text)
+    if not epic_ids:
+        add("spec-no-epic-criteria", None, None, f"{spec_path} has no '**E<n>:**' item under '## Acceptance Criteria'")
+
+    children = [
+        issue for issue in issues
+        if issue.number != epic and body_issue_ref(issue.body, "Parent epic") == epic
+        and not (issue.state.upper() == "CLOSED" and issue.state_reason.upper() == "NOT_PLANNED")
+    ]
+    features = sorted((i for i in children if "feature" in issue_types(i)), key=lambda i: i.number)
+    implementations = sorted(
+        (i for i in children if any(t in IMPLEMENTATION_TYPES for t in issue_types(i))), key=lambda i: i.number)
+
+    served: dict[str, list[tuple[str, int]]] = {epic_id: [] for epic_id in epic_ids}
+    feature_criteria: dict[int, set[str]] = {}
+    prefixes: dict[str, int] = {}
+    for feature in features:
+        match = re.search(r"^[ \t]*Criterion prefix:\s*F(\d+)\b", feature.body, re.I | re.M)
+        prefix = f"F{int(match.group(1))}" if match else None
+        if prefix is None:
+            add("feature-prefix-missing", feature.number, None, "no 'Criterion prefix: F<k>' line")
+        elif prefix in prefixes:
+            add("feature-prefix-duplicate", feature.number, prefix, f"prefix {prefix} is also used by #{prefixes[prefix]}")
+        else:
+            prefixes[prefix] = feature.number
+
+        ids = feature_criteria.setdefault(feature.number, set())
+        seen: set[str] = set()
+        for item in list_items(parse_sections(feature.body).get("Success Criteria", "")):
+            head = re.match(r"\*\*(F(\d+)\.(\d+))\*\*", item)
+            if not head:
+                add("feature-criterion-unparsed", feature.number, None, f"no '**F<k>.<m>**' id: {item[:80]}")
+                continue
+            cid = head.group(1)
+            if cid in seen:
+                add("criterion-duplicate", feature.number, cid, f"{cid} appears twice in the Feature")
+                continue
+            seen.add(cid)
+            ids.add(cid)
+            if prefix is not None and f"F{int(head.group(2))}" != prefix:
+                add("feature-criterion-wrong-prefix", feature.number, cid, f"id does not use the Feature's prefix {prefix}")
+            parent = re.match(r"\s*\(serves\s+([^)]*)\)", item[head.end():], re.I)
+            parents = re.findall(r"E\d+", parent.group(1).upper()) if parent else []
+            if not parents:
+                add("feature-criterion-no-parent", feature.number, cid, "no '(serves E<n>)' naming an Epic criterion")
+            for parent_id in dict.fromkeys(parents):
+                if parent_id in served:
+                    served[parent_id].append((cid, feature.number))
+                else:
+                    add("feature-criterion-unknown-parent", feature.number, cid, f"{parent_id} is not an Epic criterion of the spec")
+
+    for epic_id in epic_ids:
+        names = ", ".join(f"{cid} (#{num})" for cid, num in served[epic_id])
+        result.coverage.append((epic_id, served[epic_id]))
+        if not names:
+            add("epic-criterion-uncovered", None, epic_id, "no Feature criterion serves it")
+
+    feature_numbers = {feature.number for feature in features}
+    for issue in implementations:
+        criteria = story_criteria(issue.body)
+        if not criteria:
+            result.skipped.append((issue.number, "no acceptance criteria"))
+            continue
+        group = body_issue_ref(issue.body, "Feature group")
+        if group is None:
+            add("issue-feature-missing", issue.number, None, "no 'Feature group: #<m>' line")
+        elif group not in feature_numbers:
+            add("issue-feature-missing", issue.number, None, f"Feature group #{group} is not a Feature of Epic #{epic}")
+        known = feature_criteria.get(group, set()) if group in feature_numbers else None
+        mapping = story_mapping(issue.body)
+        seen = set()
+        for criterion in criteria:
+            cid = criterion.id or ""
+            if cid in seen:
+                add("criterion-duplicate", issue.number, cid, f"{cid} appears twice in the issue")
+                continue
+            seen.add(cid)
+            parents = [p for p in dict.fromkeys(mapping.get(cid, [])) if p.startswith("F")]
+            if not parents:
+                add("story-criterion-no-parent", issue.number, cid, f"no '{cid} serves F<k>.<m>' mapping")
+            for parent_id in parents:
+                if known is not None and parent_id not in known:
+                    add("story-criterion-unknown-parent", issue.number, cid,
+                        f"{parent_id} is not a criterion of Feature #{group}")
+    return result
+
+
+# --- output --------------------------------------------------------------------------
+
+def coverage_line(epic_id: str, entries: list[tuple[str, int]]) -> str:
+    if not entries:
+        return f"{epic_id}: not covered"
+    return f"{epic_id}: covered by " + ", ".join(f"{cid} (#{num})" for cid, num in entries)
+
+
+def render_text(epic: int, result: Result) -> list[str]:
+    count = len(result.findings)
+    verdict = "pass - 0 findings" if not count else f"fail - {count} findings"
+    lines = [f"#{epic}: {verdict}", f"spec: {result.spec_path} @ {result.spec_ref}"]
+    lines += [coverage_line(epic_id, entries) for epic_id, entries in result.coverage]
+    for finding in result.findings:
+        issue = f"#{finding.issue}" if finding.issue is not None else "-"
+        lines.append(f"{finding.id}: {issue} {finding.criterion or '-'} - {finding.detail}")
+    lines += [f"skip: #{number} - {reason}" for number, reason in result.skipped]
+    return lines
+
+
+def render_json(epic: int, repo: str, result: Result | None, error: str | None) -> str:
+    code = 2 if error else (1 if result and result.findings else 0)
+    return json.dumps({
+        "epic": epic, "repo": repo,
+        "spec": {"path": result.spec_path, "ref": result.spec_ref} if result else None,
+        "verdict": "unreadable" if error else ("fail" if code else "pass"),
+        "exit_code": code,
+        "coverage": [
+            {"epic_criterion": epic_id, "features": [{"criterion": cid, "issue": num} for cid, num in entries]}
+            for epic_id, entries in (result.coverage if result else [])
+        ],
+        "findings": [
+            {"id": f.id, "issue": f.issue, "criterion": f.criterion, "detail": f.detail}
+            for f in (result.findings if result else [])
+        ],
+        "skipped": [{"issue": n, "reason": r} for n, r in (result.skipped if result else [])],
+        "error": error,
+    })
+
+
+# --- command line --------------------------------------------------------------------
+
+def positive_int(value: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return int(value)
+
+
+def repository(value: str) -> str:
+    if not REPO_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("must use owner/repo format")
+    return value
+
+
+def git_ref(value: str) -> str:
+    if not value or value.startswith("-") or re.search(r"\s", value):
+        raise argparse.ArgumentTypeError("must be a branch, tag or commit")
+    return value
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):  # exit 2 is argparse's default; keep the message on stderr
+        self.print_usage(sys.stderr)
+        print(f"criteria-check: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--epic", required=True, type=positive_int, help="Epic issue number")
+    parser.add_argument("--repo", type=repository, help="owner/repo (default: $GITHUB_REPOSITORY)")
+    parser.add_argument("--ref", type=git_ref, help="git ref to read the spec from (default: default branch)")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    return parser
+
+
+def run(epic: int, repo: str, ref: str | None, *, issue_reader=None, list_reader=None, spec_reader=None) -> Result:
+    issue_reader = issue_reader or read_issue
+    list_reader = list_reader or read_issue_list
+    spec_reader = spec_reader or read_spec
+    epic_issue = issue_reader(repo, epic)
+    if "type:epic" not in epic_issue.labels:
+        raise ReadError(f"issue #{epic} is not type:epic")
+    path, text, resolved = spec_reader(repo, epic, ref)
+    issues = list_reader(repo, ISSUE_LIMIT)
+    if len(issues) >= ISSUE_LIMIT:
+        raise ReadError(f"issue list has {len(issues)} entries, as many as the limit; it may be cut off")
+    return check_epic(epic, path, resolved, text, issues)
+
+
+def main(argv: list[str] | None = None, **readers) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(args_list)
+    except SystemExit as stop:
+        if stop.code == 2 and "--json" in args_list:
+            print(render_json(0, "", None, "invalid arguments"))
+        raise
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+    try:
+        if not REPO_PATTERN.fullmatch(repo):
+            raise ReadError("--repo must be <owner/repo> (or set GITHUB_REPOSITORY)")
+        result = run(args.epic, repo, args.ref, **readers)
+    except ReadError as error:
+        if args.json:
+            print(render_json(args.epic, repo, None, str(error)))
+        else:
+            print(f"#{args.epic}: unreadable - {error}")
+        print(f"criteria-check: {error}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(render_json(args.epic, repo, result, None))
+    else:
+        print("\n".join(render_text(args.epic, result)))
+    return 1 if result.findings else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
