@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -34,12 +36,9 @@ def discover_shell_tests(directory: Path = TESTS_DIR) -> list[Path]:
 
 def run_shell_test(path: Path, bash: str, cwd: Path = REPO_ROOT, timeout: float = TIMEOUT_SECONDS) -> None:
     """Run one shell test with bash; fail with the script's output on a non-zero exit or a timeout."""
-    try:
-        result = subprocess.run([bash, str(path)], cwd=cwd, env=script_tools.host_env(), text=True,
-                                capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        pytest.fail(f"{path.name} timed out after {timeout}s\n{out}")
+    result = script_tools.run_tree(
+        [bash, str(path)], timeout=timeout, cwd=cwd, env=script_tools.host_env(),
+        timeout_message=lambda out: f"{path.name} timed out after {timeout}s; the whole process tree was killed\n{out}")
     if result.returncode != 0:
         pytest.fail(f"{path.name} exited {result.returncode}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}")
 
@@ -86,6 +85,36 @@ def test_a_hanging_shell_test_times_out(tmp_path: Path) -> None:
     script.write_text("sleep 30\n")
     with pytest.raises(pytest.fail.Exception, match="timed out"):
         run_shell_test(script, script_tools.find_bash(), cwd=tmp_path, timeout=1)
+
+
+def _pid_running(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@script_tools.requires("bash")
+def test_a_timed_out_shell_test_stops_its_whole_process_tree(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    child = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));time.sleep(120)"
+    script = tmp_path / "test_child.sh"
+    script.write_text(f"echo before-timeout\n\"{Path(sys.executable).as_posix()}\" -c \"{child}\" &\nwait\n")
+    start = time.monotonic()
+    with pytest.raises(pytest.fail.Exception) as info:
+        run_shell_test(script, script_tools.find_bash(), cwd=tmp_path, timeout=3)
+    assert time.monotonic() - start < 3 + 30
+    message = str(info.value)
+    assert "test_child.sh" in message and "timed out after 3s" in message and "before-timeout" in message
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while _pid_running(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _pid_running(pid)
 
 
 def test_missing_tool_skip_names_the_tool() -> None:
