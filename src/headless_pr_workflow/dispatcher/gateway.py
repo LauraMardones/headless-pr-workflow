@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
@@ -110,6 +111,16 @@ class Gateway(Protocol):
 
     def compare_commits(self, base: str, head: str) -> str: ...
 
+    # Read operations of the status rule (``status.py``, issue #258).
+
+    def list_open_prs(self) -> list[dict[str, Any]]: ...
+
+    def pr_files(self, number: int) -> list[str]: ...
+
+    def list_closed_issues(self) -> list[dict[str, Any]]: ...
+
+    def merge_gates_pass(self, number: int, head: str) -> bool: ...
+
 
 def parse_json_stream(text: str) -> list[Any]:
     """The JSON values in ``text``, one after another (``gh api --paginate`` prints one per page)."""
@@ -132,6 +143,36 @@ def _missing_scope(detail: str) -> str | None:
     from ..codex_review_bookkeeping import missing_scope_message
 
     return missing_scope_message(detail)
+
+
+_MERGE_GATE: Any = None
+
+
+def _merge_gate_module() -> Any:
+    """``scripts/merge-gate-summary`` loaded as a module: the one copy of the merge-gate evaluation."""
+
+    global _MERGE_GATE
+    if _MERGE_GATE is None:
+        from importlib import util
+        from importlib.machinery import SourceFileLoader
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[3] / "scripts" / "merge-gate-summary"
+        if not script.is_file():
+            raise GatewayError("evaluate merge gates", f"{script} not found")
+        loader = SourceFileLoader("hpw_merge_gate_summary", str(script))
+        spec = util.spec_from_loader(loader.name, loader)
+        if spec is None:
+            raise GatewayError("evaluate merge gates", "scripts/merge-gate-summary could not be loaded")
+        module = util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # its dataclass needs the module registered while it runs
+        try:
+            loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
+        _MERGE_GATE = module
+    return _MERGE_GATE
 
 
 class GhGateway:
@@ -216,6 +257,42 @@ class GhGateway:
         if status not in ("identical", "ahead", "behind", "diverged"):
             raise GatewayError(step, "GitHub returned a comparison that could not be parsed")
         return str(status)
+
+    def list_open_prs(self) -> list[dict[str, Any]]:
+        """Every open pull request (all pages), as the pulls API returns it."""
+
+        step = "read open pull requests"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/pulls?state=open&per_page=100"])
+        return self._pages(step, output, what="pull requests")
+
+    def pr_files(self, number: int) -> list[str]:
+        """The paths a pull request changes."""
+
+        step = f"read files of PR #{number}"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/pulls/{number}/files?per_page=100"])
+        return [str(item["filename"]) for item in self._pages(step, output, what="files") if item.get("filename")]
+
+    def list_closed_issues(self) -> list[dict[str, Any]]:
+        """Every closed issue of the repository; pull requests are left out."""
+
+        step = "read closed issues"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues?state=closed&per_page=100"])
+        return [item for item in self._pages(step, output) if "pull_request" not in item]
+
+    def merge_gates_pass(self, number: int, head: str) -> bool:
+        """Whether every merge gate passes on PR ``number`` at ``head``, by the evaluation of scripts/merge-gate-summary.
+
+        Raises ``GatewayError`` when the gates cannot be read. A result for another head than ``head`` is not a pass.
+        """
+
+        step = f"evaluate merge gates of PR #{number}"
+        try:
+            result = _merge_gate_module().evaluate(number, self.repo)
+        except GatewayError:
+            raise
+        except Exception as exc:  # GHCommandError, ValueError, an unloadable script: all mean "not readable"
+            raise GatewayError(step, mask_tokens(str(exc).strip().splitlines()[-1][:300] if str(exc).strip() else type(exc).__name__)) from None
+        return bool(result.passed) and bool(head) and head.lower().startswith(result.head.lower())
 
     def board_item(self, issue: int) -> BoardItem:
         step = "read board"

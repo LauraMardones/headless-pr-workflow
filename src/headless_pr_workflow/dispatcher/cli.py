@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts`` and ``scheduler``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler`` and ``status``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -20,6 +20,7 @@ from .gateway import Gateway, GhGateway, mask_tokens
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .scheduler import next_action
 from .state import FILE_NAMES, read_pending, read_state, write_state
+from .status import read_status
 from .write import (
     DEFAULT_ATTEMPTS,
     EXIT_INVALID,
@@ -113,6 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_next.add_argument("--in-implementation", type=_issue_list, default=[])
     s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
+    status = blocks.add_parser("status", add_help=False)
+    status_ops = status.add_subparsers(dest="operation", parser_class=_Parser)
+    st_read = status_ops.add_parser("read", add_help=False)
+    st_read.add_argument("--repo", required=True)
+    st_read.add_argument("--epic", type=_positive)
+    st_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
     marker = blocks.add_parser("marker", add_help=False)
     marker_ops = marker.add_subparsers(dest="operation", parser_class=_Parser)
 
@@ -172,13 +180,14 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker", "state", "facts", "scheduler") or not args.operation:
+    if args.block not in ("write", "marker", "state", "facts", "scheduler", "status") or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ... "
             "| hpw dispatcher facts read ... "
-            "| hpw dispatcher scheduler next ...")
+            "| hpw dispatcher scheduler next ... "
+            "| hpw dispatcher status read ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -221,11 +230,11 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler", "status") else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler") else "write"
+    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler", "status") else "write"
 
 
 def _emit(result: Result) -> int:
@@ -298,6 +307,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _emit(read_facts(gateway, args.repo, epic=args.epic))
     if args.block == "scheduler":
         return _run_scheduler(args, gateway)
+    if args.block == "status":
+        return _emit(read_status(gateway, args.repo, epic=args.epic))
 
     if args.operation == "comment":
         try:
