@@ -1,4 +1,4 @@
-Act as a senior product owner and agile delivery coach with GitHub access.
+Act as the Tech Lead (`docs/ROLES.md`) with GitHub access.
 
 Refine the following GitHub issue until it meets the project's refinement standard.
 
@@ -10,6 +10,8 @@ Issue:
 
 Do not implement code.
 
+Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and check, no refinement without a merged spec, the spec record, decision blockers instead of questions to the PO, resume after `/unblock`, lens questions and usage findings. Follow them before any issue write. Ask the PO nothing in the session.
+
 ## Core Instructions
 
 - Fetch the current GitHub issue title, body, labels, milestone, linked epic, task lists, dependencies, and relevant comments.
@@ -19,7 +21,7 @@ Do not implement code.
 - GitHub must remain the source of truth.
 - Preserve useful existing issue content, but reorganize it into the project story format.
 - Do not discard prior decisions, constraints, dependencies, or context unless clearly obsolete.
-- If something appears obsolete, move it to Notes or Open Questions instead of deleting it silently.
+- If something appears obsolete, move it to Notes instead of deleting it silently.
 - If you do not have permission or tooling to update GitHub, stop and say exactly what is missing.
 
 ## Status Workflow
@@ -65,6 +67,7 @@ Refinement is complete when the issue has:
 - Scope
 - Out of Scope
 - testable Acceptance Criteria
+- the spec record line and a `Feature group: #<n>` line
 - Epic and Feature Requirements Mapping (see the section of that name below)
 - time bounds, delivery guarantees and similar statements an executor needs, written in the story itself
 - a recorded `Split decision:` when the story combines a new script, a workflow step and docs
@@ -90,40 +93,19 @@ Every refined Story carries a `## Epic and Feature Requirements Mapping` section
 - Trace both ways (ADR-009): every acceptance criterion of the story must appear in the mapping and name the Feature criterion it serves (`F1.1`); a story criterion without a Feature parent, or mapped directly to an Epic criterion, adds scope and is not allowed. Epic criteria are reached through the Feature criteria.
 - Point to the requirement in one line; do not restate the Epic spec in the story.
 - Record a deliberately uncovered Epic requirement under `Not in this story`, so a reviewer does not rediscover it as a blocker.
-- A deferred requirement must link an existing follow-up issue (`deferred to #N`). If none exists, create the follow-up issue; if you cannot, list it under Open Questions. The follow-up issue must be linked before the story moves to `Ready for implementation`.
+- A deferred requirement must link an existing follow-up issue (`deferred to #N`). If none exists, create the follow-up issue; if you cannot, raise a `Type: decision` Blocked Declaration. The follow-up issue must be linked before the story moves to `Ready for implementation`.
 - Cross-cutting check: time bounds, delivery guarantees and similar statements an executor needs must be copied into the story's Scope or Acceptance Criteria, not only referenced in the mapping.
 - Split check: when the story adds a new script, a workflow step and docs together, record a `Split decision:` line in `## Decisions` (`Split decision: split into #A, #B` or `Split decision: keep together because ...`).
 
 ## Open Questions Format
 
-Before adding an Open Question that requires PO input, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating the question to the PO.
+Questions for the PO are not written here for the PO to answer in the session. A product question becomes a `Type: decision` Blocked Declaration posted on the issue (`.claude/commands/refine.md` → Tech Lead rules → Decision blockers), after the search for an existing answer in `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating. The affected acceptance criterion stays unchanged while the blocker is open.
 
-Each open question must be structured as:
-
-```md
-### [Question title]
-**Context:** [One sentence explaining why this matters]
-
-**Option A: [Name]**
-- Pros: ...
-- Cons: ...
-
-**Option B: [Name]**
-- Pros: ...
-- Cons: ...
-
-**Recommendation:** Option A — [brief reason in plain language, no jargon]
-```
-
-Rules:
-- Language must be non-technical — assume the reader has no engineering background
-- Each option must have at least one pro and one con
-- A recommendation is required; if genuinely too close to call, state why and what information is needed to decide
-- If there are more than two options, include all of them
+The `## Open Questions` section of the issue body lists the link to each blocker comment while the issue is blocked, and reads `None.` before it moves to `Ready for implementation` (`scripts/refine-check` fails `open_questions` otherwise).
 
 ## Decisions Format
 
-When a PO closes an open question during or after refinement, move it from Open Questions to Decisions with the chosen option, rejected alternatives, and date. Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
+When a decision blocker is answered by the PO's `/unblock` reply, or the Tech Lead settles a technical or delegated choice (label, milestone, executor, slicing, technical approach), record it under Decisions with the chosen option, rejected alternatives, date and comment link (when answered by the PO). Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
 
 Each decision must be structured as:
 
@@ -138,13 +120,13 @@ Each decision must be structured as:
 - Inspect existing repository labels first.
 - Use only existing GitHub labels from the repository.
 - Do not invent new labels.
-- Apply existing labels for type, priority, area, flow, and status only when the correct label is clear.
-- If the correct existing label is unclear, leave labels unchanged and list it under Open Questions.
+- Apply existing labels for type, priority, area, flow, and status when the correct label is clear.
+- If the correct existing label is unclear, the Tech Lead chooses among the existing labels and records the choice under `## Decisions`; a choice that needs a product decision becomes a `Type: decision` Blocked Declaration.
 
 ## Milestone Handling
 
 - Use an existing milestone only when delivery timing is clear.
-- Otherwise leave milestone unchanged and list the milestone decision under Open Questions.
+- Otherwise leave milestone unchanged and record the milestone decision under `## Decisions`; a milestone that needs a product decision becomes a `Type: decision` Blocked Declaration.
 
 ## Dependency Handling
 
@@ -154,7 +136,7 @@ Each decision must be structured as:
   `Dependency contract assumed: ...`
 - If the story must be revalidated after a dependency closes, write:
   `Revalidate after dependency closes: yes`
-- If required labels, milestone, epic link, dependency information, or business decisions are missing, add them as Open Questions instead of guessing.
+- If a label, milestone, epic link or dependency is missing, the Tech Lead settles it and records it under `## Decisions`; a missing business decision becomes a `Type: decision` Blocked Declaration instead of a guess.
 
 ## Issue Body Format
 
@@ -162,10 +144,11 @@ Update the issue body to this structure:
 
 ```md
 Parent epic: #{EPIC_NUMBER} {EPIC_TITLE}
-Feature group: {FEATURE_GROUP}
+Feature group: #{FEATURE_NUMBER} {FEATURE_TITLE}
 Parallel lane: {LANE}
 Critical path: yes/no
 PO status: {In refinement | Refined; blocked by #X | Ready for implementation.}
+Spec: [`specs/{EPIC_NUMBER}-{slug}/spec.md`]({blob link at the commit}) at `{commit}`
 
 ## Goal
 
@@ -265,7 +248,7 @@ Revalidate after dependency closes: yes/no
 
 ## Open Questions
 
-- ...
+- <link to each decision blocker comment, or `None.`>
 
 ## Decisions
 

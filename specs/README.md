@@ -27,9 +27,9 @@ The section headings and an empty Open Questions section are checked by `scripts
 |---|---|---|---|
 | Epic (`E1`) | PO, in this spec | Outcome | — |
 | Feature (`F1.1`) | Refinement | Capability | At least one Epic criterion |
-| Story | Refinement, just-in-time | Testable behavior | At least one Feature criterion |
+| Story, Task, Bug | Refinement, just-in-time | Testable behavior | At least one Feature criterion |
 
-Every Epic criterion is covered by at least one Feature criterion. A criterion with no parent adds scope and is not allowed (ADR-009).
+Every Epic criterion is covered by at least one Feature criterion. A criterion with no parent adds scope and is not allowed (ADR-009). `scripts/criteria-check --epic <n>` checks that every Epic criterion is covered and every Feature, Story, Task and Bug criterion names its parent.
 
 ## Changing a Spec
 

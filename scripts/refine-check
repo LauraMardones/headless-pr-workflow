@@ -36,7 +36,8 @@ READY = "Ready for implementation"
 REFINED = "Refined"
 
 _TASK_SECTIONS = (
-    "Goal", "Scope", "Out of Scope", "Acceptance Criteria", "Test Expectations",
+    "Goal", "Scope", "Out of Scope", "Acceptance Criteria",
+    "Epic and Feature Requirements Mapping", "Test Expectations",
     "Documentation Impact", "Dependencies", "Assumptions", "Risks / Blockers",
     "Technical Notes", "Definition of Done",
 )
@@ -54,8 +55,9 @@ REQUIRED_SECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     "task": tuple((s,) for s in _TASK_SECTIONS),
     "bug": tuple((s,) for s in (
         "Goal", "Defect Description", "Impact", "Scope", "Out of Scope", "Acceptance Criteria",
-        "Test Expectations", "Documentation Impact", "Dependencies", "Assumptions",
-        "Risks / Blockers", "Technical Notes", "Definition of Done")),
+        "Epic and Feature Requirements Mapping", "Test Expectations", "Documentation Impact",
+        "Dependencies", "Assumptions", "Risks / Blockers", "Technical Notes",
+        "Definition of Done")),
 }
 
 TITLE_PREFIX = re.compile(r"^\s*(?:\[(epic|feature|story|task|bug)\]|(epic|feature|story|task|bug)\s*:)", re.I)
