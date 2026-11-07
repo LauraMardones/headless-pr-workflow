@@ -1701,9 +1701,12 @@ record_session_start() {
 # returned CLAUDE_LIMIT_STOP_RC) ends by itself at the reset, so it is not a
 # blocker and needs no PO action. pause_at_usage_limit <step> <target> <issue>:
 #   - a new /implement goes back to "Ready for implementation"; a fix round
-#     stays "In implementation" and a /review stays "In review"; a fix round
+#     keeps the status it has and a /review stays "In review"; a fix round
 #     that pushed a new head before the stop (issue #446) gets the merge-owner
-#     marker for that head and the usual hand-off first, in this run;
+#     marker for that head and the usual hand-off first, in this run, also when
+#     the session already wrote "In review" (issue #447; the hand-off leaves it
+#     there); the fix-round record's Next line names the status read from the
+#     board after the session;
 #   - no mid-cycle blocker and no attempt marker is written, so the resume
 #     pass (or the next selection) starts the same step again once the usage
 #     limit and the allowance check let it;
@@ -1754,23 +1757,38 @@ pause_at_usage_limit() {
         round="conflict round"
         next="the story stays where it is. The next run decides from the PR as it is then: a fresh conflict round while the PR still conflicts with main, or one blocker when the PR is clean but its head has no merge-owner evidence."
     elif [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
-        next="the fix round stays in \"In implementation\" and is tried again on a later poll, once the usage limit and the allowance check allow it."
+        next="the fix round is tried again on a later poll, once the usage limit and the allowance check allow it."
+        local handed_off=false
         # Issue #446: a fix round that pushed a new head before the stop is
         # finished here, from GitHub facts read now: merge owner for the new
         # head, then the usual hand-off. Nothing is read back on a later run.
         # A PR that is still a draft was re-drafted by the round and never made
         # ready (its pytest check was not confirmed): the head is not ready for
         # review, so nothing is recorded and no blocker is posted.
+        # Issue #447: the session may already have written "In review" before
+        # the stop; the hand-off leaves that status where it is.
         if [[ -n "$FIX_ROUND_START_HEAD" && -n "$pr_head" && "${pr_head,,}" != "${FIX_ROUND_START_HEAD,,}" ]]; then
           if [[ "$(jq -r '.draft // false' <<< "${pr_json:-null}" 2>/dev/null)" == "true" ]]; then
-            next="the fix round pushed head \`${pr_head}\` but the PR is still a draft, so the head is not ready for review: no merge owner is recorded and nothing is handed off. The story stays in \"In implementation\" with the draft PR; the unfinished handoff is not continued by this run."
+            next="the fix round pushed head \`${pr_head}\` but the PR is still a draft, so the head is not ready for review: no merge owner is recorded and nothing is handed off. The unfinished handoff is not continued by this run."
           else
             FIX_ROUND_SESSION=false
             record_merge_owner "$issue" "$FIX_ROUND_START_HEAD" || exit 1
             hand_off_to_codex_review_loop "$FIX_ROUND_START_HEAD" "$FIX_ROUND_BLOCKER_BEFORE"
-            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run. Codex reviews it, and any findings start a new fix round."
+            handed_off=true
             FIX_ROUND_SESSION=true
           fi
+        fi
+        # The story's status is read from the board after the session (and the
+        # hand-off), never assumed.
+        local board_status="unreadable"
+        if BOARD_DATA=$(fetch_board_data 2>/dev/null); then
+            board_status=$(board_status_of "$issue")
+            [[ -n "$board_status" ]] || board_status="unreadable"
+        fi
+        if $handed_off; then
+            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run, and the story is \"${board_status}\" on the board. Codex reviews it, and any findings start a new fix round."
+        else
+            next+=" The story is \"${board_status}\" on the board."
         fi
     elif [[ "$step" == "implement" ]]; then
         next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
