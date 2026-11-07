@@ -7,7 +7,9 @@ live GitHub access.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, Sequence
 
 
@@ -16,6 +18,12 @@ REQUIRED_CHECK_COMMANDS = frozenset(
     {"python -m pytest tests/test_verify_closure_command.py"}
 )
 CI_CHECK_NAME = "pytest"
+REPOSITORY = "LauraMardones/headless-pr-workflow"
+PO_CHECK = "PO CHECK"
+NO_SPEC_LINE = "Spec: none found — criteria taken from the issue body"
+_EPIC_CRITERION = re.compile(r"^- \*\*(E\d+):\*\*[ \t]*(.*)$")
+_VERIFIED_BY = re.compile(r"^\s+- \*\*Verified by:\*\*[ \t]*(.*)$")
+_THE_PO = re.compile(r"\bthe po\b", re.IGNORECASE)
 
 
 class VerificationBlocked(ValueError):
@@ -62,6 +70,35 @@ class EvidenceRow:
     criterion: str
     result: str
     evidence: tuple[str, ...]
+    po_steps: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SpecCriterion:
+    id: str
+    text: str
+    verified_by: str
+
+    @property
+    def label(self) -> str:
+        """The criterion as an evidence row names it: id and spec wording."""
+
+        return f"{self.id}: {self.text}"
+
+    @property
+    def po_may_check(self) -> bool:
+        return bool(_THE_PO.search(self.verified_by))
+
+
+@dataclass(frozen=True)
+class Spec:
+    path: str
+    goal: str
+    criteria: tuple[SpecCriterion, ...]
+
+    @property
+    def declared_criteria(self) -> tuple[str, ...]:
+        return tuple(criterion.label for criterion in self.criteria)
 
 
 @dataclass(frozen=True)
@@ -100,6 +137,7 @@ class TechnicalSummary:
     created_at: str
     url: str
     checks: tuple[str, ...] = ()
+    po_check_criteria: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,10 +165,25 @@ class VerificationResult:
     evidence: tuple[EvidenceRow, ...]
     checks: tuple[CheckResult, ...]
     existing_summary_url: str | None = None
+    spec: Spec | None = None
 
     @property
     def should_post_summary(self) -> bool:
         return self.existing_summary_url is None
+
+    @property
+    def spec_line(self) -> str | None:
+        """The summary header line naming the criteria source (Epics only)."""
+
+        if self.target_type != "type:epic":
+            return None
+        if self.spec is None:
+            return f"- {NO_SPEC_LINE}"
+        return f"- Spec: {self.spec.path} @ {self.main_sha}"
+
+    @property
+    def po_check_criteria(self) -> tuple[str, ...]:
+        return tuple(row.criterion for row in self.evidence if row.result == PO_CHECK)
 
 
 class GitHubEvidence(Protocol):
@@ -155,6 +208,14 @@ class GitHubEvidence(Protocol):
 
 class LocalEvidence(Protocol):
     def head_sha(self) -> str: ...
+
+    def epic_spec(self, number: int) -> Spec | None:
+        """Return the Epic's merged spec from the checkout, or ``None`` if absent.
+
+        Raise ``VerificationBlocked`` for several matches or an unusable spec;
+        ``read_epic_spec`` implements the rules.
+        """
+        ...
 
     def evidence_rows(self, target: Issue) -> Sequence[EvidenceRow]: ...
 
@@ -204,6 +265,92 @@ def _target_type(issue: Issue) -> str:
     if len(types) != 1:
         raise VerificationBlocked("target must have exactly one supported type label")
     return next(iter(types))
+
+
+def parse_spec(path: str, text: str) -> Spec:
+    """Read the goal and the ``**E<n>:**`` criteria of one spec; fail closed."""
+
+    lines = text.splitlines()
+    goal: list[str] = []
+    criteria: list[SpecCriterion] = []
+    section = ""
+    current: tuple[str, str] | None = None
+    verified_by = ""
+
+    def flush() -> None:
+        nonlocal current, verified_by
+        if current is not None:
+            criteria.append(SpecCriterion(current[0], current[1], verified_by))
+        current, verified_by = None, ""
+
+    for line in lines:
+        if line.startswith("## "):
+            flush()
+            section = line[3:].strip()
+            continue
+        if section == "Goal":
+            goal.append(line)
+        elif section == "Acceptance Criteria":
+            criterion = _EPIC_CRITERION.match(line)
+            if criterion:
+                flush()
+                current = (criterion.group(1), criterion.group(2).strip())
+                continue
+            nested = _VERIFIED_BY.match(line)
+            if nested and current is not None and not verified_by:
+                verified_by = nested.group(1).strip()
+    flush()
+
+    goal_text = "\n".join(goal).strip()
+    blockers = []
+    if not goal_text:
+        blockers.append(f"spec has no Goal: {path}")
+    if not criteria:
+        blockers.append(f"spec has no Epic criterion (**E<n>:**): {path}")
+    if blockers:
+        raise VerificationBlocked(*blockers)
+    return Spec(path, goal_text, tuple(criteria))
+
+
+def read_epic_spec(root: Path, number: int) -> Spec | None:
+    """Find ``specs/<number>-*/spec.md`` under ``root``.
+
+    ``None`` means no spec folder exists. Several folders, a missing or
+    unreadable ``spec.md``, or an unusable spec raise ``VerificationBlocked``.
+    """
+
+    specs = root / "specs"
+    folders = (
+        sorted(p for p in specs.glob(f"{number}-*") if p.is_dir())
+        if specs.is_dir()
+        else []
+    )
+    if not folders:
+        return None
+    if len(folders) > 1:
+        names = ", ".join(f"specs/{p.name}" for p in folders)
+        raise VerificationBlocked(f"more than one spec folder for Epic #{number}: {names}")
+    path = f"specs/{folders[0].name}/spec.md"
+    try:
+        text = (folders[0] / "spec.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise VerificationBlocked(f"spec cannot be read: {path} ({error})") from error
+    return parse_spec(path, text)
+
+
+def criteria_check_command(number: int, sha: str) -> str:
+    return (
+        f"scripts/criteria-check --epic {number} --repo {REPOSITORY} --ref {sha}"
+    )
+
+
+def criteria_check_result(
+    number: int, sha: str, exit_code: int, output: str
+) -> CheckResult:
+    """Map the coverage script's exit code to a check; its text is the detail."""
+
+    outcome = {0: "PASS", 1: "FAIL"}.get(exit_code, "BLOCKED")
+    return CheckResult(criteria_check_command(number, sha), outcome, output.strip())
 
 
 def _inventory(github: GitHubEvidence, target: Issue) -> tuple[InventoryItem, ...]:
@@ -278,6 +425,8 @@ def _validate_evidence(
     rows: tuple[EvidenceRow, ...],
     checks: tuple[CheckResult, ...],
     main_sha: str,
+    required_commands: frozenset[str] = frozenset(),
+    po_checkable: frozenset[str] = frozenset(),
 ) -> None:
     blockers: list[str] = []
     if not declared_criteria:
@@ -286,11 +435,23 @@ def _validate_evidence(
     if row_criteria != declared_criteria:
         blockers.append("evidence rows do not exactly match declared criteria")
     for row in rows:
-        if row.result != "PASS" or not row.evidence:
+        if row.result == PO_CHECK:
+            if row.criterion not in po_checkable:
+                blockers.append(
+                    f"{PO_CHECK} is not allowed for criterion: {row.criterion}"
+                )
+            elif not row.po_steps:
+                blockers.append(f"{PO_CHECK} has no steps for the PO: {row.criterion}")
+            if not row.evidence:
+                blockers.append(
+                    f"{PO_CHECK} has no evidence for its provable parts: {row.criterion}"
+                )
+        elif row.result != "PASS" or not row.evidence:
             blockers.append(f"criterion is not proven: {row.criterion}")
     check_commands = {check.command for check in checks}
     missing_commands = sorted(
-        (REQUIRED_CHECK_COMMANDS | {ci_check_command(main_sha)}) - check_commands
+        (REQUIRED_CHECK_COMMANDS | required_commands | {ci_check_command(main_sha)})
+        - check_commands
     )
     for command in missing_commands:
         blockers.append(f"required check is missing: {command}")
@@ -312,7 +473,7 @@ def verify_closure(
     """
 
     number = parse_issue_number(argument_text)
-    if github.repository_name() != "LauraMardones/headless-pr-workflow":
+    if github.repository_name() != REPOSITORY:
         raise VerificationBlocked("repository identity does not match")
 
     target = github.issue(number)
@@ -338,16 +499,33 @@ def verify_closure(
                 f"Epic has open or invalid child Features: {joined}"
             )
 
+    # An Epic with a merged spec takes its criteria from the spec, never from
+    # its issue body; a Feature, or an Epic with no spec, keeps the issue body.
+    spec = local.epic_spec(number) if target_type == "type:epic" else None
+    if spec is not None and (not spec.goal.strip() or not spec.criteria):
+        raise VerificationBlocked(f"spec has no Goal or Epic criterion: {spec.path}")
+    declared = spec.declared_criteria if spec else target.declared_criteria
+    required = (
+        frozenset({criteria_check_command(number, main_sha)})
+        if spec
+        else frozenset()
+    )
+    po_checkable = (
+        frozenset(c.label for c in spec.criteria if c.po_may_check)
+        if spec
+        else frozenset()
+    )
+
     evidence = tuple(local.evidence_rows(target))
     checks = (*local.check_results(), ci_check_result(github, main_sha))
-    _validate_evidence(target.declared_criteria, evidence, checks, main_sha)
+    _validate_evidence(declared, evidence, checks, main_sha, required, po_checkable)
 
     # Model the command's mandatory final refresh immediately before mutation.
     refreshed = github.issue(number)
     refreshed_main = github.main_sha()
     if refreshed.state != "OPEN" or _target_type(refreshed) != target_type:
         raise VerificationBlocked("target changed during verification")
-    if refreshed.declared_criteria != target.declared_criteria:
+    if spec is None and refreshed.declared_criteria != target.declared_criteria:
         raise VerificationBlocked("declared criteria changed during verification")
     if refreshed_main != main_sha:
         raise VerificationBlocked("main changed during verification")
@@ -365,6 +543,7 @@ def verify_closure(
         evidence=evidence,
         checks=checks,
         existing_summary_url=urls[0] if urls else None,
+        spec=spec,
     )
 
 
@@ -390,6 +569,14 @@ def _closing_body(
     checks = (
         ", ".join(summary.checks) if summary.checks else "recorded in technical summary"
     )
+    po_line = (
+        (
+            f"- PO hands-on checks: {', '.join(summary.po_check_criteria)} "
+            "confirmed by the PO's reply",
+        )
+        if summary.po_check_criteria
+        else ()
+    )
     return "\n".join(
         (
             "## Closure Evidence",
@@ -403,6 +590,7 @@ def _closing_body(
             f"- PO confirmation: `{confirmation.author}` at "
             f"`{confirmation.created_at}` — {confirmation.url}",
             f"- Checks: {checks}",
+            *po_line,
             "- Blockers: none",
             "- Close result: closed",
         )

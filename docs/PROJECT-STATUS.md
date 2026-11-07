@@ -376,6 +376,22 @@ the focused and full test suites. Missing, failed, stale, ambiguous, or
 environment-limited evidence blocks a passing result and prevents a request for
 PO confirmation.
 
+An Epic with a merged spec (`specs/<n>-*/spec.md` at the verified `main` SHA)
+is verified against the spec, not its issue body: the goal is the spec's
+`## Goal` and the criteria are its `**E<n>:**` items in spec order. The
+summary header names `Spec: <path> @ <SHA>`. Several spec folders, an unreadable
+spec, or a spec with no goal or no Epic criterion block verification. An Epic
+with no merged spec is verified from its issue body as before, and the summary
+says `Spec: none found — criteria taken from the issue body`.
+
+For an Epic with a merged spec, `scripts/criteria-check --epic <n> --ref <SHA>`
+is a required check; its output goes under `### Coverage check`. A criterion
+whose **Verified by:** line names "the PO" may get the result `PO CHECK`: the
+verifier cites what it can prove, and the summary's `### PO hands-on checks`
+section gives the PO numbered steps, the exact text to post, the expected
+result and how to tell pass from fail. The PO does these checks, then replies
+`yes` only if every one gave the expected result.
+
 A successful comment records the target and type, full verified SHA, child and
 merged-PR inventory, criterion evidence matrix, exact checks and outcomes,
 blockers, residual risk, and next action. It also includes a stable marker made
@@ -398,7 +414,9 @@ authoritative technical-summary marker and enters the continuation instead of
 repeating verification. It accepts only an unedited comment by
 `LauraMardones`, created after the current summary, whose trimmed body is
 exactly `yes` (case-insensitive) to close, or exactly `no` to decline and
-report a `DECLINED` outcome without mutating anything. Free-form approval,
+report a `DECLINED` outcome without mutating anything. A `yes` also confirms
+the PO hands-on checks of the summary, and the closing-evidence comment names
+those criteria. Free-form approval,
 reactions, edited comments, other authors, `yes`/`no` embedded in a longer
 sentence, and out-of-band messages do not authorize closure or a decline.
 

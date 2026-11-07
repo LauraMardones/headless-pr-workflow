@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -8,6 +9,13 @@ from headless_pr_workflow.closure_verification import (
     CiRun,
     REQUIRED_CHECK_COMMANDS,
     ClosureDeclined,
+    NO_SPEC_LINE,
+    PO_CHECK,
+    Spec,
+    SpecCriterion,
+    criteria_check_command,
+    criteria_check_result,
+    read_epic_spec,
     ClosurePartialFailure,
     Comment,
     EvidenceRow,
@@ -53,6 +61,7 @@ def github() -> Mock:
 def local() -> Mock:
     checkout = Mock()
     checkout.head_sha.return_value = SHA
+    checkout.epic_spec.return_value = None
     checkout.evidence_rows.return_value = [
         EvidenceRow("Criterion one", "PASS", ("src/example.py:1-5",))
     ]
@@ -747,3 +756,318 @@ def test_comment_failure_after_close_reports_repair_action(
     with pytest.raises(ClosurePartialFailure, match="rerun to repair"):
         continue_closure("10", closure_github)
     closure_github.close_issue.assert_called_once_with(10)
+
+
+# --- Epic with a merged spec (issue #463) ---
+
+EPIC_SPEC_TEXT = """# Spec
+
+## Goal
+
+Ship the thing.
+
+## Acceptance Criteria
+
+Intro line.
+
+- **E1:** First criterion.
+  - **Verified by:** closure evidence showing the thing.
+- **E2:** Second criterion.
+  - **Verified by:** the PO follows one chain.
+
+## Decisions
+"""
+E1 = "E1: First criterion."
+E2 = "E2: Second criterion."
+CRITERIA_CHECK = criteria_check_command(10, SHA)
+
+
+def _spec(path: str = "specs/10-x/spec.md") -> Spec:
+    return Spec(
+        path,
+        "Ship the thing.",
+        (
+            SpecCriterion("E1", "First criterion.", "closure evidence showing it."),
+            SpecCriterion("E2", "Second criterion.", "The PO follows one chain."),
+        ),
+    )
+
+
+@pytest.fixture
+def epic(github: Mock, local: Mock) -> tuple[Mock, Mock]:
+    github.issue.return_value = Issue(
+        10,
+        "Epic",
+        "OPEN",
+        frozenset({"type:epic"}),
+        declared_criteria=("Body criterion that must be ignored",),
+    )
+    github.native_children.return_value = []
+    github.metadata_children.return_value = []
+    local.epic_spec.return_value = _spec()
+    local.evidence_rows.return_value = [
+        EvidenceRow(E1, "PASS", ("src/a.py:1",)),
+        EvidenceRow(E2, "PASS", ("src/b.py:2",)),
+    ]
+    local.check_results.return_value = [
+        *local.check_results.return_value,
+        CheckResult(CRITERIA_CHECK, "PASS", "#10: pass"),
+    ]
+    return github, local
+
+
+def test_epic_criteria_come_from_spec_not_issue_body(epic: tuple[Mock, Mock]) -> None:
+    result = verify_closure("10", *epic)
+
+    assert result.spec == _spec()
+    assert [row.criterion for row in result.evidence] == [E1, E2]
+    assert result.spec_line == f"- Spec: specs/10-x/spec.md @ {SHA}"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [EvidenceRow(E1, "PASS", ("x",))],
+        [
+            EvidenceRow(E1, "PASS", ("x",)),
+            EvidenceRow(E2, "PASS", ("x",)),
+            EvidenceRow("E3: extra", "PASS", ("x",)),
+        ],
+        [EvidenceRow(E2, "PASS", ("x",)), EvidenceRow(E1, "PASS", ("x",))],
+        [EvidenceRow("Body criterion that must be ignored", "PASS", ("x",))],
+    ],
+)
+def test_epic_rows_must_match_spec_exactly(
+    rows: list[EvidenceRow], epic: tuple[Mock, Mock]
+) -> None:
+    epic[1].evidence_rows.return_value = rows
+    with pytest.raises(VerificationBlocked, match="exactly match declared criteria"):
+        verify_closure("10", *epic)
+
+
+def test_spec_problem_from_reader_blocks_without_summary(
+    epic: tuple[Mock, Mock],
+) -> None:
+    epic[1].epic_spec.side_effect = VerificationBlocked("more than one spec folder")
+    with pytest.raises(VerificationBlocked, match="more than one spec folder"):
+        verify_closure("10", *epic)
+    epic[1].evidence_rows.assert_not_called()
+    epic[0].summary_urls.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        Spec("specs/10-x/spec.md", "", _spec().criteria),
+        Spec("specs/10-x/spec.md", "Goal.", ()),
+    ],
+)
+def test_model_blocks_spec_without_goal_or_criteria(
+    spec: Spec, epic: tuple[Mock, Mock]
+) -> None:
+    epic[1].epic_spec.return_value = spec
+    with pytest.raises(VerificationBlocked, match="no Goal or Epic criterion"):
+        verify_closure("10", *epic)
+
+
+def _spec_folder(tmp_path: Path, name: str, text: str | None) -> None:
+    folder = tmp_path / "specs" / name
+    folder.mkdir(parents=True)
+    if text is not None:
+        (folder / "spec.md").write_text(text, encoding="utf-8")
+
+
+def test_read_epic_spec_parses_goal_criteria_and_verified_by(tmp_path: Path) -> None:
+    _spec_folder(tmp_path, "10-x", EPIC_SPEC_TEXT)
+    _spec_folder(tmp_path, "100-other", "not read")
+
+    spec = read_epic_spec(tmp_path, 10)
+
+    assert spec is not None
+    assert spec.path == "specs/10-x/spec.md"
+    assert spec.goal == "Ship the thing."
+    assert spec.declared_criteria == (E1, E2)
+    assert [c.po_may_check for c in spec.criteria] == [False, True]
+
+
+def test_read_epic_spec_none_when_no_folder(tmp_path: Path) -> None:
+    assert read_epic_spec(tmp_path, 10) is None
+    _spec_folder(tmp_path, "11-x", EPIC_SPEC_TEXT)
+    assert read_epic_spec(tmp_path, 10) is None
+
+
+@pytest.mark.parametrize(
+    ("folders", "text", "message"),
+    [
+        (("10-a", "10-b"), EPIC_SPEC_TEXT, "more than one spec folder"),
+        (("10-a",), None, "spec cannot be read"),
+        (("10-a",), EPIC_SPEC_TEXT.replace("## Goal", "## Aim"), "no Goal"),
+        (("10-a",), EPIC_SPEC_TEXT.replace("## Goal\n\nShip the thing.", "## Goal\n"), "no Goal"),
+        (("10-a",), EPIC_SPEC_TEXT.replace("**E", "**X"), "no Epic criterion"),
+    ],
+)
+def test_read_epic_spec_blocks_bad_specs(
+    tmp_path: Path, folders: tuple[str, ...], text: str | None, message: str
+) -> None:
+    for name in folders:
+        _spec_folder(tmp_path, name, text)
+    with pytest.raises(VerificationBlocked, match=message):
+        read_epic_spec(tmp_path, 10)
+
+
+def test_missing_coverage_check_blocks(epic: tuple[Mock, Mock]) -> None:
+    epic[1].check_results.return_value = epic[1].check_results.return_value[:-1]
+    with pytest.raises(VerificationBlocked, match="required check is missing") as error:
+        verify_closure("10", *epic)
+    assert "scripts/criteria-check --epic 10" in str(error.value)
+
+
+@pytest.mark.parametrize(("code", "outcome"), [(0, "PASS"), (1, "FAIL"), (2, "BLOCKED")])
+def test_coverage_check_exit_codes(
+    code: int, outcome: str, epic: tuple[Mock, Mock]
+) -> None:
+    check = criteria_check_result(10, SHA, code, "#10: text\n")
+    assert check == CheckResult(CRITERIA_CHECK, outcome, "#10: text")
+    assert CRITERIA_CHECK == (
+        f"scripts/criteria-check --epic 10 --repo LauraMardones/headless-pr-workflow --ref {SHA}"
+    )
+    epic[1].check_results.return_value = [
+        *epic[1].check_results.return_value[:-1],
+        check,
+    ]
+    if outcome == "PASS":
+        assert verify_closure("10", *epic).checks[-2] == check
+    else:
+        with pytest.raises(VerificationBlocked, match=f"check is {outcome}"):
+            verify_closure("10", *epic)
+
+
+def test_coverage_check_not_required_for_feature_or_epic_without_spec(
+    github: Mock, local: Mock
+) -> None:
+    assert verify_closure("10", github, local).spec_line is None
+
+    github.issue.return_value = Issue(
+        10, "Epic", "OPEN", frozenset({"type:epic"}), declared_criteria=("Criterion one",)
+    )
+    github.native_children.return_value = []
+    github.metadata_children.return_value = []
+    result = verify_closure("10", github, local)
+    assert all(CRITERIA_CHECK != check.command for check in result.checks)
+
+
+def test_epic_without_spec_uses_issue_body_and_reports_no_spec(
+    github: Mock, local: Mock
+) -> None:
+    github.issue.return_value = Issue(
+        10, "Epic", "OPEN", frozenset({"type:epic"}), declared_criteria=("Criterion one",)
+    )
+    github.native_children.return_value = []
+    github.metadata_children.return_value = []
+
+    result = verify_closure("10", github, local)
+
+    assert result.spec is None
+    assert result.spec_line == f"- {NO_SPEC_LINE}"
+    assert NO_SPEC_LINE == "Spec: none found — criteria taken from the issue body"
+
+
+def test_po_check_without_spec_blocks(github: Mock, local: Mock) -> None:
+    github.issue.return_value = Issue(
+        10, "Epic", "OPEN", frozenset({"type:epic"}), declared_criteria=("Criterion one",)
+    )
+    github.native_children.return_value = []
+    github.metadata_children.return_value = []
+    local.evidence_rows.return_value = [
+        EvidenceRow("Criterion one", PO_CHECK, ("x",), ("1. do it",))
+    ]
+    with pytest.raises(VerificationBlocked, match="PO CHECK is not allowed"):
+        verify_closure("10", github, local)
+
+
+def test_po_check_with_steps_passes(epic: tuple[Mock, Mock]) -> None:
+    epic[1].evidence_rows.return_value = [
+        EvidenceRow(E1, "PASS", ("src/a.py:1",)),
+        EvidenceRow(E2, PO_CHECK, ("coverage output",), ("1. Open #5.", "2. Follow it.")),
+    ]
+    result = verify_closure("10", *epic)
+    assert result.po_check_criteria == (E2,)
+
+
+def test_po_check_without_steps_blocks(epic: tuple[Mock, Mock]) -> None:
+    epic[1].evidence_rows.return_value = [
+        EvidenceRow(E1, "PASS", ("x",)),
+        EvidenceRow(E2, PO_CHECK, ("coverage output",)),
+    ]
+    with pytest.raises(VerificationBlocked, match="no steps for the PO"):
+        verify_closure("10", *epic)
+
+
+def test_po_check_on_criterion_without_the_po_blocks(epic: tuple[Mock, Mock]) -> None:
+    epic[1].evidence_rows.return_value = [
+        EvidenceRow(E1, PO_CHECK, ("x",), ("1. do it",)),
+        EvidenceRow(E2, "PASS", ("x",)),
+    ]
+    with pytest.raises(VerificationBlocked, match="PO CHECK is not allowed"):
+        verify_closure("10", *epic)
+
+
+def test_po_check_without_evidence_blocks(epic: tuple[Mock, Mock]) -> None:
+    epic[1].evidence_rows.return_value = [
+        EvidenceRow(E1, "PASS", ("x",)),
+        EvidenceRow(E2, PO_CHECK, (), ("1. do it",)),
+    ]
+    with pytest.raises(VerificationBlocked, match="no evidence for its provable"):
+        verify_closure("10", *epic)
+
+
+def test_closing_evidence_names_po_checks_and_reply_rules_hold(
+    closure_github: Mock,
+) -> None:
+    summary = closure_github.technical_summaries.return_value[0]
+    closure_github.technical_summaries.return_value = [
+        replace(summary, po_check_criteria=("E2", "E3"))
+    ]
+
+    result = continue_closure("10", closure_github)
+
+    assert result.action == "CLOSED"
+    body = closure_github.post_closing_evidence.call_args.args[1]
+    assert "- PO hands-on checks: E2, E3 confirmed by the PO's reply" in body
+
+
+def test_po_check_summary_declines_on_no(closure_github: Mock) -> None:
+    summary = closure_github.technical_summaries.return_value[0]
+    closure_github.technical_summaries.return_value = [
+        replace(summary, po_check_criteria=("E2",))
+    ]
+    closure_github.comments.return_value = [
+        Comment("LauraMardones", "no", CONFIRMATION_TIME, "https://example.test/no")
+    ]
+    with pytest.raises(ClosureDeclined):
+        continue_closure("10", closure_github)
+    closure_github.close_issue.assert_not_called()
+
+
+def test_closing_evidence_has_no_po_line_without_po_checks(
+    closure_github: Mock,
+) -> None:
+    continue_closure("10", closure_github)
+    body = closure_github.post_closing_evidence.call_args.args[1]
+    assert "PO hands-on checks" not in body
+
+
+def test_command_file_describes_spec_coverage_and_po_checks() -> None:
+    text = (
+        Path(__file__).resolve().parent.parent / ".claude/commands/verify-closure.md"
+    ).read_text(encoding="utf-8")
+    for needle in (
+        "scripts/criteria-check",
+        "### Coverage check",
+        "### PO hands-on checks",
+        "PO CHECK",
+        "Spec: none found — criteria taken from the issue body",
+        "- Spec: <path> @ <FULL_MAIN_SHA>",
+        "- PO hands-on checks:",
+    ):
+        assert needle in text, needle
