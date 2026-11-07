@@ -1,8 +1,9 @@
 """Facts reader: ``hpw dispatcher facts read`` (issue #283, ADR-010, ADR-014).
 
 Reads, from GitHub alone, each open Epic's merged spec and each open Epic,
-Feature and story's spec record, refinement, decision blocker and hard
-dependencies, and derives *refined*, *ready* and *stale* from them. It writes
+Feature and story's spec record, refinement, decision blocker, hard
+dependencies and declared files (issue #473), and derives *refined*, *ready*
+and *stale* from them. It writes
 nothing: the gateway it is given is only asked to read.
 
 Result words and exit codes: ``read`` (0), ``unreadable`` (3: the open-issue
@@ -52,6 +53,31 @@ def parse_sections(body: str) -> dict[str, str]:
         elif current is not None:
             sections[current].append(line)
     return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def files_affected(body: str) -> list[str] | None:
+    """The paths under ``## Files affected``; ``None`` when the section is missing.
+
+    Own copy of ``extract_files`` in scripts/dispatcher-invoke.sh: the section runs from the first line that starts
+    with ``## Files affected`` to the next line that starts with ``##``; each ``- `` item loses its backticks and a
+    ``(note)``. tests/test_dispatcher_facts_block.py checks that they agree.
+    """
+
+    lines = body.replace("\r\n", "\n").split("\n")
+    start = next((i for i, line in enumerate(lines) if line.startswith("## Files affected")), None)
+    if start is None:
+        return None
+    paths: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("##"):
+            break
+        item = re.match(r"^\s*-\s\s*(.*)$", line)
+        if not item:
+            continue
+        path = re.sub(r"\s*\(.*\)", "", item.group(1).replace("`", ""), count=1).strip()
+        if path:
+            paths.append(path)
+    return paths
 
 
 def hard_dependencies(sections: dict[str, str], own: int) -> list[int] | None:
@@ -245,7 +271,8 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
     entry: dict[str, Any] = {
         "number": number, "title": issue.get("title"), "type": kind, "prio": _label(_labels(issue), "prio:"),
         "epic": parent, "feature": None, "criterion_prefix": None, "record": None, "refinement": None,
-        "decision_blocker": None, "dependencies": None, "refined": False, "ready": False, "stale": False, "reasons": [],
+        "decision_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
+        "stale": False, "reasons": [],
     }  # fmt: skip
     if "body" not in issue:
         entry["reasons"] = ["unreadable: body"]
@@ -261,6 +288,7 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
     entry["feature"] = int(group) if group and kind in STORY_TYPES else None
     if kind == "feature":
         entry["criterion_prefix"] = (_match(_CRITERION_PREFIX, body) or "").upper() or None
+    entry["files_affected"] = files_affected(body)
     spec = epics[parent]["spec"]
     try:
         entry["record"] = facts.record(body, parent, spec)
@@ -342,6 +370,13 @@ def _read(facts: _Facts, only_epic: int | None) -> Result:
             record = {"state": "unreadable", "path": None, "commit": None, "reason": f"unreadable: {exc}"}
         epics[number]["record"] = record
         epics[number]["stale"] = spec["state"] == "merged" and record["state"] in ("stale", "invalid")
+        try:
+            comments = facts.gw.list_comments(number)
+        except GatewayError as exc:
+            log(f"[FACTS] epic #{number} unreadable: {exc.step}")
+            epics[number].update(refinement=None, decision_blocker=None)
+        else:
+            epics[number].update(refinement=facts.refinement(comments), decision_blocker=facts.decision_blocker(comments))
 
     issues: list[dict[str, Any]] = []
     for issue, kind in typed:
