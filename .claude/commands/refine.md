@@ -1,4 +1,4 @@
-Act as a senior product owner and agile delivery coach with GitHub access.
+Act as the Tech Lead (`docs/ROLES.md`) with GitHub access. Refinement makes no product decision (ADR-009 item 4).
 
 Refine GitHub issue #$ARGUMENTS in LauraMardones/headless-pr-workflow by identifying its type and following the correct refinement standard.
 
@@ -15,7 +15,7 @@ Do not implement code.
 
 ## Step 0 — Check for PO usage feedback
 
-Before identifying the issue type, check whether recent implementations under the same Feature or Epic have attracted PO usage feedback that should inform this refinement.
+Before identifying the issue type, check whether recent implementations under the same Feature or Epic have attracted PO usage feedback that should inform this refinement. Put no question to the PO in the session.
 
 **Determine the parent Feature or Epic:**
 - Read the issue body for a `Parent epic:`, `Feature group:`, or `Closes #` reference.
@@ -25,21 +25,32 @@ Before identifying the issue type, check whether recent implementations under th
 **Fetch recently closed/merged work under the parent (14-day lookback):**
 - Use `mcp__github__list_issues` with `state: closed` and a `since` filter set to 14 days ago, scoped to the repository `LauraMardones/headless-pr-workflow`.
 - Filter results to items whose body references the parent issue number (e.g. `Parent epic: #N` or `Feature group: #N`), or search closed PRs via `mcp__github__list_pull_requests` with `state: closed` and the same date window.
-- If no recent items exist, proceed immediately to Step 2 without prompting the PO.
+- If no recent items exist, proceed immediately to Step 2.
 
 **Check for PO usage feedback comments:**
 - For each recently closed issue or merged PR found, use `mcp__github__issue_read` (method: `get_comments`) to fetch its comments.
 - Look for PO comments (author: LauraMardones or comments describing usage observations, unexpected behaviour, or product feedback).
 - "Usage feedback" means observations from actually using the delivered product — not refinement discussion, implementation notes, or approval comments.
 
-**Act on findings:**
+**Classify each usage finding (usage-finding rule):**
 
-- **No feedback found:** Proceed immediately to Step 2. Do not prompt the PO.
-- **Parent undetermined:** Log a note and proceed immediately to Step 2. Do not prompt the PO.
-- **Feedback found:** Summarise the relevant comments (issue/PR number, author, date, key observation) and ask the PO:
-  > "Usage feedback was found on recent implementations under this Feature/Epic. Would you like to incorporate it before proceeding with refinement, or continue with Step 2 now?"
-  >
-  > Wait for the PO's response before continuing.
+- **Affects scope or an acceptance criterion:** it becomes a `Type: decision` Blocked Declaration (see Tech Lead rules → Decision blockers). The affected criterion stays unchanged.
+- **Any other finding:** note it in the refined issue under `## Decisions` (issue/PR, date, observation) and continue refinement.
+- **No feedback found, or parent undetermined:** proceed immediately to Step 2.
+
+## Tech Lead rules
+
+These rules apply to every refinement. `refine-epic.md` and `refine-feature.md` point here and follow them.
+
+- **Role:** the Tech Lead (`docs/ROLES.md`), not a product owner. Refinement makes no product decision (ADR-009 item 4) and asks the PO nothing inside the session.
+- **Spec lookup:** the spec is the one folder `specs/<epic>-*/spec.md` on `main`, where `<epic>` is the issue's own number for a `type:epic` issue and the `Parent epic: #N` number otherwise.
+- **No merged spec:** when that folder does not exist on `main`, or more than one matches, stop before any write. Edit no issue body, label, board status or comment, and name the missing or ambiguous spec as the reason in the reply. Issues already refined under that Epic are not touched.
+- **Spec check:** before the spec is used, fetch `main` so the commit exists locally, then run `python3 scripts/spec-check <spec-path> --ref <commit>`, with `<commit>` the current `main` commit of the spec. Exit `1`: post a `Type: decision` Blocked Declaration whose `Question` names each failing check id from the output, change no acceptance criterion, and leave the board and the body at `In refinement`. Exit `2`: stop, write nothing, and report the spec as unreadable with the script's reason.
+- **Spec record:** the issue body carries exactly one line ``Spec: [`<spec-path>`](<blob link at the commit>) at `<commit>` `` with an optional note after it; `<commit>` is 7–40 hex characters. `scripts/refine-check` verifies it (`spec_record`).
+- **Decision blockers:** what the spec does not settle becomes a `## Blocked Declaration` with `Type: decision` in the format of `docs/PROJECT-STATUS.md` → Blocked Status Protocol, posted on the issue being refined; the affected criterion stays unchanged and the board and body stay at `In refinement`. Before declaring one, search for an existing answer as described in Step 2; the pre-check of existing decisions stays.
+- **Resume after `/unblock`:** the next run reads the PO's reply that contains a `/unblock` line, records the answer under the issue's `## Decisions` with its date and comment link, and continues from it. An answer that changes scope is recorded, the affected criterion stays unchanged, and the issue stays blocked until a spec PR with the change merges (ADR-009 item 5).
+- **Lens questions:** the Tech Lead answers each active lens's `## Lens Questions` in the session and records the answers under `## Decisions`. A lens question that needs a product choice becomes a decision blocker.
+- **Usage findings:** classified in Step 0.
 
 ## Step 2 — Identify issue type
 
@@ -51,7 +62,7 @@ Fetch the issue from GitHub. Check its labels for exactly one of:
 - `type:task` → follow `.claude/commands/refine-task.md`
 - `type:bug` → follow `.claude/commands/refine-bug.md`
 
-Before adding any Open Question that requires PO input, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating the question to the PO.
+Before declaring a decision blocker, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating it.
 
 ## Step 3 — If no type label is set
 

@@ -1,4 +1,4 @@
-Act as a senior product owner and agile delivery coach with GitHub access.
+Act as the Tech Lead (`docs/ROLES.md`) with GitHub access.
 
 Refine the following GitHub feature until it meets the project's refinement standard.
 
@@ -10,6 +10,8 @@ Issue:
 
 Do not implement code.
 
+Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and check, no refinement without a merged spec, the spec record, decision blockers instead of questions to the PO, resume after `/unblock`, lens questions and usage findings. Ask the PO nothing in the session.
+
 ## Core Instructions
 
 - Fetch the current GitHub issue title, body, labels, milestone, parent epic, linked issues, and relevant comments.
@@ -19,7 +21,7 @@ Do not implement code.
 - GitHub must remain the source of truth.
 - Preserve useful existing content, but reorganize it into the project feature format.
 - Do not discard prior decisions, constraints, dependencies, or context unless clearly obsolete.
-- If something appears obsolete, move it to Notes or Open Questions instead of deleting it silently.
+- If something appears obsolete, move it to Notes instead of deleting it silently.
 - If you do not have permission or tooling to update GitHub, stop and say exactly what is missing.
 
 ## Status Workflow
@@ -41,7 +43,7 @@ Before creating any new issues, inventory what already exists:
 - Also check the feature body for any existing Seed Stories list.
 - Classify each found issue by type (`type:story`, `type:task`, `type:bug`) and state (open/closed).
 - Do not create a duplicate of any existing issue that already covers the same scope.
-- If an existing issue is misclassified, mislabeled, or missing its parent reference, note it under Open Questions rather than silently fixing it during this refinement.
+- If an existing issue is misclassified, mislabeled, or missing its parent reference, note it in the refined issue rather than silently fixing it during this refinement.
 
 ## Lens Selection
 
@@ -50,14 +52,14 @@ Before breaking down the feature, apply refinement lenses to ensure the breakdow
 1. Read all `.md` files in `.claude/commands/refinement-lenses/`
 2. Always apply the `token-economics.md` lens (default, regardless of labels)
 3. Additionally, for each lens file whose `## Trigger Labels` section matches any of the current issue's GitHub labels, apply that lens as well
-4. For each active lens, present its `## Lens Questions` to the user and incorporate the lens perspective into your analysis before proposing the breakdown
+4. For each active lens, answer its `## Lens Questions` yourself as the Tech Lead, record the answers under `## Decisions`, and incorporate the lens perspective into your analysis before proposing the breakdown; a lens question that needs a product choice becomes a `Type: decision` Blocked Declaration
 
 The lens questions will help identify:
 - Per-session token overhead problems that suggest different story boundaries
 - Documentation work that should be clustered in a single story
 - Executor tier misalignments that need correction
 
-Proceed to the breakdown step only after lens questions have been answered.
+Proceed to the breakdown step once each lens question is answered or raised as a decision blocker.
 
 ## Breakdown
 
@@ -67,7 +69,7 @@ A feature refines into Story/Task/Bug issues - not into further Features.
 - Create new issues only for scope gaps not yet covered by existing issues.
 - Link all new issues to this feature and its parent epic.
 - List all related issues - both pre-existing and newly created - under Seed Stories in the feature body.
-- If the breakdown reveals that the feature itself should be split into two features, stop and raise it as an Open Question rather than silently splitting.
+- If the breakdown reveals that the feature itself should be split into two features, stop and raise it as a `Type: decision` blocker rather than silently splitting.
 
 After the breakdown is complete, apply the devil's advocate closing step (see below).
 
@@ -179,7 +181,9 @@ Refinement is complete when the feature has:
 - clear Why (relation to parent epic)
 - Scope
 - Out of Scope
-- Success Criteria (testable)
+- Criterion prefix line (`Criterion prefix: F<k>`, `k` from the Feature's place in the Epic's Seed Features list)
+- Spec record line (`Spec: [...] at `<commit>``)
+- Success Criteria (testable), each written `- [ ] **F<k>.<m>** (serves E<n>, …) — text` with the Feature's own prefix and at least one Epic criterion id
 - Seed Stories (created as GitHub issues)
 - Implementation Order derived from seed issue hard dependencies
 - Blocked / Unresolved Hard Dependencies when any seed issue cannot be ordered
@@ -189,34 +193,13 @@ Refinement is complete when the feature has:
 
 ## Open Questions Format
 
-Before adding an Open Question that requires PO input, search existing repository documentation, including `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating the question to the PO.
+Questions for the PO are not written here for the PO to answer in the session. A product question becomes a `Type: decision` Blocked Declaration posted on the issue (`.claude/commands/refine.md` → Tech Lead rules → Decision blockers), after the search for an existing answer in `docs/PROJECT-STATUS.md`, `docs/decisions/ADR-*.md`, `docs/HEADLESS-PR-WORKFLOW.md`, other relevant `docs/*.md`, and the parent Epic's and Feature's `## Decisions` sections. If an existing answer is found, record and follow it instead of escalating.
 
-Each open question must be structured as:
-
-```md
-### [Question title]
-**Context:** [One sentence explaining why this matters]
-
-**Option A: [Name]**
-- Pros: ...
-- Cons: ...
-
-**Option B: [Name]**
-- Pros: ...
-- Cons: ...
-
-**Recommendation:** Option A — [brief reason in plain language, no jargon]
-```
-
-Rules:
-- Language must be non-technical — assume the reader has no engineering background
-- Each option must have at least one pro and one con
-- A recommendation is required; if genuinely too close to call, state why and what information is needed to decide
-- If there are more than two options, include all of them
+The `## Open Questions` section of the issue body lists the link to each blocker comment, or reads `None.`.
 
 ## Decisions Format
 
-When a PO closes an open question during or after refinement, move it from Open Questions to Decisions with the chosen option, rejected alternatives, and date. Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
+When a decision blocker is answered by the PO's `/unblock` reply, or the Tech Lead settles a lens question, record it under Decisions with the chosen option, rejected alternatives, date and comment link (when answered by the PO). Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
 
 Each decision must be structured as:
 
@@ -230,7 +213,7 @@ Each decision must be structured as:
 
 - Use only existing GitHub labels.
 - Apply `type:feature` if not already set.
-- If priority, area, or milestone is unclear, add it as an Open Question.
+- If priority, area, or milestone is unclear, raise it as a `Type: decision` blocker.
 
 ## Issue Body Format
 
@@ -240,6 +223,8 @@ Update the issue body to this structure:
 Parent epic: #{EPIC_NUMBER} {EPIC_TITLE}
 Milestone: {MILESTONE}
 PO status: {In refinement | Refined | Ready for implementation.}
+Spec: [`specs/{EPIC_NUMBER}-{slug}/spec.md`]({blob link at the commit}) at `{commit}`
+Criterion prefix: F{k}
 
 ## Goal
 
@@ -259,7 +244,7 @@ Relation to parent epic and business value.
 
 ## Success Criteria
 
-- [ ] ...
+- [ ] **F{k}.{m}** (serves E{n}, ...) — text
 
 ## Seed Stories
 
@@ -298,7 +283,7 @@ Soft depends on:
 
 ## Open Questions
 
-- ...
+- <link to each decision blocker comment, or `None.`>
 
 ## Decisions
 
@@ -310,7 +295,7 @@ Soft depends on:
 The last step of every refinement, after the board write, is the deterministic check; the model is not the judge of its own completeness.
 
 - Write the board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` and require exit `0`: that exit is the board read-back. A non-zero exit means the board was not confirmed; report it, never claim the status.
-- Then run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and the board and checks the `type:`, `executor:` and `prio:` labels, the body `PO status:` against the board Status, open hard dependencies, the required body sections, open questions and parent references.
+- Then run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and the board and checks the `type:`, `executor:` and `prio:` labels, the body `PO status:` against the board Status, open hard dependencies, the required body sections, open questions, parent references, the spec record and (for a Feature) the criterion ids.
 - Run it on every refinement, including a re-refinement of an issue that is already `Ready for implementation`.
 - Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels, dependencies or board could not be read) forbids it.
 - On a non-zero exit after the board write: fix what can be fixed and re-run the check; if a failure remains, move the board back with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`, set `PO status: In refinement` in the issue body, and list the failing checks as blockers, so the body and the board never claim a status the check did not confirm.
@@ -327,4 +312,4 @@ After updating GitHub, reply only with:
 - Existing issues found and included (with numbers)
 - Stories/Tasks/Bugs created with issue numbers
 - Labels changed
-- Remaining Open Questions
+- Decision blockers raised (comment links), or none
