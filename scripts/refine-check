@@ -10,8 +10,9 @@ then one line per check: `<check-id>: pass|fail|skip - <detail>`.
 Exit codes:
   0  every applicable check passes.
   1  one or more checks fail; each failure is named.
-  2  the issue, its labels, the repository label list, a dependency or the board
-     item could not be read, or the arguments are invalid. Never a pass.
+  2  the issue, its labels, the repository label list, a dependency, the board
+     item or the recorded spec could not be read (a spec read that fails for a
+     reason other than not found), or the arguments are invalid. Never a pass.
 """
 
 from __future__ import annotations
@@ -154,6 +155,18 @@ def read_board_status(repo: str, number: int) -> str:
     raise ReadError(f"board status: issue #{number} is not on the project board")
 
 
+def spec_exists(repo: str, path: str, ref: str) -> bool:
+    """True when `path` exists at `ref`; False when GitHub answers not found."""
+    try:
+        _gh(["api", f"repos/{repo}/contents/{path}?ref={ref}", "--jq", ".type"], f"spec {path} at {ref}")
+    except ReadError as error:
+        text = str(error).lower()
+        if "http 404" in text or "not found" in text or "no commit found" in text:
+            return False
+        raise
+    return True
+
+
 # --- body parsing --------------------------------------------------------------------
 
 def parse_sections(body: str) -> dict[str, str]:
@@ -201,16 +214,38 @@ def hard_dependencies(sections: dict[str, str], own: int) -> list[int]:
     return sorted({n for n in numbers if n != own})
 
 
+SPEC_LINE = re.compile(r"^[ \t]*Spec:\s*\[`([^`]+)`\]\((\S+)\)\s+at\s+`([0-9a-fA-F]{7,40})`(?:\s.*)?$", re.M)
+FEATURE_PREFIX = re.compile(r"^[ \t]*Criterion prefix:\s*F(\d+)\b", re.I | re.M)
+# Same format as scripts/criteria-check: `**F<k>.<m>** (serves E<n>, ...) - text`.
+FEATURE_CRITERION = re.compile(r"\*\*F(\d+)\.\d+\*\*\s*\(serves\s+([^)]*)\)", re.I)
+
+
+def list_items(text: str) -> list[str]:
+    """Top-level list items of a section; indented lines continue the previous item."""
+    items: list[list[str]] = []
+    fenced = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        match = None if fenced else re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?(.*)$", line)
+        if match:
+            items.append([match.group(1)])
+        elif items and (fenced or line.startswith((" ", "\t"))):
+            items[-1].append(line.strip())
+    return [" ".join(part for part in item if part).strip() for item in items]
+
+
 def type_labels(issue: Issue) -> list[str]:
     return [label.split(":", 1)[1] for label in issue.labels if label.startswith("type:")]
 
 
 # --- checks --------------------------------------------------------------------------
 
-def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, board_reader=None) -> tuple[str | None, list[Check]]:
+def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, board_reader=None, spec_reader=None) -> tuple[str | None, list[Check]]:
     issue_reader = issue_reader or read_issue
     labels_reader = labels_reader or read_repo_labels
     board_reader = board_reader or read_board_status
+    spec_reader = spec_reader or spec_exists
     checks: list[Check] = []
 
     types = type_labels(issue)
@@ -309,7 +344,47 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
                     raise
         checks.append(Check("parent_refs", "fail", "; ".join(problems)) if problems else Check("parent_refs", "pass", "parent references resolve"))
 
+    checks.append(spec_record_check(issue, repo, effective, spec_reader))
+    checks.append(feature_criteria_check(issue, effective))
     return effective, checks
+
+
+def spec_record_check(issue: Issue, repo: str, effective: str | None, spec_reader) -> Check:
+    body = issue.body.replace("\r\n", "\n")
+    match = SPEC_LINE.search(body)
+    if effective is None:
+        return Check("spec_record", "skip", "issue type unknown")
+    if not match:
+        found = re.search(r"^[ \t]*Spec:", body, re.M)
+        return Check("spec_record", "fail", "malformed 'Spec:' line" if found else "no 'Spec:' line")
+    path, _, commit = match.groups()
+    if effective == "epic":
+        epic = issue.number
+    else:
+        parent = re.search(r"^[ \t]*Parent epic:\s*#(\d+)\b", body, re.I | re.M)
+        if not parent:
+            return Check("spec_record", "fail", "no 'Parent epic: #N' line to match the spec path against")
+        epic = int(parent.group(1))
+    if not re.fullmatch(rf"specs/{epic}-[^/]+/spec\.md", path):
+        return Check("spec_record", "fail", f"path '{path}' is not specs/{epic}-*/spec.md")
+    if not spec_reader(repo, path, commit):
+        return Check("spec_record", "fail", f"{path} does not exist at {commit}")
+    return Check("spec_record", "pass", f"{path} at {commit}")
+
+
+def feature_criteria_check(issue: Issue, effective: str | None) -> Check:
+    if effective != "feature":
+        return Check("feature_criteria", "skip", "only applies to type:feature")
+    prefix = FEATURE_PREFIX.search(issue.body.replace("\r\n", "\n"))
+    if not prefix:
+        return Check("feature_criteria", "fail", "no 'Criterion prefix: F<k>' line")
+    wanted = int(prefix.group(1))
+    items = list_items(parse_sections(issue.body).get("Success Criteria", ""))
+    for position, item in enumerate(items, start=1):
+        match = FEATURE_CRITERION.match(item)
+        if not match or int(match.group(1)) != wanted or not re.search(r"\bE\d+", match.group(2), re.I):
+            return Check("feature_criteria", "fail", f"item {position} does not match '**F{wanted}.<m>** (serves E<n>)'")
+    return Check("feature_criteria", "pass", f"{len(items)} criteria use prefix F{wanted} and name an Epic criterion")
 
 
 def verdict_line(number: int, checks: list[Check]) -> str:

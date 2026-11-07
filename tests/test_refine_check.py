@@ -33,10 +33,16 @@ STORY_SECTIONS = [
 ]
 
 
-def body(*, status="Ready for implementation.", skip=(), hard="- None.", questions="None.", header=True):
+SPEC_LINE = "Spec: [`specs/10-epic/spec.md`](https://github.com/owner/repo/blob/abc1234/specs/10-epic/spec.md) at `abc1234`"
+
+
+def body(*, status="Ready for implementation.", skip=(), hard="- None.", questions="None.", header=True, spec=SPEC_LINE):
     lines = []
     if header:
-        lines += ["Parent epic: #10 Epic", "Feature group: #11 Feature", f"PO status: {status}", ""]
+        lines += ["Parent epic: #10 Epic", "Feature group: #11 Feature", f"PO status: {status}"]
+        if spec:
+            lines.append(spec)
+        lines.append("")
     for name in STORY_SECTIONS:
         if name in skip:
             continue
@@ -51,8 +57,8 @@ def make_issue(mod, *, labels=("type:story", "prio:P2", "executor:claude-code-so
 
 
 class Env:
-    def __init__(self, mod, issue, board="Ready for implementation", states=None, repo_labels=None):
-        self.mod, self.issue, self.board = mod, issue, board
+    def __init__(self, mod, issue, board="Ready for implementation", states=None, repo_labels=None, spec=True):
+        self.mod, self.issue, self.board, self.spec = mod, issue, board, spec
         self.states = states or {}
         self.repo_labels = repo_labels if repo_labels is not None else {"executor:claude-code-sonnet"}
 
@@ -61,10 +67,16 @@ class Env:
             return self.issue
         return self.mod.Issue(number, "t", "", (), self.states.get(number, "CLOSED"))
 
+    def spec_reader(self, repo, path, ref):
+        if isinstance(self.spec, Exception):
+            raise self.spec
+        return self.spec
+
     def run(self):
         _, checks = self.mod.run_checks(
             self.issue, REPO, issue_reader=self.issue_reader,
             labels_reader=lambda repo: self.repo_labels, board_reader=lambda repo, n: self.board,
+            spec_reader=self.spec_reader,
         )
         return {c.id: c for c in checks}
 
@@ -77,7 +89,8 @@ def test_all_pass(mod):
     checks = Env(mod, make_issue(mod)).run()
     assert failing(checks) == []
     assert set(checks) >= {"type_label", "executor_label", "prio_label", "po_status_board",
-                           "hard_dependencies", "required_sections", "open_questions", "parent_refs"}
+                           "hard_dependencies", "required_sections", "open_questions", "parent_refs",
+                           "spec_record", "feature_criteria"}
 
 
 @pytest.mark.parametrize(
@@ -115,7 +128,7 @@ def test_body_status_must_match_board(mod):
 
 
 def test_missing_po_status_fails(mod):
-    assert failing(Env(mod, make_issue(mod, header=False)).run()) == ["parent_refs", "po_status_board"]
+    assert failing(Env(mod, make_issue(mod, header=False)).run()) == ["parent_refs", "po_status_board", "spec_record"]
 
 
 def test_ready_with_open_hard_dependency_fails(mod):
@@ -168,7 +181,7 @@ def test_open_question_blocks_ready_only(mod):
 def test_parent_refs_required_for_ready(mod):
     issue = make_issue(mod)
     issue = mod.Issue(5, issue.title, issue.body.replace("Parent epic: #10 Epic\n", ""), issue.labels, "OPEN")
-    assert failing(Env(mod, issue).run()) == ["parent_refs"]
+    assert failing(Env(mod, issue).run()) == ["parent_refs", "spec_record"]
 
 
 def test_unresolvable_parent_fails(mod):
@@ -190,7 +203,7 @@ def test_issue_264_replay(mod):
     checks = Env(mod, issue, board="Ready for refinement").run()
     assert failing(checks) == ["executor_label", "po_status_board"]
     assert mod.verdict_line(5, list(checks.values())).startswith(
-        "Refine check: #5 fail (2 of 8): executor_label, po_status_board")
+        "Refine check: #5 fail (2 of 9): executor_label, po_status_board")
 
 
 def patch_reads(mod, monkeypatch, issue, *, board="Ready for implementation", fail=None):
@@ -199,6 +212,7 @@ def patch_reads(mod, monkeypatch, issue, *, board="Ready for implementation", fa
 
     monkeypatch.setattr(mod, "read_issue", boom if fail == "issue" else lambda repo, n: issue if n == 5 else mod.Issue(n, "t", "", (), "CLOSED"))
     monkeypatch.setattr(mod, "read_repo_labels", boom if fail == "labels" else lambda repo: {"executor:claude-code-sonnet"})
+    monkeypatch.setattr(mod, "spec_exists", boom if fail == "spec" else lambda repo, path, ref: True)
     monkeypatch.setattr(mod, "read_board_status", boom if fail == "board" else lambda repo, n: board)
 
 
@@ -217,11 +231,12 @@ def test_main_exit_1_json(mod, monkeypatch, capsys):
     assert (data["issue"], data["type"], data["verdict"], data["exit_code"]) == (5, "story", "fail", 1)
     assert [c["id"] for c in data["checks"]] == [
         "type_label", "executor_label", "prio_label", "po_status_board",
-        "hard_dependencies", "required_sections", "open_questions", "parent_refs"]
+        "hard_dependencies", "required_sections", "open_questions", "parent_refs",
+        "spec_record", "feature_criteria"]
     assert {c["id"]: c["status"] for c in data["checks"]}["po_status_board"] == "fail"
 
 
-@pytest.mark.parametrize("what", ["issue", "labels", "board"])
+@pytest.mark.parametrize("what", ["issue", "labels", "board", "spec"])
 @pytest.mark.parametrize("as_json", [False, True])
 def test_unreadable_is_exit_2_never_pass(mod, monkeypatch, capsys, what, as_json):
     patch_reads(mod, monkeypatch, make_issue(mod), fail=what)
@@ -257,3 +272,127 @@ def test_invalid_arguments_exit_2(mod, monkeypatch, argv):
 def test_missing_repo_exit_2(mod, monkeypatch):
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     assert mod.main(["--issue", "5"]) == 2
+
+
+# --- spec_record ---------------------------------------------------------------------
+
+def spec_line(path="specs/10-epic/spec.md", commit="abc1234"):
+    return f"Spec: [`{path}`](https://github.com/owner/repo/blob/{commit}/{path}) at `{commit}`"
+
+
+def with_body(mod, issue, text, labels=None):
+    return mod.Issue(issue.number, issue.title, text, labels or issue.labels, issue.state)
+
+
+def spec_check(mod, issue, spec=True):
+    return Env(mod, issue, spec=spec).run()["spec_record"]
+
+
+def test_spec_record_pass_with_optional_note(mod):
+    note = spec_line() + " (unchanged on main)"
+    check = spec_check(mod, make_issue(mod, spec=note))
+    assert (check.status, check.detail) == ("pass", "specs/10-epic/spec.md at abc1234")
+
+
+@pytest.mark.parametrize("spec, detail", [
+    (None, "no 'Spec:' line"),
+    ("Spec: refined against abc1234", "malformed"),
+    ("Spec: [`specs/10-epic/spec.md`](https://x) at `abc12`", "malformed"),
+    ("Spec: [`specs/10-epic/spec.md`](https://x) at `abc1234" + "0" * 40 + "`", "malformed"),
+    ("Spec: [`specs/10-epic/spec.md`](https://x)", "malformed"),
+])
+def test_spec_record_missing_or_malformed_fails(mod, spec, detail):
+    check = spec_check(mod, make_issue(mod, spec=spec))
+    assert check.status == "fail" and detail in check.detail
+
+
+@pytest.mark.parametrize("path", ["specs/11-epic/spec.md", "specs/10/spec.md", "specs/10-epic/other.md", "docs/10-epic/spec.md"])
+def test_spec_record_wrong_epic_path_fails(mod, path):
+    check = spec_check(mod, make_issue(mod, spec=spec_line(path)))
+    assert check.status == "fail" and "specs/10-*/spec.md" in check.detail
+
+
+def test_spec_record_uses_own_number_for_an_epic(mod):
+    labels = ("type:epic", "prio:P2")
+    ok = mod.Issue(5, "Epic: x", f"PO status: Refined\n{spec_line('specs/5-e/spec.md')}\n", labels, "OPEN")
+    bad = mod.Issue(5, "Epic: x", f"PO status: Refined\n{spec_line('specs/10-e/spec.md')}\n", labels, "OPEN")
+    assert spec_check(mod, ok).status == "pass"
+    assert spec_check(mod, bad).status == "fail"
+
+
+def test_spec_record_non_epic_needs_parent_epic(mod):
+    issue = make_issue(mod)
+    text = issue.body.replace("Parent epic: #10 Epic\n", "")
+    check = spec_check(mod, with_body(mod, issue, text))
+    assert check.status == "fail" and "Parent epic" in check.detail
+
+
+def test_spec_record_not_found_at_commit_fails(mod):
+    check = spec_check(mod, make_issue(mod), spec=False)
+    assert check.status == "fail" and "does not exist at abc1234" in check.detail
+
+
+def test_spec_exists_tells_not_found_from_other_errors(mod, monkeypatch):
+    def fake(answer, ok=False):
+        def _gh(args, what):
+            if ok:
+                return answer
+            raise mod.ReadError(f"{what}: {answer}")
+        return _gh
+
+    monkeypatch.setattr(mod, "_gh", fake("file", ok=True))
+    assert mod.spec_exists(REPO, "specs/1-a/spec.md", "abc1234") is True
+    monkeypatch.setattr(mod, "_gh", fake("gh: Not Found (HTTP 404)"))
+    assert mod.spec_exists(REPO, "specs/1-a/spec.md", "abc1234") is False
+    monkeypatch.setattr(mod, "_gh", fake("HTTP 502"))
+    with pytest.raises(mod.ReadError):
+        mod.spec_exists(REPO, "specs/1-a/spec.md", "abc1234")
+
+
+def test_spec_read_error_other_than_not_found_is_exit_2(mod, monkeypatch, capsys):
+    patch_reads(mod, monkeypatch, make_issue(mod), fail="spec")
+    assert mod.main(["--issue", "5", "--repo", REPO]) == 2
+    assert "spec" in capsys.readouterr().out
+
+
+# --- feature_criteria ----------------------------------------------------------------
+
+FEATURE_SECTIONS = ["Goal", "Why", "Scope", "Out of Scope", "Success Criteria", "Dependencies", "Assumptions"]
+
+
+def feature_issue(mod, *, prefix="Criterion prefix: F2", criteria=None, labels=("type:feature", "prio:P2")):
+    criteria = criteria if criteria is not None else [
+        "- [ ] **F2.1** (serves E1, E3) - first", "- [ ] **F2.2** (serves E2) - second\n  continued"]
+    lines = ["Parent epic: #10 Epic", "PO status: In refinement", spec_line(), prefix, ""]
+    for name in FEATURE_SECTIONS:
+        lines += [f"## {name}", "", "\n".join(criteria) if name == "Success Criteria" else "text", ""]
+    return mod.Issue(5, "Feature: x", "\n".join(lines), labels, "OPEN")
+
+
+def criteria_check(mod, issue):
+    return Env(mod, issue, board="In refinement").run()["feature_criteria"]
+
+
+def test_feature_criteria_pass(mod):
+    assert criteria_check(mod, feature_issue(mod)).status == "pass"
+
+
+def test_feature_criteria_missing_prefix_fails(mod):
+    check = criteria_check(mod, feature_issue(mod, prefix=""))
+    assert check.status == "fail" and "Criterion prefix" in check.detail
+
+
+@pytest.mark.parametrize("item, position", [
+    ("- [ ] **F3.1** (serves E1) - wrong prefix", 2),
+    ("- [ ] **F2.3** - no serves", 2),
+    ("- [ ] **F2.3** (serves F1.1) - no epic id", 2),
+    ("- [ ] plain text", 2),
+])
+def test_feature_criteria_bad_item_fails(mod, item, position):
+    issue = feature_issue(mod, criteria=["- [ ] **F2.1** (serves E1) - ok", item])
+    check = criteria_check(mod, issue)
+    assert check.status == "fail" and f"item {position} does not match '**F2.<m>** (serves E<n>)'" in check.detail
+
+
+def test_feature_criteria_skipped_for_other_types(mod):
+    assert Env(mod, make_issue(mod)).run()["feature_criteria"].status == "skip"
