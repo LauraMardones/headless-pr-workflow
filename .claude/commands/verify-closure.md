@@ -135,22 +135,10 @@ missing.
 
 ## 6. Run and record checks
 
-Run at least this command from the verified checkout:
-
-1. `python -m pytest tests/test_verify_closure_command.py`
-
-For an Epic with a merged spec, also run, as a required check:
-
-`scripts/criteria-check --epic $ARGUMENTS --repo LauraMardones/headless-pr-workflow --ref <FULL_MAIN_SHA>`
-
-Exit `0` is `PASS`, exit `1` is `FAIL`, exit `2` is `BLOCKED`
-(`criteria_check_result` in the model). A missing run is a blocker. Keep its
-text output for the `### Coverage check` section. A Feature, or an Epic with no
-merged spec, does not run it.
-
-Do not run the full suite (`python -m pytest`) locally. CI runs it, including
-every `tests/test_*.sh` file, on every push to `main`. Read the CI `pytest`
-check run for the exact full verified `main` SHA (for example
+Read CI first. Before you choose or run any criterion-specific local check, read
+the CI `pytest` check run for the exact full verified `main` SHA. Do not run the
+full suite (`python -m pytest`) locally. CI runs it, including every
+`tests/test_*.sh` file, on every push to `main`. Read the check run (for example
 `gh api repos/LauraMardones/headless-pr-workflow/commits/<FULL_MAIN_SHA>/check-runs`
 or `gh run list --workflow tests.yml --commit <FULL_MAIN_SHA>`), match by full
 SHA only, never by branch or "latest run on main", and never wait, poll, or
@@ -169,10 +157,25 @@ and attempt number; the newest run (highest run id) counts, then its newest atte
 
 Record the CI row as ``CI pytest on <full SHA>`` with its run URL.
 
-If the focused test file has been renamed, identify its actual focused command
-from the verified repository and record that exact command instead. Add any
-scope-specific checks necessary to establish individual criteria (for example a
-criterion that names Windows keeps its own local check).
+Then run only these local checks from the verified checkout:
+
+1. `python -m pytest tests/test_verify_closure_command.py`. If the focused test
+   file has been renamed, identify its actual focused command from the verified
+   repository and run that exact command instead.
+2. For an Epic with a merged spec, `scripts/criteria-check --epic $ARGUMENTS --repo LauraMardones/headless-pr-workflow --ref <FULL_MAIN_SHA>`
+   as a required check. Exit `0` is `PASS`, exit `1` is `FAIL`, exit `2` is
+   `BLOCKED` (`criteria_check_result` in the model). A missing run is a blocker.
+   Keep its text output for the `### Coverage check` section. A Feature, or an
+   Epic with no merged spec, does not run it.
+3. Only the criterion checks that CI cannot give, for example a criterion that
+   names Windows, or a test that CI skips on Linux. Record each one in
+   `### Checks` with the reason CI cannot give it.
+
+A test file that a criterion names, and that the CI `pytest` run executes, is
+not run locally, not even as a short extra check. Cite it from that run in the
+criterion row as "passed in the CI `pytest` run on the verified SHA (Checks)".
+That citation is valid only when the CI row in `### Checks` is `PASS`; otherwise
+the row is not `PASS`.
 
 Record every exact command and classify its result as `PASS`, `FAIL`, or
 `BLOCKED`. A non-zero test result is `FAIL`. A command that cannot run because
@@ -244,6 +247,7 @@ post exactly one issue comment in this structure:
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | ... | PASS | ... |
+| 2 | ... | PASS | `tests/test_example.py` passed in the CI `pytest` run on the verified SHA (Checks) |
 
 For an Epic with a merged spec, `#` is the spec's id (`E1`) and Result is
 `PASS` or `PO CHECK`.
