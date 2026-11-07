@@ -15,7 +15,7 @@ from headless_pr_workflow.dispatcher import cli, status
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 from headless_pr_workflow.dispatcher.status import STATUSES, count_progress, derive_status, read_status
 
-from tests.test_dispatcher_facts_block import BLOCKER, PO, FakeGateway, spec_line, story_body, summary
+from tests.test_dispatcher_facts_block import BLOCKER, PO, RECORD_OK, FakeGateway, spec_line, story_body, summary
 
 DRAFT = {"number": 50, "draft": True, "gates_pass": False}
 REVIEW = {"number": 51, "draft": False, "gates_pass": False}
@@ -301,6 +301,26 @@ def test_other_blocker_types_block_until_a_trusted_unblocked_line(gw):
     assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
     gw.comment(30, "Unblocked: #99 is merged", login=PO)
     assert by_number(read_status(gw, "o/r"))[30]["status"] == "Ready to implement"
+
+
+def test_a_later_declarations_unblocked_when_field_does_not_resolve_an_earlier_blocker(gw):
+    gw.add_issue(30, ["type:story"], story_body())
+    gw.comment(30, summary())
+    gw.comment(30, "## Blocked Declaration\nType: external\nBlocked by: a vendor", login=PO)
+    gw.comment(30, "## Blocked Declaration\nType: decision\nUnblocked when: the PO answers\n", login=PO)
+    gw.comment(30, "Unblocked when: later", login=PO)
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
+    gw.comment(30, "/unblock", login=PO)
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"  # the external blocker is still open
+    gw.comment(30, "Unblocked: the vendor answered", login=PO)
+    gw.comment(30, summary())  # a refinement after the /unblock, as the facts require
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Ready to implement"
+
+
+def test_unreadable_epic_spec_record_gives_unknown_not_not_refined(gw):
+    gw.fail.add(RECORD_OK[:7])
+    item = by_number(read_status(gw, "o/r"))[10]
+    assert item["status"] == "unknown" and "unreadable" in item["fact"]
 
 
 @pytest.mark.parametrize("kind", ["external", "conflict", "resource"])

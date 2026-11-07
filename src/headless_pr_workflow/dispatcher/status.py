@@ -33,7 +33,7 @@ UNKNOWN = "unknown"
 
 _BLOCKED_TYPES = ("dependency", "external", "conflict", "resource")
 _TYPE_LINE = re.compile(r"^[ \t]*Type:\s*([A-Za-z]+)\b", re.M)
-_UNBLOCKED_LINE = re.compile(r"^\s*Unblocked\b", re.M)
+_UNBLOCKED_LINE = re.compile(r"^\s*Unblocked\b(?!\s+when\b)", re.M | re.I)
 
 
 def _decided(status: str, fact: str) -> tuple[str, str]:
@@ -134,6 +134,12 @@ def _linked(body: str, number: int) -> bool:
     return re.search(rf"(closes|fixes|resolves)\s+#{number}\b", body.lower()) is not None
 
 
+def _resolves(body: str) -> bool:
+    """An ``Unblocked`` line in a comment that is not itself a declaration (its ``Unblocked when:`` field is no resolution)."""
+
+    return "## Blocked Declaration" not in body and _UNBLOCKED_LINE.search(body) is not None
+
+
 def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
     """An open Blocked Declaration of type dependency, external, conflict or resource (see the command page)."""
 
@@ -147,7 +153,7 @@ def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
     if not declared:
         return False
     return not any(
-        facts.trusted(c) and str(c.get("created_at") or "") > declared and _UNBLOCKED_LINE.search(str(c.get("body") or ""))
+        facts.trusted(c) and str(c.get("created_at") or "") > declared and _resolves(str(c.get("body") or ""))
         for c in comments
     )
 
@@ -234,7 +240,9 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
     for number, entry in epics.items():
         kind = "epic"
         blocked, reason = blocked_and_reason(number, entry.get("decision_blocker"), read_own=False)
-        unreadable = reason or (f"unreadable: spec PRs of #{number}" if spec_pr[number] is None else None)
+        record = entry.get("record") or {}
+        unreadable = reason or (str(record.get("reason") or "unreadable: spec record") if record.get("state") == "unreadable" else None)
+        unreadable = unreadable or (f"unreadable: spec PRs of #{number}" if spec_pr[number] is None else None)
         items.append(_item(number, kind, {
             "type": kind, "state": "open", "unreadable": unreadable, "blocked": blocked,
             "refined": _epic_refined(entry), "parent_open_epic": True, "spec_merged": entry["spec"]["state"] == "merged",
