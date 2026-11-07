@@ -368,6 +368,95 @@ def test_fix_round_stays_in_implementation_and_is_tried_again(tmp_path):
     assert len(d.posted(STORY)) == 1  # same step and head: not posted again
 
 
+NEW_HEAD = "b" * 40
+
+
+def push_new_head_once(d):
+    """The first /implement session (the fix round) pushes a commit, so the PR head changes."""
+    d.on_session("implement", f"""
+if [[ ! -f "$MOCK_DIR/pushed" ]]; then
+    touch "$MOCK_DIR/pushed"
+    jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+fi
+""")
+
+
+def pushed_fix_round(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.claude_stream(*LIMITED, exit_code=1)
+    push_new_head_once(d)
+    return d
+
+
+def test_fix_round_that_pushed_a_head_is_handed_off_at_the_pause(tmp_path):
+    d = pushed_fix_round(tmp_path)
+
+    first = d.resume()
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    owner = f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={NEW_HEAD} -->"
+    assert [b for b in d.posted(PR) if owner in b]
+    assert d.status(STORY) == "In review"
+    assert f"[HANDOFF] #{STORY}" in first.stdout
+    pauses = [c for c in d.posted(STORY) if c.startswith(PAUSE)]
+    assert len(pauses) == 1 and "handed off to the Codex review loop" in pauses[0]
+    assert "Blocked Declaration" not in "".join(d.posted(STORY))
+
+    second = d.resume()
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    assert "merge-owner-missing" not in "".join(d.posted(STORY) + d.posted(PR))
+    assert "no merge-owner evidence" not in second.stdout
+
+
+def test_fix_round_without_a_push_posts_no_owner_and_no_hand_off(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY)
+    d.add_findings(PR, HEAD)
+    d.claude_stream(*LIMITED, exit_code=1)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [b for b in d.posted(PR) if "action=merge-owner" in b]
+    assert "[HANDOFF]" not in proc.stdout and d.status(STORY) == "In implementation"
+    pauses = d.posted(STORY)
+    assert len(pauses) == 1 and "is tried again on a later poll" in pauses[0]
+
+
+def test_fix_round_pause_exits_1_before_the_hand_off_when_the_owner_cannot_be_recorded(tmp_path):
+    d = pushed_fix_round(tmp_path)
+    d.fail_comment_writes(PR, 20)
+
+    proc = d.resume()
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "[HANDOFF]" not in proc.stdout and d.status(STORY) == "In implementation"
+
+
+def test_fix_round_pause_with_a_failed_in_review_write_leaves_a_pending_hand_off(tmp_path):
+    d = pushed_fix_round(tmp_path)
+    d.fail_status_write("In review")
+
+    proc = d.resume()
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert any(f"action=hand-off-pending pr={PR} head={NEW_HEAD}" in c for c in d.posted(STORY))
+    d.fail_status_write("In review", False)
+
+    later = d.resume()
+
+    assert later.returncode == 0, later.stdout + later.stderr
+    assert d.status(STORY) == "In review"
+    assert d.sessions == [f"implement {STORY}"]
+
+
 def test_fix_round_waiting_at_the_allowance_is_not_rolled_back_as_stale(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(700, "Ready for implementation")
