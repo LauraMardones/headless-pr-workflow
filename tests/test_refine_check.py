@@ -411,3 +411,42 @@ def test_feature_criteria_bad_item_fails(mod, item, position):
 
 def test_feature_criteria_skipped_for_other_types(mod):
     assert Env(mod, make_issue(mod)).run()["feature_criteria"].status == "skip"
+
+
+MAPPING = "Epic and Feature Requirements Mapping"
+BUG_ONLY = ["Defect Description", "Impact"]
+
+
+def typed_issue(mod, kind, *, with_mapping):
+    """A task or bug body with exactly the sections that type requires."""
+    sections = [s for s in STORY_SECTIONS if s not in ("User Story / Problem Statement", "Business Value", "Why")]
+    if kind == "bug":
+        sections = sections[:1] + BUG_ONLY + sections[1:]
+    lines = ["Parent epic: #10 Epic", "Feature group: #11 Feature", "PO status: Ready for implementation.", SPEC_LINE, ""]
+    for name in sections:
+        if name == MAPPING and not with_mapping:
+            continue
+        text = "Hard depends on:\n\n- None.\n\nSoft depends on:\n\n- #99" if name == "Dependencies" else "text"
+        lines += [f"## {name}", "", text, ""]
+    lines += ["## Open Questions", "", "None.", ""]
+    return mod.Issue(5, f"{kind.title()}: x", "\n".join(lines),
+                     (f"type:{kind}", "prio:P2", "executor:claude-code-sonnet"), "OPEN")
+
+
+@pytest.mark.parametrize("kind", ["task", "bug"])
+def test_task_and_bug_without_the_mapping_fail_required_sections(mod, kind):
+    checks = Env(mod, typed_issue(mod, kind, with_mapping=False)).run()
+    assert failing(checks) == ["required_sections"]
+    assert checks["required_sections"].detail == f"missing or empty: {MAPPING}"
+
+
+@pytest.mark.parametrize("kind", ["task", "bug"])
+def test_task_and_bug_with_the_mapping_pass_required_sections(mod, kind):
+    assert failing(Env(mod, typed_issue(mod, kind, with_mapping=True)).run()) == []
+
+
+@pytest.mark.parametrize("kind", ["task", "bug"])
+def test_task_and_bug_with_an_empty_mapping_fail(mod, kind):
+    issue = typed_issue(mod, kind, with_mapping=True)
+    emptied = mod.Issue(5, issue.title, issue.body.replace(f"## {MAPPING}\n\ntext", f"## {MAPPING}\n\n"), issue.labels, "OPEN")
+    assert failing(Env(mod, emptied).run()) == ["required_sections"]
