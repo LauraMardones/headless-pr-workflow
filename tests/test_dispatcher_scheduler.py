@@ -270,6 +270,90 @@ def test_buffer_counts_stories_of_two_epics_together():
     assert d.counts["ready"] == 2 and d.action is None and skips(d)[30] == "buffer-full"
 
 
+# ── #489: just-in-time Feature breakdown ──────────────────────────────────────
+
+
+def test_feature_is_broken_down_with_open_buffer_and_no_story_left():
+    d = decide([epic()], [feature(20), feature(21, refined=False), issue(30, refined=False, feature=99)])
+    assert chosen(d) == ("refine", 21, 4, "not-refined")
+
+
+@pytest.mark.parametrize("limits", [Limits(2, 0, 9)])
+def test_feature_is_held_back_when_the_buffer_is_full(limits):
+    d = decide([epic()], [feature(20), feature(21, refined=False)], limits=limits)
+    assert d.action is None and skips(d)[21] == "buffer-full"
+
+
+def test_feature_buffer_boundaries():
+    lim = Limits(2, 2, 9)
+    d = decide([epic()], [feature(21, refined=False), issue(100)], limits=lim)
+    assert chosen(d) == ("refine", 21, 4, "not-refined")  # ready 1 < min 2
+    d = decide([epic()], [feature(21, refined=False), issue(100), issue(101)], limits=lim)
+    assert chosen(d) == ("implement", 100, 5, "ready") and skips(d)[21] == "buffer-full"  # ready == min
+    lim = Limits(2, 2, 4)
+    d = decide([epic()], [feature(21, refined=False), issue(100), issue(101, ready=False), issue(102, ready=False)], limits=lim)
+    assert chosen(d) == ("refine", 21, 4, "not-refined")  # ready + waiting 3 < max 4
+    d = decide([epic()], [feature(21, refined=False), issue(100), *[issue(n, ready=False) for n in (101, 102, 103)]], limits=lim)
+    assert skips(d)[21] == "buffer-full"  # ready + waiting == max
+
+
+def test_feature_is_held_back_by_the_lowest_story_left_to_refine():
+    items = [feature(20), feature(21, refined=False), issue(32, refined=False), issue(31, refined=False)]
+    d = decide([epic()], items)
+    assert skips(d)[21] == "stories-left-to-refine #31" and chosen(d) == ("refine", 31, 6, "not-refined")
+
+
+def test_stale_story_and_unblocked_story_are_left_to_refine():
+    for story in (issue(31, stale=True, refined=False), issue(31, refined=False, blocker=UNBLOCKED, refinement=passed(AFTER))):
+        d = decide([epic()], [feature(20), feature(21, refined=False), story])
+        assert skips(d)[21] == "stories-left-to-refine #31"
+
+
+@pytest.mark.parametrize("story", [
+    issue(31, refined=False, blocker=OPEN),
+    issue(31, refined=False, refinement=failed()),
+])
+def test_blocked_or_failed_story_does_not_hold_the_feature_back(story):
+    d = decide([epic()], [feature(20), feature(21, refined=False), story])
+    assert chosen(d) == ("refine", 21, 4, "not-refined")
+
+
+def test_other_stories_do_not_hold_the_feature_back():
+    items = [feature(20), feature(21, refined=False), feature(22, refined=False, stale=False),
+             issue(31, refined=False), issue(32, refined=False, feature=22), issue(33, refined=False, parent=11, feature=24),
+             issue(34, refined=False, parent=12, feature=25)]  # fmt: skip
+    epics = [epic(10), epic(11, record="unreadable"), epic(12, spec="missing")]
+    items += [feature(24, parent=11), feature(25, parent=12)]
+    d = decide(epics, [i for i in items if i["number"] != 31], active=[])
+    assert chosen(d) == ("refine", 21, 4, "not-refined")
+    d = decide([epic()], [feature(20), feature(21, refined=False), issue(31, refined=False)], active=[31])
+    assert chosen(d) == ("refine", 21, 4, "not-refined")
+
+
+def test_unreadable_story_holds_the_feature_back_unless_its_epic_is_excluded():
+    bad = issue(31, refined=False, reasons=["unreadable: comments"])
+    d = decide([epic()], [feature(20), feature(21, refined=False), bad])
+    assert skips(d)[21] == "stories-left-to-refine #31" and skips(d)[31] == "unreadable: comments"
+    d = decide([epic(10), epic(11, record="unreadable")], [feature(20), feature(21, refined=False), issue(31, parent=11, refined=False, reasons=["unreadable: comments"])])
+    assert chosen(d) == ("refine", 21, 4, "not-refined")
+
+
+def test_stories_of_every_epic_count():
+    items = [feature(20), feature(21, refined=False), feature(24, parent=11), issue(31, parent=11, feature=24, refined=False)]
+    d = decide([epic(10), epic(11)], items)
+    assert skips(d)[21] == "stories-left-to-refine #31"
+
+
+def test_step_2_and_3_are_not_held_back_by_the_breakdown_rule():
+    held = [issue(31, refined=False)]
+    d = decide([epic()], [feature(20, stale=True, refined=False), *held], limits=Limits(2, 0, 0))
+    assert chosen(d) == ("refine", 20, 2, "stale-record")
+    d = decide([epic()], [feature(20, refined=False, blocker=UNBLOCKED, refinement=passed(AFTER)), *held], limits=Limits(2, 0, 0))
+    assert chosen(d) == ("refine", 20, 2, "unblocked")
+    d = decide([epic(record="missing")], held, limits=Limits(2, 0, 0))
+    assert chosen(d) == ("refine", 10, 3, "new-spec")
+
+
 # ── AC 8: re-refinement after a scope change ──────────────────────────────────
 
 

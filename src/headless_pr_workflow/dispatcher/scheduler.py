@@ -129,6 +129,34 @@ def _refine_gate(entry: dict[str, Any], spec: dict[str, Any]) -> str | None:
     return None
 
 
+def _stories_left_to_refine(issues: Mapping[int, dict[str, Any]], epics: Mapping[int, dict[str, Any]],
+                            stories: Sequence[dict[str, Any]], active: set[int]) -> list[int]:  # fmt: skip
+    """Numbers of the stories an earlier Feature breakdown left to refine, lowest first (just-in-time breakdown).
+
+    An unreadable story counts unless its Epic is known to have no merged spec or no ``current`` record.
+    """
+
+    left: list[int] = []
+    for story in stories:
+        number = story["number"]
+        epic = epics.get(story.get("epic")) if isinstance(story.get("epic"), int) else None
+        excluded = epic is not None and ((epic.get("spec") or {}).get("state") != "merged"
+                                         or (epic.get("record") or {}).get("state") != "current")  # fmt: skip
+        if excluded:
+            continue
+        if any(str(r).startswith("unreadable:") for r in story.get("reasons") or []):
+            left.append(number)
+            continue
+        feature = issues.get(story.get("feature") or 0) or {}
+        if (epic is None or not feature.get("refined") or feature.get("stale")
+                or (story.get("refined") and not story.get("stale")) or number in active):  # fmt: skip
+            continue
+        if _refine_gate(story, epic.get("spec") or {}) in ("open-decision-blocker", "last-refinement-failed"):
+            continue
+        left.append(number)
+    return sorted(left)
+
+
 def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits,
                 exclude: Sequence[int] = ()) -> Decision:  # fmt: skip
     """The next action from the facts (the ``read`` output of ``hpw dispatcher facts read``). No GitHub call."""
@@ -194,6 +222,8 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
     waiting = sum(1 for s in stories if s.get("refined") and not s.get("ready") and s["number"] not in active)
     buffer_open = ready < limits.buffer_min and ready + waiting < limits.buffer_max
 
+    left_to_refine = _stories_left_to_refine(issues, epics, stories, active)
+
     for number, entry in sorted(issues.items()):
         kind = entry.get("type")
         unreadable = next((r for r in entry.get("reasons") or [] if str(r).startswith("unreadable:")), None)
@@ -234,6 +264,10 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
         elif kind == "feature":
             if entry.get("stale"):
                 add(entry, "refine", epic_number, 2, 1, "stale-record", sort_key)
+            elif not buffer_open:
+                skip(number, "buffer-full")
+            elif left_to_refine:
+                skip(number, f"stories-left-to-refine #{left_to_refine[0]}")
             else:
                 add(entry, "refine", epic_number, 4, 0, "not-refined", sort_key)
         elif not buffer_open:
