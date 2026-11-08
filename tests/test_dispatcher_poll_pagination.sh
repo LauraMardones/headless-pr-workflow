@@ -64,7 +64,7 @@ elif [[ "$ARGS" == *'after:\"cursor1\"'* ]]; then
   "pageInfo": {"hasNextPage": false, "endCursor": null},
   "nodes": [
     {"content": {"number": 240, "title": "Story: Define delivery-baseline"},
-     "fieldValues": {"nodes": [{"name": "Ready for implementation", "field": {"name": "Status"}}]}}
+     "fieldValues": {"nodes": [{"name": "In implementation", "field": {"name": "Status"}}]}}
   ]
 }}]}}}}
 JSON
@@ -85,6 +85,15 @@ exit 0
 CURLMOCK
 chmod +x "$FAKE_BIN/curl"
 
+# The scheduler (issue #474) on HPW_BIN: idle, with no GitHub call.
+cat > "$FAKE_BIN/hpw" << 'HPWMOCK'
+#!/usr/bin/env bash
+echo "[SCHEDULER] idle" >&2
+echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[]}'
+exit 1
+HPWMOCK
+chmod +x "$FAKE_BIN/hpw"
+
 # ─── Test: run the real script end to end against the mock ───────────────────
 
 test_pagination_surfaces_page_two_item() {
@@ -93,17 +102,18 @@ test_pagination_surfaces_page_two_item() {
         PATH="$FAKE_BIN:$PATH" \
         MOCK_CALL_LOG="$CALL_LOG" \
         GH_TOKEN="fake-token" \
+        HPW_BIN="$FAKE_BIN/hpw" \
         bash "$REPO_ROOT/scripts/dispatcher-poll.sh" --repo "acme/example" 2>/dev/null
     )
 
-    # 1. Ready item that exists only on page 2 is surfaced.
+    # 1. An item that exists only on page 2 is surfaced.
     local found_number
-    found_number=$(echo "$poll_output" | jq -r '.ready_for_implementation[0].number // empty')
+    found_number=$(echo "$poll_output" | jq -r '.in_implementation[0].number // empty')
     if [[ "$found_number" == "240" ]]; then
         echo "PASS: item present only on page 2 (#240) is surfaced"
         PASS=$(( PASS + 1 ))
     else
-        echo "FAIL: expected #240 in ready_for_implementation, got: $poll_output"
+        echo "FAIL: expected #240 in in_implementation, got: $poll_output"
         FAIL=$(( FAIL + 1 ))
     fi
 

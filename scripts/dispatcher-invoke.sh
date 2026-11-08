@@ -4,9 +4,10 @@
 # Dispatcher pre-flight gate and execution loop — executor routing, WIP check,
 # stale detection, comment-triggered decision-blocker resume, file-overlap
 # check, conflict blocker, and story-cycle invocation with board status
-# transitions. After each story completes, is handed off or is blocked, the
-# loop finds the next "Ready for implementation" story and repeats the full
-# pre-flight + cycle.
+# transitions. New work comes from the scheduler (`hpw dispatcher scheduler
+# next`, issue #473), never from a "Ready" board status (issue #474, ADR-010).
+# After each story completes or is handed off, the loop asks the scheduler
+# again and repeats the full pre-flight + cycle for its next story.
 #
 # The cycle depends on how the story is reviewed (issue #293, ADR-006):
 #   - Codex review loop (the Claude tiers): /implement, then the story is
@@ -19,8 +20,9 @@
 #     script-only /merge and /cleanup when the story is "In merge".
 # Every run handles resumable work first: stories "In merge", then due fix
 # rounds, then pending hand-offs, then Codex-implemented PRs "In review", then
-# new work. See docs/DISPATCHER-CONFIG.md → "Codex review loop
-# hand-off and resume".
+# new work: one scheduler decision, asked right then with fresh facts. See
+# docs/DISPATCHER-CONFIG.md → "Codex review loop hand-off and resume" and
+# "Scheduler: new work from GitHub facts".
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
 #             issue #179 (Slack notification wiring — decision_blocker, dispatcher_error,
 #                         feature_closure_confirmation, epic_closure_approval)
@@ -46,9 +48,13 @@
 #             issue #315 (the metered API path is removed; executor:codex is
 #                         skipped at implementation; a Codex-implemented PR
 #                         "In review" is reviewed on the subscription)
+#             issue #474 (new work from the scheduler: with no --issue, --resume
+#                         or --refine the run asks `hpw dispatcher scheduler
+#                         next` after work in flight and starts its action)
 # Policy source of truth: docs/PROJECT-STATUS.md
 #
 # Usage:
+#   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh --repo <owner/repo> [--dry-run]
 #   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
 #       --repo <owner/repo> --issue <issue-number> [--dry-run]
 #   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
@@ -56,8 +62,12 @@
 #   GH_TOKEN=<token> bash scripts/dispatcher-invoke.sh \
 #       --repo <owner/repo> --refine <issue-number> [--dry-run]
 #
+# --repo alone is the scheduled run (issue #474): resumable work first, then
+# one scheduler decision for new work. `refine #N` starts one /refine session
+# through the --refine path and the run ends; `implement #N` runs /implement
+# #N with the usual cycle; `idle` and `unreadable` start no new work and exit 0.
 # --issue handles resumable work first, then the given story. --resume handles
-# only resumable work, for a run in which no story is ready for implementation.
+# only resumable work.
 # --refine starts exactly one /refine session for the given issue (issue #319,
 # F2.5) and nothing else: no resume pass, no /implement, no branch, no PR and
 # no board write by the dispatcher. Epic and Feature issues run on opus, every
@@ -70,7 +80,8 @@
 # Exit codes:
 #   0  — story completed (Done), story handed to the Codex review loop, a
 #        resume entry completed or was skipped by a bound, or nothing to do
-#        (including when every remaining ready item is non-executable, issue #256)
+#        (including a scheduler result of idle or unreadable, and a scheduler
+#        choice this run already skipped as non-executable, issue #256)
 #   1  — pre-flight check failed or a session failed; blocker posted on issue.
 #        Also a missing "In review" / "In merge" board option or an invalid
 #        CODEX_FIX_ROUND_MAX, with no blocker.
@@ -255,6 +266,7 @@ NON_EXECUTABLE_ISSUES=""
 RESUME_ONLY=false  # --resume: handle resumable work only (issue #293)
 REFINE_ISSUE=""    # --refine <n>: start one refinement session for #n (issue #319)
 REFINE_REQUESTED=false
+SCHEDULED=false    # no --issue, --resume or --refine: new work from the scheduler (issue #474)
 # Internal loop state, carried across the recursive exec: the resume pass runs
 # once per run, not once per chained story.
 RESUME_PASS_DONE=false
@@ -291,8 +303,8 @@ if $REFINE_REQUESTED; then
     ISSUE_NUMBER="$REFINE_ISSUE"   # the gates comment on this issue
 elif $RESUME_ONLY; then
     [[ -z "$ISSUE_NUMBER" ]] || { echo "Error: --resume and --issue cannot be combined." >&2; exit 1; }
-else
-    [[ -n "$ISSUE_NUMBER" ]] || { echo "Error: --issue <issue-number> is required." >&2; exit 1; }
+elif [[ -z "$ISSUE_NUMBER" ]]; then
+    SCHEDULED=true
 fi
 [[ "$REPO" == *"/"* ]]   || { echo "Error: --repo must be in owner/repo format." >&2; exit 1; }
 
@@ -358,6 +370,9 @@ source "$SCRIPT_DIR/lib/claude-session.sh"
 source "$SCRIPT_DIR/lib/limits.sh"
 # shellcheck source=scripts/lib/decision-blocker.sh
 source "$SCRIPT_DIR/lib/decision-blocker.sh"
+# The scheduler call, shared with dispatcher-poll.sh (issue #474).
+# shellcheck source=scripts/lib/scheduler.sh
+source "$SCRIPT_DIR/lib/scheduler.sh"
 # shellcheck source=scripts/lib/evidence-pending.sh
 source "$SCRIPT_DIR/lib/evidence-pending.sh"
 # shellcheck source=scripts/lib/review-routing.sh
@@ -2120,49 +2135,6 @@ fetch_board_data() {
     rm -rf "$tmp_dir"
 }
 
-# ─── Utility: find next Ready for implementation story (re-fetches board) ────
-
-find_next_ready_story() {
-    # Optional first arg: space-separated issue numbers to exclude (already handled).
-    # Items already skipped as non-executable this run are always excluded
-    # (issue #256), so no selection path can return the same one twice.
-    local _fnrs_exclude="${1:-}${NON_EXECUTABLE_ISSUES:+ $NON_EXECUTABLE_ISSUES}"
-    local board
-    board=$(fetch_board_data) || return 1
-
-    local _all_ready
-    _all_ready=$(echo "$board" | jq -r '
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select(
-            (.content | type) == "object" and
-            (.content.number != null) and
-            ([.fieldValues.nodes[]
-              | select(
-                  (.field.name? // "") == "Status" and
-                  ((.name? // "") == "Ready for implementation" or (.name? // "") == "Ready")
-                )
-             ] | length > 0)
-          )
-        | .content.number') || return 1
-
-    if [[ -z "$_fnrs_exclude" ]]; then
-        echo "$_all_ready" | head -1
-        return 0
-    fi
-
-    # Return first Ready story not in the exclusion list
-    local _num _skip _excl
-    while IFS= read -r _num; do
-        [[ -z "$_num" ]] && continue
-        _skip=false
-        for _excl in $_fnrs_exclude; do
-            [[ "$_num" == "$_excl" ]] && { _skip=true; break; }
-        done
-        if ! $_skip; then echo "$_num"; return 0; fi
-    done <<< "$_all_ready"
-    return 0  # empty output: all Ready stories are excluded
-}
-
 # ─── Refinement session (issue #319, F2.5) ───────────────────────────────────
 # --refine <n> starts one /refine session and ends the run. It reuses
 # invoke_executor_command(), so the usage limit, the allowance check, the token
@@ -2342,6 +2314,71 @@ board_items_in_status() {
           )
         | { id: .id, number: .content.number, title: .content.title }
     ]'
+}
+
+# ─── New work from the scheduler (issue #474, ADR-010) ───────────────────────
+# The scheduler (`hpw dispatcher scheduler next`, issue #473) decides which new
+# work starts; the dispatcher only acts on its result and reads no "Ready for
+# implementation", "Ready" or "Ready for refinement" status to choose it. It is
+# asked right before new work starts, after the work in flight, so the decision
+# uses fresh facts. --in-implementation lists the work in flight as the
+# dispatcher finds it today: the board's "In implementation", "In review" and
+# "In merge" stories. The scheduler never starts a listed story, so a story in
+# review or merge is not started again; until #475 moves this list to PR facts
+# (with its own --in-flight list), those stories also count for the WIP limit
+# and file overlap of the scheduler (PO decision on PR #485).
+
+# Issues /implement was started for in this job. Carried across the
+# `exec bash "$0"` tail calls in the environment, like DISPATCH_JOB_START_TS, so
+# the run never starts the same story twice when the facts lag behind.
+DISPATCH_RUN_STARTED_ISSUES="${DISPATCH_RUN_STARTED_ISSUES:-}"
+export DISPATCH_RUN_STARTED_ISSUES
+
+ask_scheduler() {
+    local in_impl
+    local -a extra=()
+    BOARD_DATA=$(fetch_board_data) || {
+        echo "Error: Failed to fetch project board data." >&2; exit 1
+    }
+    in_impl=$(jq -rn --argjson a "$(board_items_in_status "In implementation")" \
+        --argjson b "$(board_items_in_status "In review")" --argjson c "$(board_items_in_status "In merge")" \
+        '$a + $b + $c | map(.number) | unique | map(tostring) | join(",")')
+    $DRY_RUN && extra+=(--dry-run)
+    scheduler_next "$in_impl" ${extra[@]+"${extra[@]}"}
+}
+
+# next_new_work — ask the scheduler and act on its result. It returns only for
+# `implement #N`, with NEXT_ISSUE=N; the caller runs /implement #N.
+#   refine #N    → one /refine session through run_refine(), which ends the run
+#   idle         → no new work, exit 0 (the run log has `[SCHEDULER] idle`)
+#   unreadable   → no new work, exit 0 (the run log has `[SCHEDULER] unreadable: ...`)
+#   implement #N for a story this run already started or skipped → exit 0
+next_new_work() {
+    LAST_ACTION="asking the scheduler for new work"
+    echo "Asking the scheduler for new work..."
+    ask_scheduler
+    case "$SCHEDULER_RESULT" in
+        refine)
+            echo "Scheduler: refine #$SCHEDULER_ISSUE; one refinement session, then the run ends."
+            REFINE_ISSUE="$SCHEDULER_ISSUE"
+            ISSUE_NUMBER="$SCHEDULER_ISSUE"
+            run_refine
+            ;;
+        implement)
+            if [[ " $NON_EXECUTABLE_ISSUES $DISPATCH_RUN_STARTED_ISSUES $HAND_OFF_RESUMED_ISSUES " == *" $SCHEDULER_ISSUE "* ]]; then
+                echo "Scheduler: implement #$SCHEDULER_ISSUE, which this run already started or skipped; no new work. Dispatcher exiting cleanly."
+                DISPATCH_HANDLED=true
+                exit 0
+            fi
+            NEXT_ISSUE="$SCHEDULER_ISSUE"
+            echo "Scheduler: implement #$NEXT_ISSUE"
+            ;;
+        *)
+            echo "No new work: the scheduler result is \"$SCHEDULER_RESULT\". Dispatcher exiting cleanly."
+            DISPATCH_HANDLED=true
+            exit 0
+            ;;
+    esac
 }
 
 # ─── Utility: /merge and /cleanup, shared by Steps E3/E4 and the resume pass ─
@@ -3531,6 +3568,13 @@ if $RESUME_ONLY; then
     exit 0
 fi
 
+# The scheduled run (issue #474): one scheduler decision for new work, after
+# the work in flight above.
+if $SCHEDULED; then
+    next_new_work
+    ISSUE_NUMBER="$NEXT_ISSUE"
+fi
+
 # A story whose pending hand-off the resume pass just handled already has its
 # work on the PR. It is not started as new work in this run.
 if [[ " $HAND_OFF_RESUMED_ISSUES " == *" $ISSUE_NUMBER "* ]]; then
@@ -3539,22 +3583,19 @@ if [[ " $HAND_OFF_RESUMED_ISSUES " == *" $ISSUE_NUMBER "* ]]; then
     exit 0
 fi
 
-# ─── Utility: skip a story for this run and go on (issues #256, #315) ────────
+# ─── Utility: skip a story for this run and go on (issues #256, #315, #474) ──
 # Adds the story to the run's skip list (carried across the recursive exec by
-# --non-executable-issues), then continues with the next ready story or exits
-# 0. It writes nothing: no board status, comment, blocker, Slack message,
-# session count or allowance probe. It never returns.
+# --non-executable-issues), then asks the scheduler again (next_new_work): it
+# starts the scheduler's next action or exits 0. It writes nothing: no board
+# status, comment, blocker, Slack message, session count or allowance probe. It
+# never returns.
 
 skip_story_and_continue() {
     local skipped="$1" action="$2"
     NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$skipped"
-    LAST_ACTION="$action for #$skipped; searching for next story"
-    NEXT_ISSUE=$(find_next_ready_story || true)
-    if [[ -z "$NEXT_ISSUE" ]]; then
-        echo "No more executable \"Ready for implementation\" stories after $action. Dispatcher exiting cleanly."
-        DISPATCH_HANDLED=true
-        exit 0
-    fi
+    LAST_ACTION="$action for #$skipped; asking the scheduler for the next story"
+    echo "After $action of #$skipped:"
+    next_new_work
     echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
     _NEXT_ARGS=(--repo "$REPO" --issue "$NEXT_ISSUE" --resume-pass-done \
         --non-executable-issues "$NON_EXECUTABLE_ISSUES")
@@ -3579,9 +3620,9 @@ TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
 
 # ─── Step 1b: Executable issue-type guard (issue #256) ───────────────────────
 # Only Stories, Tasks, and Bugs are executable units for /implement. Anything
-# else sitting in "Ready for implementation" (an Epic, a Feature, or an item
-# with missing or unsupported type metadata) is skipped with one warning,
-# excluded for the rest of this run, and selection continues. This runs before
+# else the run was asked to implement (an Epic, a Feature, or an item with
+# missing or unsupported type metadata) is skipped with one warning, excluded
+# for the rest of this run, and the scheduler is asked again. This runs before
 # Step 2 so a non-executable item never reaches the executor-label check,
 # which stays fatal for executable items.
 
@@ -3908,22 +3949,15 @@ if [[ -z "$TARGET_ITEM_ID" ]]; then
     echo "Warning: Could not find project item ID for #$ISSUE_NUMBER; board updates will be skipped." >&2
 fi
 
-# ─── Utility: go on to the next Ready for implementation story ───────────────
-# Called when this story's run ends: after E4, and after the hand-off to the
-# Codex review loop (issue #293). It never returns: it either exits 0 or
-# replaces this process with the next story's run.
+# ─── Utility: go on to the scheduler's next new work (issue #474) ───────────
+# Called when this story's run ends: after the hand-off to the Codex review
+# loop (issue #293). The next story comes from a new scheduler call, not from
+# the board. It never returns: it exits 0, runs one refinement session (which
+# ends the run), or replaces this process with the next story's run.
 
-continue_with_next_ready_story() {
-    LAST_ACTION="searching for next Ready for implementation story"
+continue_with_next_new_work() {
     echo ""
-    echo "Searching for next \"Ready for implementation\" story..."
-    NEXT_ISSUE=$(find_next_ready_story || true)
-
-    if [[ -z "$NEXT_ISSUE" ]]; then
-        echo "No more \"Ready for implementation\" stories. Dispatcher exiting cleanly."
-        DISPATCH_HANDLED=true
-        exit 0
-    fi
+    next_new_work
 
     echo "Found next story: #$NEXT_ISSUE — re-running full pre-flight + execution cycle."
 
@@ -3952,6 +3986,8 @@ echo "── E1: /implement #$ISSUE_NUMBER ────────────�
 # test_failed_first_status_write_does_not_start_the_story_twice requires; the
 # hand-off records the pending hand-off so the story is not started twice.
 set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation" || true
+DISPATCH_RUN_STARTED_ISSUES="${DISPATCH_RUN_STARTED_ISSUES:+$DISPATCH_RUN_STARTED_ISSUES }$ISSUE_NUMBER"
+export DISPATCH_RUN_STARTED_ISSUES
 # The PR head before the session, if the story already has an open PR: the
 # hand-off uses it to tell "pushed nothing" from "Codex already answered".
 HEAD_BEFORE_IMPLEMENT=$(find_linked_pr_json "$ISSUE_NUMBER" | jq -r '.head.sha // empty')
@@ -3978,7 +4014,7 @@ if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
     echo ""
     echo "── Hand-off: #$ISSUE_NUMBER to the Codex review loop ───────────────────"
     hand_off_to_codex_review_loop "$HEAD_BEFORE_IMPLEMENT" "$BLOCKER_BEFORE_IMPLEMENT"
-    continue_with_next_ready_story
+    continue_with_next_new_work
 fi
 
 # ─── No review path ───────────────────────────────────────────────────────────

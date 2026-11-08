@@ -306,7 +306,7 @@ fi
 # write of saved state fails; the same line inside a shim of Block 3, or through
 # the block, passes.
 state_forms=(
-    'echo x > .dispatcher-state/o/r/notified-refinement'
+    'echo x > .dispatcher-state/o/r/actionable-events'
     'echo x >> "$STATE_DIR/o/r/actionable-events"'
     'cp "$EVENTS" "$STATE_FILE"'
     'mv -f "$STATE_FILE.tmp" "$STATE_FILE"'
@@ -340,10 +340,10 @@ state_ok="$TMP/dispatcher-state-ok.sh"
 cat >"$state_ok" <<'FIXTURE'
 #!/usr/bin/env bash
 STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
-NEXT_NOTIFIED_FILE="$TMP/notified-next"
+NEXT_NOTIFIED_FILE="$TMP/events-next"
 echo "$n" >> "$NEXT_NOTIFIED_FILE"
-echo "[POLL] Warning: cannot read refinement notification state $STATE_DIR" >&2
-DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name notified-refinement --repo "$REPO"
+echo "[POLL] Warning: cannot read the actionable-events state $STATE_DIR" >&2
+DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name actionable-events --repo "$REPO"
 FIXTURE
 chmod +x "$state_ok"
 run_check "$TMP/out" "$TMP/err" --files "$state_ok"

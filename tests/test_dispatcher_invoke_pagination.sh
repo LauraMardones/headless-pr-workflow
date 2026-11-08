@@ -4,10 +4,11 @@
 # Regression test for the fetch_board_data() helper in dispatcher-invoke.sh
 # (same class of bug as issue #248 / dispatcher-poll.sh, but this helper
 # backs the main board fetch, the stale-recovery re-fetch, and
-# find_next_ready_story() in dispatcher-invoke.sh). Before this helper
+# the scheduler's board read in dispatcher-invoke.sh). Before this helper
 # existed, each of those three queries was hard-capped at the first 100
 # project items, so an item added after that page (e.g. #240) was silently
-# invisible to get_project_item_id() and find_next_ready_story().
+# invisible to get_project_item_id() and the next-story search (since issue
+# #474 the next story comes from the scheduler).
 #
 # This test extracts the real fetch_board_data() function body from
 # scripts/dispatcher-invoke.sh (rather than reimplementing it) and runs it

@@ -19,6 +19,12 @@ state (``on_session``), such as a new PR head. The fake ``claude`` also keeps
 the argv, stdin and environment of every call (``claude_calls``), and
 ``claude_stream`` replaces its default stream-json output.
 
+The fake ``hpw`` answers ``hpw dispatcher scheduler next`` itself (issue #474): it
+logs each call's arguments to ``scheduler.log`` (``scheduler_calls``) and ``scheduler``
+to ``seq.log``, and prints the decisions a test set with ``schedule``, one per call,
+then ``idle``. A decision is printed with the scheduler's own ``[SCHEDULER] ...``
+stderr lines and exit code.
+
 An opt-in fake ``git`` (``fake_git``, issue #439) keeps the pause path off the real
 checkout: it logs every call (argv, one line each) to ``git.log`` (``git_calls``),
 answers only ``rev-parse --abbrev-ref HEAD``, ``rev-list --count`` and
@@ -55,6 +61,50 @@ BOARD_OPTIONS = {
     "In merge": "OPT_MERGE",
     "Done": "OPT_DONE",
 }
+
+FAKE_SCHEDULER = r"""if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then
+    echo "$*" >> "$MOCK_DIR/scheduler.log"
+    echo "scheduler" >> "$MOCK_DIR/seq.log"
+    n=$(( $(cat "$MOCK_DIR/scheduler.count" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$MOCK_DIR/scheduler.count"
+    if [[ -f "$MOCK_DIR/scheduler_facts.json" ]]; then  # the real rule on fixed facts
+        shift
+        PYTHONPATH="$HPW_FAKE_SRC" exec "$HPW_FAKE_PYTHON" -m headless_pr_workflow.dispatcher "$@" \
+            --facts-file "$MOCK_DIR/scheduler_facts.json"
+    fi
+    if [[ -f "$MOCK_DIR/scheduler_$n.json" ]]; then
+        cat "$MOCK_DIR/scheduler_$n.err" >&2
+        cat "$MOCK_DIR/scheduler_$n.json"
+        exit "$(cat "$MOCK_DIR/scheduler_$n.rc")"
+    fi
+    echo "[SCHEDULER] idle" >&2
+    echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[],"notes":[]}'
+    exit 1
+fi
+"""
+
+
+def scheduler_output(result: str, issue: int | None = None, *, error: str = "",
+                     skipped: list[dict] | None = None) -> tuple[str, str, int]:
+    """The stdout, stderr and exit code of ``hpw dispatcher scheduler next`` for one decision (#473)."""
+    skipped = skipped or []
+    action = None
+    lines = []
+    if result in ("refine", "implement"):
+        action = {"kind": result, "issue": issue, "type": "story", "epic": 306, "step": 1, "reason": "test"}
+        lines.append(f"[SCHEDULER] {result} #{issue} step=1 reason=test")
+    elif result == "idle":
+        lines.append("[SCHEDULER] idle")
+    else:
+        lines.append(f"[SCHEDULER] unreadable: {error}")
+    lines += [f"[SCHEDULER] skip #{e['issue']} {e['reason']}" for e in skipped]
+    out = {"ok": result in ("refine", "implement"), "block": "scheduler", "operation": "next", "result": result,
+           "action": action, "skipped": skipped, "notes": []}
+    if result == "unreadable":
+        out["error"] = error
+    rc = {"refine": 0, "implement": 0, "idle": 1}.get(result, 3)
+    return json.dumps(out), "".join(line + "\n" for line in lines), rc
+
 
 FAKE_GIT = r"""#!/usr/bin/env bash
 echo "git $*" >> "$MOCK_DIR/git.log"
@@ -374,7 +424,8 @@ class Dispatcher:
         self.bin = tmp / "bin"
         self.bin.mkdir()
         for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL), ("claude", FAKE_CLAUDE),
-                           ("hpw", "#!/usr/bin/env bash\n" + fake_hpw_route(self.bin / "gh", BASH or "bash")
+                           ("hpw", "#!/usr/bin/env bash\n" + FAKE_SCHEDULER
+                                   + fake_hpw_route(self.bin / "gh", BASH or "bash")
                                    + 'echo "fake hpw: unsupported: $*" >&2\nexit 1\n'),
                            ("allowance.sh", FAKE_ALLOWANCE),
                            ("merge.sh", FAKE_PHASE.replace("PHASE_NAME", "merge")),
@@ -390,6 +441,23 @@ class Dispatcher:
         self._write("board.json", {"items": [], "options": options or BOARD_OPTIONS})
         for name in ("gh.log", "curl.log", "sessions.log", "phases.log", "github_output", "mutations.log", "seq.log"):
             (self.mock / name).write_text("")
+
+    def schedule(self, *decisions) -> None:
+        """The scheduler's decisions, one per ``hpw dispatcher scheduler next`` call, then ``idle``.
+
+        Each decision is ``(result, issue, error, skipped)``, cut short as needed:
+        ``("implement", 12)``, ``("refine", 5)``, ``("idle",)``, ``("unreadable", None, "facts: down")``.
+        """
+        for n, decision in enumerate(decisions, start=1):
+            result, issue, error, skipped = (*decision, *(None, None, "", None)[len(decision):])
+            out, err, rc = scheduler_output(result, issue, error=error, skipped=skipped)
+            (self.mock / f"scheduler_{n}.json").write_text(out, encoding="utf-8", newline="\n")
+            (self.mock / f"scheduler_{n}.err").write_text(err, encoding="utf-8", newline="\n")
+            (self.mock / f"scheduler_{n}.rc").write_text(str(rc))
+
+    def schedule_from_facts(self, facts: dict) -> None:
+        """Run the real scheduler rule (#473) on these facts (``--facts-file``) for every call."""
+        self._write("scheduler_facts.json", facts)
 
     def fake_git(self, unpushed: int = 0, dirty: bool = False) -> None:
         """Put a fake ``git`` first on ``PATH`` (issue #439): it logs calls to ``git.log``."""
@@ -529,6 +597,8 @@ class Dispatcher:
             "CLEANUP_SCRIPT": (self.bin / "cleanup.sh").as_posix(),
             # The verified-write block (#432) runs for real, with gh as `bash <fake gh>`.
             "HPW_BIN": (self.bin / "hpw").as_posix(),
+            "HPW_FAKE_PYTHON": Path(sys.executable).as_posix(),
+            "HPW_FAKE_SRC": (REPO_ROOT / "src").as_posix(),
             "COMMENT_RETRY_DELAY": "0",
         }
         full_env.update(windows_env())
@@ -558,6 +628,11 @@ class Dispatcher:
     def sessions(self) -> list[str]:
         """Sessions started, in order, as ``"<command> <target>"``."""
         return [" ".join(line.split()[1:3]) for line in self._log("sessions.log")]
+
+    @property
+    def scheduler_calls(self) -> list[str]:
+        """The arguments of every ``hpw dispatcher scheduler next`` call, in order."""
+        return self._log("scheduler.log")
 
     @property
     def git_calls(self) -> list[str]:

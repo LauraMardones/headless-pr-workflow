@@ -1,39 +1,33 @@
 #!/usr/bin/env bash
 # scripts/dispatcher-poll.sh
 #
-# Prototype: query GitHub Projects v2 for items with status
-# "Ready for implementation" or "Ready for refinement" and output a JSON
-# object with both result lists.
-# Contract: issue #170 (initial implementation), issue #181 (dual-status extension),
-#           issue #182 (ready-for-refinement notification), issue #180 (Red flow health notification)
+# Reads the work in flight from the GitHub Projects v2 board and asks the
+# scheduler (`hpw dispatcher scheduler next`, issue #473) for the next
+# new-work action, then outputs one JSON object the workflow decides from.
+# New work never comes from a board status: the poll reads no "Ready for
+# implementation" or "Ready for refinement" status (issue #474, ADR-010).
+# Contract: issue #170 (initial implementation), issue #180 (Red flow health
+#           notification), issue #474 (new work from the scheduler; the
+#           ready-for-refinement notification of issue #182 is retired)
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-poll.sh --repo <owner/repo> [--dry-run]
 #
 # Environment (optional):
-#   SLACK_WEBHOOK_URL  Required by slack-notify.sh for ready_for_refinement notifications.
-#                      If unset, slack-notify.sh exits 1; the poll loop continues (|| true).
+#   SLACK_WEBHOOK_URL  Required by slack-notify.sh for the Red flow health notification.
 #   BOARD_URL          GitHub Projects board URL included in Red flow health notifications.
 #                      Falls back to "" if unset; slack-notify.sh renders "(no URL)" gracefully.
-#
-# Environment (optional, state):
-#   DISPATCHER_STATE_DIR  Directory holding persisted refinement-notification
-#                      state. Defaults to <repo-root>/.dispatcher-state. The
-#                      dispatcher workflow restores it from actions/cache before
-#                      the poll and saves it after (issue #257).
+#   WIP_LIMIT_IMPLEMENTATION, READY_BUFFER_MIN, READY_BUFFER_MAX
+#                      The limits the scheduler and flow-review.sh read (issue #358).
+#   HPW_BIN            The `hpw` command (default scripts/hpw); overridable for tests.
 #
 # Side effects:
-#   For each "Ready for refinement" issue not already notified during its
-#   current continuous stay in that status, calls scripts/slack-notify.sh
-#   ready_for_refinement. De-duplication state is persisted per repository in
-#   $DISPATCHER_STATE_DIR/<owner>/<repo>/notified-refinement and reconciled on
-#   every non-dry-run poll: an issue is recorded only after slack-notify.sh
-#   succeeds, and is dropped as soon as it leaves "Ready for refinement", so a
-#   later re-entry notifies again (see "Ready for refinement notification").
 #   For Red flow health: calls scripts/slack-notify.sh red_flow_health when
 #   flow_health == "Red". No de-duplication; fires on every Red-health poll run.
-#   Under --dry-run neither notification is sent and the state file is read
-#   but never written.
+#   Under --dry-run it is not sent. The poll writes no saved state.
+#   The scheduler's `[SCHEDULER] ...` lines (the action, idle, unreadable and
+#   each skipped entry, such as no-merged-spec) go to stderr unchanged, so they
+#   reach the run log. No comment is posted.
 #   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
 # Requirements: bash 4+, curl, jq
@@ -41,8 +35,6 @@
 # Output (stdout):
 #   JSON object:
 #     {
-#       "ready_for_implementation": [{"number": N, "title": "..."}, ...],
-#       "ready_for_refinement":     [{"number": N, "title": "..."}, ...],
 #       "in_merge":                 [{"number": N, "title": "..."}, ...],
 #       "in_implementation":        [{"number": N, "title": "..."}, ...],
 #       "review_due":               [{"number": N, "title": "..."}, ...],
@@ -50,10 +42,16 @@
 #       "owner_missing_due":        [{"number": N, "title": "..."}, ...],
 #       "evidence_pending":         true | false,
 #       "next_issue":               N | null,
+#       "next_action":              {kind, issue, type, epic, step, reason} | null,
+#       "scheduler_result":         "refine" | "implement" | "idle" | "unreadable",
 #       "resumable":                true | false
 #     }
 #   Every key is always present; each list is [] when no items match.
-#   next_issue (issue #434) is the first story ready for implementation.
+#   next_issue is the issue of the scheduler's action (a refine or implement
+#   decision), or null; next_action is that action object, or null;
+#   scheduler_result is the scheduler's result (issue #474). An output the
+#   poll cannot read counts as unreadable. Neither idle nor unreadable changes
+#   the poll's exit code.
 #   evidence_pending is true when a story is labelled evidence:pending (issue
 #   #348) or the label cannot be read: a failed read counts as pending.
 #   resumable is true when any of in_merge, in_implementation, review_due,
@@ -82,21 +80,14 @@
 #       item's linked issue. Items with no linked issue (draft notes, PR
 #       items) are skipped entirely.
 #   D4  No executor invocation or GitHub state mutation occurs in any run.
-#       The --dry-run flag adds a header line to stderr and suppresses Slack
-#       notifications and refinement-state writes.
-#   D5  Both status filters are applied in jq against the same accumulated
+#       The --dry-run flag adds a header line to stderr and suppresses the
+#       Slack notification.
+#   D5  Every status filter is applied in jq against the same accumulated
 #       items list, so full-board pagination is done once per poll, not once
-#       per status.
-#   D6  Refinement notification state persists across ephemeral GitHub-hosted
-#       runners only through the workflow's actions/cache restore/save steps
-#       (interim mechanism until #259 moves the dispatcher to persistent
-#       infrastructure). If the snapshot is missing or evicted the poll starts
-#       from empty state; if it is unreadable or malformed it also warns. Either
-#       way each issue currently in "Ready for refinement" may be notified once
-#       more.
-#       The same state directory also holds actionable-events, the retry state
-#       for the notifications that need PO action; that file is owned by
-#       scripts/dispatcher-notify-retry.sh (issue #295), not by this poll.
+#       per status. The statuses read are those of work in flight ("In merge",
+#       "In implementation", "In review"); finding them from PR facts is #475.
+#   D6  The scheduler reads its own facts (`hpw dispatcher facts read`), so a
+#       poll makes a second set of GitHub reads; it needs no model.
 #   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
 #       independently. Acceptable at current scale; future refactor can share
 #       the query result.
@@ -152,14 +143,16 @@ REST="https://api.github.com"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"
-HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # Block 3, `hpw dispatcher state` (ADR-014, issue #434); overridable for tests
+HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # `hpw dispatcher ...` (ADR-014); overridable for tests
 # The review-path tables, shared with dispatcher-invoke.sh (issue #315).
 # shellcheck source=scripts/lib/review-routing.sh
 source "$SCRIPT_DIR/lib/review-routing.sh"
 # The conflict-round rule, shared with dispatcher-invoke.sh (issue #449).
 # shellcheck source=scripts/lib/conflict-round.sh
 source "$SCRIPT_DIR/lib/conflict-round.sh"
+# The scheduler call, shared with dispatcher-invoke.sh (issue #474).
+# shellcheck source=scripts/lib/scheduler.sh
+source "$SCRIPT_DIR/lib/scheduler.sh"
 
 # ─── GraphQL helper ───────────────────────────────────────────────────────────
 
@@ -263,29 +256,7 @@ done
 
 ITEMS=$(jq -n --slurpfile nodes "$ITEMS_FILE" '{data:{repository:{projectsV2:{nodes:[{items:{nodes:$nodes[0]}}]}}}}')
 
-# ─── Filter by status (D5: single response, two jq passes) ───────────────────
-
-READY_FOR_IMPL=$(echo "$ITEMS" | jq '[
-  .data.repository.projectsV2.nodes[0].items.nodes[] |
-  select(
-    (.content.number? != null) and
-    ([ .fieldValues.nodes[] |
-       select((.field.name? // "") == "Status" and (.name? // "") == "Ready for implementation")
-    ] | length > 0)
-  ) |
-  { number: .content.number, title: .content.title }
-]')
-
-READY_FOR_REFINE=$(echo "$ITEMS" | jq '[
-  .data.repository.projectsV2.nodes[0].items.nodes[] |
-  select(
-    (.content.number? != null) and
-    ([ .fieldValues.nodes[] |
-       select((.field.name? // "") == "Status" and (.name? // "") == "Ready for refinement")
-    ] | length > 0)
-  ) |
-  { number: .content.number, title: .content.title }
-]')
+# ─── Work in flight by status (D5: single response) ─────────────────────────
 
 # Resumable work for dispatcher-invoke.sh (issue #293): stories "In merge" are
 # resumed at /merge, and stories "In implementation" may have a fix round due.
@@ -428,9 +399,6 @@ if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
     done <<< "$REVIEW_ROWS"
 fi
 
-IMPL_COUNT=$(echo "$READY_FOR_IMPL" | jq 'length')
-REFINE_COUNT=$(echo "$READY_FOR_REFINE" | jq 'length')
-
 # ─── Dry-run header ───────────────────────────────────────────────────────────
 
 if $DRY_RUN; then
@@ -438,101 +406,22 @@ if $DRY_RUN; then
     echo "" >&2
 fi
 
-# ─── Log found items ──────────────────────────────────────────────────────────
+# ─── New work: the scheduler's decision (issue #474) ─────────────────────────
+# The scheduler decides from GitHub facts; the poll reads no "Ready" status.
+# --in-implementation lists the work in flight as the dispatcher finds it
+# today: the board's "In implementation", "In review" and "In merge" stories,
+# so the scheduler never starts one of them again. Finding them from PR facts
+# is #475 (PO decision on PR #485).
 
-if [[ "$IMPL_COUNT" -eq 0 ]]; then
-    echo "No items found with status \"Ready for implementation\"." >&2
-else
-    echo "Items ready for implementation: $IMPL_COUNT" >&2
-    echo "" >&2
-    echo "$READY_FOR_IMPL" | jq -r '.[] | "[POLL] #\(.number) \(.title)"' >&2
-    echo "" >&2
-fi
-
-if [[ "$REFINE_COUNT" -eq 0 ]]; then
-    echo "No items found with status \"Ready for refinement\"." >&2
-else
-    echo "Items ready for refinement: $REFINE_COUNT" >&2
-    echo "" >&2
-    echo "$READY_FOR_REFINE" | jq -r '.[] | "[POLL] #\(.number) \(.title)"' >&2
-    echo "" >&2
-fi
-
-echo "Summary: $IMPL_COUNT item(s) ready for implementation, $REFINE_COUNT item(s) ready for refinement." >&2
 echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN_IMPLEMENTATION" | jq 'length') item(s) in implementation, $(echo "$REVIEW_DUE" | jq 'length') item(s) due for review." >&2
 
-# ─── Ready for refinement notification ───────────────────────────────────────
-#
-# De-duplication state: one notified issue number per line, persisted per
-# repository at $STATE_DIR/<owner>/<repo>/notified-refinement (the directory
-# layout keeps owner/repo pairs from colliding). The dispatcher workflow
-# restores and saves $STATE_DIR via actions/cache (D6).
-#
-# Lifecycle, reconciled on every non-dry-run poll:
-#   - an issue is recorded only after slack-notify.sh exits 0; a failed
-#     delivery stays unrecorded and is retried on the next poll;
-#   - recorded issues no longer in "Ready for refinement" are dropped, so a
-#     later re-entry is a new stay and notifies once more.
-# Missing, unreadable, or malformed state is never fatal: the poll warns
-# (except for a plain missing file) and continues from empty state.
-
-PREV_NOTIFIED_FILE="$POLL_TMP_DIR/notified-prev"
-NEXT_NOTIFIED_FILE="$POLL_TMP_DIR/notified-next"
-: > "$PREV_NOTIFIED_FILE"
-: > "$NEXT_NOTIFIED_FILE"
-
-# The notified-refinement state comes from Block 3. A missing file is a normal
-# cache miss; a malformed or unreadable one warns and continues empty, so at
-# most one extra notification is sent.
-REFINE_OUT=$(DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state read --name notified-refinement --repo "$REPO" 2>/dev/null) || true
-case "$(jq -r '.result // empty' <<< "$REFINE_OUT" 2>/dev/null)" in
-    ok)        jq -r '.data[]' <<< "$REFINE_OUT" > "$PREV_NOTIFIED_FILE" ;;
-    missing)   ;;
-    malformed) echo "[POLL] Warning: malformed refinement notification state $(jq -r '.path // "notified-refinement"' <<< "$REFINE_OUT"); continuing with empty state" >&2 ;;
-    *)         echo "[POLL] Warning: cannot read refinement notification state $(jq -r '.path // "notified-refinement"' <<< "$REFINE_OUT" 2>/dev/null || echo notified-refinement); continuing with empty state" >&2 ;;
-esac
-
-if [[ "$REFINE_COUNT" -gt 0 ]]; then
-    while IFS= read -r item; do
-        NUMBER=$(echo "$item" | jq -r '.number')
-        TITLE=$(echo "$item" | jq -r '.title')
-        URL="https://github.com/${REPO}/issues/${NUMBER}"
-
-        if grep -qxF "$NUMBER" "$PREV_NOTIFIED_FILE"; then
-            # Still in the same continuous stay: carry the record forward.
-            echo "$NUMBER" >> "$NEXT_NOTIFIED_FILE"
-            continue
-        fi
-
-        CONTEXT_JSON=$(jq -n \
-            --arg issue_title "$TITLE" \
-            --arg issue_url "$URL" \
-            '{"issue_title": $issue_title, "issue_url": $issue_url}')
-        if $DRY_RUN; then
-            echo "[DRY RUN] Would notify: ready_for_refinement #${NUMBER} ${TITLE}" >&2
-        else
-            NOTIFY_OK=false
-            bash "$(dirname "$0")/slack-notify.sh" ready_for_refinement "$CONTEXT_JSON" >/dev/null && NOTIFY_OK=true || true
-            if $NOTIFY_OK; then
-                echo "$NUMBER" >> "$NEXT_NOTIFIED_FILE"
-                echo "[POLL] Notified: ready_for_refinement #${NUMBER} ${TITLE}" >&2
-            else
-                echo "[POLL] Warning: slack-notify.sh failed for #${NUMBER}; will retry next cycle" >&2
-            fi
-        fi
-    done < <(echo "$READY_FOR_REFINE" | jq -c '.[]')
-fi
-
-# Save the reconciled state through Block 3 (temporary file, rename, read-back).
-# Written even when empty so issues that left "Ready for refinement" are
-# cleared. A write failure only warns: the next poll then re-notifies at most
-# once per issue still waiting.
-if ! $DRY_RUN; then
-    if ! DISPATCHER_STATE_DIR="$STATE_DIR" "$HPW_BIN" dispatcher state write --name notified-refinement \
-            --repo "$REPO" --data-file "$NEXT_NOTIFIED_FILE" >/dev/null 2>&1; then
-        echo "[POLL] Warning: cannot write refinement notification state under $STATE_DIR/$OWNER/$REPO_NAME" >&2
-    fi
-fi
+SCHEDULER_ARGS=()
+$DRY_RUN && SCHEDULER_ARGS+=(--dry-run)
+IN_FLIGHT_LIST=$(jq -rn --argjson a "$IN_IMPLEMENTATION" --argjson b "$REVIEW_CANDIDATES" --argjson c "$IN_MERGE" \
+    '$a + $b + $c | map(.number) | unique | map(tostring) | join(",")')
+scheduler_next "$IN_FLIGHT_LIST" \
+    ${SCHEDULER_ARGS[@]+"${SCHEDULER_ARGS[@]}"}
+echo "[POLL] Scheduler result: $SCHEDULER_RESULT${SCHEDULER_ISSUE:+ #$SCHEDULER_ISSUE}" >&2
 
 # ─── Flow health notification (Red only) ─────────────────────────────────────
 
@@ -594,19 +483,20 @@ fi
 # ─── JSON output (stdout) ─────────────────────────────────────────────────────
 
 jq -n \
-    --argjson impl "$READY_FOR_IMPL" \
-    --argjson refine "$READY_FOR_REFINE" \
     --argjson in_merge "$IN_MERGE" \
     --argjson in_implementation "$IN_IMPLEMENTATION" \
     --argjson review_due "$REVIEW_DUE" \
     --argjson conflict_due "$CONFLICT_DUE" \
     --argjson owner_missing_due "$OWNER_MISSING_DUE" \
     --argjson evidence_pending "$EVIDENCE_PENDING" \
-    '{ready_for_implementation: $impl, ready_for_refinement: $refine,
-      in_merge: $in_merge, in_implementation: $in_implementation,
+    --argjson next_action "$SCHEDULER_ACTION" \
+    --arg scheduler_result "$SCHEDULER_RESULT" \
+    '{in_merge: $in_merge, in_implementation: $in_implementation,
       review_due: $review_due, conflict_due: $conflict_due,
       owner_missing_due: $owner_missing_due,
       evidence_pending: $evidence_pending,
-      next_issue: ($impl[0].number // null),
+      next_issue: ($next_action.issue // null),
+      next_action: $next_action,
+      scheduler_result: $scheduler_result,
       resumable: ((($in_merge + $in_implementation + $review_due + $conflict_due + $owner_missing_due) | length > 0)
                   or $evidence_pending)}'

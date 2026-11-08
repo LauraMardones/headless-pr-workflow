@@ -34,14 +34,12 @@ def _dirs(tmp_path, monkeypatch):
 # name -> (file, a good content, the empty value)
 FILES = {
     "actionable-events": ("dispatcher-state/o/r/actionable-events", EVENT + "\n", []),
-    "notified-refinement": ("dispatcher-state/o/r/notified-refinement", "12\n40\n", []),
     "usage-sessions": ("usage/sessions", f"{TODAY}:3\n", {"day": None, "count": 0}),
     "usage-notified": ("usage/notified", f"{TODAY}\n", {"day": None}),
     "allowance-hold": ("allowance/hold.json", HOLD + "\n", None),
 }
 MALFORMED = {
     "actionable-events": '{"key":"k"}\n',
-    "notified-refinement": "12\nabc\n",
     "usage-sessions": "garbage\n",
     "usage-notified": "tomorrow\n",
     "allowance-hold": '{"until": "soon"}',
@@ -294,16 +292,22 @@ def test_an_earlier_moved_aside_copy_is_replaced_by_the_newer_one(capsys, tmp_pa
 
 
 def test_a_malformed_but_readable_file_is_replaced(capsys, tmp_path):
-    path = put(tmp_path, "notified-refinement", "oops\n")
-    rc, out, _ = write(capsys, tmp_path, "notified-refinement", "5\n")
-    assert rc == 0 and out["result"] == "written" and path.read_text() == "5\n"
+    path = put(tmp_path, "usage-notified", "oops\n")
+    rc, out, _ = write(capsys, tmp_path, "usage-notified", f"{TODAY}\n")
+    assert rc == 0 and out["result"] == "written" and path.read_text() == f"{TODAY}\n"
     assert not Path(f"{path}.unreadable").exists()
 
 
 def test_an_empty_event_file_is_valid_state(capsys, tmp_path):
-    rc, out, _ = write(capsys, tmp_path, "notified-refinement", "")
-    assert rc == 0 and path_of(tmp_path, "notified-refinement").read_text() == ""
-    assert read(capsys, "notified-refinement")[1]["data"] == []
+    rc, out, _ = write(capsys, tmp_path, "actionable-events", "")
+    assert rc == 0 and path_of(tmp_path, "actionable-events").read_text() == ""
+    assert read(capsys, "actionable-events")[1]["data"] == []
+
+
+def test_the_retired_refinement_state_is_an_unknown_name(capsys, tmp_path):
+    """Issue #474: the ready-for-refinement notification and its state are retired."""
+    rc, out, _ = run(capsys, "state", "read", "--name", "notified-" + "refinement", "--repo", "o/r")
+    assert rc == 2 and out["result"] == "invalid"
 
 
 def test_a_data_file_that_cannot_be_read_is_failed(capsys, tmp_path):
