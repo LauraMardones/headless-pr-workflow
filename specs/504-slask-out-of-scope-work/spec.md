@@ -53,6 +53,11 @@ Out:
 **Chosen:** A bug in delivered work whose Epic is closed is refined in the slask without asking the PO when it breaks an acceptance criterion of that Epic's merged spec: the fix restores behaviour the PO already approved. A bug that needs new behaviour reaches the PO at once as a decision blocker, because no closure of its Epic will list it.
 **Rejected:** Every such bug goes to the PO — the PO would approve again what the spec already says. Reopen the closed Epic — it undoes a closure the PO confirmed.
 
+### Only new findings; existing follow-ups are not sorted — 2026-11-08
+
+**Chosen:** The mechanism handles findings made after it is in place. Follow-up issues that already exist without a Feature or an Epic are not sorted or listed by this Epic; the PO places them by hand, as today. On 2026-11-08 the PO placed #507 under #160, #508 under #306, kept #367 and #369 under #418, and left #399 and #400 for a later Epic of their own.
+**Rejected:** A one-time sort of every open follow-up without a Feature or an Epic when the mechanism is delivered — it adds a criterion for a handful of issues the PO can place in one sitting.
+
 ## Checked Against
 
 - <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
