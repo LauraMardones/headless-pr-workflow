@@ -28,10 +28,20 @@ Out:
 
 ## Decisions
 
-### <Decision title>
+### Two Epics: the mechanism and the standing slask Epic — 2026-11-08
 
-**Chosen:** <…>
-**Rejected:** <alternative> — <why>
+**Chosen:** This Epic delivers the mechanism and closes as usual. The standing slask Epic is a separate Epic with its own spec, written in its own `/spec` session. It holds the slask Feature, lists the maintenance the Tech Lead may refine without asking the PO, and never closes.
+**Rejected:** One Epic that is both the mechanism and the container — the mechanism would never be verified at an Epic closure, and this spec would need an exception from the Definition of Ready.
+
+### The session that finds the work creates the slask issue — 2026-11-08
+
+**Chosen:** `/implement`, `/review` and `/refine` create the issue when they find work outside the scope of what they work on, or link an existing open issue that covers it. The PO may add one by hand. The issue carries `Parent epic:` (the slask Epic), `Feature group:` (the slask Feature), `Found under: #<epic>` (the Epic where the work was found), `Origin:` (a link to the finding) and the label `type:bug` for a defect, otherwise `type:story`. It has no `prio:` label, no `executor:` label and no `PO status:` line; refinement sets what it needs.
+**Rejected:** Keep the follow-up under the Epic where it was found — the scheduler skips it (`no-feature`) and it keeps that Epic from closing. Derive the Epic of origin from the `Origin:` link through the PR and the story — a chain of reads that breaks when one link is missing; a line in the issue is a fact that can be read directly.
+
+### Only a finding in code the PR did not change passes without a PO waiver — 2026-11-08
+
+**Chosen:** An out-of-scope finding about behaviour the PR did not add or change goes to the slask and no longer holds the PR. An edge case outside the story's criteria, and an Epic or Feature requirement the story did not take on, still wait for the PO's waiver, as today.
+**Rejected:** Every finding waits for the waiver, as today — the PO decides on defects that are not the story's. No finding waits — the PO would no longer see gaps in the story's own delivery before it merges.
 
 ## Checked Against
 
