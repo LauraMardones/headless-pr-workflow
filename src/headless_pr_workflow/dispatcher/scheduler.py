@@ -129,7 +129,8 @@ def _refine_gate(entry: dict[str, Any], spec: dict[str, Any]) -> str | None:
     return None
 
 
-def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits) -> Decision:
+def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits,
+                exclude: Sequence[int] = ()) -> Decision:  # fmt: skip
     """The next action from the facts (the ``read`` output of ``hpw dispatcher facts read``). No GitHub call."""
 
     active = set(in_implementation)
@@ -275,6 +276,13 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
                 add(entry, "implement", entry.get("epic"), 5, 0, "ready",
                     key(entry, epics.get(entry.get("epic"))))  # fmt: skip
 
+    # Issues the caller already started or skipped in this run (issue #474): never
+    # chosen, and not work in flight, so they do not count for the WIP limit.
+    unavailable = set(exclude)
+    for c in candidates:
+        if c.entry["number"] in unavailable:
+            skip(c.entry["number"], "excluded")
+    candidates = [c for c in candidates if c.entry["number"] not in unavailable]
     chosen = min(candidates, key=lambda c: (c.step, c.group, c.key), default=None)
     return Decision(
         action=chosen.action() if chosen else None,
@@ -305,7 +313,7 @@ def _usable(facts: Any) -> str | None:
     return None
 
 
-def next_action(gateway: Gateway | None, repo: str, *, in_implementation: Sequence[int],
+def next_action(gateway: Gateway | None, repo: str, *, in_implementation: Sequence[int], exclude: Sequence[int] = (),
                 env: Mapping[str, str] | None = None, facts: Mapping[str, Any] | None = None) -> Result:  # fmt: skip
     """Load the limits, read the facts (unless given) and print-ready the decision."""
 
@@ -321,7 +329,7 @@ def next_action(gateway: Gateway | None, repo: str, *, in_implementation: Sequen
     problem = _usable(facts)
     if problem:
         return _unreadable(f"facts: {problem}", limits)
-    decision = choose_next(facts, in_implementation=in_implementation, limits=limits)
+    decision = choose_next(facts, in_implementation=in_implementation, limits=limits, exclude=exclude)
     action = decision.action
     if action:
         log(f"[SCHEDULER] {action['kind']} #{action['issue']} step={action['step']} reason={action['reason']}")

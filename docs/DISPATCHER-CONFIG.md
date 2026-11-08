@@ -77,7 +77,7 @@ WIP count: 2/3
 The dispatcher starts new work from the scheduler's decision, never from a board status (issue #474, ADR-010, Feature #460). Moving a card to "Ready for implementation" or "Ready for refinement" starts nothing, and the scheduler's choice gets its session whatever its board status. The decision rule is `hpw dispatcher scheduler next` (issue #473); `scripts/dispatcher-poll.sh` and `scripts/dispatcher-invoke.sh` only call it, through `scripts/lib/scheduler.sh`, and act on its result.
 
 ```
-scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] [--dry-run]
+scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] [--exclude <n>[,<n>...]] [--dry-run]
 ```
 
 **Order of actions in a run** (#460 → Decisions "Order of actions in a run"). One model session at a time:
@@ -105,6 +105,10 @@ scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n
 - Every skipped issue gets one `[SCHEDULER] skip #<n> <reason>` line on stderr. The poll and the invoke step pass these lines to the run log unchanged.
 
 **`--in-implementation`.** The dispatcher passes the stories on the board in "In implementation", "In review" and "In merge": the work in flight as it finds it today. The scheduler never starts a listed story, so a story in review or merge is not started again. Until #475 finds work in flight from PR facts (with its own `--in-flight` list), the stories in review and merge also count for the scheduler's WIP limit and file overlap, so fewer new stories may start than the limit allows (PO decision on PR #485).
+
+**`--exclude`.** The invoke step lists the stories this run already started or skipped (for example an `executor:codex` story, which the dispatcher does not start). The scheduler never chooses them (`excluded`) and, unlike `--in-implementation`, does not count them for the WIP limit or file overlap, so the next ready story is reached instead of the same one being chosen again.
+
+**Stale recovery first.** In the scheduled run, a story "In implementation" with no activity for more than two hours and no hand-off note is rolled back to "Ready for implementation" (Recovery Protocol, `docs/PROJECT-STATUS.md`) before the scheduler is asked, so a stale story does not hold a WIP slot and block the decision with `wip-limit`.
 
 **Gates, unchanged for both kinds.** The pause switch (`DISPATCHER_ENABLED` not `true`: the workflow guard skips the poll and the invoke step, so the scheduler is not called and no session starts), the [usage limit](#usage-limit), the [allowance reserve](#subscription-allowance-and-reserve) and one session at a time (the workflow's `concurrency` group).
 

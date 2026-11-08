@@ -36,6 +36,15 @@ def scheduled(d: Dispatcher, *args: str, **kwargs):
     return d.run(*args, **kwargs)
 
 
+def fresh(d: Dispatcher, number: int) -> None:
+    """Make the board item active now, so the stale check leaves the story alone."""
+    board = d._read("board.json")
+    for item in board["items"]:
+        if item["number"] == number:
+            item["updatedAt"] = _today() + "T00:00:00Z"
+    d._write("board.json", board)
+
+
 def code_lines(path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
 
@@ -45,6 +54,7 @@ def code_lines(path) -> list[str]:
 
 def test_ac1_a_scheduled_run_asks_the_scheduler_with_the_work_in_flight(d):
     d.add_story(10, "In implementation")
+    fresh(d, 10)
     d.add_story(11, "In review")
     d.add_story(STORY, "Ready for implementation")
     d.schedule(("idle",))
@@ -231,7 +241,7 @@ def test_ac6_the_next_story_after_a_finished_cycle_comes_from_a_new_scheduler_ca
     assert d.sessions == [f"implement {STORY}", f"implement {OTHER}"]
     assert len(d.scheduler_calls) == 3
     # The second call sees the first story in flight ("In review" after the hand-off).
-    assert d.scheduler_calls[1].endswith(f"--in-implementation {STORY}")
+    assert d.scheduler_calls[1].startswith(f"dispatcher scheduler next --repo o/r --in-implementation {STORY} ")
 
 
 def test_ac6_the_board_order_does_not_choose_the_next_story(d):
@@ -269,6 +279,58 @@ def test_ac6_a_non_executable_choice_asks_the_scheduler_again(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {OTHER}"]
     assert len(d.scheduler_calls) == 3
+
+
+def _ready_facts(*numbers: int) -> dict:
+    """Facts for one open Epic with a merged spec, a refined Feature and these ready stories."""
+    from tests.test_dispatcher_scheduler import epic, feature, issue
+
+    return {"result": "read", "epics": [epic(10)],
+            "issues": [feature(20)] + [issue(n, prio="prio:P1" if n == numbers[0] else None) for n in numbers]}
+
+
+def test_review_a_skipped_story_is_unavailable_to_the_next_decision(d):
+    # The real rule (#473) does not filter executors: it chooses #700 again unless the run excludes it.
+    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(OTHER, "Ready for implementation")
+    d.add_pr(PR, OTHER)
+    d.schedule_from_facts(_ready_facts(STORY, OTHER))
+
+    proc = scheduled(d)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {OTHER}"]
+    assert d.scheduler_calls[0].endswith("--in-implementation ")
+    assert d.scheduler_calls[1].endswith(f"--in-implementation  --exclude {STORY}")
+
+
+def test_review_an_excluded_story_does_not_count_for_the_wip_limit():
+    from headless_pr_workflow.dispatcher.scheduler import Limits, choose_next
+    from tests.test_dispatcher_scheduler import chosen, skips
+
+    decision = choose_next(_ready_facts(STORY, OTHER), in_implementation=[], exclude=[STORY],
+                           limits=Limits(wip=1, buffer_min=2, buffer_max=4))
+
+    assert chosen(decision) == ("implement", OTHER, 5, "ready")
+    assert (STORY, "excluded") in [(s["issue"], s["reason"]) for s in decision.skipped]
+    assert decision.counts["in_implementation"] == 0
+    assert skips  # imported helper stays used by sibling tests
+
+
+def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
+    # WIP limit 1 and a stale story hold the slot: the scheduler says wip-limit until the stale story is rolled back.
+    d.add_story(STORY, "In implementation")  # no PR, no hand-off, old updatedAt: stale
+    d.add_story(OTHER, "Ready for implementation")
+    d.add_pr(PR, OTHER)
+    d.schedule(("idle",))
+
+    proc = scheduled(d)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f'STALE: #{STORY}' in proc.stdout
+    assert [c for c in d.posted(STORY) if "## Recovery Comment" in c]
+    # The rolled-back story is no longer "In implementation" when the scheduler is asked.
+    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation "]
 
 
 # ── AC7: the gates, for both kinds ───────────────────────────────────────────

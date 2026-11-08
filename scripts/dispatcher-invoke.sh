@@ -2344,6 +2344,12 @@ ask_scheduler() {
         --argjson b "$(board_items_in_status "In review")" --argjson c "$(board_items_in_status "In merge")" \
         '$a + $b + $c | map(.number) | unique | map(tostring) | join(",")')
     $DRY_RUN && extra+=(--dry-run)
+    # Stories this run skipped or started are unavailable to the decision, but
+    # are not work in flight, so they do not count for the WIP limit.
+    local unavailable
+    unavailable=$(printf '%s\n' $NON_EXECUTABLE_ISSUES $DISPATCH_RUN_STARTED_ISSUES $HAND_OFF_RESUMED_ISSUES \
+        | grep -E '^[1-9][0-9]*$' | sort -un | paste -sd, -) || unavailable=""
+    [[ -n "$unavailable" ]] && extra+=(--exclude "$unavailable")
     scheduler_next "$in_impl" ${extra[@]+"${extra[@]}"}
 }
 
@@ -3568,9 +3574,214 @@ if $RESUME_ONLY; then
     exit 0
 fi
 
+# ─── Step 4: Comment-triggered resume, then stale detection and recovery ──────
+# Per docs/PROJECT-STATUS.md Recovery Protocol:
+#   Stale = In implementation + no activity >2h + no handoff note (both required)
+# Per docs/PROJECT-STATUS.md Decision blockers / Resolution (issue #262):
+#   A decision blocker resumes immediately once the PO posts a standalone
+#   `/unblock` line after the blocker declaration — see
+#   check_and_resolve_decision_blocker_comment() above, run first in the loop
+#   below so it is not gated on STALE_THRESHOLD.
+
+READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
+
+# Return contract (issue #262 review): 0 means the board transition is
+# confirmed done (or, under --dry-run, confirmed simulated) — safe for a
+# caller to treat as "the story is really moving to Ready for
+# implementation". 1 means the mutation did NOT happen (unresolved
+# field/option IDs, or a failed GraphQL call) — a caller must NOT record
+# any "this is resolved/consumed" state on a 1, or a transient/config
+# failure would be indistinguishable from success and could permanently
+# strand a story. Callers that only want best-effort board sync with no
+# such downstream state must still not report success on a 1 (issue #432): the
+# stale-recovery loop below posts its Recovery Comment only after this
+# returns 0.
+set_project_status_ready() {
+    local item_id="$1"
+    local issue_num="$2"
+    BOARD_WRITE_SENT=""
+    if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
+        echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
+        return 1
+    fi
+    set_project_status "$item_id" "$issue_num" "Ready for implementation"
+}
+# ─── Steps 3 and 4: collect "In implementation" stories, recover stale ones ──
+# A function so the scheduled run (issue #474) recovers stale stories before it
+# asks the scheduler: a stale story that holds a WIP slot must be rolled back
+# first, or the scheduler reports `wip-limit` and the recovery never runs.
+STALE_RECOVERY_DONE=false
+
+recover_stale_stories() {
+    # ─── Step 3: Collect "In implementation" stories ─────────────────────────────
+
+    LAST_ACTION="collecting in-implementation stories"
+    IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
+        .data.repository.projectsV2.nodes[0].items.nodes[]
+        | select(
+            (.content | type) == "object" and
+            (.content.number != null) and
+            ([ .fieldValues.nodes[]
+               | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
+             ] | length > 0)
+          )
+        | { id: .id, number: .content.number, title: .content.title,
+            body: (.content.body // ""), updatedAt: .content.updatedAt,
+            projectUpdatedAt: .updatedAt }
+    ]')
+
+    IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
+    echo "Stories in \"In implementation\": $IN_IMPL_COUNT"
+
+
+    LAST_ACTION="stale story detection"
+    STALE_COUNT=0
+    RESUME_COUNT=0
+    for ((i=0; i < IN_IMPL_COUNT; i++)); do
+        item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
+        item_id=$(echo "$item" | jq -r '.id')
+        issue_num=$(echo "$item" | jq -r '.number')
+        issue_title=$(echo "$item" | jq -r '.title')
+        updated_at=$(echo "$item" | jq -r '.updatedAt')
+        project_updated_at=$(echo "$item" | jq -r '.projectUpdatedAt')
+
+        # ── Comment-triggered resume for decision blockers (issue #262) ──────────
+        # Runs before the time-based staleness check below: a PO's resolving
+        # comment must resume the story immediately rather than wait out
+        # STALE_THRESHOLD. Once resumed, this story is no longer "In
+        # implementation", so the staleness check below is skipped for it.
+        if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id" "$project_updated_at"; then
+            RESUME_COUNT=$(( RESUME_COUNT + 1 ))
+            continue
+        fi
+
+        # Baseline: issue updatedAt (covers issue comments, label changes, etc.)
+        last_ts=$(iso_to_ts "$updated_at")
+
+        # Fetch linked open PR once — reused for activity timestamps, handoff check, and branch name.
+        # Policy (docs/PROJECT-STATUS.md): activity includes commits, comments, AND PR updates.
+        linked_pr=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+            | jq --argjson n "$issue_num" '
+                map(select(
+                    (.body // "") | ascii_downcase |
+                    test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
+                )) | first // null')
+        pr_number=$(echo "$linked_pr" | jq -r '.number // empty')
+        pr_updated_at=$(echo "$linked_pr" | jq -r '.updated_at // empty')
+
+        # PR updated_at covers PR description edits, review comments, and CI status updates
+        if [[ -n "$pr_updated_at" ]]; then
+            pr_ts=$(iso_to_ts "$pr_updated_at")
+            [[ $pr_ts -gt $last_ts ]] && last_ts=$pr_ts
+        fi
+
+        # Latest commit pushed to the PR branch — a push updates neither issue nor PR timestamps
+        if [[ -n "$pr_number" ]]; then
+            latest_commit=$(gh api "repos/$REPO/pulls/$pr_number/commits?per_page=100" \
+                | jq -r '[.[].commit | (.committer.date // .author.date // "")] | map(select(. != "")) | sort | last // empty')
+            if [[ -n "$latest_commit" ]]; then
+                commit_ts=$(iso_to_ts "$latest_commit")
+                [[ $commit_ts -gt $last_ts ]] && last_ts=$commit_ts
+            fi
+        fi
+
+        inactivity=$(( NOW_TS - last_ts ))
+
+        if [[ $inactivity -le $STALE_THRESHOLD ]]; then
+            continue
+        fi
+
+        # Both conditions must be true for stale: >2h inactivity AND no handoff note
+        if has_handoff_note "$issue_num" "$pr_number"; then
+            continue
+        fi
+
+        # A story the dispatcher itself stopped at a fix-round bound (issue #293)
+        # is waiting for the PO, not stale. Rolling it back would start /implement
+        # again as a ready story and pass the bound.
+        if [[ -n "$pr_number" ]]; then
+            pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
+            if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" 1 \
+               || { [[ -n "$pr_head_sha" ]] \
+                    && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
+                echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
+                continue
+            fi
+            # Issue #449: the conflict-round and missing-merge-owner blockers also
+            # wait for the PO; a rollback would start /implement past them.
+            if [[ -n "$pr_head_sha" ]] \
+               && { marker_holds "$issue_num" "$(conflict_round_attempt_marker "$pr_number" "$pr_head_sha")" 1 \
+                    || marker_holds "$issue_num" "$(merge_owner_missing_marker "$pr_number" "$pr_head_sha")" 1; }; then
+                echo "#$issue_num is held by a conflict-round or merge-owner blocker; not treating it as stale."
+                continue
+            fi
+        fi
+
+        hours_inactive=$(( inactivity / 3600 ))
+        echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
+
+        # Branch name: prefer PR head ref (authoritative); fall back to naming-convention search
+        branch=""
+        [[ -n "$pr_number" ]] && branch=$(echo "$linked_pr" | jq -r '.head.ref // empty')
+        if [[ -z "$branch" ]]; then
+            branch=$(gh api "repos/$REPO/branches?per_page=100" \
+                | jq -r --argjson n "$issue_num" '
+                    map(select(.name | test("/(issue|implement)-\($n)[-_]"; "i")))
+                    | first | .name // "(unknown)"') || branch="(unknown)"
+        fi
+
+        recovery_comment="## Recovery Comment
+Detected: story in \"In implementation\" with no activity for >2h and no handoff note.
+Action: status rolled back to \"Ready for implementation\".
+Branch: $branch — existing commits intact.
+Next executor: review branch state before pulling."
+
+        # Issue #432: the status first. When it is not written, no Recovery Comment
+        # is posted and the story is not counted, so the next run tries again
+        # without a duplicate comment. When the rollback may have landed and "In
+        # implementation" cannot be written back, the next run would not see the
+        # story as stale, so the Recovery Comment is posted now.
+        if ! set_project_status_ready "$item_id" "$issue_num"; then
+            if board_status_kept "$item_id" "$issue_num" "In implementation"; then
+                echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
+                continue
+            fi
+            echo "#$issue_num: the rollback to \"Ready for implementation\" may be on the board and \"In implementation\" could not be written back; Recovery Comment posted." >&2
+        fi
+        post_comment "$issue_num" "$recovery_comment"
+
+        STALE_COUNT=$(( STALE_COUNT + 1 ))
+    done
+
+    # Recalculate active (non-stale) WIP count after recovery rollbacks and
+    # comment-triggered resumes (issue #262)
+    # Re-query the board to get updated state
+    if [[ $(( STALE_COUNT + RESUME_COUNT )) -gt 0 && $DRY_RUN == false ]]; then
+        echo "Re-fetching board after stale recovery / comment-triggered resume..."
+        BOARD_DATA=$(fetch_board_data)
+
+        IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
+            .data.repository.projectsV2.nodes[0].items.nodes[]
+            | select(
+                (.content | type) == "object" and
+                (.content.number != null) and
+                ([ .fieldValues.nodes[]
+                   | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
+                 ] | length > 0)
+              )
+            | { id: .id, number: .content.number, title: .content.title,
+                body: (.content.body // ""), updatedAt: .content.updatedAt }
+        ]')
+        IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
+    fi
+    STALE_RECOVERY_DONE=true
+}
+
 # The scheduled run (issue #474): one scheduler decision for new work, after
 # the work in flight above.
 if $SCHEDULED; then
+    LAST_ACTION="stale story detection"
+    recover_stale_stories
     next_new_work
     ISSUE_NUMBER="$NEXT_ISSUE"
 fi
@@ -3677,198 +3888,9 @@ EXECUTOR_TYPE="${ROUTING_VALUE%%:*}"
 EXECUTOR_SECRET="${ROUTING_VALUE##*:}"
 echo "Executor: $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
 
-# ─── Step 3: Collect "In implementation" stories ─────────────────────────────
-
-LAST_ACTION="collecting in-implementation stories"
-IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
-    .data.repository.projectsV2.nodes[0].items.nodes[]
-    | select(
-        (.content | type) == "object" and
-        (.content.number != null) and
-        ([ .fieldValues.nodes[]
-           | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-         ] | length > 0)
-      )
-    | { id: .id, number: .content.number, title: .content.title,
-        body: (.content.body // ""), updatedAt: .content.updatedAt,
-        projectUpdatedAt: .updatedAt }
-]')
-
-IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
-echo "Stories in \"In implementation\": $IN_IMPL_COUNT"
-
-# ─── Step 4: Comment-triggered resume, then stale detection and recovery ──────
-# Per docs/PROJECT-STATUS.md Recovery Protocol:
-#   Stale = In implementation + no activity >2h + no handoff note (both required)
-# Per docs/PROJECT-STATUS.md Decision blockers / Resolution (issue #262):
-#   A decision blocker resumes immediately once the PO posts a standalone
-#   `/unblock` line after the blocker declaration — see
-#   check_and_resolve_decision_blocker_comment() above, run first in the loop
-#   below so it is not gated on STALE_THRESHOLD.
-
-READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
-
-# Return contract (issue #262 review): 0 means the board transition is
-# confirmed done (or, under --dry-run, confirmed simulated) — safe for a
-# caller to treat as "the story is really moving to Ready for
-# implementation". 1 means the mutation did NOT happen (unresolved
-# field/option IDs, or a failed GraphQL call) — a caller must NOT record
-# any "this is resolved/consumed" state on a 1, or a transient/config
-# failure would be indistinguishable from success and could permanently
-# strand a story. Callers that only want best-effort board sync with no
-# such downstream state must still not report success on a 1 (issue #432): the
-# stale-recovery loop below posts its Recovery Comment only after this
-# returns 0.
-set_project_status_ready() {
-    local item_id="$1"
-    local issue_num="$2"
-    BOARD_WRITE_SENT=""
-    if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
-        echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
-        return 1
-    fi
-    set_project_status "$item_id" "$issue_num" "Ready for implementation"
-}
-
-LAST_ACTION="stale story detection"
-STALE_COUNT=0
-RESUME_COUNT=0
-for ((i=0; i < IN_IMPL_COUNT; i++)); do
-    item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
-    item_id=$(echo "$item" | jq -r '.id')
-    issue_num=$(echo "$item" | jq -r '.number')
-    issue_title=$(echo "$item" | jq -r '.title')
-    updated_at=$(echo "$item" | jq -r '.updatedAt')
-    project_updated_at=$(echo "$item" | jq -r '.projectUpdatedAt')
-
-    # ── Comment-triggered resume for decision blockers (issue #262) ──────────
-    # Runs before the time-based staleness check below: a PO's resolving
-    # comment must resume the story immediately rather than wait out
-    # STALE_THRESHOLD. Once resumed, this story is no longer "In
-    # implementation", so the staleness check below is skipped for it.
-    if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id" "$project_updated_at"; then
-        RESUME_COUNT=$(( RESUME_COUNT + 1 ))
-        continue
-    fi
-
-    # Baseline: issue updatedAt (covers issue comments, label changes, etc.)
-    last_ts=$(iso_to_ts "$updated_at")
-
-    # Fetch linked open PR once — reused for activity timestamps, handoff check, and branch name.
-    # Policy (docs/PROJECT-STATUS.md): activity includes commits, comments, AND PR updates.
-    linked_pr=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
-        | jq --argjson n "$issue_num" '
-            map(select(
-                (.body // "") | ascii_downcase |
-                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-            )) | first // null')
-    pr_number=$(echo "$linked_pr" | jq -r '.number // empty')
-    pr_updated_at=$(echo "$linked_pr" | jq -r '.updated_at // empty')
-
-    # PR updated_at covers PR description edits, review comments, and CI status updates
-    if [[ -n "$pr_updated_at" ]]; then
-        pr_ts=$(iso_to_ts "$pr_updated_at")
-        [[ $pr_ts -gt $last_ts ]] && last_ts=$pr_ts
-    fi
-
-    # Latest commit pushed to the PR branch — a push updates neither issue nor PR timestamps
-    if [[ -n "$pr_number" ]]; then
-        latest_commit=$(gh api "repos/$REPO/pulls/$pr_number/commits?per_page=100" \
-            | jq -r '[.[].commit | (.committer.date // .author.date // "")] | map(select(. != "")) | sort | last // empty')
-        if [[ -n "$latest_commit" ]]; then
-            commit_ts=$(iso_to_ts "$latest_commit")
-            [[ $commit_ts -gt $last_ts ]] && last_ts=$commit_ts
-        fi
-    fi
-
-    inactivity=$(( NOW_TS - last_ts ))
-
-    if [[ $inactivity -le $STALE_THRESHOLD ]]; then
-        continue
-    fi
-
-    # Both conditions must be true for stale: >2h inactivity AND no handoff note
-    if has_handoff_note "$issue_num" "$pr_number"; then
-        continue
-    fi
-
-    # A story the dispatcher itself stopped at a fix-round bound (issue #293)
-    # is waiting for the PO, not stale. Rolling it back would start /implement
-    # again as a ready story and pass the bound.
-    if [[ -n "$pr_number" ]]; then
-        pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
-        if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" 1 \
-           || { [[ -n "$pr_head_sha" ]] \
-                && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
-            echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
-            continue
-        fi
-        # Issue #449: the conflict-round and missing-merge-owner blockers also
-        # wait for the PO; a rollback would start /implement past them.
-        if [[ -n "$pr_head_sha" ]] \
-           && { marker_holds "$issue_num" "$(conflict_round_attempt_marker "$pr_number" "$pr_head_sha")" 1 \
-                || marker_holds "$issue_num" "$(merge_owner_missing_marker "$pr_number" "$pr_head_sha")" 1; }; then
-            echo "#$issue_num is held by a conflict-round or merge-owner blocker; not treating it as stale."
-            continue
-        fi
-    fi
-
-    hours_inactive=$(( inactivity / 3600 ))
-    echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
-
-    # Branch name: prefer PR head ref (authoritative); fall back to naming-convention search
-    branch=""
-    [[ -n "$pr_number" ]] && branch=$(echo "$linked_pr" | jq -r '.head.ref // empty')
-    if [[ -z "$branch" ]]; then
-        branch=$(gh api "repos/$REPO/branches?per_page=100" \
-            | jq -r --argjson n "$issue_num" '
-                map(select(.name | test("/(issue|implement)-\($n)[-_]"; "i")))
-                | first | .name // "(unknown)"') || branch="(unknown)"
-    fi
-
-    recovery_comment="## Recovery Comment
-Detected: story in \"In implementation\" with no activity for >2h and no handoff note.
-Action: status rolled back to \"Ready for implementation\".
-Branch: $branch — existing commits intact.
-Next executor: review branch state before pulling."
-
-    # Issue #432: the status first. When it is not written, no Recovery Comment
-    # is posted and the story is not counted, so the next run tries again
-    # without a duplicate comment. When the rollback may have landed and "In
-    # implementation" cannot be written back, the next run would not see the
-    # story as stale, so the Recovery Comment is posted now.
-    if ! set_project_status_ready "$item_id" "$issue_num"; then
-        if board_status_kept "$item_id" "$issue_num" "In implementation"; then
-            echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
-            continue
-        fi
-        echo "#$issue_num: the rollback to \"Ready for implementation\" may be on the board and \"In implementation\" could not be written back; Recovery Comment posted." >&2
-    fi
-    post_comment "$issue_num" "$recovery_comment"
-
-    STALE_COUNT=$(( STALE_COUNT + 1 ))
-done
-
-# Recalculate active (non-stale) WIP count after recovery rollbacks and
-# comment-triggered resumes (issue #262)
-# Re-query the board to get updated state
-if [[ $(( STALE_COUNT + RESUME_COUNT )) -gt 0 && $DRY_RUN == false ]]; then
-    echo "Re-fetching board after stale recovery / comment-triggered resume..."
-    BOARD_DATA=$(fetch_board_data)
-
-    IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select(
-            (.content | type) == "object" and
-            (.content.number != null) and
-            ([ .fieldValues.nodes[]
-               | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-             ] | length > 0)
-          )
-        | { id: .id, number: .content.number, title: .content.title,
-            body: (.content.body // ""), updatedAt: .content.updatedAt }
-    ]')
-    IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
+# ─── Steps 3 and 4: stale recovery (already done by the scheduled run) ─────
+if ! $STALE_RECOVERY_DONE; then
+    recover_stale_stories
 fi
 
 # ─── Step 5: WIP limit check ──────────────────────────────────────────────────
