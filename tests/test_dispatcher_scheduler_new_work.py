@@ -443,3 +443,61 @@ def test_ac11_dispatcher_config_no_longer_describes_the_refinement_notification(
     assert "| `ready_for_refinement` |" not in text
     assert "| `notified-refinement` |" not in text
     assert "the #306 scheduler will use it" not in text
+
+
+# ── Pre-flight judges the target against the other stories (issue #496) ──────
+
+FILES = "\n## Files affected\n\n- `scripts/a.sh`\n"
+
+
+def _target_in_implementation_on_first_read_only(d: Dispatcher, other_status: str | None = None,
+                                                 other_body: str = "") -> None:
+    """The 14:40 case: the run's first board read has the target "In implementation", the scheduler's read does not."""
+    d.add_story(STORY, "In implementation", body=FILES)
+    if other_status:
+        d.add_story(OTHER, other_status, body=other_body)
+        fresh(d, OTHER)
+    fresh(d, STORY)
+    d.add_pr(PR, STORY)
+    d.board_read_once(1)
+    board = d._read("board.json")
+    next(i for i in board["items"] if i["number"] == STORY)["status"] = "Ready for implementation"
+    d._write("board.json", board)
+    d.schedule(("implement", STORY))
+
+
+def test_ac1_ac3_the_target_is_not_compared_with_itself_when_the_first_board_read_listed_it(d):
+    _target_in_implementation_on_first_read_only(d)
+
+    proc = scheduled(d)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "File overlap detected" not in proc.stdout
+    assert "WIP limit reached" not in proc.stdout
+    assert "Pre-flight passed" in proc.stdout
+    assert not [c for c in d.posted(STORY) if "Type: conflict" in c]
+    assert d.sessions == [f"implement {STORY}"]
+
+
+def test_ac1_the_target_listed_as_in_implementation_does_not_count_for_the_wip_limit(d):
+    # WIP limit 1 (the fake default): the target itself in the list must not fill the slot.
+    d.add_story(STORY, "In implementation", body=FILES)
+    fresh(d, STORY)
+    d.add_pr(PR, STORY)
+    d.schedule(("implement", STORY))
+
+    proc = scheduled(d)
+
+    assert "WIP limit reached" not in proc.stdout, proc.stdout
+    assert "Active WIP count: 0" in proc.stdout
+
+
+def test_ac2_ac3_another_story_with_an_overlapping_file_is_still_reported(d):
+    _target_in_implementation_on_first_read_only(d, "In implementation", FILES)
+
+    proc = scheduled(d)
+
+    assert "FAIL: File overlap detected" in proc.stdout
+    assert f'owned by #{OTHER}' in proc.stdout
+    assert [c for c in d.posted(STORY) if "Type: conflict" in c]
+    assert d.sessions == []

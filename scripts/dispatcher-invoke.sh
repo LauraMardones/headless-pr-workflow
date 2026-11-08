@@ -3898,6 +3898,23 @@ fi
 # (docs/PROJECT-STATUS.md, docs/DISPATCHER-CONFIG.md)
 
 LAST_ACTION="WIP limit check"
+# The pre-flight judges the target against the other stories (issue #496): it
+# reads the board data of the latest fetch (the scheduler call's, in a scheduled
+# run), not the earlier read of the stale recovery, and leaves the target out.
+IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq --argjson target "$ISSUE_NUMBER" '[
+    .data.repository.projectsV2.nodes[0].items.nodes[]
+    | select(
+        (.content | type) == "object" and
+        (.content.number != null) and
+        (.content.number != $target) and
+        ([ .fieldValues.nodes[]
+           | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
+         ] | length > 0)
+      )
+    | { id: .id, number: .content.number, title: .content.title,
+        body: (.content.body // ""), updatedAt: .content.updatedAt }
+]')
+IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
 echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"
 
 if [[ $IN_IMPL_COUNT -ge $WIP_LIMIT ]]; then
