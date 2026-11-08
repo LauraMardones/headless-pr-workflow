@@ -406,7 +406,10 @@ FAKE_PHASE = r"""#!/usr/bin/env bash
 echo "PHASE_NAME $2" >> "$MOCK_DIR/phases.log"
 echo "PHASE_NAME $2" >> "$MOCK_DIR/seq.log"
 [[ -f "$MOCK_DIR/on_PHASE_NAME.sh" ]] && bash "$MOCK_DIR/on_PHASE_NAME.sh"
-[[ -f "$MOCK_DIR/fail_PHASE_NAME" ]] && { echo "fake PHASE_NAME script failure" >&2; exit 1; }
+if [[ -f "$MOCK_DIR/fail_PHASE_NAME" ]]; then  # the file may hold an exit code (default 1)
+    echo "fake PHASE_NAME script failure" >&2
+    rc=$(cat "$MOCK_DIR/fail_PHASE_NAME"); exit "${rc:-1}"
+fi
 if [[ "PHASE_NAME" == merge && ! -f "$MOCK_DIR/no_confirmation" ]]; then  # the confirmation the real script posts
     f="$MOCK_DIR/comments_$2.json"; [[ -f "$f" ]] || echo '[]' > "$f"
     jq --arg b "$MOCK_BOT" '. + [{user: {login: $b}, body: "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge", created_at: "2026-10-13T09:31:00Z"}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
@@ -566,10 +569,12 @@ class Dispatcher:
         """The next ``times`` comment writes on issue or PR ``target`` fail (an HTTP 500)."""
         (self.mock / f"fail_posts_{target}").write_text(str(times), encoding="utf-8")
 
-    def fail(self, command: str, failing: bool = True) -> None:
-        """Make a /implement or /review session, or the /merge or /cleanup script, fail."""
+    def fail(self, command: str, failing: bool = True, exit_code: int | None = None) -> None:
+        """Make a /implement or /review session, or the /merge or /cleanup script, fail.
+
+        ``exit_code`` is the exit code of a failing /merge or /cleanup script (default 1)."""
         path = self.mock / f"fail_{command}"
-        path.write_text("") if failing else path.unlink(missing_ok=True)
+        path.write_text("" if exit_code is None else str(exit_code)) if failing else path.unlink(missing_ok=True)
 
     def claude_stream(self, *events, exit_code: int = 0) -> None:
         """Make the fake ``claude`` print these stream-json lines (dicts or raw strings) and exit."""
