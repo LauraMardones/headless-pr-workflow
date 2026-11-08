@@ -359,7 +359,35 @@ USAGE_LIMIT_SCRIPT="${USAGE_LIMIT_SCRIPT:-$SCRIPT_DIR/dispatcher-usage-limit.sh}
 ALLOWANCE_SCRIPT="${ALLOWANCE_SCRIPT:-$SCRIPT_DIR/dispatcher-allowance.sh}"  # overridable for tests
 MERGE_SCRIPT="${MERGE_SCRIPT:-$SCRIPT_DIR/dispatcher-merge.sh}"          # /merge without a session (#264); overridable for tests
 CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-$SCRIPT_DIR/dispatcher-cleanup.sh}"    # /cleanup without a session (#264); overridable for tests
-HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # the building blocks of ADR-014 (`hpw dispatcher ...`); overridable for tests
+# The building blocks of ADR-014 (`hpw dispatcher ...`); overridable for tests.
+# By default `hpw` runs from an export of the commit the run started on (issue
+# #497): a session leaves its story branch checked out, and `scripts/hpw` runs
+# the `src/` of the checkout it sits in, so later scheduler calls would
+# otherwise decide with the branch's older code. The export is taken once per
+# run: DISPATCH_HPW_PIN_DIR survives `exec bash "$0"` (the environment is
+# kept), so a restart reuses the run's start commit; the process that exits for
+# good removes it (_dispatcher_exit_hook). Fail closed: no copy, no session.
+if [[ -z "${HPW_BIN:-}" ]]; then
+    if [[ ! -x "${DISPATCH_HPW_PIN_DIR:-}/scripts/hpw" ]]; then
+        _hpw_pin_dir=$(mktemp -d "${TMPDIR:-/tmp}/dispatcher-hpw-pin.XXXXXX") || {
+            echo "Error: cannot pin hpw to the run's start commit: no temporary directory could be created; no session starts." >&2
+            exit 1
+        }
+        _hpw_pin_commit=$(git -C "$REPO_ROOT" rev-parse HEAD) || _hpw_pin_commit=""
+        if [[ -z "$_hpw_pin_commit" ]] \
+            || ! (set -o pipefail; git -C "$REPO_ROOT" archive "$_hpw_pin_commit" scripts/hpw src | tar -x -C "$_hpw_pin_dir") \
+            || [[ ! -x "$_hpw_pin_dir/scripts/hpw" ]]; then
+            rm -rf "$_hpw_pin_dir"
+            echo "Error: cannot pin hpw to the run's start commit (${_hpw_pin_commit:-unknown}): the export failed; no session starts." >&2
+            exit 1
+        fi
+        DISPATCH_HPW_PIN_DIR="$_hpw_pin_dir"
+        export DISPATCH_HPW_PIN_DIR
+        echo "hpw is pinned to the run's start commit $_hpw_pin_commit"
+    fi
+    HPW_BIN="$DISPATCH_HPW_PIN_DIR/scripts/hpw"
+    export HPW_BIN  # the child scripts (usage-limit, merge, cleanup, ...) pin to the same copy
+fi
 COMMANDS_DIR="$REPO_ROOT/.claude/commands"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)
 # Token cleaning and the ANTHROPIC_* scrub, shared with the allowance probe (#314).
@@ -558,6 +586,7 @@ _dispatcher_exit_hook() {
         lost="$(cat "$DISPATCH_REGISTER_FAILURES_FILE")"
     fi
     rm -f "${DISPATCH_REGISTER_FAILURES_FILE:-}" 2>/dev/null || true
+    if [[ -n "${DISPATCH_HPW_PIN_DIR:-}" ]]; then rm -rf "$DISPATCH_HPW_PIN_DIR" 2>/dev/null || true; fi
     if [[ -n "$lost" ]]; then
         while IFS= read -r line; do
             echo "Error: actionable event lost, neither recorded nor delivered: $line" >&2

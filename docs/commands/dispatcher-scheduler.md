@@ -1,6 +1,6 @@
 # Command: `hpw dispatcher scheduler next`
 
-Chooses the dispatcher's next new-work action from the facts of [`hpw dispatcher facts read`](dispatcher-facts.md): which Epic, Feature or story to refine next, or which ready story to start implementing. It never writes to GitHub and never reads the board (ADR-010: decisions come from facts; ADR-014: one building block, one JSON line). It returns one action per run; the dispatcher calls it again on the next run (ADR-012: one session at a time). Code: `src/headless_pr_workflow/dispatcher/scheduler.py`.
+Chooses the dispatcher's next new-work action from the facts of [`hpw dispatcher facts read`](dispatcher-facts.md): which Epic, Feature or story to refine next, or which ready story to start implementing. It never writes to GitHub and never reads the board (ADR-010: decisions come from facts; ADR-014: one building block, one JSON line). It returns one action per run; the dispatcher calls it again on the next run (ADR-012: one session at a time). Code: `src/headless_pr_workflow/dispatcher/scheduler.py`. In a dispatcher run, `hpw` runs from an export of the commit the run started on, whatever branch a session leaves checked out (#497, [DISPATCHER-CONFIG](../DISPATCHER-CONFIG.md)).
 
 ```
 hpw dispatcher scheduler next --repo <owner/repo> [--facts-file <path>] [--in-implementation <n>[,<n>...]] [--dry-run]
