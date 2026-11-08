@@ -70,8 +70,9 @@ def assert_no_mutation(h):
 def test_decision_document_pr_is_refused(h, path):
     h.fixture(f"repos/{REPO}/pulls/{PR}/files", [{"filename": "src/a.py"}, {"filename": path}])
     proc = run(h)
-    assert proc.returncode == 1
+    assert proc.returncode == 3
     assert "ADR-011" in proc.stderr and "PO merges" in proc.stderr
+    assert f"PR #{PR}" in proc.stderr and proc.stderr.rstrip().endswith(f"Files: {path}")
     assert_no_mutation(h) and h.log("gate.log") == []
 
 

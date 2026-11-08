@@ -1069,8 +1069,9 @@ post_mid_cycle_blocker() {
     # the default; a caller that knows the cause names it instead.
     local reason="${5:-}"
     local unblocked_when="${6:-/$failed_command completes successfully for #$issue_num with exit code 0}"
-    local body state
-    state="execution loop halted after /$failed_command failed; board reflects last successful state"
+    # Optional state text (issue #502); the default stays the failure text.
+    local state="${7:-execution loop halted after /$failed_command failed; board reflects last successful state}"
+    local body
     body="## Blocked Declaration
 Type: external
 Declared by: $DECLARED_BY
@@ -2548,11 +2549,34 @@ merge_attempt_marker() {
     dispatcher_marker "action=merge-attempt pr=$1 head=$2"
 }
 
+# decision_files_text <space-separated files> — the first 5 files, then
+# "and <k> more", so the Slack text cap never cuts the PR number or the
+# instruction (issue #502).
+decision_files_text() {
+    local -a list
+    read -r -a list <<< "$1"
+    local n=${#list[@]} shown
+    if (( n > 5 )); then
+        shown="${list[*]:0:5}"
+        shown="${shown// /, }, and $((n - 5)) more"
+    else
+        shown="${list[*]}"
+        shown="${shown// /, }"
+    fi
+    printf '%s' "$shown"
+}
+
 run_merge_or_block() {
     local pr_number="$1" head_sha="$2" marker=""
     [[ -n "$head_sha" ]] && marker=$(merge_attempt_marker "$pr_number" "$head_sha")
     LAST_ACTION="running the merge script for PR #$pr_number"
-    if ! run_phase_script "$MERGE_SCRIPT" "/merge" --pr "$pr_number"; then
+    # The script's stderr is kept for the decision-document blocker (issue #502)
+    # and passed on unchanged.
+    local merge_err merge_rc=0
+    merge_err=$(mktemp) || merge_err=/dev/null
+    run_phase_script "$MERGE_SCRIPT" "/merge" --pr "$pr_number" 2>"$merge_err" || merge_rc=$?
+    [[ "$merge_err" == /dev/null ]] || cat "$merge_err" >&2
+    if [[ $merge_rc -ne 0 ]]; then
         # The script exits 1 after a completed merge only when the confirmation
         # comment was not posted. That is not a merge blocker (#348): the
         # evidence-pending comment it left is retried by settle_merge_confirmation.
@@ -2562,10 +2586,24 @@ run_merge_or_block() {
             echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: PR #$pr_number is merged but its confirmation comment was not posted; retried on a later run"
             return 0
         fi
-        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
+        if [[ $merge_rc -eq 3 ]]; then
+            # Exit 3: the PR changes decision documents; the PO merges it
+            # personally (ADR-011). A planned step, not a failure (issue #502).
+            local files cause
+            files=$(sed -n 's/^.*Files: //p' "$merge_err" | head -n 1)
+            files=$(decision_files_text "$files")
+            cause="PR #$pr_number changes decision documents (ADR-011): ${files:-(files not reported)}. The PO reviews and merges it personally in GitHub. This is a planned step, not a failure."
+            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker" "$cause" \
+                "The PO has reviewed and merged PR #$pr_number in GitHub, then replies with a line that is exactly /unblock." \
+                "waiting for the PO to review and merge PR #$pr_number; board stays In merge"
+        else
+            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
+        fi
+        [[ "$merge_err" == /dev/null ]] || rm -f "$merge_err"
         DISPATCH_HANDLED=true
         exit 1
     fi
+    [[ "$merge_err" == /dev/null ]] || rm -f "$merge_err"
     echo "✓ /merge completed for PR #$pr_number"
 }
 

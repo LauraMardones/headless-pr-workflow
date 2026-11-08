@@ -9,7 +9,9 @@
 # Usage: dispatcher-merge.sh --pr <N> --repo <owner/name> [--method squash|merge|rebase]
 #
 # Exit 0: the PR is merged (now or already). Exit 1: blocked or failed; the
-# reason is on stderr. Exit 2: invalid invocation.
+# reason is on stderr. Exit 2: invalid invocation. Exit 3: the PR changes
+# decision documents (ADR-011); the PO merges it personally. The reason on
+# stderr ends with "Files: <file> <file> ..." (issue #502).
 #
 # Anything this script cannot judge blocks the merge (fail closed). It never
 # writes the board: a blocked story stays "In merge" (one attempt per head,
@@ -84,7 +86,8 @@ if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '
 fi
 decision_files=$(grep -E '^(specs/[0-9]+-[^/]+/|docs/decisions/ADR-[^/]*\.md$)' <<< "$files" || true)
 if [[ -n "$decision_files" ]]; then
-    block "the PR changes decision documents (ADR-011); the PO merges such PRs personally in GitHub. Files: $(tr '\n' ' ' <<< "$decision_files")"
+    echo "/merge blocked for PR #$PR: the PR changes decision documents (ADR-011); the PO merges such PRs personally in GitHub. Files: $(tr '\n' ' ' <<< "$decision_files" | sed 's/ *$//')" >&2
+    exit 3
 fi
 
 # Fresh refresh: state, draft flag and head, read immediately before the gate.

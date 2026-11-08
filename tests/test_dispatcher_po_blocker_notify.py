@@ -114,6 +114,60 @@ def test_ac2_conflict_cause_travels_in_the_context(d):
     assert "Cause:" in declaration(d)["body"]
 
 
+def in_merge_story_with_failing_merge(d: Dispatcher, exit_code: int, files: str = "") -> None:
+    d.add_story(STORY, "In merge")
+    d.add_pr(PR, STORY)
+    d.fail("merge", exit_code=exit_code)
+    if files:  # the reason the real script prints on stderr
+        (d.mock / "on_merge.sh").write_text(
+            f"echo '/merge blocked for PR #{PR}: the PR changes decision documents (ADR-011); "
+            f"the PO merges such PRs personally in GitHub. Files: {files}' >&2\n", encoding="utf-8")
+
+
+@needs_tools
+def test_decision_document_refusal_posts_the_planned_step_blocker(d):
+    in_merge_story_with_failing_merge(d, 3, "docs/decisions/ADR-020-x.md specs/1-a/spec.md")
+
+    d.run_issue(STORY)
+
+    body = declaration(d)["body"]
+    assert f"Cause: PR #{PR} changes decision documents (ADR-011): docs/decisions/ADR-020-x.md, specs/1-a/spec.md. " \
+           "The PO reviews and merges it personally in GitHub. This is a planned step, not a failure." in body
+    assert f"Unblocked when: The PO has reviewed and merged PR #{PR} in GitHub, then replies with a line that is exactly /unblock." in body
+    assert f"State of in-progress work: waiting for the PO to review and merge PR #{PR}; board stays In merge" in body
+    assert "Type: external" in body and "action=merge-attempt" in body
+    assert "failed" not in body.split("Cause:")[0] and "completes successfully" not in body
+    events = po_events(d)
+    assert len(events) == 1
+    context = json.loads(events[0]["context"])
+    assert "planned step" in context["cause"] and "/unblock" in context["unblocked_when"]
+    assert "waiting for the PO" in context["state"] and "failed" not in context["state"]
+
+
+@needs_tools
+def test_decision_document_refusal_with_seven_files_names_five_and_the_rest(d):
+    files = [f"specs/1-a/f{i}.md" for i in range(1, 8)]
+    in_merge_story_with_failing_merge(d, 3, " ".join(files))
+
+    d.run_issue(STORY)
+
+    cause = json.loads(po_events(d)[0]["context"])["cause"]
+    assert ", ".join(files[:5]) + ", and 2 more." in cause and "f6.md" not in cause
+    assert cause.startswith(f"PR #{PR} changes") and "planned step" in cause
+
+
+@needs_tools
+def test_other_merge_failures_keep_the_generic_blocker_text(d):
+    in_merge_story_with_failing_merge(d, 1)
+
+    d.run_issue(STORY)
+
+    body = declaration(d)["body"]
+    assert "Unblocked when: /merge completes successfully for #500 with exit code 0" in body
+    assert "State of in-progress work: execution loop halted after /merge failed" in body
+    assert "Cause:" not in body and "action=merge-attempt" in body
+
+
 @needs_tools
 def test_ac2_a_failed_blocker_write_registers_nothing(d):
     d.add_story(STORY, "In merge")
