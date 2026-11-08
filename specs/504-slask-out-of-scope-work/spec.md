@@ -13,11 +13,18 @@ Today each out-of-scope finding becomes a follow-up issue under its own Epic wit
 
 In:
 
-- <…>
+- `/implement`, `/review` and `/refine` create a slask issue, or link an existing one, for work found outside their scope, with the lines and labels decided below.
+- `/review` stops holding a PR for a finding in code the PR did not change. Other out-of-scope findings still wait for the PO's waiver.
+- Before each Feature breakdown the Tech Lead sorts the slask: a finding that fits an existing Feature criterion moves there. Allowed maintenance is refined where it is. A bug that breaks a criterion of a closed Epic's spec is refined without the PO. Anything else becomes a decision blocker.
+- `/verify-closure` lists to the PO the slask issues found under the Epic it closes. The PO chooses a new spec or closing each one.
+- The scheduler no longer skips slask issues as `no-feature` or `no-parent`.
 
 Out:
 
-- <…>
+- The standing slask Epic, its spec and the list of allowed maintenance (own `/spec` session).
+- Sorting follow-ups that existed before the mechanism.
+- #399 and #400.
+- Changing how the scheduler orders work.
 
 ## Acceptance Criteria
 
