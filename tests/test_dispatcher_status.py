@@ -15,7 +15,7 @@ from headless_pr_workflow.dispatcher import cli, status
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 from headless_pr_workflow.dispatcher.status import STATUSES, count_progress, derive_status, read_status
 
-from tests.test_dispatcher_facts_block import BLOCKER, PO, RECORD_OK, FakeGateway, spec_line, story_body, summary
+from tests.test_dispatcher_facts_block import BLOCKER, PO, RECORD_OK, SPEC_PATH, FakeGateway, spec_line, story_body, summary
 
 DRAFT = {"number": 50, "draft": True, "gates_pass": False}
 REVIEW = {"number": 51, "draft": False, "gates_pass": False}
@@ -63,7 +63,8 @@ def test_every_status_and_type(over, expected):
 def test_every_status_name_is_reachable():
     reached = {"unknown"}
     for over in [{"state": "closed"}, {"blocked": True}, {"type": "epic", "spec_pr": True},
-                 {"refined": False, "spec_merged": False}, {"refined": False}, {"prs": [GREEN]}, {"prs": [REVIEW]},
+                 {"refined": False, "spec_merged": False}, {"refined": False, "refinement_failed": True},
+                 {"refined": False}, {"prs": [GREEN]}, {"prs": [REVIEW]},
                  {"prs": [DRAFT]}, {}, {"ready": False}, {"type": "epic"}, {"type": None}]:  # fmt: skip
         reached.add(of(**over))
     assert reached == set(STATUSES) | {"unknown"}
@@ -101,6 +102,28 @@ def test_in_progress_never_applies_to_implementation_issues(kind):
 ])
 def test_precedence(over, winner):
     assert of(**over) == winner
+
+
+@pytest.mark.parametrize("kind", ["epic", "feature", "story", "task", "bug"])
+def test_refinement_failed_for_every_type_and_beats_not_refined(kind):
+    assert of(type=kind, refined=False, refinement_failed=True) == "Refinement failed"
+    assert of(type=kind, refined=False, refinement_failed=False) == "Not refined"
+
+
+@pytest.mark.parametrize("over, winner", [
+    ({"state": "closed"}, "Done"),
+    ({"blocked": True}, "Blocked"),
+    ({"spec_pr": True, "refined": False, "spec_merged": False}, "In specification"),
+    ({"refined": False, "spec_merged": False}, "No spec"),
+    ({"refined": False, "parent_open_epic": False}, "No spec"),
+])
+def test_refinement_failed_yields_to_the_earlier_statuses(over, winner):
+    assert of(refinement_failed=True, **{"refined": False, **over}) == winner
+
+
+def test_a_refinement_failed_fact_names_why():
+    status_, fact = derive_status(facts(refined=False, refinement_failed=True))
+    assert status_ == "Refinement failed" and "refine-check" in fact and "\n" not in fact
 
 
 def test_no_spec_beats_not_refined_when_both_hold():
@@ -511,3 +534,56 @@ def test_the_merge_gate_script_loads_as_a_module():
     from headless_pr_workflow.dispatcher.gateway import _merge_gate_module
 
     assert callable(_merge_gate_module().evaluate)
+
+
+# ── Refinement failed: parity with the scheduler's gate (issue #476) ──────────
+
+
+def _gate_and_status(gw, number):
+    from headless_pr_workflow.dispatcher.facts import read_facts
+    from headless_pr_workflow.dispatcher.scheduler import _refine_gate
+
+    out = read_facts(gw, "")
+    epic = out.fields["epics"][0]
+    entry = next(e for e in out.fields["issues"] if e["number"] == number)
+    return _refine_gate(entry, epic["spec"]), by_number(read_status(gw, "o/r"))[number]["status"]
+
+
+@pytest.mark.parametrize("comments, failed", [
+    ([summary("fail: spec_record")], True),
+    ([summary("unreadable")], True),
+    ([summary()], False),
+    ([summary("fail: x"), summary()], False),
+    ([summary("fail: x"), "/unblock"], True),  # an /unblock answers a blocker; there is none
+    ([summary("fail: x"), BLOCKER, "/unblock"], False),
+    ([summary(), BLOCKER, "/unblock", summary("fail: x")], True),
+    ([], False),
+])
+@pytest.mark.parametrize("kind", ["story", "feature"])
+def test_refinement_failed_holds_exactly_when_the_scheduler_gate_says_last_refinement_failed(gw, comments, failed, kind):
+    gw.add_issue(30, [f"type:{kind}"], story_body())
+    for text in comments:
+        gw.comment(30, text)
+    gate, got = _gate_and_status(gw, 30)
+    assert (gate == "last-refinement-failed") is failed
+    assert (got == "Refinement failed") is failed
+
+
+def test_a_summary_older_than_the_spec_commit_is_not_a_refinement_failure(gw):
+    gw.add_issue(30, ["type:story"], story_body())
+    gw.comment(30, summary("fail: x"))
+    gw.commits[SPEC_PATH] = {"sha": "a" * 40, "date": "2026-12-01T00:00:00Z"}
+    gate, got = _gate_and_status(gw, 30)
+    assert gate != "last-refinement-failed" and got == "Not refined"
+
+
+def test_a_failed_epic_refinement_gives_the_epic_refinement_failed(gw):
+    gw.comment(10, summary("fail: x"))
+    assert by_number(read_status(gw, "o/r"))[10]["status"] == "Refinement failed"
+
+
+def test_a_blocker_beats_a_failed_refinement(gw):
+    gw.add_issue(30, ["type:story"], story_body())
+    gw.comment(30, summary("fail: x"))
+    gw.comment(30, BLOCKER)
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"

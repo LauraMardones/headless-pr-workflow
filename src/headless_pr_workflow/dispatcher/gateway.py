@@ -38,6 +38,29 @@ BOARD_QUERY = """query($owner: String!, $repo: String!, $number: Int!) {
   }
 }"""
 
+BOARD_ITEMS_QUERY = """query($owner: String!, $repo: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    projectsV2(first: 1) {
+      nodes {
+        id
+        fields(first: 30) {
+          nodes { ... on ProjectV2SingleSelectField { id name options { id name } } }
+        }
+        items(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            content { __typename ... on Issue { number state labels(first: 50) { nodes { name } } } }
+            fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          }
+        }
+      }
+    }
+  }
+}"""
+
+BOARD_ITEMS_MAX_PAGES = 50
+
 STATUS_MUTATION = """mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
   updateProjectV2ItemFieldValue(input: {
     projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
@@ -76,6 +99,25 @@ class BoardItem:
     options: dict[str, str] = field(default_factory=dict)
     item_id: str | None = None
     status: str | None = None
+
+
+@dataclass(frozen=True)
+class BoardCard:
+    """One item of the board. ``number`` is ``None`` for an item that is not an issue (a draft or a pull request)."""
+
+    item_id: str
+    number: int | None = None
+    state: str | None = None  # "open" or "closed" for an issue
+    labels: tuple[str, ...] = ()
+    status: str | None = None
+
+
+@dataclass(frozen=True)
+class BoardSnapshot:
+    """Every item of the repository's first Projects v2 board and the Status options (issue #476)."""
+
+    options: dict[str, str] = field(default_factory=dict)
+    cards: list[BoardCard] = field(default_factory=list)
 
 
 class Gateway(Protocol):
@@ -120,6 +162,14 @@ class Gateway(Protocol):
     def list_closed_issues(self) -> list[dict[str, Any]]: ...
 
     def merge_gates_pass(self, number: int, head: str) -> bool: ...
+
+    # Board sync (``board_sync.py``, issue #476).
+
+    def list_board_items(self) -> BoardSnapshot: ...
+
+    def issue_body(self, number: int) -> str: ...
+
+    def edit_issue_body(self, number: int, body: str) -> None: ...
 
 
 def parse_json_stream(text: str) -> list[Any]:
@@ -335,6 +385,63 @@ class GhGateway:
             item_id=item.get("id"), status=status,
         )  # fmt: skip
 
+    def list_board_items(self) -> BoardSnapshot:
+        """Every item of the first Projects v2 board (all pages) and its Status options."""
+
+        step = "read board items"
+        options: dict[str, str] = {}
+        cards: list[BoardCard] = []
+        cursor: str | None = None
+        for _ in range(BOARD_ITEMS_MAX_PAGES):
+            args = ["api", "graphql", "-f", f"query={BOARD_ITEMS_QUERY}", "-f", f"owner={self.owner}",
+                    "-f", f"repo={self.name}"]  # fmt: skip
+            if cursor:
+                args += ["-f", f"cursor={cursor}"]
+            payload = self._json(step, args)
+            if not isinstance(payload, dict):
+                raise GatewayError(step, "GitHub returned a board that could not be parsed")
+            if payload.get("errors"):
+                messages = "; ".join(str(e.get("message")) for e in payload["errors"] if isinstance(e, dict))
+                raise GatewayError(step, f"GraphQL returned errors ({messages[:300]}); the token needs the 'project' and 'repo' scopes")
+            repository = (payload.get("data") or {}).get("repository") or {}
+            projects = ((repository.get("projectsV2") or {}).get("nodes")) or []
+            if not projects or not isinstance(projects[0], dict) or not projects[0].get("id"):
+                raise GatewayError(step, f"no Projects v2 board is visible on {self.repo}; the token needs the 'project' scope")
+            project = projects[0]
+            status_field = next((f for f in ((project.get("fields") or {}).get("nodes") or [])
+                                 if isinstance(f, dict) and f.get("name") == "Status"), None)  # fmt: skip
+            if status_field is None:
+                raise GatewayError(step, "the board has no Status field")
+            options = {str(o["name"]): str(o["id"]) for o in status_field.get("options") or []
+                       if isinstance(o, dict) and o.get("name") and o.get("id")}  # fmt: skip
+            page = project.get("items") or {}
+            for node in page.get("nodes") or []:
+                if not isinstance(node, dict) or not node.get("id"):
+                    continue
+                content = node.get("content") or {}
+                is_issue = content.get("__typename") == "Issue" and isinstance(content.get("number"), int)
+                labels = tuple(str(label.get("name")) for label in ((content.get("labels") or {}).get("nodes") or [])
+                               if isinstance(label, dict) and label.get("name"))  # fmt: skip
+                cards.append(BoardCard(
+                    item_id=str(node["id"]), number=content["number"] if is_issue else None,
+                    state=str(content.get("state") or "").lower() or None if is_issue else None, labels=labels,
+                    status=(node.get("fieldValueByName") or {}).get("name"),
+                ))  # fmt: skip
+            info = page.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return BoardSnapshot(options=options, cards=cards)
+            cursor = info.get("endCursor")
+            if not cursor:
+                raise GatewayError(step, "GitHub returned a board page without a cursor")
+        raise GatewayError(step, f"the board has more than {BOARD_ITEMS_MAX_PAGES} pages of items")
+
+    def issue_body(self, number: int) -> str:
+        step = f"read body of #{number}"
+        payload = self._json(step, ["api", f"repos/{self.repo}/issues/{number}"])
+        if not isinstance(payload, dict):
+            raise GatewayError(step, "GitHub returned an issue that could not be parsed")
+        return str(payload.get("body") or "")
+
     def issue_labels(self, number: int) -> list[str]:
         payload = self._json(f"read labels of #{number}", ["api", f"repos/{self.repo}/issues/{number}"])
         if not isinstance(payload, dict):
@@ -365,6 +472,11 @@ class GhGateway:
         if isinstance(payload, dict) and payload.get("errors"):
             messages = "; ".join(str(e.get("message")) for e in payload["errors"] if isinstance(e, dict))
             raise GatewayError("write status", f"GraphQL returned errors ({messages[:300]})")
+
+    def edit_issue_body(self, number: int, body: str) -> None:
+        # The body goes on stdin as JSON: no command-line length limit and no quoting.
+        self._run(f"write body of #{number}", ["api", f"repos/{self.repo}/issues/{number}", "-X", "PATCH", "--input", "-"],
+                  stdin=json.dumps({"body": body}))  # fmt: skip
 
     def add_label(self, number: int, name: str) -> None:
         self._run(f"add label to #{number}", ["api", f"repos/{self.repo}/issues/{number}/labels", "-X", "POST", "-f", f"labels[]={name}"])

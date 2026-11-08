@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .board_sync import sync_board
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
@@ -121,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     st_read.add_argument("--repo", required=True)
     st_read.add_argument("--epic", type=_positive)
     st_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+    st_sync = status_ops.add_parser("sync", add_help=False)
+    st_sync.add_argument("--repo", required=True)
+    st_sync.add_argument("--epic", type=_positive)
+    st_sync.add_argument("--attempts", type=_positive, default=DEFAULT_ATTEMPTS)
+    st_sync.add_argument("--dry-run", action="store_true")
 
     marker = blocks.add_parser("marker", add_help=False)
     marker_ops = marker.add_subparsers(dest="operation", parser_class=_Parser)
@@ -188,7 +194,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher state read|write|read-pending ... "
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
-            "| hpw dispatcher status read ...")
+            "| hpw dispatcher status read|sync ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -309,6 +315,9 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
     if args.block == "scheduler":
         return _run_scheduler(args, gateway)
     if args.block == "status":
+        if args.operation == "sync":
+            return _emit(sync_board(gateway, args.repo, epic=args.epic, attempts=args.attempts, dry_run=args.dry_run,
+                                    settings=settings))  # fmt: skip
         return _emit(read_status(gateway, args.repo, epic=args.epic))
 
     if args.operation == "comment":

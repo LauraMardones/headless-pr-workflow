@@ -22,12 +22,13 @@ from typing import Any, Mapping
 
 from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, read_facts
 from .gateway import Gateway, GatewayError
+from .scheduler import _refine_gate
 from .write import Result, log
 
 BLOCK = "status"
 OPERATION = "read"
 
-STATUSES = ("No spec", "In specification", "Not refined", "Blocked", "Refined", "Ready to implement",
+STATUSES = ("No spec", "In specification", "Refinement failed", "Not refined", "Blocked", "Refined", "Ready to implement",
             "In implementation", "In review", "Mergeable", "In progress", "Done")  # fmt: skip
 UNKNOWN = "unknown"
 
@@ -46,8 +47,9 @@ def derive_status(facts: Mapping[str, Any]) -> tuple[str, str]:
     Keys of ``facts``: ``type`` (``epic``, ``feature``, ``story``, ``task``, ``bug`` or ``None``), ``state``
     (``open`` or ``closed``), ``unreadable`` (a reason, or ``None``), ``blocked``, ``refined``, ``ready``,
     ``parent_open_epic`` (the item has an open parent Epic; always true for an Epic), ``spec_merged`` and
-    ``spec_pr`` (for the item's Epic: spec merged on main; an open PR adds or changes the spec), and ``prs``
-    (open linked PRs, each ``{"number", "draft", "gates_pass"}``).
+    ``spec_pr`` (for the item's Epic: spec merged on main; an open PR adds or changes the spec), ``refinement_failed``
+    (the scheduler's ``last-refinement-failed`` fact, #476), and ``prs`` (open linked PRs, each
+    ``{"number", "draft", "gates_pass"}``).
     """
 
     kind = facts.get("type")
@@ -75,6 +77,10 @@ def derive_status(facts: Mapping[str, Any]) -> tuple[str, str]:
             return _decided("No spec", "the issue has no open parent Epic and no open linked PR")
         if not spec_merged:
             return _decided("No spec", "the Epic has no merged spec and no open spec PR, and the issue is not refined")
+    if facts.get("refinement_failed"):
+        return _decided("Refinement failed", "the latest refine Session Summary after the current spec commit "
+                                             "reports refine-check fail or unreadable, with no /unblock after it")
+    if not refined and not own_pr:
         return _decided("Not refined", "the Epic's spec is merged and the issue has no refinement for the current spec")
 
     if not implementation:
@@ -169,6 +175,12 @@ def _epic_refined(entry: Mapping[str, Any]) -> bool:
     return not (blocker["state"] == "unblocked" and str(refinement["created_at"] or "") <= blocker["unblocked_at"])
 
 
+def _refinement_failed(entry: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
+    """The scheduler's ``last-refinement-failed`` gate, with the Epic's spec merged (the rule is the scheduler's)."""
+
+    return spec.get("state") == "merged" and _refine_gate(dict(entry), dict(spec)) == "last-refinement-failed"
+
+
 def read_status(gateway: Gateway, repo: str, *, epic: int | None = None, env: Mapping[str, str] | None = None) -> Result:
     """Derive the status of every open typed issue (or of one Epic and the issues under it) and the progress counts."""
 
@@ -246,7 +258,8 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
         items.append(_item(number, kind, {
             "type": kind, "state": "open", "unreadable": unreadable, "blocked": blocked,
             "refined": _epic_refined(entry), "parent_open_epic": True, "spec_merged": entry["spec"]["state"] == "merged",
-            "spec_pr": bool(spec_pr[number]), "prs": []}))  # fmt: skip
+            "spec_pr": bool(spec_pr[number]), "prs": [],
+            "refinement_failed": _refinement_failed({**entry, "type": "epic"}, entry["spec"])}))  # fmt: skip
     for entry in entries:
         number, kind = int(entry["number"]), entry["type"]
         parent = entry.get("epic")
@@ -264,7 +277,8 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
             "type": kind, "state": "open", "unreadable": unreadable, "blocked": blocked,
             "refined": bool(entry["refined"]), "ready": bool(entry["ready"]), "parent_open_epic": in_epic,
             "spec_merged": in_epic and epics[parent]["spec"]["state"] == "merged",
-            "spec_pr": bool(in_epic and spec_pr[parent]), "prs": linked(number) if unreadable is None else []}))  # fmt: skip
+            "spec_pr": bool(in_epic and spec_pr[parent]), "prs": linked(number) if unreadable is None else [],
+            "refinement_failed": in_epic and _refinement_failed(entry, epics[parent]["spec"])}))  # fmt: skip
 
     for item in sorted(items, key=lambda i: i["number"]):
         log(f"[STATUS] #{item['number']} {item['type']} {item['status']}: {item['fact']}")
