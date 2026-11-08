@@ -43,6 +43,16 @@ Out:
 **Chosen:** An out-of-scope finding about behaviour the PR did not add or change goes to the slask and no longer holds the PR. An edge case outside the story's criteria, and an Epic or Feature requirement the story did not take on, still wait for the PO's waiver, as today.
 **Rejected:** Every finding waits for the waiver, as today — the PO decides on defects that are not the story's. No finding waits — the PO would no longer see gaps in the story's own delivery before it merges.
 
+### The allowed maintenance is listed in the standing slask Epic's spec — 2026-11-08
+
+**Chosen:** The kinds of maintenance the Tech Lead may refine without asking the PO, and where the line goes, are decided in the standing slask Epic's spec. A finding that is no such maintenance and fits no existing Feature criterion goes to the PO as this spec describes.
+**Rejected:** List the maintenance in this spec — the list belongs with the Epic that holds the work, and the PO changes it there with a scope-change spec PR.
+
+### A bug that breaks a criterion of a closed Epic is fixed without the PO — 2026-11-08
+
+**Chosen:** A bug in delivered work whose Epic is closed is refined in the slask without asking the PO when it breaks an acceptance criterion of that Epic's merged spec: the fix restores behaviour the PO already approved. A bug that needs new behaviour reaches the PO at once as a decision blocker, because no closure of its Epic will list it.
+**Rejected:** Every such bug goes to the PO — the PO would approve again what the spec already says. Reopen the closed Epic — it undoes a closure the PO confirmed.
+
 ## Checked Against
 
 - <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
