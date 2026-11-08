@@ -267,6 +267,28 @@ def test_summary_pass_fail_and_none(gw, capsys):
         assert not facts_of(out, n)["refined"] and "no-passing-summary" in facts_of(out, n)["reasons"]
 
 
+def checks_summary(checks):
+    return f"## Session Summary\nCommand: refine\nIssue / PR: #1\nChecks run: {checks}\nBlockers: none"
+
+
+@pytest.mark.parametrize(
+    ("checks", "expected"),
+    [
+        ("spec-check — pass (`c64d6f6`); refine-check — pass", "pass"),
+        ("spec-check — pass (`c64d6f6`); refine-check — fail: spec_record", "fail"),
+        ("spec-check - pass; refine-check - unreadable", "unreadable"),
+        ("spec-check — pass (`c64d6f6`)", "unreadable"),
+        ("pre-refine-check — pass", "unreadable"),
+    ],
+)
+def test_refine_check_found_after_other_checks(gw, capsys, checks, expected):
+    # #492: refine sessions write spec-check before refine-check on the same line.
+    story(gw, 30, summary_text=checks_summary(checks))
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["refinement"]["refine_check"] == expected
+    assert facts_of(out, 30)["refined"] is (expected == "pass")
+
+
 def test_latest_summary_counts(gw, capsys):
     story(gw, 30, summary_text=summary())
     gw.comment(30, summary("fail: x", command="refine-story"))
