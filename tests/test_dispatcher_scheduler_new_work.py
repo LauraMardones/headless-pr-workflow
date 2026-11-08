@@ -41,7 +41,9 @@ def fresh(d: Dispatcher, number: int) -> None:
     board = d._read("board.json")
     for item in board["items"]:
         if item["number"] == number:
-            item["updatedAt"] = _today() + "T00:00:00Z"
+            # The current time, not midnight: the stale check rolls back a story
+            # inactive for more than two hours, so midnight failed after 02:00 UTC (#493).
+            item["updatedAt"] = _now()
     d._write("board.json", board)
 
 
@@ -363,6 +365,11 @@ def test_ac7_at_the_usage_limit_no_session_starts(d, kind):
 def _today() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _step(name: str) -> str:
