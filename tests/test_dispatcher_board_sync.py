@@ -474,8 +474,9 @@ def board_page(nodes, *, next_cursor=None):
         "items": {"pageInfo": {"hasNextPage": next_cursor is not None, "endCursor": next_cursor}, "nodes": nodes}}]}}}}
 
 
-def issue_node(item_id, number, state, labels, status):
+def issue_node(item_id, number, state, labels, status, repo="o/r"):
     return {"id": item_id, "content": {"__typename": "Issue", "number": number, "state": state,
+                                       "repository": {"nameWithOwner": repo},
                                        "labels": {"nodes": [{"name": n} for n in labels]}},
             "fieldValueByName": {"name": status} if status else None}  # fmt: skip
 
@@ -491,6 +492,13 @@ def test_the_gateway_pages_through_the_board_items():
     assert snapshot.cards == [BoardCard("i1", 1, "open", ("type:story",), "Done"), BoardCard("i2", 2, "closed", (), None),
                               BoardCard("i3", None, None, (), None), BoardCard("i4", None, None, (), None)]  # fmt: skip
     assert not any(a.startswith("cursor=") for a in gateway.sent[0]) and "cursor=C1" in gateway.sent[1]
+
+
+def test_the_gateway_ignores_cards_of_another_repository():
+    gateway = Recorded([board_page([issue_node("i1", 30, "OPEN", [], "Done"),
+                                    issue_node("i2", 30, "CLOSED", [], "In review", repo="other/repo")])])
+    cards = gateway.list_board_items().cards
+    assert [(c.item_id, c.number) for c in cards] == [("i1", 30), ("i2", None)]
 
 
 @pytest.mark.parametrize("payload, reason", [

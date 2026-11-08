@@ -50,7 +50,7 @@ BOARD_ITEMS_QUERY = """query($owner: String!, $repo: String!, $cursor: String) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id
-            content { __typename ... on Issue { number state labels(first: 50) { nodes { name } } } }
+            content { __typename ... on Issue { number state repository { nameWithOwner } labels(first: 50) { nodes { name } } } }
             fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
           }
         }
@@ -420,6 +420,8 @@ class GhGateway:
                     continue
                 content = node.get("content") or {}
                 is_issue = content.get("__typename") == "Issue" and isinstance(content.get("number"), int)
+                if is_issue and ((content.get("repository") or {}).get("nameWithOwner") or "").lower() != self.repo.lower():
+                    is_issue = False  # a card of another repository on a shared board: never match it by number
                 labels = tuple(str(label.get("name")) for label in ((content.get("labels") or {}).get("nodes") or [])
                                if isinstance(label, dict) and label.get("name"))  # fmt: skip
                 cards.append(BoardCard(
