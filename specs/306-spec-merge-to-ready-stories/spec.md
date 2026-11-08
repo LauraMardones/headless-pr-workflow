@@ -19,6 +19,7 @@ In:
 - Rewritten `/refine*` commands: a tech-lead role that reads the spec at a known commit, makes no product decisions, raises a decision blocker for a specification defect instead of asking the PO, records the spec commit it refined against, and writes no board status and no `PO status:` line. This includes the refinement completeness check (`scripts/refine-check`, #344).
 - Traced acceptance criteria: Feature criteria name the Epic criteria they serve, and story criteria name their Feature criteria. Stories already carry a requirements mapping (#350). A script checks across the Epic that every Epic criterion is covered and that no criterion lacks a parent.
 - Just-in-time story refinement: the Tech Lead keeps 3–5 stories ready to implement and refines no further ahead. The big-bang exception in `docs/REFINEMENT-PIPELINE.md` is removed.
+- Just-in-time Feature breakdown: the Tech Lead breaks the next Feature into stories only when the ready buffer needs refilling and no story from an earlier breakdown is left to refine. A story that cannot be refined now, because it waits for the PO's answer to a decision blocker or its last refinement failed, does not hold back the next breakdown. The Epic-to-Feature breakdown still happens at once after a spec merge.
 - Order between Epics: the PO sets a priority label on an Epic and the scheduler follows it. Equal priority falls back to the earlier spec merge.
 - Re-refinement after a scope change: affected Features and stories are re-refined before any of them is implemented further.
 - The scheduler: a script, with no model, chooses the next action from hard dependencies, priority, queue limits, the WIP limit of two and file overlap. It replaces the board trigger in the dispatcher, including for starting implementation.
@@ -56,8 +57,8 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
   - **Verified by:** closure evidence with the coverage check's output for the proof Epic, showing no uncovered Epic criterion and no criterion without a parent. The PO follows one chain from a story criterion up to an Epic criterion.
 - **E3:** Refinement makes no product decision. What the spec does not settle, including a merged spec that fails the Definition of Ready, reaches the PO as a decision blocker, and refinement resumes after the PO's answer.
   - **Verified by:** the PO posts a usage finding that contradicts a criterion of a story not yet refined. The next refinement raises a decision blocker and leaves the criterion unchanged, and it continues after the PO's `/unblock` comment. Closure evidence also shows the spec check's tests for a spec that fails the Definition of Ready.
-- **E4:** A story becomes ready to implement only when it is refined and every hard dependency is closed. The ready buffer holds 3–5 stories while unrefined work remains.
-  - **Verified by:** closure evidence from the proof Epic showing a refined story becoming ready on the next scheduler run after its last hard dependency closed, and a buffer that never exceeded five and was refilled when it dropped below three.
+- **E4:** A story becomes ready to implement only when it is refined and every hard dependency is closed. The ready buffer holds 3–5 stories while unrefined work remains. A Feature is broken into stories only when the buffer needs refilling and no story from an earlier breakdown is left to refine.
+  - **Verified by:** closure evidence from the proof Epic showing a refined story becoming ready on the next scheduler run after its last hard dependency closed, and a buffer that never exceeded five and was refilled when it dropped below three. The evidence also shows a scheduler run that skipped an unrefined Feature while a story from an earlier breakdown was left to refine, and the run that broke that Feature down once none was left.
 - **E5:** Moving a board card starts no work, and the board is corrected. The pause switch stops new refinement.
   - **Verified by:** the PO drags an unrefined item to the ready status; no session starts and the next scheduler run restores the status. Closure evidence shows a scheduler run with `DISPATCHER_ENABLED=false` that started no refinement session.
 - **E6:** The board and the Epic issue show the current state: the stage of each implementation issue, and how much of each Feature and Epic remains.
@@ -144,6 +145,16 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 **Chosen:** Before work starts on a merged spec, a script checks it against the Definition of Ready (#438). A spec that fails reaches the PO as a decision blocker, and refinement makes no guess.
 **Rejected:** Rely only on the check in the spec session — once refinement starts without the PO, nothing would catch a spec merged with a gap.
 
+### Features are broken into stories just in time — 2026-11-07
+
+**Chosen:** The next Feature is broken into stories only when the ready buffer needs refilling and no story from an earlier breakdown is left to refine. Stories created by a Feature breakdown wait as a queue, and story refinement draws from that queue. A story waiting for the PO's answer or after a failed refinement does not hold back the next breakdown. This extends "No big-bang refinement" from stories to Features; that decision stands.
+**Rejected:** Break down every Feature right after the Epic refinement, as the scheduler delivered by #473 does (step 4 runs before implementation starts, with no limit) — it is big-bang refinement at Feature level, and usage findings could no longer reach later Features. A fixed number of Features broken down ahead — one more number to set, while the buffer already says when more work is needed. The PO moves issues to "Ready for refinement" by hand to start refinement — the board would trigger work again, against ADR-010.
+
+### Out-of-scope findings are handled by a separate Epic — 2026-11-07
+
+**Chosen:** Work found during implementation that lies outside an Epic's scope goes to a catch-all Feature under a catch-all Epic for the whole repository. That Epic gets its own spec, which states how the Tech Lead sorts its findings into existing Features and what maintenance the Tech Lead may refine without asking the PO. This Epic does not change for it.
+**Rejected:** Add the sorting of findings and the follow-up of leftovers to this Epic — this Epic would depend on an Epic that has no spec yet.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -174,6 +185,9 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - #257 and PR #299 (de-duplication of the "ready for refinement" notification, merged) — not affected until this Epic retires that notification.
 - Spec #418, Out — it names #306 as the home of WSJF ordering (#400) and the allowance cost per issue (#399). Conflict, resolved by the decision "WSJF ordering and allowance cost per issue stay out". #418's spec is not changed by this PR.
 - #319 and #356 — refined before this spec merged, as provisional. Their bodies are input only and are re-refined against this spec.
+- ADR-009 item 6 (Feature-to-Story breakdown just in time against the ready buffer) — no conflict. The decision "Features are broken into stories just in time" states the rule that item asks for.
+- `docs/commands/dispatcher-scheduler.md` (#473, delivered under Feature #460) — conflict: step 4 refines every unrefined Feature before implementation starts, with no limit. Resolved by the decision "Features are broken into stories just in time"; the scheduler rule and its document change with it. Its ready-buffer rule (step 6 only while ready is below the minimum and ready plus waiting is below the maximum) already counts refined stories that wait for a dependency, and is kept.
+- Open issues under this Epic (#460, #461, #474–#479) — this scope change makes their refinement records stale, so the Tech Lead re-refines them against this spec (E7). The open PR for #474 is reviewed against the re-refined story.
 
 ## Delegated to the Tech Lead
 
@@ -181,7 +195,8 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - Ordering within the Epic, including shared-file ordering.
 - The technical approach for each scope item, including whether `scripts/dispatcher-poll.sh` and `scripts/project-status-sync.sh` are extended or replaced, within ADR-014.
 - The board's status names and the fact behind each, including how Epics, Features and Epics without a merged spec are shown, within ADR-010.
-- The scheduler's working rules other than the Epic priority label, the ready buffer of 3–5 and the WIP limit of two: how priority is applied within an Epic, and tie-breaks.
+- The scheduler's working rules other than the Epic priority label, the ready buffer of 3–5, the WIP limit of two and the just-in-time Feature breakdown: how priority is applied within an Epic, and tie-breaks.
+- How the queue of stories waiting for refinement is shown on the board, within ADR-010.
 - How a spec merge and a scope change are detected, and how "affected" Features and stories are determined for re-refinement.
 - The form of the refinement record, where the spec commit is recorded, and how a criterion names its parent.
 - The form of the Epic issue as index.
