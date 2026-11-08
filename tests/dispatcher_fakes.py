@@ -209,6 +209,11 @@ if [[ "$endpoint" == "graphql" ]]; then
             }}}' "$MOCK_DIR/board.json"
         exit 0
     fi
+    # The Nth board read uses board_N.json when a test set one (Dispatcher.board_read_once).
+    reads=$(( $(cat "$MOCK_DIR/board.reads" 2>/dev/null || echo 0) + 1 ))
+    echo "$reads" > "$MOCK_DIR/board.reads"
+    board_file="$MOCK_DIR/board.json"
+    [[ -f "$MOCK_DIR/board_$reads.json" ]] && board_file="$MOCK_DIR/board_$reads.json"
     jq --slurpfile st "$MOCK_DIR/state.json" '
         . as $b |
         {data:{repository:{projectsV2:{nodes:[{
@@ -226,7 +231,7 @@ if [[ "$endpoint" == "graphql" ]]; then
                                            field: {name: "Status"}}]}
                 }]
             }
-        }]}}}}' "$MOCK_DIR/board.json"
+        }]}}}}' "$board_file"
     exit 0
 fi
 
@@ -521,6 +526,10 @@ class Dispatcher:
         """The review Session Summary the bookkeeping job posts after findings on ``head``."""
         self.add_comment(pr, "## Session Summary\nCommand: review\nNext action: implementation\n\n"
                          + bookkeeping_marker("move-in-implementation", head), login=login)
+
+    def board_read_once(self, read: int) -> None:
+        """Keep the board as it is now for the ``read``-th project board read only; later reads see later changes."""
+        self._write(f"board_{read}.json", self._read("board.json"))
 
     def set_status(self, number: int, status: str) -> None:
         state = self._read("state.json")
