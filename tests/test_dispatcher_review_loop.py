@@ -502,7 +502,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
     for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh",
-                "conflict-round.sh"):  # sourced (#314, #296, #348, #358, #449)
+                "conflict-round.sh", "scheduler.sh"):  # sourced (#314, #296, #348, #358, #449, #474)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -820,6 +820,8 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
     if held:
         for head in ("1" * 40, HEAD):
             d.add_findings(PR, head)
+    else:
+        d.schedule(("implement", STORY))  # the scheduler chooses the rolled-back story next (#474)
 
     proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
 
@@ -831,7 +833,7 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
         assert len(comments) == 1 and "Type: resource" in comments[0]
         assert f"#{STORY} is held by a fix-round blocker" in proc.stdout
     else:
-        # Without the blocker the story is rolled back and picked up as a ready story.
+        # Without the blocker the story is rolled back and started again when the scheduler chooses it.
         assert len(comments) == 1 and "## Recovery Comment" in comments[0]
         assert d.sessions == ["implement 700", f"implement {STORY}"]
 
@@ -997,7 +999,8 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evi
                     '  *labels=evidence*) [ "$EVIDENCE" = fail ] && exit 22; echo "$EVIDENCE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
                     encoding="utf-8", newline="\n")
     curl.chmod(0o755)
-    out, err, rc = scheduler_output(*scheduler)
+    result, issue, error, skipped = (*scheduler, *(None, None, "", None)[len(scheduler):])
+    out, err, rc = scheduler_output(result, issue, error=error, skipped=skipped)
     (tmp_path / "scheduler.json").write_text(out if raw_scheduler is None else raw_scheduler, encoding="utf-8")
     (tmp_path / "scheduler.err").write_text(err, encoding="utf-8")
     hpw = bin_dir / "hpw"
@@ -1235,7 +1238,8 @@ def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, 
 
 @needs_tools
 def test_ac14_poll_is_not_resumable_with_nothing_to_resume(tmp_path):
-    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")])
+    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")],
+                    scheduler=("implement", 1))
     assert out["resumable"] is False and out["next_issue"] == 1
 
 
@@ -1256,7 +1260,8 @@ def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
     body = workflow_step("Run dispatcher invoke")
     env_block, run_block = body.split("        run:", 1)
     assert "CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}" in env_block
-    assert "NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}" in env_block
+    # Issue #474: the invoke step asks the scheduler itself; the poll's choice is not passed on.
+    assert "NEXT_ISSUE" not in env_block
     assert run_block.strip().splitlines()[0] == "bash scripts/dispatcher-workflow-step.sh invoke"
 
 

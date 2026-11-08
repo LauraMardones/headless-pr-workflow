@@ -51,6 +51,7 @@ def test_ac6_ac8_next_ready_story_continues_past_a_codex_story(d):
     d.add_story(STORY, "Ready for implementation", executor="codex")
     d.add_story(501, "Ready for implementation", executor="claude-code-sonnet")
     d.add_pr(PR, 501)
+    d.schedule(("implement", 501))  # the next story comes from the scheduler (#474)
     proc = d.run_issue(STORY)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stderr.count(WARNING) == 1  # not returned again across the recursive exec

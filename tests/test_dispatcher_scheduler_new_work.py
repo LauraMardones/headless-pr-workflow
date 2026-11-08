@@ -289,7 +289,7 @@ def test_ac7_below_the_reserve_no_session_starts(d, kind):
 def test_ac7_at_the_usage_limit_no_session_starts(d, kind):
     d.add_story(STORY, "Ready for implementation")
     d.schedule((kind, STORY))
-    (d.mock / "usage" / "sessions").write_text(f"{_today()}:1\n", encoding="utf-8")
+    (d.mock / "usage" / "sessions").write_text(f"{_today()}:1\n", encoding="utf-8", newline="\n")
 
     proc = scheduled(d, env={"USAGE_LIMIT_SESSIONS_PER_DAY": "1", "USAGE_LIMIT_TODAY": _today()})
 

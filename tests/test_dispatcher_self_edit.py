@@ -67,6 +67,7 @@ def test_tail_call_starts_the_rewritten_script(d):
     d.add_pr(900, STORY)
     d.add_pr(901, NEXT_STORY)
     d.on_session("implement", REWRITE)
+    d.schedule(("implement", NEXT_STORY))  # the next story comes from the scheduler (#474)
 
     proc = d.run_issue(STORY)
 

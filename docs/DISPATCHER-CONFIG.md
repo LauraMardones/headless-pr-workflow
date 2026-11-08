@@ -590,7 +590,7 @@ bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable 
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only (manual)
 ```
 
-The workflow always uses the first form (or `--refine <n>` for the `refine_issue` input). It runs the invoke step when the scheduler chose new work, when a story is `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
+The workflow always uses the first form (or `--refine <n>` for the `refine_issue` input); `--issue` and `--resume` stay for manual runs. It runs the invoke step when the scheduler chose new work, when a story is `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
 
 The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
 
