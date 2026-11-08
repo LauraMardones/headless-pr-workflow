@@ -22,6 +22,8 @@ Exit `0`: every applicable check passes. Exit `1`: a check fails and is named. E
 
 Rolling, just-in-time refinement is the required strategy. Story refinement is always just-in-time against the ready buffer; there is no big-bang refinement, in which all stories of an Epic or Feature are refined before implementation begins. A small Epic simply has all its stories in the buffer at once (ADR-009; Epic #306 → Decisions "No big-bang refinement").
 
+The scheduler breaks a Feature into stories only when the ready buffer needs refilling and no story from an earlier breakdown is left to refine (`docs/commands/dispatcher-scheduler.md` → Just-in-time Feature breakdown).
+
 **Why rolling refinement:**
 
 - The bottleneck is refinement quality and human review bandwidth, not implementation speed.

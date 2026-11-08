@@ -43,12 +43,13 @@ The rule chooses steps 2 to 6 of #460 → "Order of actions in a run". Step 1, w
 |---|---|---|
 | 2 — re-refinement and resume | a stale Epic (record `stale` or `invalid`); stale Features; stale stories in `--in-implementation`; any Epic, Feature or story resumed after `/unblock` | `scope-change`, `stale-record`, `unblocked` |
 | 3 — Epic refinement after a new spec | an Epic with spec `merged` and record `missing` | `new-spec` |
-| 4 — Feature refinement | a Feature that is not refined and not stale | `not-refined` |
+| 4 — Feature refinement | a Feature that is not refined and not stale, only when the ready buffer is open and no story is left to refine (see "Just-in-time Feature breakdown") | `not-refined` |
 | 5 — implementation start | a story whose facts say `ready`, not in `--in-implementation` | `ready` |
 | 6 — story refinement for the ready buffer | stale stories, then stories never refined | `stale-record`, `not-refined` |
 
 Rules that hold before a step:
 
+- **Just-in-time Feature breakdown.** A Feature that is not refined and not stale is a step-4 candidate only when the step-6 buffer condition holds (`ready < READY_BUFFER_MIN` and `ready + waiting < READY_BUFFER_MAX`) and no story is left to refine. A story is left to refine when it is an open Story, Task or Bug whose `Feature group:` Feature is refined and not stale, whose Epic has a merged spec and a `current` record, that is not refined (never refined, or stale), is not in `--in-implementation`, and whose refine gate is neither `open-decision-blocker` nor `last-refinement-failed` (a story resumed after `/unblock` counts as left). A story whose facts are unreadable counts as left unless its Epic is known to have no merged spec or no `current` record. The count runs across all Epics. A Feature held back is skipped with `buffer-full` (checked first) or `stories-left-to-refine #<n>` (`<n>` the lowest such story); the next run breaks it down once none is left. Steps 2 and 3 are not held back.
 - **No merged spec.** Under an Epic with spec `missing` or `ambiguous` nothing is refined, not the Epic, its Features or its stories. `skipped` lists the Epic once as `no-merged-spec: <facts reason>`, which names `specs/<epic>-*/spec.md`. A ready story there can still be implemented.
 - **Epic first.** While an Epic's record is not `current`, its Features and stories are not refined (`epic-not-refined`).
 - **Feature first.** A story is refined only when its `Feature group:` Feature is refined and not stale (`feature-not-refined #<feature>`); a story with no `Feature group:` is not refined (`no-feature`).
@@ -82,7 +83,8 @@ A story starts only while the stories in `--in-implementation` are fewer than `W
 | `no-feature` | the story has no `Feature group:` |
 | `open-decision-blocker` | the issue waits for the PO's answer |
 | `last-refinement-failed` | the latest refinement after the newest spec commit and any `/unblock` did not pass |
-| `buffer-full` | the ready buffer does not allow story refinement |
+| `buffer-full` | the ready buffer does not allow story refinement or a Feature breakdown |
+| `stories-left-to-refine #<n>` | the Feature is not broken down while story `#<n>` (the lowest) is left to refine |
 | `wip-limit` | `WIP_LIMIT_IMPLEMENTATION` stories are in implementation |
 | `file-overlap #<n> <path>` | the story shares `<path>` with story `#<n>` in implementation |
 | `unreadable: <facts reason>` | the facts could not read the issue (an Epic whose comments failed shows `unreadable: comments`) |
