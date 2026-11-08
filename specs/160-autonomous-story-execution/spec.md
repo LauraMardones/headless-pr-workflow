@@ -32,6 +32,7 @@ In, remaining:
 - Notifications that need PO action are not lost when a delivery fails.
 - A decision blocker can be decided from the notification: it states the question, the options and a recommendation.
 - An end-to-end proof in this repository: three consecutive stories, each from ready to cleanup.
+- A stop on repeated failed sessions: the dispatcher starts no new session, tells the PO once, and starts again only after a PO action (#503).
 
 Out:
 
@@ -63,6 +64,8 @@ Out:
   - **Verified by:** the ADR from #289 is on `main` with `Status: Accepted`; the three proof stories from E1 were started by its mechanism; and the API-key secrets are removed from the repository, with no API usage on the provider billing pages for the proof period.
 - **E7:** Merge and cleanup use no model.
   - **Verified by:** the run logs of the three proof stories show no model invocation for merge and cleanup.
+- **E8:** After repeated failed sessions, the dispatcher starts no new session and sends the PO one Slack message that names the failed sessions, their stories and links to their runs. It starts again only after a PO action, and never on its own, also not when its saved state is lost. The PO can change how many failures stop it without a code change. A session stopped by a provider usage limit does not count as a failure.
+  - **Verified by:** provoked failed sessions up to the threshold, after which the next poll starts no session and the PO receives exactly one message with the sessions, stories and run links; a further poll with the dispatcher's saved state removed still starts no session; the PO's action, after which the next poll starts a session; and changing the threshold without a code change and seeing the new value take effect.
 
 ## Decisions
 
@@ -161,6 +164,21 @@ Out:
 **Chosen:** No owned or persistent runner host, and no failover to another provider. Reconfirmed by the PO on 2026-10-01. Two parts of ADR-005 return in another form through decisions above: sessions run on the subscription ("No metered API usage"), and the five-hour window is accounted for ("A reserve of the subscription allowance, set by the PO").
 **Rejected:** ADR-005's owned Raspberry Pi host with subscription login on it and rolling-window failover — infrastructure the PO would own and maintain.
 
+### A stop on repeated failed sessions belongs in this Epic — 2026-11-08
+
+**Chosen:** A failure-based stop (#503) is part of #160. The PO first chose this on 2026-11-08 (recorded on #503, option A). Reconfirmed by the PO on 2026-11-08 in this spec session.
+**Rejected:** The catch-all Epic, or another Epic — the stop protects the autonomous story cycle that this Epic delivers.
+
+### The failure-based stop is a new criterion, E8 — 2026-11-08
+
+**Chosen:** A new criterion E8. E5 stays as it is and stays delivered (Feature #308 is closed).
+**Rejected:** Extend E5 — E5 would no longer count as delivered, and E5 is about limits on healthy work, not a stop on failures.
+
+### What the failure-based stop must do — 2026-11-08
+
+**Chosen:** After repeated failed sessions no new session starts, and the PO gets one Slack message with the failed sessions, their stories and their run links. The dispatcher starts again only after a PO action, never on its own, and a lost saved state does not restart it. The PO can change the threshold without a code change. A session stopped by a provider usage limit does not count as a failure.
+**Rejected:** A threshold fixed in code — the PO wants to adjust it, as with the usage limit and the reserve. A stop that clears itself after a time or when its state is lost — the stop is there because something is wrong that needs the PO. Counting provider usage-limit stops — those are healthy pauses that E5 and E6 already handle.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -177,6 +195,8 @@ Out:
 - `docs/ADAPTERS.md` → Cross-Provider Review Pairing — the same conflict as under ADR-006, with the same resolution.
 - `docs/MERGE-POLICY.md` and `docs/required-check-policy.json` — no conflict. Required checks are still declared absent for `main`; making the test check required is remaining scope.
 - `docs/DISPATCHER-CONFIG.md` — it describes the daily token caps per executor type and the API-key secrets. Both are replaced by decisions in this spec, and the document is updated when that work is implemented.
+- `docs/DISPATCHER-CONFIG.md` → Usage limit (checked 2026-11-08) — no conflict with E8. `USAGE_LIMIT_SESSIONS_PER_DAY` counts every session and stays. Its count resets when the cache entry is lost; E8 requires that a lost saved state does not restart the dispatcher, so E8's stop cannot rely on that cache alone.
+- #503 (Story, 2026-11-08) — its wanted outcome and its placement in #160 are carried into E8 after the PO confirmed them in this session. Its questions for refinement are delegated to the Tech Lead.
 - #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
 - #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
 - #160 success criterion on OSS compatibility invariants — left out; see Decisions.
@@ -190,6 +210,7 @@ Out:
 - The unit and granularity of the usage limit, after #289.
 - Where the usage limit and the reserve are configured, provided the PO can change them without a code change.
 - Executor and model choice per issue.
+- For E8: what counts as a failed session (apart from the provider usage-limit stop, which never counts), whether failures are counted in a row or within a time window, the starting threshold, where the setting and the failure count are kept, which PO action starts the dispatcher again, and whether failed `/merge` and `/cleanup` scripts count.
 
 Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
