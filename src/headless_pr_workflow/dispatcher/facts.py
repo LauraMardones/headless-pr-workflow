@@ -33,7 +33,10 @@ _PARENT_EPIC = re.compile(r"^[ \t]*Parent epic:\s*#(\d+)\b", re.I | re.M)
 _FEATURE_GROUP = re.compile(r"^[ \t]*Feature group:\s*#(\d+)\b", re.I | re.M)
 _CRITERION_PREFIX = re.compile(r"^[ \t]*Criterion prefix:\s*(F\d+)\b", re.I | re.M)
 _REFINE_COMMAND = re.compile(r"^[ \t]*Command:\s*refine(?:-[A-Za-z]+)?[ \t]*$", re.M)
-_CHECK_RESULT = re.compile(r"^[ \t]*Checks run:\s*refine-check\s*[—–-]+\s*(pass|fail|unreadable)\b", re.I | re.M)
+# The refine-check item may follow other checks on the line, e.g. "spec-check — pass; refine-check — pass" (#492).
+_CHECK_RESULT = re.compile(
+    r"^[ \t]*Checks run:[^\n]*?(?<![\w-])refine-check\s*[—–-]+\s*(pass|fail|unreadable)\b", re.I | re.M
+)
 _UNBLOCK_LINE = re.compile(r"^\s*/unblock\s*$")
 
 
