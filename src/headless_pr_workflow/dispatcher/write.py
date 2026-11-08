@@ -48,6 +48,7 @@ EXIT_UNREADABLE = 3
 
 _EXIT_BY_RESULT = {
     "written": EXIT_OK,
+    "synced": EXIT_OK,
     "already": EXIT_OK,
     "dry-run": EXIT_OK,
     "none": EXIT_OK,
