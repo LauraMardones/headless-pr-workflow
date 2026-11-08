@@ -386,6 +386,7 @@ if [[ -z "${HPW_BIN:-}" ]]; then
         echo "hpw is pinned to the run's start commit $_hpw_pin_commit"
     fi
     HPW_BIN="$DISPATCH_HPW_PIN_DIR/scripts/hpw"
+    export HPW_BIN  # the child scripts (usage-limit, merge, cleanup, ...) pin to the same copy
 fi
 COMMANDS_DIR="$REPO_ROOT/.claude/commands"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"  # Claude Code binary; overridable for tests (shared with #317)

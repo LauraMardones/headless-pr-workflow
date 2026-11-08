@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
+from pathlib import Path
 
 import tests.dispatcher_fakes as fakes
 from tests.dispatcher_fakes import REPO_ROOT, Dispatcher, needs_tools
@@ -55,6 +57,14 @@ def copy(tmp_path, monkeypatch):
     git(repo, "commit", "-q", "-am", "older code")
     git(repo, "switch", "-q", "main")
     monkeypatch.setattr(fakes, "INVOKE", repo / "scripts" / "dispatcher-invoke.sh")
+    # Leave HPW_BIN absent, not empty: an exported empty variable keeps its export attribute
+    # when the script assigns it, which would mask an unexported default.
+    real_run_tree = fakes.run_tree
+
+    def run_tree_without_hpw_bin(cmd, *, env, **kwargs):
+        return real_run_tree(cmd, env={k: v for k, v in env.items() if k != "HPW_BIN"}, **kwargs)
+
+    monkeypatch.setattr(fakes, "run_tree", run_tree_without_hpw_bin)
     return repo
 
 
@@ -63,6 +73,18 @@ def run(tmp_path, copy, **env):
     d.add_story(STORY, "Ready for implementation")
     d.add_pr(970, STORY)
     d.schedule(("implement", STORY), ("idle",))
+    # The child PATH holds only the fake bin and the system dirs; give scripts/hpw its `python`.
+    python = d.bin / "python"
+    python.write_text(f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
+    python.chmod(0o755)
+    # A child script logs the launcher it was handed (the allowance probe runs before each session).
+    real_allowance = d.bin / "allowance.sh"
+    wrapped = d.bin / "allowance-real.sh"
+    real_allowance.rename(wrapped)
+    real_allowance.write_text(
+        f'#!/bin/bash\necho "${{HPW_BIN-unset}}" >> "{(d.mock / "child-hpw-bin.log").as_posix()}"\n'
+        f'exec bash "{wrapped.as_posix()}" "$@"\n')
+    real_allowance.chmod(0o755)
     d.on_session("implement", f'git -C "{copy.as_posix()}" switch -q story\n')
     proc = d.run(env={"HPW_BIN": "", "FAKE_HPW": (d.bin / "hpw").as_posix(), **env})
     return d, proc
@@ -102,3 +124,12 @@ def test_the_pinned_copy_is_removed_at_exit(tmp_path, copy):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert list(pins.iterdir()) == []
+
+
+def test_child_scripts_get_the_pinned_launcher_exported(tmp_path, copy):
+    d, proc = run(tmp_path, copy)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    seen = set((d.mock / "child-hpw-bin.log").read_text().split())
+    assert len(seen) == 1 and "unset" not in seen
+    assert seen.pop().endswith("/scripts/hpw")
