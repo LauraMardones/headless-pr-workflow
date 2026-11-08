@@ -5,7 +5,7 @@
 
 ## Goal
 
-A story that is refined and has no open hard dependency is implemented, reviewed, merged and cleaned up without the PO, apart from decision blockers, closure confirmations and Red flow-health alerts, and within the usage limits.
+A story that is refined and has no open hard dependency is implemented, reviewed, merged and cleaned up without the PO, apart from decision blockers, closure confirmations, Red flow-health alerts and the PO's own merge of a PR that changes decision documents (ADR-011), and within the usage limits.
 
 Today every step has a command, but the PO still starts each one by hand and relays work between them. The PO can make product judgments but cannot do code review, so that relay is the main bottleneck. The dispatcher foundation is delivered; what still needs the PO in the story cycle is review, approval, merge and cleanup.
 
@@ -33,6 +33,7 @@ In, remaining:
 - A decision blocker can be decided from the notification: it states the question, the options and a recommendation.
 - An end-to-end proof in this repository: three consecutive stories, each from ready to cleanup.
 - A stop on repeated failed sessions: the dispatcher starts no new session, tells the PO once, and starts again only after a PO action (#503).
+- After the PO merges a PR that changes decision documents, the story reaches `Done` and cleanup with no further PO action (#505).
 
 Out:
 
@@ -66,6 +67,8 @@ Out:
   - **Verified by:** the run logs of the three proof stories show no model invocation for merge and cleanup.
 - **E8:** After repeated failed sessions, the dispatcher starts no new session and sends the PO one Slack message that names the failed sessions, their stories and links to their runs. It starts again only after a PO action, and never on its own, also not when its saved state is lost. The PO can change how many failures stop it without a code change. A session stopped by a provider usage limit does not count as a failure.
   - **Verified by:** provoked failed sessions up to the threshold, after which the next poll starts no session and the PO receives exactly one message with the sessions, stories and run links; a further poll with the dispatcher's saved state removed still starts no session; the PO's action, after which the next poll starts a session; and changing the threshold without a code change and seeing the new value take effect.
+- **E9:** When the PO has merged a PR that changes decision documents, its story reaches `Done` and is cleaned up with no further blocker and no further PO action.
+  - **Verified by:** a story whose PR changes a decision document and is merged by the PO in GitHub; its issue and PR timelines show no blocker and no PO comment or `/unblock` between the PO's merge and the deletion of its branch.
 
 ## Decisions
 
@@ -179,6 +182,11 @@ Out:
 **Chosen:** After repeated failed sessions no new session starts, and the PO gets one Slack message with the failed sessions, their stories and their run links. The dispatcher starts again only after a PO action, never on its own, and a lost saved state does not restart it. The PO can change the threshold without a code change. A session stopped by a provider usage limit does not count as a failure.
 **Rejected:** A threshold fixed in code — the PO wants to adjust it, as with the usage limit and the reserve. A stop that clears itself after a time or when its state is lost — the stop is there because something is wrong that needs the PO. Counting provider usage-limit stops — those are healthy pauses that E5 and E6 already handle.
 
+### The PO's merge of a decision document is a touchpoint, and the story continues after it — 2026-11-08
+
+**Chosen:** The Goal names the PO's own merge of a PR that changes decision documents (ADR-011) as a fourth PO touchpoint. A new criterion, E9, requires that the story then reaches `Done` and cleanup with no further blocker and no further PO action (#505).
+**Rejected:** Extend E1 — E1 is proven on three ordinary stories with no PO action, and a decision-document story always needs the PO's merge. No Epic criterion, only a story under #160 — then the Goal could never hold for such a story, and nothing would check it at closure.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -189,7 +197,7 @@ Out:
 - ADR-008 (Epic spec in the repository) — no conflict. This spec is the specification of #160. Using the spec merge as start signal is implemented by Epic #306.
 - ADR-009 (refinement is Tech Lead work) — it amends #160's decision "Refinement execution model" (2026-06-03), its non-goal "Headless automatic Epic or Feature refinement" and its refinement touchpoint. None of the three is carried into this spec; the topic moved to Epic #306. Its widening of #289 to refinement sessions is kept.
 - ADR-010 (the board shows current state) — conflict: the delivered dispatcher is triggered by board status. Resolved by the ADR's own "Effective when" clause: #160 keeps the current trigger until Epic #306 implements ADR-010. #258 and #283 moved to #306. The two #160 decisions on the Epic's board status (2026-09-27) are not carried.
-- ADR-011 (decision documents approved by the PO's merge) — no conflict. This spec PR is a decision document.
+- ADR-011 (decision documents approved by the PO's merge) — no conflict. This spec PR is a decision document. Item 5 (only the PO merges decision documents) is why the Goal names that merge as a PO touchpoint, and E9 covers what follows it.
 - `docs/PROJECT-STATUS.md` → OSS Compatibility Invariants, and `docs/ADAPTERS.md` → Executor Routing — no conflict. "Capacity Is Abstracted For Metered And Unmetered Executors" agrees with specifying the usage limit as an outcome.
 - `docs/PROJECT-STATUS.md` → Blocked Status Protocol and WIP Pre-Flight Check — no conflict.
 - `docs/ADAPTERS.md` → Cross-Provider Review Pairing — the same conflict as under ADR-006, with the same resolution.
@@ -197,6 +205,8 @@ Out:
 - `docs/DISPATCHER-CONFIG.md` — it describes the daily token caps per executor type and the API-key secrets. Both are replaced by decisions in this spec, and the document is updated when that work is implemented.
 - `docs/DISPATCHER-CONFIG.md` → Usage limit (checked 2026-11-08) — no conflict with E8. `USAGE_LIMIT_SESSIONS_PER_DAY` counts every session and stays. Its count resets when the cache entry is lost; E8 requires that a lost saved state does not restart the dispatcher, so E8's stop cannot rely on that cache alone.
 - #503 (Story, 2026-11-08) — its wanted outcome and its placement in #160 are carried into E8 after the PO confirmed them in this session. Its questions for refinement are delegated to the Tech Lead.
+- `docs/DISPATCHER-CONFIG.md` → the merged-PR path (checked 2026-11-08) — conflict with E9: a merged PR with no `Merge gate:` confirmation from the dispatcher counts `merge-confirmation-missing` and, after 3 runs, posts a blocker that needs a PO `/unblock`. A PR the PO merged by hand has no such confirmation. Resolved by E9; the document is updated when #505 is implemented.
+- #505 (Story, 2026-11-08) — its wanted outcome is carried into E9 after the PO confirmed it in this session.
 - #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
 - #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
 - #160 success criterion on OSS compatibility invariants — left out; see Decisions.
@@ -211,6 +221,7 @@ Out:
 - Where the usage limit and the reserve are configured, provided the PO can change them without a code change.
 - Executor and model choice per issue.
 - For E8: what counts as a failed session (apart from the provider usage-limit stop, which never counts), whether failures are counted in a row or within a time window, the starting threshold, where the setting and the failure count are kept, which PO action starts the dispatcher again, and whether failed `/merge` and `/cleanup` scripts count.
+- For E9: how the dispatcher tells the PO's merge of a decision-document PR apart from other merges it did not confirm.
 
 Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
