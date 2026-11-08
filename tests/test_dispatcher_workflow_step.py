@@ -193,7 +193,17 @@ def test_invoke_passes_the_exit_code_through(sb):
 def test_trigger_check_and_retry_run_dry_unless_the_state_writer(sb, writer, flag):
     assert sb.run("trigger-check", STATE_WRITER=writer).returncode == 0
     assert sb.run("retry", STATE_WRITER=writer).returncode == 0
-    assert sb.calls() == [f"trigger-check --repo o/r{flag}", f"retry run --repo o/r{flag}"]
+    assert sb.calls() == [f"trigger-check --repo o/r{flag}", f"retry scan-job-blockers --repo o/r{flag}",
+                          f"retry run --repo o/r{flag}"]
+
+
+@pytest.mark.parametrize("failing,code", [("scan", 1), ("run", 3)])
+def test_retry_step_runs_after_a_failed_scan_and_reports_either_failure(sb, failing, code):
+    (sb.scripts / "dispatcher-notify-retry.sh").write_text(
+        f'#!/usr/bin/env bash\necho "retry $*" >> "$STEP_LOG"\n'
+        f'[[ "$1" == {"scan-job-blockers" if failing == "scan" else "run"} ]] && exit {code}\nexit 0\n', newline="\n")
+    assert sb.run("retry", STATE_WRITER="true").returncode == code
+    assert [c.split()[1] for c in sb.calls()] == ["scan-job-blockers", "run"]
 
 
 @pytest.mark.parametrize("step_name", ["poll", "invoke", "trigger-check", "retry", "usage-limit-notify"])

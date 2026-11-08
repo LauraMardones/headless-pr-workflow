@@ -23,7 +23,10 @@
 #                       with --repo only: work in flight, then the scheduler's
 #                       new-work decision, asked again with fresh facts (issue #474)
 #   trigger-check       dispatcher-trigger-check.sh (--dry-run unless STATE_WRITER=true)
-#   retry               dispatcher-notify-retry.sh run (--dry-run unless STATE_WRITER=true)
+#   retry               dispatcher-notify-retry.sh scan-job-blockers (issue #393: registers the
+#                       po_blocker events of the bookkeeping job's blockers), then run
+#                       (both --dry-run unless STATE_WRITER=true); a failed scan never
+#                       prevents run, and the step fails when either failed
 #   usage-limit-notify  the usage_limit_reached Slack notification, then mark-notified
 #
 # Environment: GITHUB_OUTPUT and GITHUB_ENV (files the runner provides), REPO
@@ -137,10 +140,15 @@ step_trigger_check() {
 
 step_retry() {
     require_repo
-    local args=(run --repo "$REPO") flag
+    local args=(--repo "$REPO") flag scan_rc=0 run_rc=0
     flag=$(dry_run_unless_writer)
     [[ -z "$flag" ]] || args+=("$flag")
-    bash "$SCRIPT_DIR/dispatcher-notify-retry.sh" "${args[@]}"
+    # Issue #393: the bookkeeping job's blockers become events first, so the
+    # run below delivers them in the same cycle. A failed scan never skips run.
+    bash "$SCRIPT_DIR/dispatcher-notify-retry.sh" scan-job-blockers "${args[@]}" || scan_rc=$?
+    bash "$SCRIPT_DIR/dispatcher-notify-retry.sh" run "${args[@]}" || run_rc=$?
+    [[ "$run_rc" -eq 0 ]] || return "$run_rc"
+    return "$scan_rc"
 }
 
 # Issue #320: sent in the run in which the limit stopped a session. The marker
