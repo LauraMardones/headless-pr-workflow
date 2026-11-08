@@ -79,6 +79,7 @@ OWN_MARKER_ALLOW=(
     "check_and_resolve_decision_blocker_comment own-marker"  # the PO's /unblock line; its CLAIM/CONFIRM text goes through Block 2
     "conflict_round_rule own-marker"  # pure decision rule over the three logins it is given
     "evidence_pending_comment own-marker"  # builds the evidence-pending text of #348; read back through Block 2
+    "scan_job_blockers own-marker"  # dispatcher-notify-retry.sh (issue #393): the bookkeeping job's declarations, posted under the PO account
     "resolved own-marker"  # dispatcher-notify-retry.sh: the PO's /unblock line after a blocker event
 )
 # The shims of Block 3 in the dispatcher scripts: they call `hpw dispatcher state`.

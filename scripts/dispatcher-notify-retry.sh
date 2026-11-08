@@ -12,12 +12,31 @@
 #   bash scripts/dispatcher-notify-retry.sh register --repo <owner/repo> \
 #       --event <event> --issue <n> [--since <iso8601>] --context <json> [--dry-run]
 #   bash scripts/dispatcher-notify-retry.sh run --repo <owner/repo> [--dry-run] [--drain]
+#   bash scripts/dispatcher-notify-retry.sh scan-job-blockers --repo <owner/repo> [--dry-run]
 #
 # register  Records an actionable event as pending (idempotent per event key).
 #           Called by dispatcher-invoke.sh where it used to send directly.
 # run       One delivery cycle: drops resolved events, sends every undelivered
 #           one, records the result. Run by the workflow on every cycle, also
 #           when no story is ready or resumable.
+#
+# scan-job-blockers  (issue #393) Registers one po_blocker event for each open
+#           "## Blocked Declaration" of Type: external or Type: resource that
+#           the codex-review-bookkeeping job posted on the story of an open,
+#           non-draft PR and that no later standalone "/unblock" line from
+#           $DECISION_BLOCKER_PO_LOGIN lifts. The job is stateless by design and
+#           cannot queue the event itself, so the workflow's retry step scans
+#           before it runs. A declaration is the job's when the comment has the
+#           "## Blocked Declaration" heading, a "Declared by:" line equal to the
+#           job's DECLARED_BY and its hidden marker with action=blocker-external
+#           or action=blocker-resource (the constants are read from
+#           headless_pr_workflow.codex_review_bookkeeping, not copied). Only the
+#           latest such declaration of a story counts; <since> is its created_at,
+#           so the scan is idempotent per declaration (register de-duplicates).
+#           A failed read of a PR, a story or its comments skips that story, is
+#           logged as a [NOTIFY] warning and never stops the scan; the next cycle
+#           reads again. Exit 0 when the scan finished; 1 only when a
+#           registration failed (register's own behaviour).
 #
 # run --drain  An extra delivery attempt that dispatcher-invoke.sh makes before
 #           it chains to the next story, so an alert is not held back by hours
@@ -85,9 +104,9 @@ HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"  # the verified write of ADR-014 (issue #4
 
 die() { echo "Error: $*" >&2; exit 2; }
 
-[[ $# -ge 1 ]] || die "usage: $0 register|run --repo <owner/repo> ..."
+[[ $# -ge 1 ]] || die "usage: $0 register|run|scan-job-blockers --repo <owner/repo> ..."
 MODE="$1"; shift
-[[ "$MODE" == register || "$MODE" == run ]] || die "unknown mode: $MODE"
+[[ "$MODE" == register || "$MODE" == run || "$MODE" == scan-job-blockers ]] || die "unknown mode: $MODE"
 
 REPO="" EVENT="" ISSUE="" SINCE="" CONTEXT="" DRY_RUN=false DRAIN=false
 while [[ $# -gt 0 ]]; do
@@ -196,6 +215,74 @@ if [[ "$MODE" == register ]]; then
     fi
     echo "[NOTIFY] Registered actionable event: $KEY" >&2
     exit 0
+fi
+
+# ─── scan-job-blockers (issue #393) ───────────────────────────────────────────
+
+# scan_job_blockers: the job's declarations are posted under the PO's account,
+# so they are read as plain issue comments, not as the dispatcher's own markers.
+scan_job_blockers() {
+    command -v gh >/dev/null 2>&1 || die "'gh' is required"
+    PYTHON_BIN="${HPW_PYTHON:-}"
+    if [[ -z "$PYTHON_BIN" ]]; then
+        PYTHON_BIN=python3; command -v python3 >/dev/null 2>&1 || PYTHON_BIN=python
+    fi
+    # The declaration format is the job's contract: read its constants, never copy them.
+    JOB=$(PYTHONPATH="${HPW_SRC:-$REPO_ROOT/src}${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -c '
+import json
+from headless_pr_workflow import codex_review_bookkeeping as j
+print(json.dumps({"declared_by": j.DECLARED_BY, "marker": j.MARKER_PREFIX,
+                  "actions": [j.ACTION_BLOCKER_EXTERNAL, j.ACTION_BLOCKER_RESOURCE],
+                  "associations": sorted(j.TRUSTED_DECLARER_ASSOCIATIONS)}))' 2>/dev/null) \
+        && jq -e 'type == "object"' <<< "$JOB" >/dev/null 2>&1 \
+        || { echo "[NOTIFY] Warning: cannot read the bookkeeping job's declaration format; job blockers not scanned this cycle" >&2; return 0; }
+
+    prs=$(gh pr list --repo "$REPO" --state open --limit 1000 --json number,isDraft,closingIssuesReferences 2>/dev/null) \
+        && stories=$(jq -r '[.[] | select(.isDraft | not) | .closingIssuesReferences[]?.number] | unique | .[]' <<< "$prs" 2>/dev/null) \
+        || { echo "[NOTIFY] Warning: cannot list open pull requests; job blockers not scanned this cycle" >&2; return 0; }
+
+    SCAN_RC=0
+    for story in $stories; do
+        info=$(gh api "repos/$REPO/issues/$story" 2>/dev/null) && jq -e 'type == "object"' <<< "$info" >/dev/null 2>&1 \
+            || { echo "[NOTIFY] Warning: cannot read #$story; its job blockers are not scanned this cycle" >&2; continue; }
+        [[ "$(jq -r '.state // ""' <<< "$info")" == open ]] || continue
+        comments=$(gh api --paginate "repos/$REPO/issues/$story/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
+            && jq -e 'type == "array"' <<< "$comments" >/dev/null 2>&1 \
+            || { echo "[NOTIFY] Warning: cannot read the comments of #$story; its job blockers are not scanned this cycle" >&2; continue; }
+        # The latest job declaration, unless a later standalone /unblock line from the PO lifts it.
+        declaration=$(jq -c --argjson job "$JOB" --arg po "$DECISION_BLOCKER_PO_LOGIN" '
+            def lines: (.body // "") | split("\n");
+            def is_job:
+                (.user.login == $po or (.user.type // "") == "Bot" or ((.author_association // "") as $a | $job.associations | index($a)))
+                and (lines | any(. == "## Blocked Declaration"))
+                and (lines | any(. == "Declared by: " + $job.declared_by))
+                and (lines | any(. as $l | $job.actions | any(. as $a | ($job.marker + " action=" + $a) as $m | $l | startswith($m + " "))));
+            ([.[] | select(is_job)] | last) as $d
+            | if $d == null then empty
+              elif any(.[]; .user.login == $po and .created_at > $d.created_at
+                            and (lines | any(test("^\\s*/unblock\\s*$")))) then empty
+              else {since: $d.created_at,
+                    type: (if ($d | lines | any(. == "Type: resource")) then "resource" else "external" end),
+                    unblocked_when: ($d | lines | map(select(startswith("Unblocked when: "))) | first // "" | sub("^Unblocked when: "; "")),
+                    state: ($d | lines | map(select(startswith("State of in-progress work: "))) | first // "" | sub("^State of in-progress work: "; ""))}
+              end' <<< "$comments" 2>/dev/null) \
+            || { echo "[NOTIFY] Warning: cannot evaluate the comments of #$story; its job blockers are not scanned this cycle" >&2; continue; }
+        [[ -n "$declaration" ]] || continue
+        context=$(jq -nc --argjson d "$declaration" --arg st "$(jq -r '.title // ""' <<< "$info")" \
+                         --arg iu "https://github.com/$REPO/issues/$story" \
+                  '{story_title: $st, issue_url: $iu, blocker_type: $d.type,
+                    unblocked_when: $d.unblocked_when, state: $d.state, cause: ""}')
+        args=(register --repo "$REPO" --event po_blocker --issue "$story"
+              --since "$(jq -r '.since' <<< "$declaration")" --context "$context")
+        $DRY_RUN && args+=(--dry-run)
+        bash "${BASH_SOURCE[0]}" "${args[@]}" || SCAN_RC=1
+    done
+    return "$SCAN_RC"
+}
+
+if [[ "$MODE" == scan-job-blockers ]]; then
+    scan_job_blockers
+    exit $?
 fi
 
 # ─── run ──────────────────────────────────────────────────────────────────────
