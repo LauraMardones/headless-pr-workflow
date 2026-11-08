@@ -35,7 +35,7 @@ from .marker import list_markers
 from .write import _PENDING_FIELDS, EXIT_INVALID, EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, log
 
 BLOCK = "state"
-FILE_NAMES = ("actionable-events", "notified-refinement", "usage-sessions", "usage-notified", "allowance-hold")
+FILE_NAMES = ("actionable-events", "usage-sessions", "usage-notified", "allowance-hold")
 
 _EXIT = {
     "ok": EXIT_OK,
@@ -53,7 +53,6 @@ _EXIT = {
 _DAY = r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
 _SESSIONS = re.compile(rf"^({_DAY}):([0-9]+)$")
 _NOTIFIED = re.compile(rf"^({_DAY})$")
-_ISSUE_NUMBER = re.compile(r"^[0-9]+$")
 
 
 class StateResult(Result):
@@ -82,7 +81,7 @@ def state_path(name: str, repo: str, env: Mapping[str, str] | None = None) -> Pa
     """The file of a registered name; the directories keep the overrides the scripts always had."""
 
     env = os.environ if env is None else env
-    if name in ("actionable-events", "notified-refinement"):
+    if name == "actionable-events":
         base = Path(env.get("DISPATCHER_STATE_DIR") or _root() / ".dispatcher-state")
         owner, _, repo_name = repo.partition("/")
         return base / owner / repo_name / name
@@ -96,7 +95,6 @@ def state_path(name: str, repo: str, env: Mapping[str, str] | None = None) -> Pa
 def empty_value(name: str) -> Any:
     return {
         "actionable-events": [],
-        "notified-refinement": [],
         "usage-sessions": {"day": None, "count": 0},
         "usage-notified": {"day": None},
         "allowance-hold": None,
@@ -140,13 +138,6 @@ def parse(name: str, text: str, today: str) -> tuple[str, Any, dict[str, Any]]:
                 kept.append(value)
         # A malformed line never discards a valid pending record next to it (#338).
         return ("ok" if len(kept) == total else "malformed"), kept, {"dropped": total - len(kept)}
-    if name == "notified-refinement":
-        lines = text.split("\n")
-        if lines[-1] == "":
-            lines.pop()
-        if all(_ISSUE_NUMBER.match(line) for line in lines):
-            return "ok", [int(line) for line in lines], {}
-        return "malformed", [], {}
     if name == "usage-sessions":
         match = _SESSIONS.match(text.rstrip("\n"))
         if match is None:

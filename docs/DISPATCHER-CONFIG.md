@@ -44,15 +44,15 @@ The PO sets every WIP and queue limit in repository variables (issue #358). No s
 
 | Variable | Valid values | Suggested value | Read by |
 |---|---|---|---|
-| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories in "In implementation" at the same time. | `2` | `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
-| `READY_BUFFER_MIN` | A whole number of zero or more. The fewest stories kept in "Ready for implementation". | `3` | the shared check; the #306 scheduler will use it |
-| `READY_BUFFER_MAX` | A whole number, `READY_BUFFER_MIN` or more. The most stories kept in "Ready for implementation". | `5` | the shared check; the #306 scheduler will use it |
+| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories in "In implementation" at the same time. | `2` | the [scheduler](#scheduler-new-work-from-github-facts), `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
+| `READY_BUFFER_MIN` | A whole number of zero or more. The fewest ready stories the scheduler keeps. | `3` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
+| `READY_BUFFER_MAX` | A whole number, `READY_BUFFER_MIN` or more. The most ready and waiting stories the scheduler keeps. | `5` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
 
-**Change them** under **Settings → Secrets and variables → Actions → Variables** (`https://github.com/<owner>/<repo>/settings/variables/actions`). No code change is needed; the new value applies on the next run. The workflow passes all three to the "Run dispatcher poll" step (the poll runs `flow-review.sh`) and the "Run dispatcher invoke" step.
+**Change them** under **Settings → Secrets and variables → Actions → Variables** (`https://github.com/<owner>/<repo>/settings/variables/actions`). No code change is needed; the new value applies on the next run. The workflow passes all three to the "Run dispatcher poll" step (the poll runs the scheduler and `flow-review.sh`) and the "Run dispatcher invoke" step (it runs the scheduler again).
 
 **Board column limits are only visual.** A limit set on a column of the project board is read by nothing. The PO sets it by hand to match the variable.
 
-**The shared check.** `scripts/lib/limits.sh` (`load_limits`) checks all three variables and is sourced by `dispatcher-invoke.sh` and `flow-review.sh`, so a missing or invalid buffer value is found on the first run, not when the #306 scheduler starts reading it. Any script that reads a limit uses it instead of its own check.
+**The shared check.** `scripts/lib/limits.sh` (`load_limits`) checks all three variables and is sourced by `dispatcher-invoke.sh` and `flow-review.sh`, so a missing or invalid buffer value is found on the first run. The scheduler checks the same three variables itself and reports `unreadable` for a bad value. Any script that reads a limit uses it instead of its own check.
 
 **Log lines.**
 
@@ -71,6 +71,50 @@ WIP count: 2/3
 **When the WIP limit is reached** the dispatcher posts a conflict blocker whose "Unblocked when" line names the configured limit (`Fewer than <limit> stories are in "In implementation"…`).
 
 ---
+
+## Scheduler: new work from GitHub facts
+
+The dispatcher starts new work from the scheduler's decision, never from a board status (issue #474, ADR-010, Feature #460). Moving a card to "Ready for implementation" or "Ready for refinement" starts nothing, and the scheduler's choice gets its session whatever its board status. The decision rule is `hpw dispatcher scheduler next` (issue #473); `scripts/dispatcher-poll.sh` and `scripts/dispatcher-invoke.sh` only call it, through `scripts/lib/scheduler.sh`, and act on its result.
+
+```
+scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] [--exclude <n>[,<n>...]] [--dry-run]
+```
+
+**Order of actions in a run** (#460 → Decisions "Order of actions in a run"). One model session at a time:
+
+1. work in flight, as before (the resume pass: "In merge", fix rounds, pending hand-offs, "In review", conflict rounds);
+2. then one scheduler decision for new work. The scheduler orders the rest: re-refinement of stale issues (Epic first), Epic refinement after a new spec merge, Feature refinement, the start of a ready story's implementation, and story refinement for the ready buffer.
+
+**When it is asked.** The poll asks to decide whether the invoke step runs. The invoke step (`dispatcher-invoke.sh --repo <owner/repo>`, no `--issue`) asks again right before it starts new work, after the work in flight, so the decision uses fresh facts. After a finished `/implement` cycle (the hand-off to the Codex review loop), and after a story the run skips as non-executable, the next story also comes from a new scheduler call, not from the board.
+
+**Acting on the result.**
+
+| Result | What the dispatcher does |
+|---|---|
+| `refine #N` | One refinement session for `#N` through the `--refine` path ([Refinement sessions](#refinement-sessions)); the run ends after it, with no chained session. |
+| `implement #N` | `/implement #N` with the usual cycle and the board write to "In implementation". A story this run already started or skipped is not started again: the run exits `0`. |
+| `idle` | No new-work session. The run log has `[SCHEDULER] idle`. Exit code unchanged. |
+| `unreadable` | No new-work session. The run log has `[SCHEDULER] unreadable: <error>`. Work in flight in the same run still runs, and the next run (five minutes later, ADR-013) asks again. Exit code unchanged. An output the dispatcher cannot read counts as `unreadable`. |
+
+**The rules** (in the scheduler, issue #473):
+
+- **Ready buffer.** Story refinement starts only while fewer than `READY_BUFFER_MIN` stories are ready and fewer than `READY_BUFFER_MAX` are ready or refined and waiting; otherwise the story is skipped with `buffer-full`.
+- **WIP limit.** No implementation starts while the `--in-implementation` list has `WIP_LIMIT_IMPLEMENTATION` or more stories (`wip-limit`).
+- **File overlap.** A ready story whose `## Files affected` names a file of a listed story is skipped (`file-overlap #<n> <path>`).
+- **No-spec rule.** Nothing under an Epic with no merged spec is refined. The run log carries the scheduler's `[SCHEDULER] skip #<epic> no-merged-spec: <reason>` line; no comment is posted.
+- Every skipped issue gets one `[SCHEDULER] skip #<n> <reason>` line on stderr. The poll and the invoke step pass these lines to the run log unchanged.
+
+**`--in-implementation`.** The dispatcher passes the stories on the board in "In implementation", "In review" and "In merge": the work in flight as it finds it today. The scheduler never starts a listed story, so a story in review or merge is not started again. Until #475 finds work in flight from PR facts (with its own `--in-flight` list), the stories in review and merge also count for the scheduler's WIP limit and file overlap, so fewer new stories may start than the limit allows (PO decision on PR #485).
+
+**`--exclude`.** The invoke step lists the stories this run already started or skipped (for example an `executor:codex` story, which the dispatcher does not start). The scheduler never chooses them (`excluded`) and, unlike `--in-implementation`, does not count them for the WIP limit or file overlap, so the next ready story is reached instead of the same one being chosen again.
+
+**Stale recovery first.** In the scheduled run, a story "In implementation" with no activity for more than two hours and no hand-off note is rolled back to "Ready for implementation" (Recovery Protocol, `docs/PROJECT-STATUS.md`) before the scheduler is asked, so a stale story does not hold a WIP slot and block the decision with `wip-limit`.
+
+**Gates, unchanged for both kinds.** The pause switch (`DISPATCHER_ENABLED` not `true`: the workflow guard skips the poll and the invoke step, so the scheduler is not called and no session starts), the [usage limit](#usage-limit), the [allowance reserve](#subscription-allowance-and-reserve) and one session at a time (the workflow's `concurrency` group).
+
+**Poll output.** The poll's JSON has `next_issue` (the issue of a `refine` or `implement` action, or `null`), `next_action` (the scheduler's `action` object: `kind`, `issue`, `type`, `epic`, `step`, `reason`; or `null`) and `scheduler_result` (`refine`, `implement`, `idle` or `unreadable`). It no longer has `ready_for_implementation` or `ready_for_refinement`. The workflow's invoke-step condition is unchanged in meaning: the step runs when `next_issue` is set or `resumable` is true.
+
+**Retired.** The `ready_for_refinement` Slack notification and its `notified-refinement` saved state are gone (#460 → Decisions "No stored state is needed"). A leftover `notified-refinement` file in the Actions cache does no harm: nothing reads it, and it expires with the cache.
 
 ## Executor Secrets — `CLAUDE_CODE_OAUTH_TOKEN`
 
@@ -297,7 +341,6 @@ scripts/hpw dispatcher state read-pending --number <n> --item <item> [--expected
 | Name | File (formats and paths unchanged) | Malformed or unreadable |
 |---|---|---|
 | `actionable-events` | `.dispatcher-state/<owner>/<repo>/actionable-events` (`DISPATCHER_STATE_DIR`) | the retry step sends nothing and leaves the file; a malformed *line* is dropped while valid lines are kept; a new event is delivered directly |
-| `notified-refinement` | `.dispatcher-state/<owner>/<repo>/notified-refinement` | the poll continues empty (at most one extra notification) |
 | `usage-sessions` | `.dispatcher-usage/sessions` (`YYYY-MM-DD:<count>`, `USAGE_LIMIT_STATE_DIR`) | **starts no session**: `[USAGE LIMIT ERROR]`, exit `2`. A file dated another day is the normal start of a new day: 0 sessions |
 | `usage-notified` | `.dispatcher-usage/notified` (`YYYY-MM-DD`) | the notification is sent again |
 | `allowance-hold` | `.dispatcher-allowance/hold.json` (`ALLOWANCE_STATE_DIR`) | the allowance check probes again |
@@ -306,11 +349,11 @@ scripts/hpw dispatcher state read-pending --number <n> --item <item> [--expected
 - **`write`** checks the data against the name's format, writes a temporary file, renames it into place and reads it back (`written`, exit `0`; `failed`, exit `1`, with one stderr line naming the file and the step). A path that is not a regular file, or a file that cannot be read, is moved aside to `<file>.unreadable` and never overwritten. A write stopped before the rename leaves the old file whole. `--dry-run` writes nothing and returns `dry-run`.
 - **`read-pending`** finds the dispatcher's own evidence-pending comment through Block 2 and returns `none`, `ok` (with `payload`), `stale-head` (the payload was recorded for another head), `malformed` or `unreadable`. `write retry-pending` reads its payload through it.
 - **Output:** one JSON line (`ok`, `block: "state"`, `operation`, `result`, `name`, `data` or `payload`, `error`); exit `2` is an unknown name or invalid arguments. The block adds no wait and no retry.
-- The bash callers are thin shims: `load_state` and `save_state` in `dispatcher-notify-retry.sh`, the refinement state in `dispatcher-poll.sh`, `read_count`, `record`, `notify-due` and `mark-notified` in `dispatcher-usage-limit.sh`, and the hold in `dispatcher-allowance.sh`.
+- The bash callers are thin shims: `load_state` and `save_state` in `dispatcher-notify-retry.sh`, `read_count`, `record`, `notify-due` and `mark-notified` in `dispatcher-usage-limit.sh`, and the hold in `dispatcher-allowance.sh`.
 
 **Workflow rules** (`.github/workflows/dispatcher.yml`): every `actions/cache/save` key contains `${{ github.run_id }}-${{ github.run_attempt }}`, so a re-run never collides with the first attempt, and restores match by prefix, so the newest snapshot wins; every state save has `always()` in its `if:`, so it also runs after a failed or cancelled step; only the state writer (a scheduled run, or a run on the default branch) saves `.dispatcher-state`, and other refs run the poll, invoke, trigger-check and retry steps with `--dry-run`.
 
-**Workflow steps are scripts.** Every `run:` in `dispatcher.yml` is one command: `bash scripts/dispatcher-workflow-step.sh <step>`, or the pinned `npm install`. The step script holds the guard (`guard`), the state-writer rule (`scope`), the cache dates (`cache-date`, `cache-save-date`), `gh auth setup-git` (`git-auth`), the `--dry-run` and `--issue`/`--resume` choices (`poll`, `invoke`, `trigger-check`, `retry`) and the usage-limit notification context (`usage-limit-notify`). The poll reports `next_issue`, `evidence_pending` and `resumable` in its JSON; a failed read of the `evidence:pending` label counts as pending.
+**Workflow steps are scripts.** Every `run:` in `dispatcher.yml` is one command: `bash scripts/dispatcher-workflow-step.sh <step>`, or the pinned `npm install`. The step script holds the guard (`guard`), the state-writer rule (`scope`), the cache dates (`cache-date`, `cache-save-date`), `gh auth setup-git` (`git-auth`), the `--dry-run` and `--refine` choices (`poll`, `invoke`, `trigger-check`, `retry`) and the usage-limit notification context (`usage-limit-notify`). The poll reports `next_issue`, `next_action`, `scheduler_result`, `evidence_pending` and `resumable` in its JSON; a failed read of the `evidence:pending` label counts as pending.
 
 **Change check.** `scripts/dispatcher-change-check.sh` has the check id `saved-state`: outside the shims above it flags a redirect, `cp`, `mv`, `rm`, `cat`, `read <` or `mkdir` on a path under `.dispatcher-state`, `.dispatcher-usage` or `.dispatcher-allowance`, or on a variable named `*STATE_DIR`, `*STATE_FILE`, `HOLD_FILE`, `SESSIONS_FILE` or `NOTIFIED_FILE`. On `dispatcher.yml` it flags an `actions/cache/save` key without `github.run_attempt`, a cache save whose `if:` has no `always()`, and a `run:` step that calls `gh` directly.
 
@@ -325,13 +368,12 @@ The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for t
 | `evidence_unwritable` | required merge or cleanup evidence has been missing for 15 minutes and the story's comments cannot be written, so #348's blocker cannot be posted (issue #372) | yes |
 | `feature_closure_confirmation` | all stories of a Feature are Done | yes |
 | `epic_closure_approval` | all Features of an Epic are Done | yes |
-| `ready_for_refinement` | an issue enters "Ready for refinement" | yes, by the poll (issue #257) |
 | `red_flow_health` | the board health is Red | re-sent on every poll while Red |
 | `budget_cap_reached` | every ready story is budget-blocked | no |
 | `dispatcher_error` | the invoke run exited unexpectedly | no: the failing run is itself red |
 | `dispatch_trigger_stopped` | the newest `workflow_dispatch` run of `dispatcher.yml` on `main` is more than 15 minutes old, or none exists (issue #339, [Dispatcher trigger](#dispatcher-trigger)) | yes, until a newer dispatched run exists |
 
-**Retry of notifications that need PO action (issue #295).** `dispatcher-invoke.sh` queues `decision_blocker`, `po_blocker`, `evidence_unwritable`, `feature_closure_confirmation` and `epic_closure_approval`, and `scripts/dispatcher-trigger-check.sh` queues `dispatch_trigger_stopped` (issue #339; it is resolved when a newer dispatched run exists, uses issue `0` and never posts an issue comment, so a persistent delivery failure only turns the run red), in `$DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events` (restored and saved by the same `actions/cache` steps as the refinement state). The workflow step **Retry actionable Slack notifications** (`scripts/dispatcher-notify-retry.sh run`) runs on every cycle, also when no story is ready or resumable, sends each undelivered event and records it as delivered only after `slack-notify.sh` exits 0. A delivered event is not sent again while it stays unresolved. An event stops being retried, even if it was never delivered, when it is resolved: a decision blocker or `po_blocker` by a `/unblock` line from the PO after the declaration or by closing the issue, a closure event by closing the Feature or Epic, `evidence_unwritable` when the evidence is posted by the dispatcher's own account or #348's give-up blocker for the item is on the story (a closed story does not resolve it, because the cleanup case concerns a story that is already `Done`). A new decision blocker or `po_blocker` on the same issue is a new event (the key is the `created_at` of the declaration comment). `po_blocker` is queued by `post_blocker_once` and `post_mid_cycle_blocker` for every `Type: resource` or `Type: external` blocker the dispatcher posts; `Type: conflict` blockers (WIP limit, file overlap) clear on their own and send nothing. After a session that exits 0 the event is queued only while the blocker is open, that is, no later PO comment has a line that is exactly `/unblock` (the rule of `docs/PROJECT-STATUS.md`, Decision blockers); the state de-duplicates a re-run over the same declaration (issue #357). A blocker the dispatcher does not post again because its marker still holds queues no second event. Before `dispatcher-invoke.sh` chains to the next story, and after each story the resume pass handles ("In merge", fix rounds, pending hand-offs, "In review"; issue #349), it makes one extra delivery attempt (`run --drain`), so an alert is not held back by the chained or later resumed sessions or by the `/implement` session that follows the resume pass; that attempt records a success but never counts a failure. If the state file cannot be written, `register` delivers the event synchronously instead and exits non-zero when that fails too, and the retry step ends the run red with an `[NOTIFY] Error:` line. A state file that exists as a regular file but cannot be read (issue #352) is never overwritten or removed, because the events in it stay recoverable: `run` sends nothing, leaves the file unchanged, writes an `[NOTIFY] Error:` line and exits 1; `run --drain` writes a `[NOTIFY] Warning:` line and exits 0; `register` delivers the event directly (exit 0 on success, 1 on failure) and writes no state file. Once the file is readable again the next `run` delivers what it holds. When `register` exits non-zero, `dispatcher-invoke.sh` carries on with its loop, writes an `Error:` line naming the event type and issue number, and exits 1 at its end, also across a chained `exec`; this is not reported as `dispatcher_error`. The steps after the invoke step (usage-limit notice, session-state save, retry, state save) still run. The `.dispatcher-state` cache is also saved when the job is cancelled, so an event queued during the invoke step survives; the save keeps its guards (enabled, successful poll, default-branch state writer).
+**Retry of notifications that need PO action (issue #295).** `dispatcher-invoke.sh` queues `decision_blocker`, `po_blocker`, `evidence_unwritable`, `feature_closure_confirmation` and `epic_closure_approval`, and `scripts/dispatcher-trigger-check.sh` queues `dispatch_trigger_stopped` (issue #339; it is resolved when a newer dispatched run exists, uses issue `0` and never posts an issue comment, so a persistent delivery failure only turns the run red), in `$DISPATCHER_STATE_DIR/<owner>/<repo>/actionable-events` (restored and saved by the `actions/cache` steps of [Dispatcher state cache](#dispatcher-state-cache)). The workflow step **Retry actionable Slack notifications** (`scripts/dispatcher-notify-retry.sh run`) runs on every cycle, also when no story is ready or resumable, sends each undelivered event and records it as delivered only after `slack-notify.sh` exits 0. A delivered event is not sent again while it stays unresolved. An event stops being retried, even if it was never delivered, when it is resolved: a decision blocker or `po_blocker` by a `/unblock` line from the PO after the declaration or by closing the issue, a closure event by closing the Feature or Epic, `evidence_unwritable` when the evidence is posted by the dispatcher's own account or #348's give-up blocker for the item is on the story (a closed story does not resolve it, because the cleanup case concerns a story that is already `Done`). A new decision blocker or `po_blocker` on the same issue is a new event (the key is the `created_at` of the declaration comment). `po_blocker` is queued by `post_blocker_once` and `post_mid_cycle_blocker` for every `Type: resource` or `Type: external` blocker the dispatcher posts; `Type: conflict` blockers (WIP limit, file overlap) clear on their own and send nothing. After a session that exits 0 the event is queued only while the blocker is open, that is, no later PO comment has a line that is exactly `/unblock` (the rule of `docs/PROJECT-STATUS.md`, Decision blockers); the state de-duplicates a re-run over the same declaration (issue #357). A blocker the dispatcher does not post again because its marker still holds queues no second event. Before `dispatcher-invoke.sh` chains to the next story, and after each story the resume pass handles ("In merge", fix rounds, pending hand-offs, "In review"; issue #349), it makes one extra delivery attempt (`run --drain`), so an alert is not held back by the chained or later resumed sessions or by the `/implement` session that follows the resume pass; that attempt records a success but never counts a failure. If the state file cannot be written, `register` delivers the event synchronously instead and exits non-zero when that fails too, and the retry step ends the run red with an `[NOTIFY] Error:` line. A state file that exists as a regular file but cannot be read (issue #352) is never overwritten or removed, because the events in it stay recoverable: `run` sends nothing, leaves the file unchanged, writes an `[NOTIFY] Error:` line and exits 1; `run --drain` writes a `[NOTIFY] Warning:` line and exits 0; `register` delivers the event directly (exit 0 on success, 1 on failure) and writes no state file. Once the file is readable again the next `run` delivers what it holds. When `register` exits non-zero, `dispatcher-invoke.sh` carries on with its loop, writes an `Error:` line naming the event type and issue number, and exits 1 at its end, also across a chained `exec`; this is not reported as `dispatcher_error`. The steps after the invoke step (usage-limit notice, session-state save, retry, state save) still run. The `.dispatcher-state` cache is also saved when the job is cancelled, so an event queued during the invoke step survives; the save keeps its guards (enabled, successful poll, default-branch state writer).
 
 **Bound and red run.** A failed delivery never aborts the dispatcher; the step exits 0 and retries on the next cycle. After 3 failed cycles in a row (about 15 minutes) the step exits 1, so the run ends red, and one comment is posted on the affected issue naming the event and the first failed attempt. Later failing cycles stay red but add no comment, and Slack still receives the message when it recovers. Missing state starts empty; in a malformed state file only the malformed lines are dropped and valid records are kept; a state file that exists but cannot be read is left unchanged and makes `run` red (see above). Under `--dry-run` nothing is sent, recorded or commented. A manual run on a non-default ref only reports what it would send; an event queued in such a run is not saved and is not delivered.
 
@@ -351,114 +393,22 @@ The dispatcher workflow passes this secret to the shell environment automaticall
 
 For local development, copy `.env.example` to `.env` and set your webhook URL there. `.env` is listed in `.gitignore` and must not be committed.
 
-### Ready for refinement notification state
+### Dispatcher state cache
 
-`scripts/dispatcher-poll.sh` sends one `ready_for_refinement` notification per issue for each **continuous stay** in **Ready for refinement** (issue #257). Its de-duplication state is one issue number per line in `.dispatcher-state/<owner>/<repo>/notified-refinement` (override the directory with `DISPATCHER_STATE_DIR`). It holds issue numbers only: no credentials, message text, or webhook responses.
-
-Lifecycle, applied on every poll except `--dry-run`:
-
-- **Delivery:** an issue is recorded only after `slack-notify.sh` exits `0`, which logs `[POLL] Notified: ...` on stderr.
-- **Retry:** a failed delivery logs `[POLL] Warning: slack-notify.sh failed for #N; will retry next cycle`, stays unrecorded, and is retried on the next poll. The poll still exits `0`.
-- **Exit and re-entry:** recorded issues that are no longer in **Ready for refinement** are dropped, so an issue that leaves and later returns notifies once more.
-- **Missing, unreadable, or malformed state:** a missing file (a first run or a cache miss) starts from empty state silently. An unreadable or malformed file logs a `[POLL] Warning:` and starts from empty state. A failed write logs a warning. None of these abort the poll or change its stdout JSON.
-- **`--dry-run`:** reads the state, logs `[DRY RUN] Would notify: ...`, sends no Slack notification, and never writes the state.
-
-GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` with `actions/cache`:
+GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` (the `actionable-events` state above) with `actions/cache`. The step names come from issue #257, when the cache held the retired refinement-notification state (issue #474):
 
 1. **Restore refinement notification state** runs before **Run dispatcher poll** on every enabled run. Its `dispatcher-state-` prefix restores the most recently saved snapshot.
-2. **Save refinement notification state** runs right after a successful poll on every enabled default-branch run, whether or not an issue is ready for implementation. Cache entries are immutable, so each run saves under a unique `dispatcher-state-<run_id>-<run_attempt>` key.
-3. **Default branch only writes state.** Actions caches are scoped by ref, so a snapshot saved by a run on another ref would be invisible to the scheduled default-branch runs, and they would notify again. **Resolve notification state scope** therefore marks every scheduled run, and every manual run dispatched on the default branch, as the state writer. A manual `workflow_dispatch` on any other ref still restores the default-branch snapshot. It runs the poll with `--dry-run`, so it sends no Slack notification (including Red flow health) and the save step is skipped.
-4. A workflow-level `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) serializes scheduled and manual runs, so no two runs read the same snapshot and race to write it. GitHub keeps at most one pending run per group; a newer pending run replaces an older pending one, and in-progress runs are never cancelled.
+2. **Save poll notification state** and **Save refinement notification state** save it on every enabled default-branch run after a successful poll. Cache entries are immutable, so each save uses a unique key with `<run_id>-<run_attempt>`.
+3. **Default branch only writes state.** Actions caches are scoped by ref, so **Resolve notification state scope** marks every scheduled run, and every manual run dispatched on the default branch, as the state writer. A manual `workflow_dispatch` on any other ref restores the default-branch snapshot and runs the poll, invoke, trigger-check and retry steps with `--dry-run`; the save steps are skipped.
+4. A workflow-level `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) serializes scheduled and manual runs, so no two runs read the same snapshot and race to write it.
 
-**Residual risk:** if the cache is evicted (GitHub removes entries unused for 7 days, or the oldest entries past the repository's size limit) or a save fails, the next poll starts from empty state. Each issue still in **Ready for refinement** can then be notified once more.
-
-**Interim mechanism:** this cache exists only because the dispatcher runs on ephemeral GitHub-hosted runners. #259 moves the dispatcher to persistent infrastructure, where local disk supersedes the cache steps. That migration must keep the continuous-stay, exit/re-entry, delivery-only recording, and retry semantics above, and must revalidate #257's acceptance criteria before the cache steps are removed.
-
----
-
-## Dispatcher trigger
-
-Issue #339, [ADR-013](decisions/ADR-013-dispatcher-trigger-mechanism.md). GitHub's `schedule` cron is best effort and was observed 2h44 to 7h27 apart. A hosted HTTP cron service therefore calls `workflow_dispatch` on `main` every 5 minutes. The GitHub cron (`*/5 * * * *`) stays as a backup, and the `concurrency` group (`dispatcher-<owner>/<repo>`, `cancel-in-progress: false`) keeps simultaneous starts from running in parallel or notifying twice. A pending run replaced in the group shows as cancelled; that is expected.
-
-### Chosen service and alternative
-
-| | Service | Provider documentation |
-|---|---|---|
-| Chosen | **cron-job.org** | [REST API](https://docs.cron-job.org/rest-api.html): schedule `minutes` 0-59 or `-1` for every minute (`JobSchedule`); POST and a header dictionary and body (`RequestMethod`, `JobExtendedData`); execution history (`/jobs/<jobId>/history`); `notification.onFailure` with the built-in account e-mail (`JobNotificationSettings`) |
-| Alternative | **Upstash QStash** schedules | [Create a schedule](https://upstash.com/docs/qstash/api-reference/schedules/create-a-schedule): cron schedule with one-minute resolution, headers forwarded to the target, retries and a failure callback; free plan |
-
-The five ADR-013 properties are: a schedule of 5 minutes or less, a POST with an `Authorization` header, a run history, an e-mail to the account owner when a call fails, and a free plan. The provider pages above show the first four for cron-job.org and the first two and the callback for QStash. **Unconfirmed at the time of writing:** the free plan's limits for cron-job.org and QStash's failure e-mail. The PO confirms both on the provider's current plan page at setup step 1 and may choose the alternative.
-
-### PO setup
-
-The implementer never creates accounts or handles token values.
-
-1. Create the scheduler account (cron-job.org, or the alternative).
-2. Create a fine-grained personal access token: repository access `LauraMardones/headless-pr-workflow` only, repository permission **Actions: Read and write** only, with an expiry date. Store it only in the scheduler, never in the repository, an issue, a PR, an Actions secret or a log. It is not `PROJECT_TOKEN`.
-3. Create the job: `POST https://api.github.com/repos/LauraMardones/headless-pr-workflow/actions/workflows/dispatcher.yml/dispatches`, body `{"ref":"main"}`, headers `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, every 5 minutes, with the failure e-mail switched on.
-4. Run the [manual check](#manual-check) and confirm that dispatched runs appear.
-
-### Token rotation
-
-Before the token's expiry date:
-
-1. Create the new token with the same repository and permission.
-2. Update the job's `Authorization` header in the scheduler.
-3. Run the manual check and confirm a dispatched run created after the update.
-4. Revoke the old token.
-
-**Leaked token.** Revoke it at once, create a replacement and update the job as above, run `gh workflow enable dispatcher.yml` (GitHub can disable a workflow), then run the manual check. A leaked token can only dispatch runs of this repository's workflows (Actions: Read and write); it cannot read code.
-
-### Stop alert
-
-Every enabled dispatcher run on the default branch, whatever started it, runs **Check the dispatch trigger** (`scripts/dispatcher-trigger-check.sh`). It reads the creation time of the newest `workflow_dispatch` run of `dispatcher.yml` on `main`. If that is more than 15 minutes old, or no such run exists, it queues one `dispatch_trigger_stopped` event, which **Retry actionable Slack notifications** sends and retries. The event key is the creation time of that run (or `none`), so each gap notifies once, and the event is dropped as soon as a newer dispatched run exists; a later gap is a new event. Age is judged by creation time, never by finish time or conclusion, so a long session or a cancelled (replaced) run does not look like a stop. On a non-default ref or under `--dry-run` the check only logs `[TRIGGER] Would queue ...`. A failed API read logs `[TRIGGER] Warning: ...`, sends nothing and never fails the run.
-
-The Slack message names the age of the newest dispatched run, its creation time, the manual check command and this section.
-
-### Manual check
-
-```
-gh run list --workflow dispatcher.yml --branch main --event workflow_dispatch --limit 5
-```
-
-Read the `CREATED` column (the "ago" value of the first row): with the scheduler live, the newest row is at most about 5 minutes old and consecutive rows are about 5 minutes apart. A newest row older than 15 minutes means the scheduler is stopped: check the provider's run history and failure e-mail, then the token's expiry and permission. A `cancelled` conclusion on some rows is normal (replaced pending runs).
-
-### Known limits
-
-- A manual `workflow_dispatch` run by the PO on `main` uses the same identity and event as the scheduler, so it resets the 15-minute clock once.
-- No alert while `DISPATCHER_ENABLED` is not `true`: the guard skips every step.
-- No alert when the scheduler and the cron both stop (for example a disabled workflow); the service's failure e-mail and the manual check cover that.
-
----
-
-## Dispatcher Toggle
-
-| Variable | Values | Default |
-|---|---|---|
-| `DISPATCHER_ENABLED` | `true` / `false` | `true` |
-
-Set this repository variable to `false` to pause all autonomous dispatcher runs without disabling the workflow file. The dispatcher checks this value at startup and exits cleanly when it is `false`.
-
-To update this variable:
-
-`https://github.com/<owner>/<repo>/settings/variables/actions`
-
----
-
-## Usage Limit Notification
-
-The first time the usage limit stops a session on a UTC day, the dispatcher workflow sends a `usage_limit_reached` Slack notification (see [Usage limit](#usage-limit)). The Slack message contains:
-- A header identifying the pause: `:no_entry: Daily session limit reached -- Dispatcher Paused`
-- The sessions started today and the limit, and that no new work starts until 00:00 UTC
-- A direct link to [GitHub Settings - Variables](https://github.com/LauraMardones/headless-pr-workflow/settings/variables/actions) to change the limit or toggle `DISPATCHER_ENABLED`
-
-To enable this notification, ensure `SLACK_WEBHOOK_URL` is configured as a repository secret (see Slack Notifications section above).
+**Interim mechanism:** this cache exists only because the dispatcher runs on ephemeral GitHub-hosted runners. #259 moves the dispatcher to persistent infrastructure, where local disk supersedes the cache steps.
 
 ---
 
 ## Executable Issue Types in the Invoke Loop
 
-Only Stories, Tasks, and Bugs are executable units for `/implement`. Before executor-label routing, `scripts/dispatcher-invoke.sh` classifies every candidate taken from **Ready for implementation** (issue #256):
+Only Stories, Tasks, and Bugs are executable units for `/implement`. Before executor-label routing, `scripts/dispatcher-invoke.sh` classifies every story the [scheduler](#scheduler-new-work-from-github-facts) chose for `/implement`, or `--issue` named (issue #256):
 
 | Type metadata | Result |
 |---|---|
@@ -634,16 +584,17 @@ Each run handles resumable work before it starts new work:
 2. fix rounds that are due, and hand-offs that are still pending;
 3. stories in `In review` (a `/review` session for a Codex-implemented PR; a conflicting review-loop PR is queued);
 4. the queued conflict rounds. Every `/merge` of the run has run by then, so each round starts from the newest `main`;
-5. stories in **Ready for implementation**, as before.
+5. then one [scheduler](#scheduler-new-work-from-github-facts) decision for new work, asked right then.
 
-`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due`, `conflict_due` and `owner_missing_due` (each `[{number, title}]`). `conflict_due` lists the review-loop stories in `In review` that the [conflict-round rule](#conflict-round) owes a round. `owner_missing_due` lists, by the same rule, the review-loop stories in `In review` whose clean head has no merge-owner evidence and no missing-merge-owner blocker yet ([A head left without an owner](#conflict-round)). Together they cost one PR read per review-loop story in `In review` per poll, and two comment reads when GitHub has computed that PR's mergeability. A story whose PR or comments cannot be read is not listed, and the poll writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due and owner_missing_due skip it this cycle` or `[POLL] Warning: could not read the comments of #<n> or PR #<pr>; conflict_due and owner_missing_due skip it this cycle`. `ready_for_implementation` and `ready_for_refinement` are unchanged. `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when a story is ready for implementation **or** any of these lists is non-empty:
+`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due`, `conflict_due` and `owner_missing_due` (each `[{number, title}]`). `conflict_due` lists the review-loop stories in `In review` that the [conflict-round rule](#conflict-round) owes a round. `owner_missing_due` lists, by the same rule, the review-loop stories in `In review` whose clean head has no merge-owner evidence and no missing-merge-owner blocker yet ([A head left without an owner](#conflict-round)). Together they cost one PR read per review-loop story in `In review` per poll, and two comment reads when GitHub has computed that PR's mergeability. A story whose PR or comments cannot be read is not listed, and the poll writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due and owner_missing_due skip it this cycle` or `[POLL] Warning: could not read the comments of #<n> or PR #<pr>; conflict_due and owner_missing_due skip it this cycle`. The poll also reports the scheduler's choice (`next_issue`, `next_action`, `scheduler_result`). `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when the scheduler chose new work (`next_issue` is set) **or** any of these lists is non-empty:
 
 ```
-bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable work first, then story <n>
-bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only
+bash scripts/dispatcher-invoke.sh --repo <owner/repo>               # resumable work first, then the scheduler's new work
+bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable work first, then story <n> (manual)
+bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only (manual)
 ```
 
-The workflow uses `--resume` when no story is ready for implementation. It runs the invoke step when a story is ready, `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
+The workflow always uses the first form (or `--refine <n>` for the `refine_issue` input); `--issue` and `--resume` stay for manual runs. It runs the invoke step when the scheduler chose new work, when a story is `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
 
 The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
 
@@ -762,7 +713,7 @@ An `[ALLOWANCE ERROR]` on every poll with work most likely means the undocumente
 
 `bash scripts/dispatcher-invoke.sh --repo <owner/repo> --refine <n> [--dry-run]` starts one refinement session for issue `<n>` (issue #319, ADR-012, Feature #460 criterion F2.5). It runs `.claude/commands/refine.md` with `$ARGUMENTS` set to `<n>` through `invoke_executor_command()`, so the token cleaning, the `ANTHROPIC_*` scrub, `CLAUDE_SESSION_ARGS`, the session count and the log lines are the implementation session's. `<n>` must be a positive whole number; `--refine` cannot be combined with `--issue` or `--resume` (exit `1`, nothing starts).
 
-**How it starts.** The scheduler calls this step after #474; until then only a manual run starts it: **Actions → Dispatcher → Run workflow**, with the input `refine_issue` set to the issue number. With `refine_issue` set the run passes the guard, installs Claude Code, restores the session state cache and runs only `dispatcher-invoke.sh --refine <refine_issue>` in the "Run dispatcher invoke" step, whatever the poll found; the usage-limit notification step is unchanged. With `refine_issue` empty the run is as before.
+**How it starts.** In the scheduled run a `refine #N` decision of the [scheduler](#scheduler-new-work-from-github-facts) starts it, after the work in flight (issue #474), and the run ends after the session. A manual run also starts it: **Actions → Dispatcher → Run workflow**, with the input `refine_issue` set to the issue number. With `refine_issue` set the run passes the guard, installs Claude Code, restores the session state cache and runs only `dispatcher-invoke.sh --refine <refine_issue>` in the "Run dispatcher invoke" step, whatever the poll found; the usage-limit notification step is unchanged. With `refine_issue` empty the run is as before.
 
 **Tier.** The model comes from the issue's type, not from its `executor:` label: `type:epic` and `type:feature` run on `opus`, every other issue (`type:story`, `type:task`, `type:bug`, or no `type:` label) on `sonnet`. The rule is fixed in `refine_executor_label()`; there is no repository variable for it.
 

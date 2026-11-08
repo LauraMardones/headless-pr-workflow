@@ -171,10 +171,17 @@ def test_a_failed_poll_is_a_failed_step_without_outputs(sb):
 
 
 @pytest.mark.parametrize("writer,flag", [("true", ""), ("false", " --dry-run")])
-@pytest.mark.parametrize("issue,tail", [("42", " --issue 42"), ("", " --resume")])
-def test_invoke_picks_issue_or_resume_and_runs_dry_unless_the_state_writer(sb, writer, flag, issue, tail):
+@pytest.mark.parametrize("issue", ["42", ""])
+def test_invoke_runs_the_scheduled_form_and_runs_dry_unless_the_state_writer(sb, writer, flag, issue):
+    """Issue #474: the invoke step asks the scheduler itself; the poll's choice is not passed on."""
     assert sb.run("invoke", STATE_WRITER=writer, NEXT_ISSUE=issue).returncode == 0
-    assert sb.calls() == [f"invoke --repo o/r{flag}{tail}"]
+    assert sb.calls() == [f"invoke --repo o/r{flag}"]
+
+
+@pytest.mark.parametrize("writer,flag", [("true", ""), ("false", " --dry-run")])
+def test_invoke_with_a_refine_input_runs_only_the_refine_form(sb, writer, flag):
+    assert sb.run("invoke", STATE_WRITER=writer, REFINE_ISSUE="12").returncode == 0
+    assert sb.calls() == [f"invoke --repo o/r{flag} --refine 12"]
 
 
 def test_invoke_passes_the_exit_code_through(sb):

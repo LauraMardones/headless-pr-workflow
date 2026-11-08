@@ -16,16 +16,18 @@
 #   cache-save-date     SAVE_DAY=<UTC date> to $GITHUB_ENV (the save key)
 #   git-auth            gh auth setup-git, so a session's plain git push authenticates
 #   poll                dispatcher-poll.sh (--dry-run unless STATE_WRITER=true); outputs
-#                       issue_number (the poll's next_issue) and resumable
+#                       issue_number (the poll's next_issue: the scheduler's choice,
+#                       issue #474) and resumable
 #   invoke              dispatcher-invoke.sh (--dry-run unless STATE_WRITER=true) with
 #                       --refine $REFINE_ISSUE when it is set (issue #319), else
-#                       --issue $NEXT_ISSUE, or --resume when there is none
+#                       with --repo only: work in flight, then the scheduler's
+#                       new-work decision, asked again with fresh facts (issue #474)
 #   trigger-check       dispatcher-trigger-check.sh (--dry-run unless STATE_WRITER=true)
 #   retry               dispatcher-notify-retry.sh run (--dry-run unless STATE_WRITER=true)
 #   usage-limit-notify  the usage_limit_reached Slack notification, then mark-notified
 #
 # Environment: GITHUB_OUTPUT and GITHUB_ENV (files the runner provides), REPO
-# (<owner/repo>, the steps pass github.repository), STATE_WRITER, NEXT_ISSUE, REFINE_ISSUE,
+# (<owner/repo>, the steps pass github.repository), STATE_WRITER, REFINE_ISSUE,
 # and the variables named per step above. Output goes to those files and to
 # stderr; stdout stays empty.
 #
@@ -63,8 +65,7 @@ step_guard() {
 
 # Actions caches are scoped by ref: a cache saved on a non-default ref is
 # invisible to the scheduled run on the default branch. Only default-branch runs
-# (every scheduled run, and manual runs dispatched on that branch) may send
-# refinement notifications and save state.
+# (every scheduled run, and manual runs dispatched on that branch) save state.
 step_scope() {
     require_file_var GITHUB_OUTPUT
     local writer=false
@@ -74,7 +75,7 @@ step_scope() {
     fi
     echo "state_writer=$writer" >> "$GITHUB_OUTPUT"
     if [[ "$writer" != "true" ]]; then
-        echo "Non-default ref ${REF:-}: poll runs with --dry-run; refinement notification state is read-only" >&2
+        echo "Non-default ref ${REF:-}: poll runs with --dry-run; dispatcher state is read-only" >&2
     fi
 }
 
@@ -108,10 +109,12 @@ step_poll() {
     echo "resumable=$resumable" >> "$GITHUB_OUTPUT"
 }
 
-# Resumable work is handled first in both forms; --resume is the run with no
-# story ready for implementation (issue #293). The session count is saved to
-# this ref's cache scope, so a run on a non-default ref is read-only (--dry-run)
-# and cannot start sessions the next scheduled default-branch run would not see.
+# The scheduled run handles work in flight first, then asks the scheduler again
+# right before it starts new work, so the decision uses fresh facts (issue
+# #474); the poll's choice only decides whether this step runs. The session
+# count is saved to this ref's cache scope, so a run on a non-default ref is
+# read-only (--dry-run) and cannot start sessions the next scheduled
+# default-branch run would not see.
 step_invoke() {
     require_repo
     local args=(--repo "$REPO") flag
@@ -119,10 +122,8 @@ step_invoke() {
     [[ -z "$flag" ]] || args+=("$flag")
     if [[ -n "${REFINE_ISSUE:-}" ]]; then
         bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --refine "$REFINE_ISSUE"
-    elif [[ -n "${NEXT_ISSUE:-}" ]]; then
-        bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --issue "$NEXT_ISSUE"
     else
-        bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}" --resume
+        bash "$SCRIPT_DIR/dispatcher-invoke.sh" "${args[@]}"
     fi
 }
 

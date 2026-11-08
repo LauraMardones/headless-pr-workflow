@@ -18,6 +18,7 @@ import pytest
 from headless_pr_workflow import codex_review_bookkeeping as bookkeeping
 from tests.dispatcher_fakes import (
     BASH, BOARD_OPTIONS, BOT, INVOKE, PO, REPO_ROOT, Dispatcher, bookkeeping_marker, needs_tools,
+    scheduler_output,
 )
 from tests.script_tools import script_path, windows_env
 
@@ -501,7 +502,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
     for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh",
-                "conflict-round.sh"):  # sourced (#314, #296, #348, #358, #449)
+                "conflict-round.sh", "scheduler.sh"):  # sourced (#314, #296, #348, #358, #449, #474)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -819,6 +820,8 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
     if held:
         for head in ("1" * 40, HEAD):
             d.add_findings(PR, head)
+    else:
+        d.schedule(("implement", STORY))  # the scheduler chooses the rolled-back story next (#474)
 
     proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
 
@@ -830,7 +833,7 @@ def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held
         assert len(comments) == 1 and "Type: resource" in comments[0]
         assert f"#{STORY} is held by a fix-round blocker" in proc.stdout
     else:
-        # Without the blocker the story is rolled back and picked up as a ready story.
+        # Without the blocker the story is rolled back and started again when the scheduler chooses it.
         assert len(comments) == 1 and "## Recovery Comment" in comments[0]
         assert d.sessions == ["implement 700", f"implement {STORY}"]
 
@@ -968,10 +971,16 @@ def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
     assert "all 2 stories Done" not in proc.stdout and d.slack_calls == []
 
 
-def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evidence: str = "[]") -> dict:
+def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evidence: str = "[]",
+              scheduler: tuple = ("idle",), dry_run: bool = True, raw_scheduler: str | None = None,
+              stderr: list | None = None) -> dict:
     """Run the real dispatcher-poll.sh against a fake ``curl`` that serves one board page.
 
     An item is ``(number, status)`` or ``(number, status, [labels])``; ``pulls`` is the open-PR list.
+    A fake ``hpw`` answers ``hpw dispatcher scheduler next`` with ``scheduler`` (the arguments of
+    ``scheduler_output``) or the text ``raw_scheduler``, and logs its arguments to ``scheduler.log``;
+    any other ``hpw`` call runs the real one. The fake ``curl`` logs Slack calls to ``slack.log``.
+    ``stderr``, when given, receives the poll's stderr.
     """
     nodes = [{"content": {"number": n, "title": f"Story {n}",
                           "labels": {"nodes": [{"name": name} for name in (rest[0] if rest else [])]}},
@@ -985,30 +994,49 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evi
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
     curl = bin_dir / "curl"
     (tmp_path / "pulls.json").write_text(json.dumps(pulls or []), encoding="utf-8")
-    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  */pulls*) cat "$PULLS_FILE" ;;\n'
+    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  *hooks.slack*) echo "$*" >> "$SLACK_LOG" ;;\n'
+                    '  */pulls*) cat "$PULLS_FILE" ;;\n'
                     '  *labels=evidence*) [ "$EVIDENCE" = fail ] && exit 22; echo "$EVIDENCE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
                     encoding="utf-8", newline="\n")
     curl.chmod(0o755)
+    result, issue, error, skipped = (*scheduler, *(None, None, "", None)[len(scheduler):])
+    out, err, rc = scheduler_output(result, issue, error=error, skipped=skipped)
+    (tmp_path / "scheduler.json").write_text(out if raw_scheduler is None else raw_scheduler, encoding="utf-8")
+    (tmp_path / "scheduler.err").write_text(err, encoding="utf-8")
+    hpw = bin_dir / "hpw"
+    hpw.write_text('#!/usr/bin/env bash\n'
+                   'if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then\n'
+                   f'    echo "$*" >> "{(tmp_path / "scheduler.log").as_posix()}"\n'
+                   f'    cat "{(tmp_path / "scheduler.err").as_posix()}" >&2\n'
+                   f'    cat "{(tmp_path / "scheduler.json").as_posix()}"\n'
+                   f'    exit {rc}\nfi\n'
+                   f'exec "{(REPO_ROOT / "scripts" / "hpw").as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
+    hpw.chmod(0o755)
+    (tmp_path / "slack.log").write_text("")
     env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "PULLS_FILE": (tmp_path / "pulls.json").as_posix(), "EVIDENCE": evidence,
+           "SLACK_LOG": (tmp_path / "slack.log").as_posix(),
+           "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
-           "HPW_BIN": (REPO_ROOT / "scripts" / "hpw").as_posix(),
+           "HPW_BIN": hpw.as_posix(),
            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5", **windows_env()}
+    args = ["--dry-run"] if dry_run else []
     proc = subprocess.run(
-        [BASH, (REPO_ROOT / "scripts" / "dispatcher-poll.sh").as_posix(), "--repo", "o/r", "--dry-run"],
+        [BASH, (REPO_ROOT / "scripts" / "dispatcher-poll.sh").as_posix(), "--repo", "o/r", *args],
         env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert proc.returncode == 0, proc.stderr
+    if stderr is not None:
+        stderr.append(proc.stderr)
     return json.loads(proc.stdout)
 
 
 @needs_tools
 def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
     out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"),
-                               (3, "In merge"), (4, "In implementation"), (5, "In review"), (6, "Done")])
+                               (3, "In merge"), (4, "In implementation"), (5, "In review"), (6, "Done")],
+                    scheduler=("implement", 1))
     assert out == {
-        "ready_for_implementation": [{"number": 1, "title": "Story 1"}],
-        "ready_for_refinement": [{"number": 2, "title": "Story 2"}],
         "in_merge": [{"number": 3, "title": "Story 3"}],
         "in_implementation": [{"number": 4, "title": "Story 4"}],
         "review_due": [],
@@ -1016,8 +1044,70 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "owner_missing_due": [],
         "evidence_pending": False,
         "next_issue": 1,
+        "next_action": {"kind": "implement", "issue": 1, "type": "story", "epic": 306, "step": 1, "reason": "test"},
+        "scheduler_result": "implement",
         "resumable": True,
     }
+    # Issue #474: the scheduler gets the work in flight ("In implementation", "In review", "In merge").
+    assert (tmp_path / "scheduler.log").read_text().splitlines() == [
+        "dispatcher scheduler next --repo o/r --in-implementation 3,4,5 --dry-run"]
+
+
+# ── Issue #474: the poll asks the scheduler (AC 1, 5, 8, 9, 10) ─────────────
+
+
+@needs_tools
+@pytest.mark.parametrize("scheduler,result,issue", [
+    (("refine", 2), "refine", 2),
+    (("implement", 1), "implement", 1),
+    (("idle",), "idle", None),
+    (("unreadable", None, "facts: down"), "unreadable", None),
+])
+def test_474_poll_json_shape_for_each_scheduler_result(tmp_path, scheduler, result, issue):
+    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement")], scheduler=scheduler)
+    assert set(out) == {"in_merge", "in_implementation", "review_due", "conflict_due", "owner_missing_due",
+                        "evidence_pending", "next_issue", "next_action", "scheduler_result", "resumable"}
+    assert out["scheduler_result"] == result and out["next_issue"] == issue
+    assert (out["next_action"] or {}).get("issue") == issue
+    assert out["resumable"] is False  # nothing in flight
+
+
+@needs_tools
+def test_474_poll_output_that_cannot_be_read_is_unreadable(tmp_path):
+    err: list = []
+    out = poll_json(tmp_path, [(1, "Ready for implementation")], raw_scheduler="oops", scheduler=("unreadable", None, "x"),
+                    stderr=err)
+    assert out["scheduler_result"] == "unreadable" and out["next_issue"] is None and out["next_action"] is None
+    assert "[SCHEDULER] unreadable: hpw dispatcher scheduler next exited 3 without a result" in err[0]
+
+
+@needs_tools
+@pytest.mark.parametrize("scheduler,line", [
+    (("idle", None, "", [{"issue": 306, "reason": "no-merged-spec: no spec on main"}]),
+     "[SCHEDULER] skip #306 no-merged-spec: no spec on main"),
+    (("idle",), "[SCHEDULER] idle"),
+    (("unreadable", None, "facts: down"), "[SCHEDULER] unreadable: facts: down"),
+])
+def test_474_poll_passes_the_scheduler_lines_to_the_run_log(tmp_path, scheduler, line):
+    err: list = []
+    poll_json(tmp_path, [(1, "Ready for refinement")], scheduler=scheduler, stderr=err)
+    assert line in err[0]
+
+
+@needs_tools
+def test_474_a_ready_for_refinement_issue_gets_no_notification_and_no_state(tmp_path):
+    out = poll_json(tmp_path, [(301, "Ready for refinement"), (302, "Ready for refinement")], dry_run=False)
+    assert out["scheduler_result"] == "idle"
+    assert (tmp_path / "slack.log").read_text() == ""
+    assert not (tmp_path / "state").exists() or not any((tmp_path / "state").rglob("*"))
+
+
+def test_474_no_code_path_sends_or_stores_the_retired_notification():
+    for path in [*(REPO_ROOT / "scripts").rglob("*.sh"), *(REPO_ROOT / "scripts").glob("hpw*"),
+                 *(REPO_ROOT / "src").rglob("*.py"), REPO_ROOT / ".github" / "workflows" / "dispatcher.yml"]:
+        text = path.read_text(encoding="utf-8")
+        assert "ready_for_refinement" not in text, path
+        assert "notified-refinement" not in text, path
 
 
 def open_pr(number: int, issue: int, draft: bool = False) -> dict:
@@ -1048,7 +1138,7 @@ def test_ac16_only_claude_tier_in_review_gives_an_empty_review_due(tmp_path):
 def test_ac14_poll_lists_are_empty_arrays_when_nothing_matches(tmp_path):
     out = poll_json(tmp_path, [(5, "In review")])
     assert out["in_merge"] == [] and out["in_implementation"] == [] and out["review_due"] == []
-    assert out["ready_for_implementation"] == [] and out["ready_for_refinement"] == []
+    assert "ready_for_implementation" not in out and "ready_for_refinement" not in out
 
 
 @needs_tools
@@ -1148,7 +1238,8 @@ def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, 
 
 @needs_tools
 def test_ac14_poll_is_not_resumable_with_nothing_to_resume(tmp_path):
-    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")])
+    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")],
+                    scheduler=("implement", 1))
     assert out["resumable"] is False and out["next_issue"] == 1
 
 
@@ -1169,7 +1260,8 @@ def test_ac14_workflow_invoke_step_resumes_without_a_ready_story():
     body = workflow_step("Run dispatcher invoke")
     env_block, run_block = body.split("        run:", 1)
     assert "CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}" in env_block
-    assert "NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}" in env_block
+    # Issue #474: the invoke step asks the scheduler itself; the poll's choice is not passed on.
+    assert "NEXT_ISSUE" not in env_block
     assert run_block.strip().splitlines()[0] == "bash scripts/dispatcher-workflow-step.sh invoke"
 
 

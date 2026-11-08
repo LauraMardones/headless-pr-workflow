@@ -1,9 +1,10 @@
-"""Workflow contract for ready_for_refinement notification state (issue #257).
+"""Workflow contract for the dispatcher state cache (issue #257).
 
-GitHub-hosted runners are ephemeral, so ``scripts/dispatcher-poll.sh``'s
-de-duplication state must be restored from ``actions/cache`` before the poll
-and saved after it on every enabled run, and runs must be serialized so two
-runs never read the same snapshot and race to write it.
+GitHub-hosted runners are ephemeral, so ``.dispatcher-state`` (the
+actionable-events state of issue #295) must be restored from ``actions/cache``
+before the poll and saved after it on every enabled run, and runs must be
+serialized so two runs never read the same snapshot and race to write it. The
+step names come from the ready-for-refinement notification, retired by #474.
 
 The workflow is parsed textually (PyYAML is not a project dependency).
 """
@@ -171,10 +172,12 @@ def test_concurrency_serializes_scheduled_and_manual_runs():
     assert "on:" in text and "schedule:" in text and "workflow_dispatch:" in text
 
 
-def test_poll_script_default_state_dir_matches_cached_path():
-    script = POLL_SCRIPT.read_text(encoding="utf-8")
-    assert 'STATE_DIR="${DISPATCHER_STATE_DIR:-$REPO_ROOT/.dispatcher-state}"' in script
-    assert "${TMPDIR:-/tmp}/dispatcher-poll-notified-refinement" not in script
+def test_poll_script_reads_and_writes_no_saved_state():
+    """Issue #474: the ready-for-refinement notification and its state are retired."""
+    code = "\n".join(line for line in POLL_SCRIPT.read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "dispatcher state" not in code and "STATE_DIR" not in code
+    assert "notified-" + "refinement" not in code
 
 
 def test_state_dir_is_gitignored():
@@ -184,8 +187,8 @@ def test_state_dir_is_gitignored():
 
 def test_poll_state_is_saved_before_the_cancellable_invoke_step():
     """Codex finding on #295: the invoke step can run for hours and be
-    cancelled, which skips the final save and re-sends a ready_for_refinement
-    alert already sent by the poll. The poll's state is saved right after it."""
+    cancelled, which skips the final save. The state is saved right after the
+    poll too (the poll itself writes none since issue #474)."""
     names = [name for name, _ in _steps()]
     assert names.index(POLL) < names.index(EARLY_SAVE) < names.index(INVOKE)
     early = _step(EARLY_SAVE)

@@ -22,7 +22,6 @@
 #   epic_closure_approval     fields: epic_title, summary_url
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
 #   dispatcher_error          fields: error_description, last_action
-#   ready_for_refinement      fields: issue_title, issue_url
 #   usage_limit_reached       fields: sessions_today, limit, settings_url
 #   dispatch_trigger_stopped  fields: age, last_created_at, check_command, docs_url (issue #339;
 #                                     age is "none" when no dispatched run exists)
@@ -276,32 +275,6 @@ build_payload() {
                 }'
             ;;
 
-        ready_for_refinement)
-            local issue_title issue_url
-            issue_title=$(echo "$ctx" | jq -r '.issue_title // "(unknown)"')
-            issue_url=$(echo "$ctx" | jq -r '.issue_url // ""')
-            jq -n \
-                --arg issue_title "$issue_title" \
-                --arg issue_url "$issue_url" \
-                '{
-                    blocks: [
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ":pencil: *Ready for Refinement*" }
-                        },
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ("*Issue:* " + $issue_title) }
-                        },
-                        {
-                            type: "section",
-                            text: { type: "mrkdwn", text: ("*Link:* " + (if $issue_url != "" then "<" + $issue_url + "|View issue>" else "(no URL)" end)) }
-                        }
-                    ]
-                }'
-            ;;
-
-
         usage_limit_reached)
             local sessions_today limit settings_url
             sessions_today=$(echo "$ctx" | jq -r '.sessions_today // "(unknown)"')
@@ -338,7 +311,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker po_blocker evidence_unwritable feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error ready_for_refinement usage_limit_reached dispatch_trigger_stopped"
+KNOWN_EVENTS="decision_blocker po_blocker evidence_unwritable feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error usage_limit_reached dispatch_trigger_stopped"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0

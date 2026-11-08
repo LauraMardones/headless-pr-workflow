@@ -30,14 +30,15 @@
 # history, and a step before the invoke makes plain `git push` authenticate
 # through `gh` with PROJECT_TOKEN. A session no longer needs a git override.
 #
-# 2026-09-27 (issue #257): ready_for_refinement de-duplication state now
-# survives ephemeral runners. .dispatcher-state/ is restored from
-# actions/cache before the poll and saved under a unique per-run key right
-# after it (independent of whether an issue is ready for implementation).
-# Only default-branch runs write it, because caches are ref-scoped; a manual
-# run on another ref polls with --dry-run against the default-branch snapshot.
-# Workflow-level concurrency serializes scheduled and manual runs so two runs
-# never read the same snapshot and race to write it. Interim until #259.
+# 2026-09-27 (issue #257): .dispatcher-state/ survives ephemeral runners. It
+# is restored from actions/cache before the poll and saved under a unique
+# per-run key right after it. Only default-branch runs write it, because
+# caches are ref-scoped; a manual run on another ref polls with --dry-run
+# against the default-branch snapshot. Workflow-level concurrency serializes
+# scheduled and manual runs so two runs never read the same snapshot and race
+# to write it. Interim until #259. Issue #474 retired the ready-for-refinement
+# notification, whose state this was first; the steps keep their names and now
+# carry the actionable-events state of issue #295.
 #
 # 2026-10-14 (issue #295): notifications that need PO action are queued in the
 # same .dispatcher-state/ by dispatcher-invoke.sh and sent, retried and bounded
@@ -67,8 +68,15 @@
 #
 # 2026-10-13 (issue #293): the invoke step also runs when the poll reports a
 # story "In merge" or "In implementation", so the dispatcher can resume a story
-# after the Codex review loop answered. With no story ready for implementation
-# it runs dispatcher-invoke.sh with --resume.
+# after the Codex review loop answered.
+#
+# 2026-11-08 (issue #474, ADR-010): new work comes from the scheduler
+# (`hpw dispatcher scheduler next`), never from a "Ready" board status. The poll
+# asks it to decide whether the invoke step runs (issue_number is the
+# scheduler's choice); the invoke step runs dispatcher-invoke.sh with --repo
+# only, which handles work in flight first and then asks the scheduler again.
+# The ready-for-refinement notification is retired. The invoke step's if: is
+# unchanged in meaning.
 #
 # Prototype divergences:
 # D1: dispatcher-poll.sh does not yet exist on main (story #170 is in review).
@@ -91,7 +99,8 @@ on:
 
 # One dispatcher run at a time per repository: scheduled and manual runs share
 # the same group, and queued runs wait instead of cancelling an in-progress
-# run, so refinement-notification state is never written by two runs at once.
+# run, so dispatcher state is never written by two runs at once and only one
+# model session runs at a time.
 concurrency:
   group: dispatcher-${{ github.repository }}
   cancel-in-progress: false
@@ -122,8 +131,8 @@ jobs:
       # Actions caches are scoped by ref: a cache saved on a non-default ref is
       # invisible to the scheduled run on the default branch. Only default-branch
       # runs (every scheduled run, and manual runs dispatched on that branch)
-      # may send refinement notifications and save state; a manual run on any
-      # other ref reads the default-branch snapshot and polls with --dry-run.
+      # save state; a manual run on any other ref reads the default-branch
+      # snapshot and polls with --dry-run.
       - name: Resolve notification state scope
         if: steps.guard.outputs.enabled == 'true'
         id: scope
@@ -133,9 +142,10 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash scripts/dispatcher-workflow-step.sh scope
 
-      # Restores the newest snapshot: restore-keys prefix matches pick the most
-      # recently created cache. A miss is not an error; dispatcher-poll.sh
-      # starts from empty state.
+      # Restores the newest snapshot of .dispatcher-state (the actionable-events
+      # state, issue #295): restore-keys prefix matches pick the most recently
+      # created cache. A miss is not an error. The name is kept from issue #257;
+      # the refinement notification itself is retired (issue #474).
       - name: Restore refinement notification state
         if: steps.guard.outputs.enabled == 'true'
         uses: actions/cache/restore@v4
@@ -157,9 +167,10 @@ jobs:
         run: bash scripts/dispatcher-workflow-step.sh poll
 
       # Saved right after the poll (issue #295), before the invoke step, which
-      # can run for hours and be cancelled: the poll's own state (a sent
-      # ready_for_refinement alert) must survive that. The final save below
-      # writes a newer snapshot, which the prefix restore prefers.
+      # can run for hours and be cancelled. The poll itself writes no state
+      # since issue #474; the save keeps the restored snapshot current. The
+      # final save below writes a newer snapshot, which the prefix restore
+      # prefers.
       - name: Save poll notification state
         if: ${{ always() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' && steps.scope.outputs.state_writer == 'true' }}
         uses: actions/cache/save@v4
@@ -212,7 +223,6 @@ jobs:
           RESERVE_FIVE_HOUR_PERCENT: ${{ vars.RESERVE_FIVE_HOUR_PERCENT }}
           RESERVE_WEEKLY_PERCENT: ${{ vars.RESERVE_WEEKLY_PERCENT }}
           CODEX_FIX_ROUND_MAX: ${{ vars.CODEX_FIX_ROUND_MAX }}
-          NEXT_ISSUE: ${{ steps.poll.outputs.issue_number }}
           REFINE_ISSUE: ${{ inputs.refine_issue }}
           STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
           REPO: ${{ github.repository }}

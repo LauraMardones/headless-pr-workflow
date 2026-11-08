@@ -8,8 +8,10 @@
 # Runs the real scripts/dispatcher-invoke.sh end to end (no function copies)
 # with a fake `gh` and a fake `curl` on PATH. The fake `gh` serves a stateful
 # project board: board mutations are recorded and reflected in later board
-# fetches, so a live (non-dry-run) story cycle can reach Done and the loop's
-# "next ready story" search runs against the updated board.
+# fetches. The next story after a skip or a finished cycle comes from the
+# scheduler (issue #474): the fake `hpw` answers `hpw dispatcher scheduler
+# next` with the lines of $MOCK_DIR/scheduler ("implement <n>" or "idle"), one
+# per call, then idle.
 #
 # Scenarios covered:
 #   1. Incident reproduction, live: type:epic first, valid Story second ->
@@ -204,6 +206,20 @@ if [[ "\${1:-} \${2:-}" == "dispatcher state" ]]; then  # Block 3 (issue #434): 
 fi
 EOF
 cat >> "$FAKE_BIN/hpw" << 'EOF'
+if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then  # issue #474
+    n=$(( $(cat "$MOCK_DIR/scheduler.count" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$MOCK_DIR/scheduler.count"
+    line=$(sed -n "${n}p" "$MOCK_DIR/scheduler" 2>/dev/null || true)
+    read -r kind num <<< "${line:-idle}"
+    if [[ "$kind" == idle ]]; then
+        echo "[SCHEDULER] idle" >&2
+        echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[]}'
+        exit 1
+    fi
+    echo "[SCHEDULER] $kind #$num step=5 reason=ready" >&2
+    echo "{\"ok\":true,\"block\":\"scheduler\",\"operation\":\"next\",\"result\":\"$kind\",\"action\":{\"kind\":\"$kind\",\"issue\":$num},\"skipped\":[]}"
+    exit 0
+fi
 [[ "${1:-} ${2:-}" == "dispatcher write" ]] || { echo "fake hpw: unsupported: $*" >&2; exit 2; }
 op="$3"; shift 3
 repo="" number="" file="" status="" dry=false
@@ -269,6 +285,12 @@ add_item() {
         > "$d/issue_$n.json"
 }
 
+# schedule <dir> <decision>... — the scheduler's decisions, one per call ("implement <n>", "idle")
+schedule() {
+    local d="$1"; shift
+    printf '%s\n' "$@" > "$d/scheduler"
+}
+
 # link_pr <dir> <pr-number> <issue-number>
 link_pr() {
     jq --argjson p "$2" --argjson n "$3" \
@@ -305,6 +327,7 @@ E=$(new_env)
 add_item "$E" 160 "$READY" "" type:epic
 add_item "$E" 161 "$READY" "" type:story executor:claude-code-sonnet
 link_pr "$E" 900 161
+schedule "$E" "implement 161" idle
 run_dispatcher "$E" --issue 160
 
 assert_eq "exit 0" "$RUN_RC" "0"
@@ -317,7 +340,7 @@ assert_contains "Story #161 was handed to the Codex review loop" "$RUN_OUT" "han
 assert_not_contains "no /implement for the Epic" "$RUN_OUT" "E1: /implement #160"
 assert_contains "Claude Code was started" "$(cat "$E/claude.log")" "model=sonnet"
 assert_not_contains "Epic board item never mutated" "$(cat "$E/gh.log")" "MUTATION item=ITEM_160"
-assert_contains "loop exited cleanly after the Story" "$RUN_OUT" "No more \"Ready for implementation\" stories."
+assert_contains "loop exited cleanly after the Story" "$RUN_OUT" "No new work: the scheduler result is \"idle\"."
 
 # ─── 2. Feature first, Story second (--dry-run) ───────────────────────────────
 
@@ -327,6 +350,7 @@ E=$(new_env)
 add_item "$E" 231 "$READY" "" type:feature
 add_item "$E" 232 "$READY" "" type:task executor:claude-code-sonnet
 link_pr "$E" 901 232
+schedule "$E" "implement 232" idle
 run_dispatcher "$E" --issue 231 --dry-run
 
 assert_eq "exit 0" "$RUN_RC" "0"
@@ -347,14 +371,28 @@ echo "3. Every ready item is non-executable"
 E=$(new_env)
 add_item "$E" 10 "$READY" "" type:epic
 add_item "$E" 11 "$READY" "" type:feature
+schedule "$E" "implement 11" idle
 run_dispatcher "$E" --issue 10
 
 assert_eq "exit 0" "$RUN_RC" "0"
 assert_eq "one warning for #10" "$(count_matches "$RUN_ERR" "Warning: #10 ")" "1"
 assert_eq "one warning for #11" "$(count_matches "$RUN_ERR" "Warning: #11 ")" "1"
-assert_contains "clean exit message" "$RUN_OUT" "No more executable \"Ready for implementation\" stories after non-executable skip."
+assert_contains "clean exit message" "$RUN_OUT" "No new work: the scheduler result is \"idle\"."
 assert_eq "no executor API call" "$(cat "$E/curl.log")" ""
 assert_not_contains "no board mutation" "$(cat "$E/gh.log")" "MUTATION"
+
+# ─── 3b. The scheduler chooses the skipped item again ─────────────────────────
+
+echo ""
+echo "3b. The scheduler chooses the skipped item again"
+E=$(new_env)
+add_item "$E" 12 "$READY" "" type:epic
+schedule "$E" "implement 12" "implement 12"
+run_dispatcher "$E" --issue 12
+
+assert_eq "exit 0" "$RUN_RC" "0"
+assert_eq "one warning for #12" "$(count_matches "$RUN_ERR" "Warning: #12 ")" "1"
+assert_contains "the run does not loop" "$RUN_OUT" "Scheduler: implement #12, which this run already started or skipped; no new work."
 
 # ─── 4. Missing type ──────────────────────────────────────────────────────────
 
@@ -376,6 +414,7 @@ echo "5. Unsupported type label"
 E=$(new_env)
 add_item "$E" 30 "$READY" "" type:spike executor:claude-code-sonnet
 add_item "$E" 31 "$READY" "" type:story type:epic executor:claude-code-sonnet
+schedule "$E" "implement 31" idle
 run_dispatcher "$E" --issue 30
 
 assert_eq "exit 0" "$RUN_RC" "0"
@@ -391,6 +430,7 @@ E=$(new_env)
 add_item "$E" 40 "$READY" "Feature" executor:claude-code-sonnet
 add_item "$E" 41 "$READY" "Bug" executor:claude-code-sonnet
 link_pr "$E" 902 41
+schedule "$E" "implement 41" idle
 run_dispatcher "$E" --issue 40 --dry-run
 
 assert_eq "exit 0" "$RUN_RC" "0"
