@@ -28,10 +28,12 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <An outcome the PO can verify at Epic closure.>
-  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
-- **E2:** <…>
-  - **Verified by:** <…>
+- **E1:** Work found outside a session's scope lands as a slask issue carrying `Found under:` and `Origin:`. A PR is not held for a finding in code the PR did not change.
+  - **Verified by:** a proof PR whose review finds a defect in code it did not change: the PR merges without a PO waiver, and the slask issue links back to that finding.
+- **E2:** Before each Feature breakdown, every slask issue is sorted. One that fits a Feature criterion is moved to that Feature. Allowed maintenance, and a bug that breaks a criterion of a closed Epic's spec, are refined without the PO. Anything else reaches the PO as a decision blocker.
+  - **Verified by:** closure evidence showing one slask issue of each kind and what happened to it, with no PO action except the decision blocker.
+- **E3:** An out-of-scope finding no longer stops its Epic from closing, and nothing found is lost: when an Epic closes, the PO gets a list of the open slask issues found under it and chooses a new spec or closing each one.
+  - **Verified by:** the first Epic to close after this mechanism is in place closes while a slask issue found under it is still open, and its closure evidence lists that issue.
 
 ## Decisions
 
