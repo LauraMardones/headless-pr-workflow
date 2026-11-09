@@ -113,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     s_next.add_argument("--repo", required=True)
     s_next.add_argument("--facts-file")
     s_next.add_argument("--in-implementation", type=_issue_list, default=[])
+    s_next.add_argument("--in-flight", type=_issue_list, default=[])
     s_next.add_argument("--exclude", type=_issue_list, default=[])
     s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
@@ -287,7 +288,8 @@ def _run_scheduler(args: argparse.Namespace, gateway: Gateway) -> int:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             facts = {"result": "unreadable", "error": f"read facts file: {exc}"}
     return _emit(next_action(None if facts is not None else gateway, args.repo,
-                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts))  # fmt: skip
+                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts,
+                             in_flight=args.in_flight))  # fmt: skip
 
 
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:

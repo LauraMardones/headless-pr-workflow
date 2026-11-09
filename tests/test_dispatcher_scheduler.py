@@ -79,8 +79,8 @@ def facts(epics, issues):
             "error": None}  # fmt: skip
 
 
-def decide(epics, issues, active=(), limits=LIMITS):
-    return choose_next(facts(epics, issues), in_implementation=list(active), limits=limits)
+def decide(epics, issues, active=(), limits=LIMITS, flight=()):
+    return choose_next(facts(epics, issues), in_implementation=list(active), limits=limits, in_flight=list(flight))
 
 
 def chosen(decision):
@@ -643,7 +643,7 @@ def test_next_action_in_process_matches_the_command(gw, capsys):
 
 
 def test_choose_next_takes_no_gateway():
-    assert list(inspect.signature(choose_next).parameters) == ["facts", "in_implementation", "limits", "exclude"]
+    assert list(inspect.signature(choose_next).parameters) == ["facts", "in_implementation", "limits", "exclude", "in_flight"]
 
 
 def test_no_token_in_output(gw, capsys, monkeypatch):
@@ -653,3 +653,46 @@ def test_no_token_in_output(gw, capsys, monkeypatch):
     rc = cli.main(["scheduler", "next", "--repo", "o/r"], gateway_factory=lambda repo: gw)
     out, err = capsys.readouterr()
     assert rc == 3 and TOKEN not in out + err
+
+
+# ── #475: --in-flight ─────────────────────────────────────────────────────────
+
+
+def test_in_flight_story_is_never_an_implementation_candidate():
+    d = decide([epic()], [feature(20), issue(30)], flight=[30])
+    assert d.action is None and d.counts["ready"] == 0
+
+
+def test_in_flight_story_is_not_counted_for_the_wip_limit_or_file_overlap():
+    items = [feature(20), issue(30, files=["a.py"]), issue(31, files=["a.py"]), issue(32, files=["b.py"])]
+    d = decide([epic()], items, flight=[31, 32], limits=Limits(1, 0, 9))
+    assert chosen(d) == ("implement", 30, 5, "ready")  # no wip-limit, no file-overlap with #31
+    d = decide([epic()], items, active=[32], flight=[31], limits=Limits(1, 0, 9))
+    assert skips(d)[30] == "wip-limit"  # --in-implementation counts as before
+
+
+def test_in_flight_story_is_refined_only_when_stale():
+    d = decide([epic()], [feature(20), issue(30, refined=False)], flight=[30])
+    assert d.action is None
+    d = decide([epic()], [feature(20), issue(30, stale=True, refined=False)], flight=[30])
+    assert chosen(d) == ("refine", 30, 2, "stale-record")
+
+
+def test_in_flight_story_is_not_left_to_refine():
+    items = [feature(20), feature(21, refined=False), issue(31, refined=False)]
+    assert skips(decide([epic()], items))[21] == "stories-left-to-refine #31"
+    assert chosen(decide([epic()], items, flight=[31])) == ("refine", 21, 4, "not-refined")
+
+
+def test_story_in_both_lists_counts_as_in_implementation():
+    d = decide([epic()], [feature(20), issue(30), issue(31)], active=[30], flight=[30], limits=Limits(1, 0, 9))
+    assert d.counts["in_implementation"] == 1 and skips(d)[31] == "wip-limit"
+
+
+def test_command_in_flight(gw, capsys):
+    gw.add_issue(30, ["type:story"], story_body() + "\n## Files affected\n\n- `a.py`\n")
+    gw.comment(30, summary())
+    rc, out, _ = run(capsys, gw, "--in-flight", "30")
+    assert rc == 1 and out["action"] is None and out["counts"]["in_implementation"] == 0
+    rc, out, _ = run(capsys, gw, "--in-flight", "")
+    assert rc == 0 and out["action"]["issue"] == 30
