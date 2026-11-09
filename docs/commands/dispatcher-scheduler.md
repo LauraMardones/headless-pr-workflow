@@ -3,13 +3,14 @@
 Chooses the dispatcher's next new-work action from the facts of [`hpw dispatcher facts read`](dispatcher-facts.md): which Epic, Feature or story to refine next, or which ready story to start implementing. It never writes to GitHub and never reads the board (ADR-010: decisions come from facts; ADR-014: one building block, one JSON line). It returns one action per run; the dispatcher calls it again on the next run (ADR-012: one session at a time). Code: `src/headless_pr_workflow/dispatcher/scheduler.py`. In a dispatcher run, `hpw` runs from an export of the commit the run started on, whatever branch a session leaves checked out (#497, [DISPATCHER-CONFIG](../DISPATCHER-CONFIG.md)).
 
 ```
-hpw dispatcher scheduler next --repo <owner/repo> [--facts-file <path>] [--in-implementation <n>[,<n>...]] [--dry-run]
+hpw dispatcher scheduler next --repo <owner/repo> [--facts-file <path>] [--in-implementation <n>[,<n>...]] [--in-flight <n>[,<n>...]] [--dry-run]
 ```
 
-Python: `choose_next(facts, *, in_implementation, limits) -> Decision` is the rule itself and gets no gateway; `next_action(gateway, repo, *, in_implementation, env=None, facts=None) -> Result` loads the limits, reads the facts with `read_facts` unless they are given, and returns what the command prints.
+Python: `choose_next(facts, *, in_implementation, limits, exclude=(), in_flight=()) -> Decision` is the rule itself and gets no gateway; `next_action(gateway, repo, *, in_implementation, exclude=(), env=None, facts=None, in_flight=()) -> Result` loads the limits, reads the facts with `read_facts` unless they are given, and returns what the command prints.
 
 - `--facts-file <path>`: use the JSON line printed by `hpw dispatcher facts read` instead of reading GitHub. A file that cannot be read or parsed, or whose `result` is not `read`, gives exit `3`.
-- `--in-implementation`: the issue numbers of the stories in implementation, comma-separated; empty or absent means none. The list is trusted as given: the caller owns it (#474 for new work, #475 for work in flight).
+- `--in-implementation`: the issue numbers of the stories in implementation, comma-separated; empty or absent means none. They count for the WIP limit and the file overlap. The dispatcher passes the stories with an open linked PR that is a draft, or whose current head has a fix round due (#475). The list is trusted as given: the caller owns it.
+- `--in-flight`: the issue numbers of every other story with work in flight, comma-separated; empty or absent means none. The dispatcher passes every other open Story, Task or Bug with an open linked PR, and every one with an open `dependency`, `external`, `conflict` or `resource` Blocked Declaration that no later PO `/unblock` line resolves (#475). A listed story is never an implementation candidate, is refined only when stale (step 2), and is **not** counted for the WIP limit or the file overlap. A number in both lists counts as `--in-implementation`.
 - `--dry-run` is accepted and changes nothing: the command has no write to skip.
 
 Environment: `GH_TOKEN` (through `gh`, only without `--facts-file`), `DECISION_BLOCKER_PO_LOGIN` (passed to the facts reader), and the three limits `WIP_LIMIT_IMPLEMENTATION`, `READY_BUFFER_MIN`, `READY_BUFFER_MAX`, checked by the rules of `scripts/lib/limits.sh`: a whole number (`08` is 8), `WIP_LIMIT_IMPLEMENTATION` 1 or more, `READY_BUFFER_MIN` not above `READY_BUFFER_MAX`. A missing, empty or invalid value gives exit `3` before any GitHub read, and `error` names the variable and its value.
@@ -41,21 +42,21 @@ The rule chooses steps 2 to 6 of #460 → "Order of actions in a run". Step 1, w
 
 | Step | Candidates, in this order | `reason` |
 |---|---|---|
-| 2 — re-refinement and resume | a stale Epic (record `stale` or `invalid`); stale Features; stale stories in `--in-implementation`; any Epic, Feature or story resumed after `/unblock` | `scope-change`, `stale-record`, `unblocked` |
+| 2 — re-refinement and resume | a stale Epic (record `stale` or `invalid`); stale Features; stale stories in `--in-implementation` or `--in-flight`; any Epic, Feature or story resumed after `/unblock` | `scope-change`, `stale-record`, `unblocked` |
 | 3 — Epic refinement after a new spec | an Epic with spec `merged` and record `missing` | `new-spec` |
 | 4 — Feature refinement | a Feature that is not refined and not stale, only when the ready buffer is open and no story is left to refine (see "Just-in-time Feature breakdown") | `not-refined` |
-| 5 — implementation start | a story whose facts say `ready`, not in `--in-implementation` | `ready` |
+| 5 — implementation start | a story whose facts say `ready`, in neither `--in-implementation` nor `--in-flight` | `ready` |
 | 6 — story refinement for the ready buffer | stale stories, then stories never refined | `stale-record`, `not-refined` |
 
 Rules that hold before a step:
 
-- **Just-in-time Feature breakdown.** A Feature that is not refined and not stale is a step-4 candidate only when the step-6 buffer condition holds (`ready < READY_BUFFER_MIN` and `ready + waiting < READY_BUFFER_MAX`) and no story is left to refine. A story is left to refine when it is an open Story, Task or Bug whose `Feature group:` Feature is refined and not stale, whose Epic has a merged spec and a `current` record, that is not refined (never refined, or stale), is not in `--in-implementation`, and whose refine gate is neither `open-decision-blocker` nor `last-refinement-failed` (a story resumed after `/unblock` counts as left). A story whose facts are unreadable counts as left unless its Epic is known to have no merged spec or no `current` record. The count runs across all Epics. A Feature held back is skipped with `buffer-full` (checked first) or `stories-left-to-refine #<n>` (`<n>` the lowest such story); the next run breaks it down once none is left. Steps 2 and 3 are not held back.
+- **Just-in-time Feature breakdown.** A Feature that is not refined and not stale is a step-4 candidate only when the step-6 buffer condition holds (`ready < READY_BUFFER_MIN` and `ready + waiting < READY_BUFFER_MAX`) and no story is left to refine. A story is left to refine when it is an open Story, Task or Bug whose `Feature group:` Feature is refined and not stale, whose Epic has a merged spec and a `current` record, that is not refined (never refined, or stale), is in neither `--in-implementation` nor `--in-flight`, and whose refine gate is neither `open-decision-blocker` nor `last-refinement-failed` (a story resumed after `/unblock` counts as left). A story whose facts are unreadable counts as left unless its Epic is known to have no merged spec or no `current` record. The count runs across all Epics. A Feature held back is skipped with `buffer-full` (checked first) or `stories-left-to-refine #<n>` (`<n>` the lowest such story); the next run breaks it down once none is left. Steps 2 and 3 are not held back.
 - **No merged spec.** Under an Epic with spec `missing` or `ambiguous` nothing is refined, not the Epic, its Features or its stories. `skipped` lists the Epic once as `no-merged-spec: <facts reason>`, which names `specs/<epic>-*/spec.md`. A ready story there can still be implemented.
 - **Epic first.** While an Epic's record is not `current`, its Features and stories are not refined (`epic-not-refined`).
 - **Feature first.** A story is refined only when its `Feature group:` Feature is refined and not stale (`feature-not-refined #<feature>`); a story with no `Feature group:` is not refined (`no-feature`).
 - **Decision blocker.** An issue with an open decision blocker is not refined (`open-decision-blocker`). An issue whose blocker the PO answered with `/unblock`, and whose latest refine Session Summary is older than `unblocked_at`, is resumed at step 2, also when the buffer is full.
 - **Each refinement is started once.** An issue whose latest refine Session Summary is later than its Epic's `spec.committed_at` and later than any `unblocked_at`, and does not report `pass`, is not refined again (`last-refinement-failed`) until a new spec commit or an `/unblock`.
-- **Stories in implementation.** A story in `--in-implementation` is refined only when it is stale (step 2); any other state of it is work in flight for step 1. It is never an implementation candidate.
+- **Stories in implementation or in flight.** A story in `--in-implementation` or `--in-flight` is refined only when it is stale (step 2); any other state of it is work in flight for step 1. It is never an implementation candidate.
 
 ## Order within a step
 
@@ -67,11 +68,11 @@ Rules that hold before a step:
 
 ## Ready buffer
 
-`counts.ready` is the stories (Story, Task, Bug, across all Epics) that are ready and not in implementation; `counts.waiting` is those refined but not ready and not in implementation. Step 6 runs only when `ready < READY_BUFFER_MIN` and `ready + waiting < READY_BUFFER_MAX`; otherwise each step-6 candidate is skipped with `buffer-full`.
+`counts.ready` is the stories (Story, Task, Bug, across all Epics) that are ready and in neither `--in-implementation` nor `--in-flight`; `counts.waiting` is those refined but not ready and in neither list. Step 6 runs only when `ready < READY_BUFFER_MIN` and `ready + waiting < READY_BUFFER_MAX`; otherwise each step-6 candidate is skipped with `buffer-full`.
 
 ## WIP limit and file overlap
 
-A story starts only while the stories in `--in-implementation` are fewer than `WIP_LIMIT_IMPLEMENTATION` (otherwise each candidate is skipped with `wip-limit`), and only when none of its `files_affected` is in the `files_affected` of a story in implementation (otherwise `file-overlap #<n> <path>`, and the next candidate is tried). A missing `## Files affected` section on either side means no overlap check for that pair, as in the dispatcher's WIP pre-flight today, and adds the note `files-affected-missing #<n>`.
+A story starts only while the stories in `--in-implementation` are fewer than `WIP_LIMIT_IMPLEMENTATION` (the stories in `--in-flight` do not count) (otherwise each candidate is skipped with `wip-limit`), and only when none of its `files_affected` is in the `files_affected` of a story in implementation (otherwise `file-overlap #<n> <path>`, and the next candidate is tried). A missing `## Files affected` section on either side means no overlap check for that pair, as in the dispatcher's WIP pre-flight today, and adds the note `files-affected-missing #<n>`.
 
 ## Skip reasons
 

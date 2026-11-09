@@ -12,15 +12,16 @@
 # The cycle depends on how the story is reviewed (issue #293, ADR-006):
 #   - Codex review loop (the Claude tiers): /implement, then the story is
 #     handed to the Codex review loop and its run ends. A later run resumes it
-#     from GitHub facts — at /merge → /cleanup when it is "In merge", or at
-#     /implement on the same PR when a fix round is due.
+#     from pull request facts — at /merge → /cleanup when its PR passes the
+#     merge gates, or at /implement on the same PR when a fix round is due.
 #   - executor:codex: not started for /implement (no subscription mechanism,
 #     ADR-012; issue #315). A PR that Codex implemented outside the dispatcher
 #     is reviewed by a resume entry: /review under claude-code-opus, then the
-#     script-only /merge and /cleanup when the story is "In merge".
-# Every run handles resumable work first: stories "In merge", then due fix
-# rounds, then pending hand-offs, then Codex-implemented PRs "In review", then
-# new work: one scheduler decision, asked right then with fresh facts. See
+#     script-only /merge and /cleanup when its PR passes the merge gates.
+# Every run handles resumable work first, found from pull request facts and
+# the dispatcher's markers, never from a board status (issue #475): the merge
+# step, then due fix rounds, then pending hand-offs, then the review step,
+# then new work: one scheduler decision, asked right then with fresh facts. See
 # docs/DISPATCHER-CONFIG.md → "Codex review loop hand-off and resume" and
 # "Scheduler: new work from GitHub facts".
 # Implements: issue #171 (pre-flight gate), issue #172 (execution loop, Feature #162),
@@ -2368,14 +2369,19 @@ inflight_get_page() {
     gh api "$1"
 }
 
-# inflight_prepare — the accounts the markers are read under. 1 when the
-# dispatcher's or the bookkeeping job's account cannot be resolved.
+# inflight_prepare — the accounts the markers are read under, as the poll reads
+# them. Without the dispatcher's account no fix round or pending hand-off is
+# found in this run (a warning says so); every story with a linked PR is still
+# in a step or a scheduler list, so none is started again as new work.
 inflight_prepare() {
-    resolve_dispatcher_login || return 1
-    INFLIGHT_BOT="$DISPATCHER_LOGIN"
-    INFLIGHT_BK=$(bookkeeping_login)
-    [[ -n "$INFLIGHT_BK" ]] || return 1
+    INFLIGHT_BOT="" INFLIGHT_BK=""
     INFLIGHT_PO="$DECISION_BLOCKER_PO_LOGIN"
+    if resolve_dispatcher_login; then
+        INFLIGHT_BOT="$DISPATCHER_LOGIN"
+        INFLIGHT_BK=$(bookkeeping_login)
+    else
+        echo "Warning: could not resolve the dispatcher's account; no fix round or pending hand-off is found in this run." >&2
+    fi
 }
 
 # Issues /implement was started for in this job. Carried across the
@@ -2983,9 +2989,13 @@ $(fix_round_attempt_marker "$pr_number" "$pr_head")" \
 
 # ─── Resume pass (issue #293) ─────────────────────────────────────────────────
 # Runs once at the start of every run, before new work, and decides everything
-# from GitHub facts read now (board status, linked PR, comment markers).
-# Order: stories "In merge", then due fix rounds, then hand-offs that are
-# still pending, then "In review", then conflict rounds (issue #409).
+# from GitHub facts read now: the linked PR, its merge gates and comment
+# markers, through scripts/lib/in-flight.sh and `hpw dispatcher in-flight plan`
+# (issue #475). No board status chooses a story; moving a card starts nothing.
+# Order: the merge step (and the finish step), then due fix rounds, then
+# hand-offs that are still pending, then the review step, then conflict rounds
+# (issue #409). A story whose spec record is stale gets no fix round, conflict
+# round, /review or /merge (resume_session_allowed, F2.7).
 #
 # load_story_context sets the per-story globals the session helpers read
 # (ISSUE_NUMBER, TARGET_*, EXECUTOR_LABEL). It returns 1 with
@@ -3253,8 +3263,8 @@ resume_fix_round() {
 # merges only through the unchanged gates. Rules:
 #   - one rule decides whether a round is owed, from GitHub facts read now
 #     (conflict_round_rule in scripts/lib/conflict-round.sh, which
-#     scripts/dispatcher-poll.sh uses too): the story is "In implementation",
-#     "In review" or "In merge"; its open, non-draft PR conflicts; no fix round
+#     scripts/dispatcher-poll.sh uses too): the story is a review-loop story,
+#     whatever its board status; its open, non-draft PR conflicts; no fix round
 #     is due; the story has no open blocker; and no conflict-round attempt
 #     marker holds for the PR's current head;
 #   - a stopped round (a usage-limit pause, a cancelled run, a failed write of
@@ -3275,10 +3285,11 @@ resume_fix_round() {
 # Other stories (for example executor:codex) get no session: one blocker per
 # head names the conflict (block_merge_conflict).
 #
-# The same rule finds a review-loop story "In implementation" or "In review"
-# whose PR is clean but whose head has no merge-owner evidence: a session
-# stopped after its push, before the hand-off finished. It gets one blocker
-# per head and no session (block_ownerless_head). A head "In merge" without
+# The same rule finds a review-loop story in the review step (or with a fix
+# round already tried) whose PR is clean but whose head has no merge-owner
+# evidence: a session stopped after its push, before the hand-off finished. It
+# gets one blocker per head and no session (block_ownerless_head). A head in
+# the merge step without
 # that evidence is checked by resume_in_merge_story itself (issue #406): the
 # same blocker, with the text for a head pushed outside a dispatcher session.
 
@@ -3409,8 +3420,8 @@ $marker"; then
     echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${pr_head:0:7} has no merge-owner evidence; blocker posted"
 }
 
-# A review-loop story "In review": the Codex review loop answers it, so no
-# /review session starts. The rule may still owe a conflict round or find an
+# A review-loop story in the review step: the Codex review loop answers it,
+# so no /review session starts. The rule may still owe a conflict round or find an
 # ownerless head.
 check_review_loop_story_in_review() {
     local issue_num="$1" item_id="$2" pr_number
@@ -3419,7 +3430,7 @@ check_review_loop_story_in_review() {
     check_review_loop_pr "$issue_num" "$item_id" "In review" "$pr_number" || true
 }
 
-# block_merge_conflict <issue> <pr> <head> — a story "In merge" with no
+# block_merge_conflict <issue> <pr> <head> — a story in the merge step with no
 # conflict round: one blocker per head that names the conflict (AC 8).
 block_merge_conflict() {
     local issue_num="$1" pr_number="$2" pr_head="$3"
@@ -3537,9 +3548,10 @@ run_conflict_rounds() {
     CONFLICT_ROUND_QUEUE=()
 }
 
-# A story still "Ready for implementation" whose hand-off is pending: the
-# status writes of its run failed. It is completed here, before new work, so
-# it is not started a second time.
+# A review-loop story whose hand-off is pending (the dispatcher's own
+# hand-off-pending marker without hand-off-done, issue #475): the status
+# writes of its run failed. It is completed here, before new work, so it is
+# not started a second time.
 resume_pending_hand_off() {
     local issue_num="$1" item_id="$2"
     local pr_json pr_number
@@ -3551,13 +3563,14 @@ resume_pending_hand_off() {
     complete_pending_hand_off "$issue_num" "$item_id" "$pr_number" "$(jq -r '.draft // false' <<< "$pr_json")"
 }
 
-# A story "In review" whose executor has a REVIEW_EXECUTOR_ROUTING row (issue
+# A story in the review step (an open, non-draft linked PR outside the merge
+# step, issue #475) whose executor has a REVIEW_EXECUTOR_ROUTING row (issue
 # #315, F308.9): its PR was implemented outside the dispatcher, so no Codex
 # review loop answers it. /review runs on the PR under the executor the table
 # names, through invoke_executor_command(), so the usage limit and the
-# allowance check apply. When /review leaves the story "In merge", the merge
-# and cleanup scripts run as for any "In merge" story. When it leaves another
-# status, the entry ends: fixes are made outside the dispatcher.
+# allowance check apply. When the PR's merge gates then put it in the merge
+# step, the merge and cleanup scripts run as for any story in the merge step.
+# Otherwise the entry ends: fixes are made outside the dispatcher.
 # One /review attempt per PR head: a failed /review records the head in its
 # blocker, and a later run skips that head until the PR has a new head or the
 # PO posts /unblock (same rule as "one merge attempt per head").

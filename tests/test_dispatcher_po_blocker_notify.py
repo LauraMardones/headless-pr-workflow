@@ -69,7 +69,8 @@ def test_ac1_fix_round_maximum_registers_one_po_blocker(d):
 
 @needs_tools
 @pytest.mark.parametrize("pr", ["none", "closed-unmerged", "draft"])
-def test_ac2_in_merge_story_without_a_pr_registers_one_po_blocker(d, pr):
+def test_ac2_in_merge_story_without_a_pr_registers_no_po_blocker(d, pr):
+    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; a card "In merge" decides nothing."""
     d.add_story(STORY, "In merge")
     if pr == "closed-unmerged":
         d.add_pr(PR, STORY, state="closed")
@@ -79,10 +80,7 @@ def test_ac2_in_merge_story_without_a_pr_registers_one_po_blocker(d, pr):
     assert d.resume().returncode == 0
     assert d.resume().returncode == 0
 
-    events = po_events(d)
-    assert len(events) == 1
-    context = json.loads(events[0]["context"])
-    assert context["blocker_type"] == "external" and "In merge" in context["state"]
+    assert po_events(d) == [] and d.posted(STORY) == [] and d.phases == []
 
 
 @needs_tools
@@ -210,7 +208,9 @@ def test_ac7_evidence_give_up_registers_one_po_blocker_and_no_dispatcher_error(t
 
 @needs_tools
 def test_ac8_dry_run_logs_the_would_register_line_and_writes_nothing(d):
-    d.add_story(STORY, "In merge")
+    # A clean review-loop head with no merge-owner evidence gets the missing-merge-owner blocker (#449).
+    d.add_story(STORY, "In review")
+    d.add_pr(PR, STORY, owned=False)
 
     proc = d.resume("--dry-run")
 

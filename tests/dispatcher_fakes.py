@@ -81,6 +81,13 @@ FAKE_SCHEDULER = r"""if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next"
     echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[],"notes":[]}'
     exit 1
 fi
+# The facts the resume pass reads before a fix round, conflict round, /review or /merge (#475),
+# when a test set them (Dispatcher.set_facts); otherwise the real block runs on the fake gh.
+if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher facts read" && -f "$MOCK_DIR/facts_read.json" ]]; then
+    echo "facts" >> "$MOCK_DIR/facts.log"
+    cat "$MOCK_DIR/facts_read.json"
+    exit "$(cat "$MOCK_DIR/facts_read.rc")"
+fi
 """
 
 
@@ -351,6 +358,45 @@ case "$mode" in
 esac
 """
 
+# The merge gates for the poll tests (issue #475), on MERGE_GATE_SCRIPT: $GATES_FILE maps a PR number
+# to ``pass``, ``fail`` (the default), ``conflicting`` or ``unreadable``; the head comes from $PULLS_FILE.
+POLL_FAKE_GATE = r"""#!/usr/bin/env bash
+pr=""
+while [[ $# -gt 0 ]]; do case "$1" in --pr) pr="$2"; shift 2 ;; *) shift ;; esac; done
+head=$(jq -r --argjson n "$pr" '[.[] | select(.number == $n)][0].head.sha[0:7] // "0000000"' "$PULLS_FILE")
+mode=$(jq -r --arg n "$pr" '.[$n] // "fail"' "$GATES_FILE" 2>/dev/null || echo fail)
+case "$mode" in
+    pass)        echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=$head" ;;
+    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=no, head=$head"; exit 1 ;;
+    unreadable)  echo "merge-gate-summary: could not read the pull request" >&2; exit 2 ;;
+    *)           echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=none, threads=none, mergeable=yes, head=$head"; exit 1 ;;
+esac
+"""
+
+
+def poll_fakes(tmp_path: Path, bin_dir: Path, issues: list[tuple], gates: dict[int, str] | None = None,
+               comments: dict[int, list] | None = None) -> dict[str, str]:
+    """The open issues and merge gates scripts/dispatcher-poll.sh reads (issue #475).
+
+    An issue is ``(number, labels)``: a ``type:story`` label is added unless one of ``type:`` is
+    given. ``comments`` only sets each issue's comment count, as GitHub's issue list does; the
+    caller's fake ``curl`` serves the comments. Returns the environment for the poll: ``ISSUES_FILE``
+    (the caller's ``curl`` serves it for ``issues?state=open``), ``GATES_FILE`` and ``MERGE_GATE_SCRIPT``.
+    """
+    rows = []
+    for number, labels in issues:
+        names = list(labels) if any(name.startswith("type:") for name in labels) else ["type:story", *labels]
+        rows.append({"number": number, "title": f"Story {number}", "labels": [{"name": n} for n in names],
+                     "comments": len((comments or {}).get(number, []))})
+    (tmp_path / "issues.json").write_text(json.dumps(rows), encoding="utf-8")
+    (tmp_path / "gates.json").write_text(json.dumps({str(k): v for k, v in (gates or {}).items()}), encoding="utf-8")
+    gate = bin_dir / "gate.sh"
+    gate.write_text(POLL_FAKE_GATE, encoding="utf-8", newline="\n")
+    gate.chmod(0o755)
+    return {"ISSUES_FILE": (tmp_path / "issues.json").as_posix(), "GATES_FILE": (tmp_path / "gates.json").as_posix(),
+            "MERGE_GATE_SCRIPT": gate.as_posix()}
+
+
 FAKE_CURL = r"""#!/usr/bin/env bash
 set -euo pipefail
 url=""
@@ -400,6 +446,19 @@ if [[ -f "$MOCK_DIR/fail_$command" ]]; then
     echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
     echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"duration_ms":1000,"usage":{"input_tokens":1,"output_tokens":1}}'
     exit 1
+fi
+if [[ "$command" == implement ]]; then  # the session opens its PR or marks its draft ready (Dispatcher.add_pr, #475)
+    for f in "$MOCK_DIR"/opened_on_implement_*.json; do
+        [[ -f "$f" ]] || continue
+        jq --slurpfile pr "$f" '. + $pr' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/pulls.tmp"
+        mv "$MOCK_DIR/pulls.tmp" "$MOCK_DIR/pulls.json"; rm -f "$f"
+    done
+    for f in "$MOCK_DIR"/ready_on_implement_*; do
+        [[ -f "$f" ]] || continue
+        pr="${f##*_}"; rm -f "$f"
+        jq --argjson n "$pr" 'map(if .number == $n then .draft = false else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/pulls.tmp"
+        mv "$MOCK_DIR/pulls.tmp" "$MOCK_DIR/pulls.json"
+    done
 fi
 [[ -f "$MOCK_DIR/on_$command.sh" ]] && bash "$MOCK_DIR/on_$command.sh"
 if [[ -f "$MOCK_DIR/claude_stream.jsonl" ]]; then
@@ -496,6 +555,12 @@ class Dispatcher:
             (self.mock / f"scheduler_{n}.err").write_text(err, encoding="utf-8", newline="\n")
             (self.mock / f"scheduler_{n}.rc").write_text(str(rc))
 
+    def set_facts(self, facts: dict | str, rc: int = 0) -> None:
+        """What ``hpw dispatcher facts read`` prints (a dict, or raw text) and its exit code (#475)."""
+        text = facts if isinstance(facts, str) else json.dumps(facts)
+        (self.mock / "facts_read.json").write_text(text, encoding="utf-8", newline="\n")
+        (self.mock / "facts_read.rc").write_text(str(rc))
+
     def schedule_from_facts(self, facts: dict) -> None:
         """Run the real scheduler rule (#473) on these facts (``--facts-file``) for every call."""
         self._write("scheduler_facts.json", facts)
@@ -529,8 +594,30 @@ class Dispatcher:
         self._write(f"issue_{number}.json", {"number": number, "title": f"Story {number}", "body": body,
                                              "labels": [{"name": name} for name in labels]})
 
-    def add_pr(self, number: int, issue: int, head: str = "a" * 40, draft: bool = False,
-               state: str = "open", merged: bool = False, owned: bool | None = None, **extra) -> None:
+    def add_pr(self, number: int, issue: int, head: str = "a" * 40, draft: bool | None = None,
+               state: str = "open", merged: bool = False, owned: bool | None = None,
+               opened_by_implement: bool = False, **extra) -> None:
+        """An open PR that closes ``issue``.
+
+        ``draft=None`` (the default) follows the story's board status, as a real /implement leaves the
+        PR: for a story "Ready for implementation" the PR is a draft until its next /implement session
+        marks it ready; otherwise it is ready. The resume pass finds work from these PR facts (#475),
+        so a ready PR on an unstarted story would put the story in review. ``opened_by_implement``
+        keeps the PR away until the next /implement session opens it (ready), so the story has no
+        work in flight before it starts.
+        """
+        board_item = next((i for i in self._read("board.json")["items"] if i["number"] == issue), None)
+        if opened_by_implement:
+            self._write(f"opened_on_implement_{number}.json",
+                        {"number": number, "body": f"Closes #{issue}", "state": "open", "draft": False,
+                         "merged_at": None, "updated_at": "2026-09-27T00:00:00Z",
+                         "head": {"ref": "branch", "sha": head}, "mergeable": True, "mergeable_state": "clean",
+                         **extra})
+            return
+        if draft is None:
+            draft = bool(board_item) and board_item["status"] == "Ready for implementation" and state == "open"
+            ready_file = self.mock / f"ready_on_implement_{number}"
+            ready_file.write_text("") if draft else ready_file.unlink(missing_ok=True)
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
         # A PR is clean unless the test says otherwise (``mergeable`` /
         # ``mergeable_state``); None is GitHub's "not computed yet" (issue #409).
@@ -542,13 +629,18 @@ class Dispatcher:
         # A story "In merge" is merged by the dispatcher only for a head it owns
         # (issue #406): the PR carries the owner marker unless the test says
         # ``owned=False``.
-        board_item = next((i for i in self._read("board.json")["items"] if i["number"] == issue), None)
         if owned is None:
             owned = bool(board_item) and board_item["status"] == "In merge"
         if owned and not merged:
             self.add_comment(number, f"<!-- hpw:dispatcher action=merge-owner pr={number} head={head} -->")
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
+
+    def close_issue(self, number: int) -> None:
+        """Close the issue, as GitHub does when its PR merges: the work in flight reads open issues only (#475)."""
+        issue = self._read(f"issue_{number}.json")
+        issue["state"] = "closed"
+        self._write(f"issue_{number}.json", issue)
 
     def add_comment(self, target: int, body: str, login: str = BOT, at: str | None = None) -> None:
         tick = int((self.mock / "clock").read_text()) + 1 if (self.mock / "clock").exists() else 1

@@ -109,7 +109,8 @@ def test_ac11_cases_that_do_nothing(d, case):
     assert d.sessions == [] and d.board_writes == [] and d.posted(STORY) == []
     output = proc.stdout + proc.stderr
     skips = [line for line in output.splitlines() if "[RESUME SKIP]" in line]
-    assert len(skips) == (0 if case == "claude-tier" else 1), output
+    # No PR or a draft PR puts the story in no review step at all (#475): nothing to skip.
+    assert len(skips) == (1 if case in ("no-label", "two-labels") else 0), output
     if skips:
         assert skips[0].startswith(f"[RESUME SKIP] #{STORY}: ")
 
@@ -129,7 +130,7 @@ def test_ac12_review_leaving_in_implementation_runs_no_merge(d):
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.phases == []
-    assert f'[RESUME] #{STORY}: /review left the story in "In implementation"; no merge' in proc.stdout
+    assert f"[RESUME] #{STORY}: /review left PR #{PR} outside the merge step; no merge" in proc.stdout
 
 
 def test_ac13_one_review_attempt_per_head(d):
@@ -156,7 +157,7 @@ def test_ac13_completed_review_that_leaves_in_review_is_not_repeated_on_the_same
     codex_in_review(d)  # the fake /review session changes no status
     first = d.resume()
     assert first.returncode == 0, first.stdout + first.stderr
-    assert f'/review left the story in "In review"; no merge' in first.stdout
+    assert f"/review left PR #{PR} outside the merge step; no merge" in first.stdout
     recorded = d.posted(STORY)
     assert len(recorded) == 1 and f"action=review-attempt pr={PR} head={'a' * 40}" in recorded[0]
     second = d.resume()
