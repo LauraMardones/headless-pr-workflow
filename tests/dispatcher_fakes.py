@@ -305,8 +305,15 @@ case "$path" in
         [[ -f "$MOCK_DIR/issue_$n.json" ]] || { echo "fake gh: no issue $n" >&2; exit 1; }
         cat "$MOCK_DIR/issue_$n.json" ;;
     repos/*/issues)  # GET /repos/{r}/issues?labels=<one label>, with --jq applied as the real gh does
-        want=$(sed -E 's/.*[?&]labels=([^&]*).*/\1/; s/%3A/:/g' <<< "$endpoint")
-        all=$(for f in "$MOCK_DIR"/issue_*.json; do [[ -f "$f" ]] && cat "$f"; done | jq -s --arg l "$want" '[.[] | select(any(.labels[]?; .name == $l))]')
+        # Without labels=, the open issues (issue #475), each with its comment count as GitHub returns it.
+        want=""
+        [[ "$endpoint" == *labels=* ]] && want=$(sed -E 's/.*[?&]labels=([^&]*).*/\1/; s/%3A/:/g' <<< "$endpoint")
+        all=$(for f in "$MOCK_DIR"/issue_*.json; do
+                  [[ -f "$f" ]] || continue
+                  num=$(jq -r '.number' "$f"); count=0
+                  [[ -f "$MOCK_DIR/comments_$num.json" ]] && count=$(jq 'length' "$MOCK_DIR/comments_$num.json")
+                  jq -c --argjson c "$count" '. + {comments: $c}' "$f"
+              done | jq -s --arg l "$want" '[.[] | select(($l == "" and (.state // "open") == "open") or any(.labels[]?; .name == $l and $l != ""))]')
         if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$all"; else echo "$all"; fi ;;
     repos/*/pulls)
         if [[ "$endpoint" == *state=closed* ]]; then
@@ -316,6 +323,31 @@ case "$path" in
         fi ;;
     *)
         echo '[]' ;;
+esac
+"""
+
+# Stands in for scripts/merge-gate-summary in the resume pass and the poll (issue #475). A gate
+# file ``gate_<pr>`` sets the result (``pass``, ``fail``, ``unreadable``, ``conflicting``: all gates
+# but mergeability pass); without one the gates pass only when the linked story's board status is
+# "In merge", so a test written for the old board trigger keeps its meaning.
+FAKE_GATE = r"""#!/usr/bin/env bash
+pr=""
+while [[ $# -gt 0 ]]; do case "$1" in --pr) pr="$2"; shift 2 ;; *) shift ;; esac; done
+echo "gate $pr" >> "$MOCK_DIR/gates.log"
+head=$(jq -r --argjson n "$pr" '[.[] | select(.number == $n)][0].head.sha[0:7] // "0000000"' "$MOCK_DIR/pulls.json")
+mode=""
+[[ -f "$MOCK_DIR/gate_$pr" ]] && mode=$(cat "$MOCK_DIR/gate_$pr")
+if [[ -z "$mode" ]]; then
+    issue=$(jq -r --argjson n "$pr" '[.[] | select(.number == $n)][0].body // "" | capture("[Cc]loses #(?<i>[0-9]+)").i // empty' "$MOCK_DIR/pulls.json")
+    status=$(jq -r --arg i "ITEM_$issue" --slurpfile b "$MOCK_DIR/board.json" '.[$i] // ([$b[0].items[] | select(.id == $i)][0].status // "")' "$MOCK_DIR/state.json")
+    mode=fail
+    [[ "$status" == "In merge" ]] && mode=pass
+fi
+case "$mode" in
+    pass)        echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=$head" ;;
+    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=no, head=$head"; exit 1 ;;
+    unreadable)  echo "merge-gate-summary: could not read the pull request" >&2; exit 2 ;;
+    *)           echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=none, threads=none, mergeable=yes, head=$head"; exit 1 ;;
 esac
 """
 
@@ -435,6 +467,7 @@ class Dispatcher:
                            ("hpw", "#!/usr/bin/env bash\n" + FAKE_SCHEDULER
                                    + fake_hpw_route(self.bin / "gh", BASH or "bash")
                                    + 'echo "fake hpw: unsupported: $*" >&2\nexit 1\n'),
+                           ("gate.sh", FAKE_GATE),
                            ("allowance.sh", FAKE_ALLOWANCE),
                            ("merge.sh", FAKE_PHASE.replace("PHASE_NAME", "merge")),
                            ("cleanup.sh", FAKE_PHASE.replace("PHASE_NAME", "cleanup"))):
@@ -561,6 +594,11 @@ class Dispatcher:
         path = self.mock / "fail_pr_read"
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
+    def set_gates(self, pr: int, result: str) -> None:
+        """The merge gates of PR ``pr`` for the resume pass (issue #475): ``pass``, ``fail``, ``unreadable``
+        or ``conflicting`` (every gate but mergeability passes). The default follows the story's board status."""
+        (self.mock / f"gate_{pr}").write_text(result, encoding="utf-8")
+
     def set_pytest(self, head: str, result: str) -> None:
         """The required pytest check of ``head``: success (the default), failure, pending or absent (#449)."""
         (self.mock / f"checks_{head}").write_text(result, encoding="utf-8")
@@ -608,6 +646,7 @@ class Dispatcher:
             "ALLOWANCE_SCRIPT": (self.bin / "allowance.sh").as_posix(),
             "ALLOWANCE_SEQ": seq,
             "MERGE_SCRIPT": (self.bin / "merge.sh").as_posix(),
+            "MERGE_GATE_SCRIPT": (self.bin / "gate.sh").as_posix(),
             "CLEANUP_SCRIPT": (self.bin / "cleanup.sh").as_posix(),
             # The verified-write block (#432) runs for real, with gh as `bash <fake gh>`.
             "HPW_BIN": (self.bin / "hpw").as_posix(),

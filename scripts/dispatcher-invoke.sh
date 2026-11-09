@@ -407,6 +407,9 @@ source "$SCRIPT_DIR/lib/evidence-pending.sh"
 source "$SCRIPT_DIR/lib/review-routing.sh"
 # shellcheck source=scripts/lib/conflict-round.sh
 source "$SCRIPT_DIR/lib/conflict-round.sh"
+# The work in flight from pull request facts, shared with dispatcher-poll.sh (issue #475).
+# shellcheck source=scripts/lib/in-flight.sh
+source "$SCRIPT_DIR/lib/in-flight.sh"
 
 # ─── Executor session tuning (#254, #314, ADR-003) — overridable for tests ────
 # AGENT_MAX_WALLCLOCK_SECONDS is the enforced safety bound: a Claude Code
@@ -2331,19 +2334,13 @@ board_status_of() {
         | [.fieldValues.nodes[] | select((.field.name? // "") == "Status") | .name][0] // empty' | head -1
 }
 
-board_items_in_status() {
-    local status_name="$1"
-    echo "$BOARD_DATA" | jq -c --arg s "$status_name" '[
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select(
-            (.content | type) == "object" and
-            (.content.number != null) and
-            ([ .fieldValues.nodes[]
-               | select((.field.name? // "") == "Status" and (.name? // "") == $s)
-             ] | length > 0)
-          )
-        | { id: .id, number: .content.number, title: .content.title }
-    ]'
+# board_item_id_of <issue> — the board item of the issue, for the status writes
+# that stay until #461. No status is read: the item is looked up by number.
+board_item_id_of() {
+    local issue_num="$1"
+    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
+        [.data.repository.projectsV2.nodes[0].items.nodes[]
+         | select((.content | type) == "object" and .content.number == $n) | .id][0] // empty'
 }
 
 # ─── New work from the scheduler (issue #474, ADR-010) ───────────────────────
@@ -2351,12 +2348,35 @@ board_items_in_status() {
 # work starts; the dispatcher only acts on its result and reads no "Ready for
 # implementation", "Ready" or "Ready for refinement" status to choose it. It is
 # asked right before new work starts, after the work in flight, so the decision
-# uses fresh facts. --in-implementation lists the work in flight as the
-# dispatcher finds it today: the board's "In implementation", "In review" and
-# "In merge" stories. The scheduler never starts a listed story, so a story in
-# review or merge is not started again; until #475 moves this list to PR facts
-# (with its own --in-flight list), those stories also count for the WIP limit
-# and file overlap of the scheduler (PO decision on PR #485).
+# uses fresh facts. --in-implementation lists the stories with a draft linked
+# PR or a fix round due (they count for the WIP limit and the file overlap);
+# --in-flight lists every other story with work in flight, found from pull
+# request facts by scripts/lib/in-flight.sh (issue #475): the scheduler never
+# starts a listed story, so a story in review or merge is not started again,
+# and these stories do not count for the WIP limit. No board status is read.
+
+# The readers scripts/lib/in-flight.sh calls, and its inputs (issue #475).
+MERGE_GATE_SCRIPT="${MERGE_GATE_SCRIPT:-$SCRIPT_DIR/merge-gate-summary}"
+
+inflight_get_all() {
+    local path="$1" sep='?'
+    [[ "$path" == *"?"* ]] && sep='&'
+    gh api --paginate "${path}${sep}per_page=100" | jq -s 'add // []'
+}
+
+inflight_get_page() {
+    gh api "$1"
+}
+
+# inflight_prepare — the accounts the markers are read under. 1 when the
+# dispatcher's or the bookkeeping job's account cannot be resolved.
+inflight_prepare() {
+    resolve_dispatcher_login || return 1
+    INFLIGHT_BOT="$DISPATCHER_LOGIN"
+    INFLIGHT_BK=$(bookkeeping_login)
+    [[ -n "$INFLIGHT_BK" ]] || return 1
+    INFLIGHT_PO="$DECISION_BLOCKER_PO_LOGIN"
+}
 
 # Issues /implement was started for in this job. Carried across the
 # `exec bash "$0"` tail calls in the environment, like DISPATCH_JOB_START_TS, so
@@ -2365,14 +2385,14 @@ DISPATCH_RUN_STARTED_ISSUES="${DISPATCH_RUN_STARTED_ISSUES:-}"
 export DISPATCH_RUN_STARTED_ISSUES
 
 ask_scheduler() {
-    local in_impl
     local -a extra=()
-    BOARD_DATA=$(fetch_board_data) || {
-        echo "Error: Failed to fetch project board data." >&2; exit 1
-    }
-    in_impl=$(jq -rn --argjson a "$(board_items_in_status "In implementation")" \
-        --argjson b "$(board_items_in_status "In review")" --argjson c "$(board_items_in_status "In merge")" \
-        '$a + $b + $c | map(.number) | unique | map(tostring) | join(",")')
+    if ! inflight_prepare || ! inflight_compute; then
+        # Fail closed: without the work in flight the scheduler could start a story that is in review.
+        echo "[SCHEDULER] unreadable: the work in flight could not be read" >&2
+        SCHEDULER_RESULT="unreadable"; SCHEDULER_ISSUE=""; SCHEDULER_ACTION="null"
+        return 0
+    fi
+    inflight_scheduler_lists
     $DRY_RUN && extra+=(--dry-run)
     # Stories this run skipped or started are unavailable to the decision, but
     # are not work in flight, so they do not count for the WIP limit.
@@ -2380,7 +2400,7 @@ ask_scheduler() {
     unavailable=$(printf '%s\n' $NON_EXECUTABLE_ISSUES $DISPATCH_RUN_STARTED_ISSUES $HAND_OFF_RESUMED_ISSUES \
         | grep -E '^[1-9][0-9]*$' | sort -un | paste -sd, -) || unavailable=""
     [[ -n "$unavailable" ]] && extra+=(--exclude "$unavailable")
-    scheduler_next "$in_impl" ${extra[@]+"${extra[@]}"}
+    scheduler_next "$IN_IMPLEMENTATION_LIST" "$IN_FLIGHT_LIST" ${extra[@]+"${extra[@]}"}
 }
 
 # next_new_work — ask the scheduler and act on its result. It returns only for
@@ -3008,8 +3028,61 @@ load_story_context() {
     fi
 }
 
-# A story "In merge", whatever its executor. The board status is not trusted
-# on its own: the merge gates inside /merge decide whether the PR merges.
+# ─── Stale spec record (issue #475, F2.7) ────────────────────────────────────
+# Before a fix round, conflict round, /review or /merge starts, the facts of
+# `hpw dispatcher facts read` (#283) are read once per run. A story whose spec
+# record is older than its Epic's current spec commit gets no such session
+# until it is re-refined; the scheduler chooses that (#473, step 2). When the
+# facts cannot be read, no such session starts in this run. Finishing a merged
+# PR starts no session and is not held back.
+RESUME_FACTS_STATE=""   # "", read or unreadable
+RESUME_FACTS_JSON=""
+RESUME_FACTS_ERROR=""
+
+read_resume_facts() {
+    [[ -z "$RESUME_FACTS_STATE" ]] || return 0
+    local out rc=0
+    out=$("$HPW_BIN" dispatcher facts read --repo "$REPO" 2>/dev/null) || rc=$?
+    if [[ $rc -eq 0 ]] && jq -e 'type == "object" and .result == "read"' <<< "$out" >/dev/null 2>&1; then
+        RESUME_FACTS_STATE=read
+        RESUME_FACTS_JSON="$out"
+    else
+        RESUME_FACTS_STATE=unreadable
+        RESUME_FACTS_ERROR=$(jq -r '.error // empty' <<< "$out" 2>/dev/null || true)
+        [[ -n "$RESUME_FACTS_ERROR" ]] || RESUME_FACTS_ERROR="hpw dispatcher facts read exited $rc"
+        echo "${LOG_PREFIX}[RESUME SKIP] facts unreadable: $RESUME_FACTS_ERROR; no in-flight session in this run" >&2
+    fi
+}
+
+# resume_session_allowed <issue> — 0 when a fix round, conflict round, /review
+# or /merge may start for the story; 1 (with the log line) when its spec
+# record is stale or its facts cannot be read.
+resume_session_allowed() {
+    local issue_num="$1" entry reason record_commit epic_commit
+    read_resume_facts
+    [[ "$RESUME_FACTS_STATE" == "read" ]] || return 1
+    entry=$(jq -c --argjson n "$issue_num" '[.issues[]? | select(.number == $n)][0] // empty' <<< "$RESUME_FACTS_JSON")
+    # No entry: no parent Epic or no merged spec; such a story is never stale (#283).
+    [[ -n "$entry" ]] || return 0
+    reason=$(jq -r '[.reasons[]? | select(startswith("unreadable:"))][0] // empty' <<< "$entry")
+    if [[ -n "$reason" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: facts unreadable (${reason#unreadable: }); trying again on the next run" >&2
+        return 1
+    fi
+    if [[ "$(jq -r '.stale // false' <<< "$entry")" == "true" ]]; then
+        record_commit=$(jq -r '.record.commit // "none"' <<< "$entry")
+        epic_commit=$(jq -r --argjson e "$(jq '.epic // 0' <<< "$entry")" \
+            '[.epics[]? | select(.number == $e)][0].spec.commit // "unknown"' <<< "$RESUME_FACTS_JSON")
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: stale spec record (${record_commit:0:7} is older than the Epic's ${epic_commit:0:7}); no fix round, conflict round, /review or /merge until it is re-refined"
+        return 1
+    fi
+    return 0
+}
+
+# A story in the merge step (issue #475): an open, non-draft linked PR whose
+# merge gates pass on its current head, ignoring mergeability (in-flight.sh), or
+# a story whose linked PR is already merged (finish). The merge gates inside
+# /merge still decide whether the PR merges.
 resume_in_merge_story() {
     local issue_num="$1" item_id="$2"
     local pr_json pr_number pr_draft pr_head merged_pr
@@ -3023,6 +3096,7 @@ resume_in_merge_story() {
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
 
     if [[ -n "$pr_number" && "$pr_draft" != "true" ]]; then
+        resume_session_allowed "$issue_num" || return 0
         if [[ -n "$pr_head" ]] && marker_holds "$issue_num" "$(merge_attempt_marker "$pr_number" "$pr_head")" 0; then
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /merge was already tried on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
             return 0
@@ -3080,14 +3154,12 @@ resume_in_merge_story() {
         fi
     fi
 
-    echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: \"In merge\" with no open non-draft PR and no merged PR that closes it"
-    post_blocker_once "$issue_num" "$TARGET_TITLE" "external" \
-        "$(dispatcher_marker "action=in-merge-without-pr")" \
-        "#$issue_num has a linked open PR that is ready for review, or its board status is corrected" \
-        "none started by the dispatcher; the story is \"In merge\" with no open non-draft PR and no merged PR that closes it"
+    # No open non-draft PR and no merged PR: nothing is in the merge step. The
+    # retired in-merge-without-pr blocker reported a board status that no PR
+    # fact supports (issue #475).
 }
 
-# A story "In implementation" for which the bookkeeping job recorded findings
+# A review-loop story with a fix round due (issue #475): the bookkeeping job recorded findings
 # on the PR's current head. The story already holds its place within the WIP
 # limit, so the WIP and file-overlap checks are not run against it again; the
 # allowance check inside invoke_executor_command() still applies.
@@ -3145,6 +3217,7 @@ resume_fix_round() {
         return 0
     fi
 
+    resume_session_allowed "$issue_num" || return 0
     echo ""
     echo "${LOG_PREFIX}[RESUME] #$issue_num: fix round $round of $CODEX_FIX_ROUND_MAX, /implement on PR #$pr_number"
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
@@ -3398,6 +3471,7 @@ run_conflict_round() {
     pr_number=$(jq -r '.number // empty' <<< "$pr_json")
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
     [[ -n "$pr_number" && -n "$pr_head" ]] || return 0
+    resume_session_allowed "$issue_num" || return 0
 
     echo ""
     echo "${LOG_PREFIX}[RESUME] #$issue_num: PR #$pr_number conflicts with main; conflict round, /implement on PR #$pr_number"
@@ -3493,7 +3567,7 @@ review_attempt_marker() {
 
 resume_review_story() {
     local issue_num="$1" item_id="$2"
-    local review_label pr_json pr_number pr_draft pr_head marker status
+    local review_label pr_json pr_number pr_draft pr_head marker
     if ! load_story_context "$issue_num" "$item_id"; then
         echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: $STORY_SKIP_REASON" >&2
         return 0
@@ -3537,6 +3611,7 @@ resume_review_story() {
         fi
     fi
 
+    resume_session_allowed "$issue_num" || return 0
     echo ""
     echo "${LOG_PREFIX}[RESUME] #$issue_num: /review on PR #$pr_number under $review_label"
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
@@ -3564,12 +3639,14 @@ $marker" || echo "Warning: could not record the /review attempt for PR #$pr_numb
     fi
 
     refresh_board_after_resumed_story
-    status=$(board_status_of "$issue_num")
-    if [[ "$status" == "In merge" ]]; then
+    # The merge runs only when the PR's gate facts put it in the merge step
+    # (issue #475); the board status decides nothing.
+    pr_head=$(jq -r '.head.sha // empty' <<< "$(find_linked_pr_json "$issue_num" 2>/dev/null || true)" 2>/dev/null || true)
+    if [[ -n "$pr_head" ]] && inflight_gates_pass "$pr_number" "$pr_head"; then
         resume_in_merge_story "$issue_num" "$item_id"
         return 0
     fi
-    echo "${LOG_PREFIX}[RESUME] #$issue_num: /review left the story in \"${status:-unknown}\"; no merge"
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: /review left PR #$pr_number outside the merge step; no merge"
 }
 
 # The closure check of each finished story reads $BOARD_DATA. Re-read it after
@@ -3585,33 +3662,42 @@ refresh_board_after_resumed_story() {
 # One delivery attempt after each item, so an alert queued by one story is not
 # held back by the next one (issue #349).
 run_resume_pass() {
-    local items count i
+    local list count i
     retry_pending_cleanup_summaries
-    items=$(board_items_in_status "In merge")
-    count=$(jq 'length' <<< "$items")
+    # Every step finds its stories from pull request facts, whatever their board
+    # status (issue #475); a failed read starts no in-flight session.
+    if ! inflight_prepare || ! inflight_compute; then
+        echo "${LOG_PREFIX}[RESUME SKIP] the work in flight could not be read; no in-flight session in this run" >&2
+        return 0
+    fi
+    local plan="$INFLIGHT_JSON"
+
+    # The merge step, then the finish step.
+    list=$(jq -c '.merge + .finish' <<< "$plan")
+    count=$(jq 'length' <<< "$list")
     for ((i=0; i < count; i++)); do
-        resume_in_merge_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        resume_row_story resume_in_merge_story "$(jq -r ".[$i].number" <<< "$list")"
         drain_actionable_events
     done
 
-    items=$(board_items_in_status "In implementation")
-    count=$(jq 'length' <<< "$items")
+    list=$(jq -c '.fix_round' <<< "$plan")
+    count=$(jq 'length' <<< "$list")
     for ((i=0; i < count; i++)); do
-        resume_fix_round "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        resume_row_story resume_fix_round "$(jq -r ".[$i].number" <<< "$list")"
         drain_actionable_events
     done
 
-    items=$(board_items_in_status "Ready for implementation")
-    count=$(jq 'length' <<< "$items")
+    list=$(jq -c '.hand_off' <<< "$plan")
+    count=$(jq 'length' <<< "$list")
     for ((i=0; i < count; i++)); do
-        resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        resume_row_story resume_pending_hand_off "$(jq -r ".[$i].number" <<< "$list")"
         drain_actionable_events
     done
 
-    items=$(board_items_in_status "In review")
-    count=$(jq 'length' <<< "$items")
+    list=$(jq -c '.review' <<< "$plan")
+    count=$(jq 'length' <<< "$list")
     for ((i=0; i < count; i++)); do
-        resume_review_story "$(jq -r ".[$i].number" <<< "$items")" "$(jq -r ".[$i].id" <<< "$items")"
+        resume_row_story resume_review_story "$(jq -r ".[$i].number" <<< "$list")"
         drain_actionable_events
     done
 
@@ -3620,10 +3706,16 @@ run_resume_pass() {
     run_conflict_rounds
 }
 
+# resume_row_story <function> <issue> — runs a resume step for a story found
+# from the facts, with its board item for the status writes that stay until #461.
+resume_row_story() {
+    "$1" "$2" "$(board_item_id_of "$2")"
+}
+
 REQUESTED_ISSUE="$ISSUE_NUMBER"
 if ! $RESUME_PASS_DONE; then
     LAST_ACTION="resume pass"
-    echo "Checking for resumable work (\"In merge\", fix rounds, Codex-implemented PRs \"In review\")..."
+    echo "Checking for resumable work (merge step, fix rounds, hand-offs, reviews)..."
     run_resume_pass
     RESUME_PASS_DONE=true
     ISSUE_NUMBER="$REQUESTED_ISSUE"
