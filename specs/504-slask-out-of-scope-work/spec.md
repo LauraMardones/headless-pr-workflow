@@ -67,9 +67,23 @@ Out:
 **Chosen:** The mechanism handles findings made after it is in place. Follow-up issues that already exist without a Feature or an Epic are not sorted or listed by this Epic; the PO places them by hand, as today. On 2026-11-08 the PO placed #507 under #160, #508 under #306, kept #367 and #369 under #418, and left #399 and #400 for a later Epic of their own.
 **Rejected:** A one-time sort of every open follow-up without a Feature or an Epic when the mechanism is delivered — it adds a criterion for a handful of issues the PO can place in one sitting.
 
+### Automation resolves the thread of a finding in code the PR did not change — 2026-11-09
+
+**Chosen:** When a review finding is classified as Out of scope because it is in code the PR did not add or change, and its slask issue is created or linked in the thread, automation resolves that thread. This is a second resolution path in `docs/MERGE-POLICY.md`, next to the superseded Codex thread. Every other thread, and every other merge gate, is unchanged.
+**Rejected:** The PO resolves the thread by hand — merge would still wait for the PO, which undoes the decision that such a finding no longer holds the PR. Open no thread for such a finding — Codex opens its own threads, so a Codex finding would still block merge.
+
 ## Checked Against
 
-- <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
+- ADR-008 item 5 (scope changes only by spec PR) — no conflict. A slask finding that needs a new criterion reaches the PO as a decision blocker; the new criterion enters a spec only through a spec PR, never through the answer on the blocker.
+- ADR-009 (refinement makes no product decision) — no conflict. Sorting moves a finding only to an existing criterion, and refines without the PO only maintenance the PO listed in the standing slask Epic's spec or a bug against a criterion the PO already approved.
+- ADR-010 (status from facts; the scheduler skips `no-parent` and `no-feature`) — no conflict. A slask issue carries `Parent epic:` and `Feature group:`, so it is scheduled like any other issue, and it has no `PO status:` line.
+- ADR-011 (decision documents approved by the PO's merge) — no conflict. This spec and the standing slask Epic's spec are both spec PRs the PO merges.
+- ADR-006 (Codex findings are inline threads, so the unresolved-thread gate blocks on them) — no conflict. The gate is unchanged; only the resolution of one kind of thread is added (decision of 2026-11-09).
+- `docs/MERGE-POLICY.md` → Out of scope findings and Path 1 (only the PO waives; automation resolves only a superseded Codex thread) — conflict. Resolved by the decisions of 2026-11-08 and 2026-11-09: a finding in code the PR did not change needs no waiver, and automation resolves its thread. The delivering stories update `docs/MERGE-POLICY.md`, `.claude/commands/review.md` and `.claude/commands/implement.md`.
+- `.claude/commands/implement.md` (a follow-up issue gets `PO status: Backlog` and no parent) — conflict. Replaced by the decision of 2026-11-08 on the slask issue's lines and labels.
+- `.claude/commands/verify-closure.md` (an open child blocks closure) — no conflict. A slask issue is a child of the standing slask Epic, not of the Epic it was found under, so it does not block that Epic; the closure check only lists it.
+- Spec #306 (2026-11-07: catch-all work is a separate Epic) — no conflict; this is that Epic.
+- Specs #306 and #418 on #399 and #400 — inconsistent with each other: #418 places them in #306, while #306 leaves them for a later Epic. Outside this Epic; on 2026-11-08 the PO left them for a later Epic of their own.
 
 ## Delegated to the Tech Lead
 
