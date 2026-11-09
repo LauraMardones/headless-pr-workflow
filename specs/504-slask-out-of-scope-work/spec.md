@@ -87,11 +87,15 @@ Out:
 
 ## Delegated to the Tech Lead
 
-- <Choices refinement may make on its own, e.g. slicing, technical approach, ordering.>
+- Slicing into Features and stories, and their order.
+- Which job resolves a thread (`/review`, the Codex bookkeeping job, or both), and how it proves the finding's slask issue exists.
+- How the sort step marks each slask issue's outcome, and where it runs in the scheduler.
+- How `/verify-closure` reads `Found under:` and shows the list.
 
 ## Dependencies
 
-- <Other Epics or external work this depends on, or "None".>
+- The standing slask Epic, with its spec merged, before E1–E3 can be proven. Its spec is written in its own `/spec` session.
+- #489 (Feature breakdown only when the ready buffer needs refilling): delivered.
 
 ## Open Questions
 
