@@ -72,7 +72,9 @@ Out:
 
 ## Dependencies
 
-<…>
+- Inga hårda beroenden. ADR-014:s byggblock #432, #433 och #434 är levererade.
+- Samordning med de öppna Epicen #160 och #306 eftersom de kan ändra samma dispatcherfiler.
+- Inget hårt beroende till Epic #518.
 
 ## Open Questions
 
