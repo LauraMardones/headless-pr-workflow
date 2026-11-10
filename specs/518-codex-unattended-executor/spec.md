@@ -77,7 +77,10 @@ Out:
 
 ## Delegated to the Tech Lead
 
-<…>
+- Välj köformat, pollingintervall, arbetsmarkörer, worktree-hantering och teknisk överlämning mellan GitHub Actions och Codex-appen.
+- Välj modulgränser, testfall, ordning mellan Features och stories samt hur de beslutade reserverna läses och verkställs utan kodändring.
+- Bestäm hur befintliga `/refine`-, `/implement`- och fixrundekontrakt återanvänds och hur deras slutkontroller får autentiserad GitHub-åtkomst.
+- Om den dokumenterade Plus-vägen inte kan uppfylla målet: stoppa och begär ett nytt PO-beslut. Tech Lead får inte byta till API-debitering, Business/Enterprise, självgranskning, en annan reserv eller försvagade PO- och mergegrindar.
 
 ## Dependencies
 
