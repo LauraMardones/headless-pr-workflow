@@ -1,7 +1,7 @@
 # Epic #519: Simplify dispatcher orchestration
 
 **Epic issue:** #519
-**Milestone:** <milestone>
+**Milestone:** M6 Autonomous Execution
 
 ## Goal
 
@@ -25,8 +25,12 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <…>
-  - **Verified by:** <…>
+- **E1:** För samma GitHub-fakta väljer dispatchern samma nästa steg, blockerare och mergegrind före och efter förenklingen, även vid fel och avbrott.
+  - **Verified by:** En scenario- och regressionstestmatris jämför beslut och synliga GitHub-effekter för förfining, implementering, granskning, fixrundor, merge, cleanup, ransongränser och felvägar mot nuvarande beteende.
+- **E2:** Varje regel som avgör ett nästa steg har en enda testad källa, så att pollning och återupptagning inte kan ge olika svar på samma fakta.
+  - **Verified by:** Kodinventeringen namnger varje regel och dess enda implementation; tester med samma faktaunderlag via varje ingång ger samma beslut och fallerar om en dubblerad beslutsväg införs.
+- **E3:** `scripts/dispatcher-invoke.sh` minskar med minst 30 procent från 4 137 rader utan att komplexiteten bara flyttas till en annan stor shellfil.
+  - **Verified by:** Radantalet är högst 2 895; det sammanlagda radantalet i `scripts/dispatcher-*.sh` minskar, flyttade regler ligger i testade moduler och relevanta fokus- och CI-tester är gröna.
 
 ## Decisions
 
