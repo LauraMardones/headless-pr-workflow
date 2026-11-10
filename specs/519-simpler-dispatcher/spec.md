@@ -34,7 +34,24 @@ Out:
 
 ## Decisions
 
-<…>
+### Beteendeneutral förenkling — 2026-11-10
+
+**Chosen:** Epicet samlar dubbla beslutsvägar och gör dem testbara utan att ändra vilket arbete HPW utför, när det utförs eller vilka grindar som måste passera. Befintliga fel- och stoppvägar ingår i jämförelsen.
+
+**Rejected:** Att samtidigt ändra schemaläggning, granskningskrav eller mergepolicy — det skulle göra det svårt att visa att förenklingen bevarar säkerheten.
+
+### Bygg vidare på ADR-014 — 2026-11-10
+
+**Chosen:** Nya eller omskrivna beslutsregler ligger i testbar Python-kod enligt ADR-014; Bash behåller körordning, sessionsstart och utgångskoder. Förenklingen görs stegvis ovanpå de delade byggblock som redan är beslutade.
+
+**Rejected:** En total omskrivning av dispatchern i ett steg — den skulle ge ett stort ändringsspann och göra beteendeparitet svår att kontrollera.
+
+### Mätbar minskning och eget Epic — 2026-11-10
+
+**Chosen:** `scripts/dispatcher-invoke.sh` ska bli minst 30 procent kortare än baslinjen 4 137 rader, och komplexiteten får inte bara flyttas till en annan stor shellfil. Epic #519 har inget hårt beroende till Codex-Epic #518 och inför inte Codex-funktioner.
+
+**Rejected:** Ett rent radmål utan krav på testade beslutsregler eller total minskning av shellkod — det skulle gå att uppfylla genom att bara flytta kod. Att slå ihop #518 och #519 — det skulle blanda ny funktion med beteendeneutral förenkling.
+
 
 ## Checked Against
 
