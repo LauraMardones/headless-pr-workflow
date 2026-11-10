@@ -91,4 +91,4 @@ Out:
 
 ## Open Questions
 
-<…>
+None.
