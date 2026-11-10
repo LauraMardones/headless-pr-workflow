@@ -78,4 +78,4 @@ Out:
 
 ## Open Questions
 
-<…>
+None.
