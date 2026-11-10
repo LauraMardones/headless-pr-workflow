@@ -38,7 +38,30 @@ Out:
 
 ## Decisions
 
-<…>
+### Plus-abonnemanget och körplatsen — 2026-11-10
+
+**Chosen:** Codex körs obemannat genom schemalagda uppgifter i den inloggade Codex-appen på PO:s dator. Datorn och appen får behöva vara igång. Inga OpenAI API-nycklar, köpta API-token eller Business-/Enterprise-abonnemang används för modellkörningen. Om denna väg inte kan uppfylla säkerhets- och beviskraven stoppar arbetet för ett nytt PO-beslut.
+
+**Rejected:** Att köra Codex på HPW:s GitHub Actions-runner med en kopierad interaktiv inloggning — det är inte en dokumenterad Plus-autentisering för CI. En separat debiterad API-nyckel eller ett nytt Business-/Enterprise-abonnemang — de bryter mot målet att använda befintliga abonnemang utan separat debitering.
+
+### Vänta och återuppta — 2026-11-10
+
+**Chosen:** När datorn, appen eller Codex-ransonen hindrar arbete väntar Codex-tilldelade stories och återupptas med beständigt GitHub-tillstånd. Ingen automatisk överflyttning till Claude sker.
+
+**Rejected:** Automatisk överflyttning till Claude — den skulle förbruka granskarreserven och ändra det tidigare beslutet i Epic #160 om ingen leverantörsfailover.
+
+### Oberoende granskning och reserv — 2026-11-10
+
+**Chosen:** Claude granskar Codex-PR:er på aktuell head-SHA enligt befintlig review- och mergepolicy. Codex lämnar samma test- och PR-bevis som Claude. Codex-arbetaren startar inte under en PO-reserv på 10 procent av femtimmarsgränsen eller 20 procent av veckogränsen; värdena kan ändras utan kodändring. Granskningskapacitet hos Claude skyddas också innan nytt Codex-arbete tas in.
+
+**Rejected:** Codex granskar sitt eget arbete eller fortsätter starta arbete när ransongränserna gör full leverans omöjlig — det skulle försvaga oberoendet eller skapa en växande granskningskö.
+
+### Separata Epic och ADR — 2026-11-10
+
+**Chosen:** Codex-exekveraren kan levereras före den bredare förenklingen i Epic #519. En egen ADR-ändring av ADR-012 beslutar hur den lokala Codex-vägen kompletterar Claude-sessionerna i GitHub Actions innan implementation.
+
+**Rejected:** Ett gemensamt Epic eller ett hårt beroende till #519 — det skulle hålla tillbaka Codex-piloten tills en bredare beteendeneutral ombyggnad är klar.
+
 
 ## Checked Against
 
