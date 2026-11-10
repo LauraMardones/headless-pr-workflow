@@ -65,7 +65,10 @@ Out:
 
 ## Delegated to the Tech Lead
 
-<…>
+- Inventera dubbla beslutsvägar och välj ordning, modulgränser och små refaktoreringssteg som bevarar beteendet.
+- Välj regressionsmatris, testfixturer och mätmetod för radantal och samlat shellomfång.
+- Samordna filändringar med Epic #160 och #306 samt de redan levererade byggblocken i ADR-014.
+- För inte in nya workflowregler, Codex-funktioner, ändrad autentisering, ändrad granskningspolicy eller försvagade mergegrindar utan ett nytt PO-beslut.
 
 ## Dependencies
 
