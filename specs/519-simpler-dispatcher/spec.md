@@ -55,7 +55,13 @@ Out:
 
 ## Checked Against
 
-<…>
+- ADR-014 och Epic #418, Feature #368 — de verifierade GitHub-skrivningarna, ägarbundna markörerna och det validerade sparade tillståndet är redan levererade. Detta Epic använder dem och följer ADR:ns uppdelning: Python för nya eller omskrivna beslutsregler, Bash för körordning och sessionsstart.
+- ADR-002 och ADR-012 — GitHub Actions som Claude-runner och dess autentisering ändras inte av detta Epic.
+- ADR-007 och `docs/MERGE-POLICY.md` — oberoende granskning på aktuell head, gröna tester, olösta trådar och färsk mergekontroll förblir grindar.
+- ADR-010 — boardstatus är en härledd vy; förenklingen behåller GitHub-fakta som källa för beslut.
+- Epic #160 och #306 — deras öppna dispatcher- och förfiningsarbete kan beröra samma filer. Samordna ordningen och återbasera vid behov, men gör dem inte till hårda beroenden och ändra inte deras beslut.
+- Epic #518 — Codex som ny exekverare ägs där. Detta Epic förenklar dagens beteende oberoende av om #518 är levererat.
+- `docs/DISPATCHER-CONFIG.md` och `docs/ADAPTERS.md` — uppdateras för den nya kodfördelningen, utan att ändra de dokumenterade workflowkontrakten.
 
 ## Delegated to the Tech Lead
 
