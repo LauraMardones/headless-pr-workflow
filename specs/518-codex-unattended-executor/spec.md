@@ -1,7 +1,7 @@
 # Epic #518: Codex as an unattended executor
 
 **Epic issue:** #518
-**Milestone:** <milestone>
+**Milestone:** M6 Autonomous Execution
 
 ## Goal
 
@@ -27,8 +27,14 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <…>
-  - **Verified by:** <…>
+- **E1:** Minst två riktiga, berättigade stories förfinas och implementeras av Codex utan att PO startar modellsessionerna.
+  - **Verified by:** Ärendenas och PR:ernas tidslinjer visar Codex-uppgifternas starter, förfiningsbevis, commits, testresultat och PR-överlämning, utan PO-kommandon mellan tilldelning och PR.
+- **E2:** Codex-PR:er granskas oberoende av Claude på aktuell head-SHA, och blockerande fynd leder till en avgränsad Codex-fixrunda innan PR:en kan mergas.
+  - **Verified by:** Minst en av bevis-PR:erna har Claude-granskning på sin aktuella head; ett kontrollerat fynd i ett test eller en verklig PR visar återgång till Codex, ny testkörning och förnyad granskning före merge.
+- **E3:** Ett avbrott, en avstängd Codex-dator eller en uppnådd ransongräns lämnar arbetet i ett väntande, återupptagbart tillstånd utan dubbelstart, förlorade commits eller automatisk flytt till Claude.
+  - **Verified by:** Ett avbrutet bevisarbete återupptas efter att datorn eller appen är tillbaka; deterministiska tester täcker ransongräns, upprepad körning och förlorat svar efter en GitHub-skrivning.
+- **E4:** Codex-arbetet följer samma tester, PR-bevis, överlämningskrav och mergegrindar som Claude-arbetet och ger ingen separat API-debitering.
+  - **Verified by:** Fokus- och CI-testerna är gröna på bevis-PR:ernas aktuella head-SHA, överlämningsbevisen finns på GitHub, mergegrindarna passerar oförändrade och PO kontrollerar att ingen OpenAI API-förbrukning uppstått under bevisperioden.
 
 ## Decisions
 
