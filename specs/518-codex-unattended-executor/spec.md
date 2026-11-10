@@ -84,7 +84,10 @@ Out:
 
 ## Dependencies
 
-<…>
+- Före implementation: en separat accepterad ADR-ändring som lägger till Codex-vägen till ADR-012.
+- Externt: PO:s ChatGPT Plus- och Claude-abonnemang, en dator med Codex-appen igång när lokala uppgifter ska köras, och GitHub-åtkomst för de nödvändiga bevisen och kontrollerna.
+- Samordning: de befintliga session-, förfinings- och granskningskontrakten i Epic #160 och #306. Deras fullständiga stängning är inte ett hårt beroende.
+- Inget hårt beroende till Epic #519.
 
 ## Open Questions
 
