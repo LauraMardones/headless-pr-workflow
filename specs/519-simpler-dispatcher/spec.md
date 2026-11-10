@@ -7,6 +7,8 @@
 
 HPW:s dispatcher ska vara lättare att förstå, ändra och testa genom att samla beslut om nästa steg på ett tydligt ställe och minska överlappande kontrollflöde, utan att försvaga befintliga säkerhets- och mergegrindar.
 
+`dispatcher-invoke.sh` är nu 4 137 rader; fler exekveringsvägar gör ändringar svårare att granska och ökar risken för skilda beslut i olika återupptagningsvägar.
+
 ## Scope
 
 In:
