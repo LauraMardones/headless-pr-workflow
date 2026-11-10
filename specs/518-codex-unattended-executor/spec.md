@@ -65,7 +65,15 @@ Out:
 
 ## Checked Against
 
-<…>
+- ADR-006 och ADR-007 samt `docs/MERGE-POLICY.md` — oberoende Claude-granskning av Codex-PR:er på aktuell head-SHA och alla mergegrindar består; ingen konflikt.
+- ADR-008 och ADR-011 — specen är PO:s beslut och mergas personligen av PO; ingen konflikt.
+- ADR-009 och Epic #306 — Codex följer samma Tech Lead-regler och verifieringskrav för förfining; den tekniska körvägen ändras, inte produktbesluten.
+- ADR-010 — boardstatus härleds från GitHub-fakta; Codex tillför beständiga fakta men inför inte en konkurrerande statuskälla.
+- ADR-012 och `docs/DISPATCHER-CONFIG.md` — konflikt: ADR-012 startar modellsessioner på GitHub Actions-runnern med Claude-abonnemanget och beskriver inte en lokal Codex-arbetare. En separat ADR-ändring måste besluta och dokumentera den nya vägen före implementation; Claude-vägen fortsätter enligt ADR-012.
+- ADR-014 och Epic #418 — ny GitHub-skrivning, markörer och sparat tillstånd använder de redan beslutade byggblocken; ingen ny handskriven variant.
+- Epic #160 — dess avgränsning bort från en persistent värd och leverantörsfailover gäller det Epicet. Detta nya Epic tillåter uttryckligen PO:s dator som Codex-värd men behåller beslutet att inte flytta ett stoppat Codex-arbete automatiskt till Claude.
+- Epic #519 — den beteendeneutrala förenklingen är ett separat Epic och inget hårt beroende.
+- OpenAI:s dokumentation om schemalagda uppgifter och åtkomsttoken — schemalagda lokala uppgifter är den avsedda Plus-vägen; automatiseringstoken för CI är inte tillgängliga på Plus. Se https://learn.chatgpt.com/docs/automations och https://learn.chatgpt.com/docs/enterprise/access-tokens.
 
 ## Delegated to the Tech Lead
 
