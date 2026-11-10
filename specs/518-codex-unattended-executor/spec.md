@@ -7,6 +7,8 @@
 
 HPW ska kunna låta Codex på mitt nuvarande abonnemang förfina, implementera och göra fixrundor obemannat när min dator är igång. Claude granskar Codex-PR:er oberoende. Arbetet ska kunna återupptas efter avbrott och respektera abonnemangens gränser utan separat API-debitering.
 
+Claude-ransonen tog slut innan Codex hade kunnat ta en motsvarande del av implementeringen; HPW behöver använda båda abonnemangen utan att PO startar varje story själv.
+
 ## Scope
 
 In:
