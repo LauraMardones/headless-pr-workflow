@@ -343,7 +343,10 @@ def test_usage_limit_reached_event_payload(tmp_path):
 
 
 def test_a_counter_that_cannot_be_written_starts_nothing(d):
-    proc = d.run_issue(ISSUE, seq="0,0,0,0", env={"USAGE_LIMIT_STATE_DIR": "/dev/null/usage"})
+    blocked_parent = d.mock / "not_a_directory"
+    blocked_parent.write_text("", encoding="utf-8")
+    proc = d.run_issue(ISSUE, seq="0,0,0,0",
+                       env={"USAGE_LIMIT_STATE_DIR": (blocked_parent / "usage").as_posix()})
     assert d.sessions == []
     assert "[USAGE LIMIT ERROR] could not record the session start" in proc.stderr
 
@@ -402,7 +405,7 @@ def test_an_unreadable_counter_starts_no_session(tmp_path):
 
 def test_a_counter_dated_another_day_is_still_the_start_of_a_new_day(tmp_path):
     (tmp_path / "state").mkdir()
-    (tmp_path / "state" / "sessions").write_text("2026-10-13:5\n")
+    (tmp_path / "state" / "sessions").write_text("2026-10-13:5\n", newline="\n")
     proc = usage(tmp_path, "check")
     assert proc.returncode == 0 and proc.stdout.split() == ["0", "2"]
     assert json.loads(usage(tmp_path, "status").stdout) == {"sessions_today": 0, "limit": 2}
