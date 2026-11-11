@@ -447,15 +447,20 @@ if [[ -f "$MOCK_DIR/fail_$command" ]]; then
     echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"duration_ms":1000,"usage":{"input_tokens":1,"output_tokens":1}}'
     exit 1
 fi
-if [[ "$command" == implement ]]; then  # the session opens its PR or marks its draft ready (Dispatcher.add_pr, #475)
+if [[ "$command" == implement && "$(cat "$MOCK_DIR/claude_exit" 2>/dev/null || echo 0)" == 0 ]]; then
+    # A stopped session has not completed the PR hand-off (Dispatcher.add_pr, #475).
     for f in "$MOCK_DIR"/opened_on_implement_*.json; do
         [[ -f "$f" ]] || continue
+        jq -e --arg target "Closes #$target" '.body == $target' "$f" >/dev/null || continue
         jq --slurpfile pr "$f" '. + $pr' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/pulls.tmp"
         mv "$MOCK_DIR/pulls.tmp" "$MOCK_DIR/pulls.json"; rm -f "$f"
     done
     for f in "$MOCK_DIR"/ready_on_implement_*; do
         [[ -f "$f" ]] || continue
-        pr="${f##*_}"; rm -f "$f"
+        pr="${f##*_}"
+        jq -e --argjson n "$pr" --arg target "Closes #$target" \
+            'any(.[]; .number == $n and .body == $target)' "$MOCK_DIR/pulls.json" >/dev/null || continue
+        rm -f "$f"
         jq --argjson n "$pr" 'map(if .number == $n then .draft = false else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/pulls.tmp"
         mv "$MOCK_DIR/pulls.tmp" "$MOCK_DIR/pulls.json"
     done
@@ -615,7 +620,7 @@ class Dispatcher:
                          **extra})
             return
         if draft is None:
-            draft = bool(board_item) and board_item["status"] == "Ready for implementation" and state == "open"
+            draft = bool(board_item) and self.status(issue) == "Ready for implementation" and state == "open"
             ready_file = self.mock / f"ready_on_implement_{number}"
             ready_file.write_text("") if draft else ready_file.unlink(missing_ok=True)
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]

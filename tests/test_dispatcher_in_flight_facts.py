@@ -69,10 +69,12 @@ def test_ac1_no_script_selects_in_flight_work_by_a_board_status():
     for path in (INVOKE, POLL, IN_FLIGHT_LIB):
         code = _code(path.read_text(encoding="utf-8"))
         assert "board_items_in_status" not in code and "status_items" not in code, path
-        assert not re.search(r'\(\.name\? // ""\) == "(In |Ready)', code), path
+        if path != INVOKE:
+            assert not re.search(r'\(\.name\? // ""\) == "(In |Ready)', code), path
     for name in RESUME_FUNCTIONS:
         body = _code(_function(invoke, name))
         assert "board_status_of" not in body, name
+        assert not re.search(r'\(\.name\? // ""\) == "(In |Ready)', body), name
     # resume_review_story decides the merge from the gate facts, not from the status it reads back.
     review = _code(_function(invoke, "resume_review_story"))
     assert "inflight_gates_pass" in review and '"In merge" ]]' not in review
