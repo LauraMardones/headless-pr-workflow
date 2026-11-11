@@ -2,10 +2,10 @@
 
 **Status:** Accepted
 **Date:** 2026-10-10
-**Related:** #289 (spike), #160 (E5, E6), #306, #308, #304, ADR-006, ADR-009, ADR-010
+**Related:** #289 (spike), #160 (E5, E6), #306, #308, #304, #518, #522, ADR-006, ADR-007, ADR-009, ADR-010
 **Supersedes:** ADR-003
 **Amends:** ADR-002's "the dispatcher invokes executors via API calls, not embedded sessions" and "executor sessions run outside GitHub Actions"
-**Effective when:** #314 (implementation sessions) and #317 (allowance and reserve) are merged. #315 (review of Codex-implemented stories), #316 (pause and resume at a usage limit), #318 (`gh` with GraphQL for `/merge`) and #319 (refinement sessions, Epic #306) complete it. Until #314 lands, the dispatcher's current API loop is what the code does; it must not be used with a metered key (spec #160).
+**Effective when:** #314 (implementation sessions) and #317 (allowance and reserve) are merged. #315 (review of Codex-implemented stories), #316 (pause and resume at a usage limit), #318 (`gh` with GraphQL for `/merge`) and #319 (refinement sessions, Epic #306) complete it. Until #314 lands, the dispatcher's current API loop is what the code does; it must not be used with a metered key (spec #160). The Epic #518 amendment takes effect when the PO merges this ADR update; #522 must implement and prove the local Codex path before it is used for unattended work.
 
 ## Context
 
@@ -22,13 +22,23 @@ The spike checks the provider's terms before any trial session is started, becau
 
 Accepted by the PO on 2026-10-10 after the trial; the merge of this ADR is the approval (ADR-011). The trial is recorded under [Trial record](#trial-record) and [Findings per criterion](#findings-per-criterion).
 
-Model sessions are started by the GitHub Actions dispatcher, which runs Claude Code on the runner signed in with the PO's subscription token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). No API key is used. This is candidate B, and it applies to all three kinds of session:
+Claude model sessions continue to be started by the GitHub Actions dispatcher, which runs Claude Code on the runner signed in with the PO's subscription token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). No API key is used. This is candidate B, and it applies to these Claude session kinds:
 
 - **Implementation:** the dispatcher starts `/implement` for the next ready story.
 - **Refinement:** the Tech Lead's scheduler (ADR-009) starts refinement sessions the same way.
 - **Review of a Codex-implemented story:** the dispatcher starts `/review` the same way, replacing the API call ADR-006 left in place.
 
-Before it starts any session, the dispatcher reads the five-hour and weekly allowance from a one-turn Claude Code run and starts nothing when either is below the PO's reserve.
+Before it starts a Claude session, the dispatcher reads the five-hour and weekly allowance from a one-turn Claude Code run and starts nothing when either is below the PO's reserve.
+
+### Codex Plus amendment (Epic #518, 2026-11-11)
+
+Codex may also execute unattended refinement, implementation and fix rounds through scheduled tasks in the signed-in Codex app on the PO's computer, using the PO's existing Plus subscription. The computer and app must be running for a task to start. This local path complements the Claude path above; Codex is not started on the GitHub Actions runner. It uses no OpenAI API key, metered API billing, copied interactive login in CI, or Business/Enterprise subscription. If the local Plus path cannot meet the safety and evidence requirements, implementation stops for a new PO decision rather than changing the authentication or billing model.
+
+Assignment, the current owner, progress, interruption, and handoff are recorded as durable GitHub facts. The scheduled worker claims assigned work and checks those facts before starting or resuming, so repeated task runs and a lost response after a GitHub write cannot create duplicate sessions or discard pushed commits. The worker resumes from the recorded issue, PR, branch and head SHA after an interruption; local app state is not the authority for ownership or completion. The exact queue, claim and polling mechanics belong to #522.
+
+When the computer or app is unavailable, or a usage limit or reserve blocks a start, Codex-assigned work remains waiting and resumable. It is not automatically reassigned to Claude. Before each new Codex session, the worker enforces a PO reserve of **10% of the five-hour allowance and 20% of the weekly allowance**, with both thresholds configurable without a code change. It also protects Claude capacity for independent review before taking in new Codex work. If the necessary allowance or review capacity cannot be confirmed, the worker waits rather than starting unchecked.
+
+Claude independently reviews Codex PRs against their **current head SHA**. Blocking findings return to a bounded Codex fix round, followed by tests and renewed independent review of the new head. Codex does not review its own PR for approval. Codex work supplies the same tests, PR evidence and handoff as Claude work. The existing independent approval, required-check, unresolved-thread, merge-ownership, fresh-refresh and PO decision gates remain in force; this amendment grants no merge or product-decision exception.
 
 Candidate A (cloud sessions started by a routine) is not chosen. It worked for implementation, but GitHub GraphQL is blocked there by design, so `/merge`'s merge gate cannot run.
 
@@ -38,9 +48,9 @@ Provider terms (2026-10-08): both candidates are allowed; see [Provider terms ch
 
 - `scripts/merge-gate-summary` keeps using `gh` with GraphQL. The Actions runner provides it; no script change is needed for `/merge`.
 - The embedded API loop in `scripts/dispatcher-invoke.sh` and the API-key secrets are removed in the follow-up work under #308 (#314, #315).
-- ADR-002's runner choice and five-minute poll stand. Its "the dispatcher invokes executors via API calls" and "executor sessions run outside GitHub Actions" are replaced: the session runs inside the Actions job, on the subscription.
-- A session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet; #316 must prove it.
-- The session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today.
+- ADR-002's runner choice and five-minute poll stand for Claude. Its "the dispatcher invokes executors via API calls" and "executor sessions run outside GitHub Actions" are replaced for Claude: those sessions run inside Actions jobs on the subscription. Epic #518 adds the separate local Codex path described above.
+- A Claude session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet; #316 must prove it.
+- The Claude session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today.
 - The allowance reading depends on a field (`unifiedWindows`) that Anthropic does not document. If it disappears, the dispatcher must stop starting sessions, not start them unchecked.
 - "Ordinary, individual usage" is the limit Anthropic sets on subscription use and it has no number. One session at a time keeps to a fair reading of it.
 - Revisit if Anthropic changes the terms or the token, if GraphQL becomes available in cloud sessions, or if the allowance can no longer be read.
