@@ -105,6 +105,12 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
         head = str(pr.get("head") or "")
         if draft:
             implementing.add(number)
+        elif row.get("gates_pass"):
+            # A ready PR that passes the current-head gates is in the merge step
+            # even when an older fix or hand-off marker is still present.
+            flight.add(number)
+            steps["merge"].append(_entry(row))
+            continue
         pr_comments = row.get("pr_comments")
         if row.get("review_loop") and dispatcher and story_comments is not None and pr_comments is not None:
             if findings_on_head(pr_comments, head, bookkeeping):
@@ -118,7 +124,7 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
         if draft:
             continue
         flight.add(number)
-        steps["merge" if row.get("gates_pass") else "review"].append(_entry(row))
+        steps["review"].append(_entry(row))
     return {**steps, "in_implementation": sorted(implementing), "in_flight": sorted(flight - implementing)}
 
 

@@ -59,6 +59,17 @@ def test_each_step_comes_from_its_fact():
     assert result["in_flight"] == [1, 4, 5]
 
 
+@pytest.mark.parametrize("story,pr_comments", [
+    ([PENDING], []),
+    ([], [FINDINGS]),
+    ([PENDING], [FINDINGS]),
+])
+def test_passing_merge_gates_take_precedence_over_pending_markers(story, pr_comments):
+    result = plan(row(4, pr=90, gates=True, story=story, pr_comments=pr_comments))
+    assert steps(result) == {"merge": [4], "finish": [], "fix_round": [], "hand_off": [], "review": []}
+    assert result["in_implementation"] == [] and result["in_flight"] == [4]
+
+
 def test_entries_carry_the_pr_and_head():
     result = plan(row(5, pr=95))
     assert result["review"] == [{"number": 5, "title": "Story 5", "executors": ["claude-code-sonnet"], "pr": 95,

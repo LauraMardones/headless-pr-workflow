@@ -100,6 +100,19 @@ def test_ac2_gates_passing_on_the_head_give_the_merge_step_whatever_the_card(d, 
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.status(STORY) == "Done"
 
 
+def test_ac2_passing_gates_merge_even_with_a_pending_hand_off(d):
+    d.add_story(STORY, "In review", executor="claude-code-sonnet")
+    d.add_pr(PR, STORY, draft=False, owned=True)
+    d.set_gates(PR, "pass")
+    pending_hand_off(d)
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, output(proc)
+    assert f"[RESUME] #{STORY}: /merge PR #{PR}" in proc.stdout
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+
+
 @pytest.mark.parametrize("gate", ["fail", "unreadable"])
 def test_ac2_a_failing_or_unreadable_gate_gives_no_merge_even_in_merge(d, gate):
     d.add_story(STORY, "In merge", executor="claude-code-sonnet")
