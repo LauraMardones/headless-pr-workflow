@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -134,7 +135,9 @@ class Gate:
 
 
 def do_claim(gh, settings, *, run="run-a", owner="po-laptop", gate=None, at=None, env=None):
-    return claim(gh, REPO, owner=owner, run=run, eligibility=gate or Gate(), now=lambda: at or gh.at,
+    if at is not None:
+        gh.at = at  # GitHub stamps the run's comments at the run's time
+    return claim(gh, REPO, owner=owner, run=run, eligibility=gate or Gate(), now=lambda: gh.at,
                  config=CONFIG, settings=settings, env=env or {})
 
 
@@ -401,6 +404,46 @@ def test_a_replay_and_a_new_run_recovering_one_expired_attempt_give_one_owner(gh
     assert [(m.fields["attempt"], m.fields["run"]) for m in claims(gh)] == [("1", "run-a"), ("2", "run-b"), ("2", "run-a")]
 
 
+def leave_queue(gh: WorkerGitHub, number: int, status: str, state: str) -> None:
+    gh.cards = [replace(c, status=status, state=state) if c.number == number else c for c in gh.cards]
+
+
+@pytest.mark.parametrize("status, state", [("In review", "open"), ("Done", "closed")])
+def test_a_replay_whose_item_left_the_queue_claims_no_other_item(gh, settings, status, state):
+    gh.story(5)
+    gh.story(6)
+    assert do_claim(gh, settings).fields["issue"] == 5
+    leave_queue(gh, 5, status, state)
+    posts = len(gh.posts())
+    gate = Gate()
+    replay = do_claim(gh, settings, gate=gate)
+    assert replay.result == "waiting" and replay.exit_code == 1 and "invocation" not in replay.fields
+    assert replay.fields["issue"] == 5 and replay.fields["skipped"] == [{"issue": 5, "reason": "not-queued"}]
+    assert len(gh.posts()) == posts and claims(gh, 6) == [] and gate.calls == []
+    # A new run still claims the next item.
+    assert do_claim(gh, settings, run="run-b").fields["issue"] == 6
+
+
+def test_a_replay_after_its_item_was_handed_off_and_left_the_queue_reports_ended(gh, settings):
+    gh.story(5)
+    gh.story(6)
+    do_claim(gh, settings)
+    finish(gh, REPO, 5, 1, "run-a", result="done", reason="handoff", head=H1, settings=settings, env={}, config=CONFIG,
+           now=lambda: gh.at)
+    leave_queue(gh, 5, "In review", "open")
+    replay = do_claim(gh, settings)
+    assert replay.result == "ended" and replay.fields["issue"] == 5 and claims(gh, 6) == []
+
+
+def test_only_a_named_run_reads_the_items_outside_the_queue(gh, settings):
+    gh.story(4, "In review")
+    gh.story(5)
+    fresh = claim(gh, REPO, owner="pc", eligibility=Gate(), now=lambda: gh.at, config=CONFIG, settings=settings, env={})
+    assert fresh.result == "claimed" and "list 4" not in gh.calls
+    do_claim(gh, settings, run="run-b")
+    assert "list 4" in gh.calls
+
+
 @pytest.mark.parametrize("marker", [
     "action=codex-claim issue=5 attempt=one owner=x run=r command=implement",
     "action=codex-claim issue=5 attempt=1 owner=x run=r command=deploy",
@@ -523,6 +566,7 @@ def test_an_interrupted_session_is_resumed_from_the_current_remote_head(gh, sett
     assert result.fields["invocation"]["resume"] == {"pr": 12, "branch": BRANCH, "head": H2}
     [end] = [m for m in gh.marks(5) if m.action == "end"]
     assert end.fields["attempt"] == "1" and end.fields["run"] == "r1" and end.fields["reason"] == "interrupted"
+    assert end.fields["by"] == "r2"
     [_, second] = claims(gh)
     assert second.fields["branch"] == BRANCH and second.fields["head"] == H2 and second.fields["pr"] == "12"
     assert gh.branches == {BRANCH: H2} and list(gh.prs) == [12]  # no new branch and no new PR
@@ -545,6 +589,76 @@ def test_the_interrupted_session_cannot_record_progress_after_the_resume(gh, set
     do_claim(gh, settings, run="r2", at=T0 + timedelta(hours=5))
     late = record_progress(gh, REPO, 5, 1, "r1", branch=BRANCH, head=H3, settings=settings, env={}, config=CONFIG)
     assert late.result == "not-owner"
+
+
+def owner_progress(gh, settings, head=H1, run="r1"):
+    return record_progress(gh, REPO, 5, 1, run, branch=BRANCH, head=head, settings=settings, env={}, config=CONFIG,
+                           now=lambda: gh.at)
+
+
+def test_an_owner_record_that_lands_before_the_interruption_keeps_the_attempt(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.at = T0 + timedelta(hours=5)
+    seen = {}
+    # The recovering run read attempt 1 as expired; the owner's progress reaches GitHub before its interruption.
+    gh.before_post = lambda: seen.setdefault("progress", owner_progress(gh, settings))
+    recovery = do_claim(gh, settings, run="r2", at=gh.at)
+    assert seen["progress"].result == "written"
+    assert recovery.result == "waiting" and recovery.exit_code == 1 and "invocation" not in recovery.fields
+    assert recovery.fields["skipped"] == [{"issue": 5, "reason": "lease-held"}]
+    assert [m.fields["run"] for m in claims(gh)] == ["r1"]
+    # The owner keeps the attempt: its later records and its end still count, and the item stays held.
+    gh.branches[BRANCH] = H2
+    assert owner_progress(gh, settings, head=H2).result == "written"
+    assert do_claim(gh, settings, run="r3", at=T0 + timedelta(hours=6)).fields["skipped"] == [
+        {"issue": 5, "reason": "claimed"}]
+    assert finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H2, settings=settings, env={},
+                  config=CONFIG, now=lambda: gh.at).result == "written"
+
+
+@pytest.mark.parametrize("operation", ["progress", "finish"])
+def test_an_owner_record_that_lands_after_the_interruption_reports_not_owner(gh, settings, operation):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.at = T0 + timedelta(hours=5)
+    seen = {}
+    # The owner read its attempt as open; another run's interruption and new claim reach GitHub first.
+    gh.before_post = lambda: seen.setdefault("recovery", do_claim(gh, settings, run="r2", at=gh.at))
+    if operation == "progress":
+        late = owner_progress(gh, settings)
+    else:
+        late = finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H1, settings=settings, env={},
+                      config=CONFIG, now=lambda: gh.at)
+    assert seen["recovery"].result == "claimed" and seen["recovery"].fields["attempt"] == 2
+    assert late.result == "not-owner" and late.exit_code == 1 and "stop the session" in late.error
+
+
+def test_a_replay_whose_own_session_renewed_the_lease_recovers_after_a_later_expiry(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=5)
+    gh.before_post = lambda: owner_progress(gh, settings, run="run-a")
+    replay = do_claim(gh, settings, at=gh.at)
+    assert replay.result == "waiting" and replay.fields["skipped"] == [{"issue": 5, "reason": "lease-held"}]
+    assert len(claims(gh)) == 1
+    # The voided interruption does not block a valid one by the same run once the lease runs out again.
+    gh.branches[BRANCH] = H1
+    later = do_claim(gh, settings, at=T0 + timedelta(hours=10))
+    assert later.result == "claimed" and later.fields["attempt"] == 2
+    assert [(m.fields["attempt"], m.fields["by"]) for m in gh.marks(5) if m.action == "end"] == [
+        ("1", "run-a"), ("1", "run-a")]
+
+
+def test_an_interruption_recorded_within_the_lease_by_github_time_does_not_end_the_attempt(gh, settings):
+    # A computer clock ahead of GitHub's reads the lease as expired; GitHub's timestamps decide.
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.at = T0 + timedelta(hours=1)
+    result = claim(gh, REPO, owner="pc", run="r2", eligibility=Gate(), now=lambda: T0 + timedelta(hours=5),
+                   config=CONFIG, settings=settings, env={})
+    assert result.result == "waiting" and result.fields["skipped"] == [{"issue": 5, "reason": "lease-held"}]
+    assert owner_progress(gh, settings).result == "written"
 
 
 @pytest.mark.parametrize("change, reason", [
@@ -791,6 +905,7 @@ def test_the_dispatcher_config_documents_the_worker_protocol():
                  "lowest comment id", "OPENAI_API_KEY", *codex_worker.COMMAND_BY_STATUS):
         assert word in section, word
     for reason in ("head-diverged", "branch-missing", "pr-closed", "pr-missing", "pr-branch-mismatch", "foreign-pr",
-                   "ambiguous-branch", "ambiguous-pr", "conflicting-claim", "retry-later", "handed-off-on-head"):
+                   "ambiguous-branch", "ambiguous-pr", "conflicting-claim", "retry-later", "handed-off-on-head",
+                   "lease-held", "not-queued"):
         assert f"`{reason}`" in section, reason
     assert f"{codex_worker.DEFAULT_LEASE_MINUTES}" in section and f"{codex_worker.DEFAULT_RETRY_MINUTES}" in section

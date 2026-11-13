@@ -13,7 +13,8 @@ Markers (own account only, ``<!-- hpw:dispatcher action=<action> ... -->``):
 - ``codex-claim issue= attempt= owner= run= command= pr= branch= head=``: the claim; the claim with
   the lowest comment id of an attempt owns it.
 - ``codex-progress issue= attempt= run= pr= branch= head=``: what the owning session pushed.
-- ``codex-end issue= attempt= run= result=done|wait reason= head= until=``: the attempt is over.
+- ``codex-end issue= attempt= run= result=done|wait reason= head= until= by=``: the attempt is over; ``by`` names
+  the run that recorded an interruption, which counts only when the lease had run out by GitHub's timestamps.
 - ``codex-wait issue= attempt= reason=``: the item waits before that attempt could be claimed.
 
 Result words and exit codes: ``claimed``, ``continued``, ``written``, ``already``, ``read``,
@@ -213,6 +214,23 @@ def _valid(mark: Mark, issue: int) -> bool:
     return True
 
 
+def _end_counts(end: Mark, attempt: Attempt, config: Config) -> bool:
+    """Whether ``end`` ends ``attempt``; ``attempt.progress`` holds only the records older than ``end``.
+
+    The owner's own ``finish`` always counts. An interruption (``by=`` the recovering run) counts only when, by
+    GitHub's own timestamps, the attempt's newest earlier claim or progress record is older than the lease: an owner
+    record that landed between the recovering run's read and its write renews the lease and voids the interruption.
+    """
+
+    if not end.get("by"):
+        return True
+    ended = _time(end.created_at)
+    times = [_time(m.created_at) for m in (attempt.claim, *attempt.progress)]
+    if ended is None or any(t is None for t in times):
+        return False  # a lease that cannot be read is never expired
+    return ended - max(t for t in times if t) > config.lease
+
+
 def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config) -> IssueState:
     """The pure claim rule over the own markers of ``issue``."""
 
@@ -232,7 +250,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
             return IssueState(issue, "conflict", reason="foreign-run", marks=marks)
         if mark.action == "progress":
             attempt.progress.append(mark)
-        elif attempt.end is None:
+        elif attempt.end is None and _end_counts(mark, attempt, config):
             attempt.end = mark
 
     recorded: dict[str, str] | None = None
@@ -275,8 +293,18 @@ def _prio(labels: tuple[str, ...]) -> int:
 def read_queue(gateway: Gateway) -> list[dict[str, Any]]:
     """The eligible ``executor:codex`` items, in claim order; raises ``GatewayError``."""
 
+    return _queue(gateway.list_board_items().cards)
+
+
+def _codex_issues(cards: list[Any]) -> list[int]:
+    """Every board issue that carries ``executor:codex``, whatever its status or state: where a run's claims can be."""
+
+    return sorted({card.number for card in cards if card.number is not None and CODEX_EXECUTOR_LABEL in card.labels})
+
+
+def _queue(cards: list[Any]) -> list[dict[str, Any]]:
     queue = []
-    for card in gateway.list_board_items().cards:
+    for card in cards:
         executors = [label for label in card.labels if label.startswith("executor:")]
         if card.number is None or card.state != "open" or executors != [CODEX_EXECUTOR_LABEL]:
             continue
@@ -435,11 +463,13 @@ def _wait(gateway: Gateway, issue: int, attempt: int, reason: str, settings: Set
 
 
 def _end_fields(issue: int, attempt: int, run: str, result: str, reason: str, head: str | None,
-                until: str | None) -> list[tuple[str, str]]:  # fmt: skip
+                until: str | None, by: str | None = None) -> list[tuple[str, str]]:  # fmt: skip
     fields = [("issue", str(issue)), ("attempt", str(attempt)), ("run", run), ("result", result), ("reason", reason),
               ("head", head or "-")]  # fmt: skip
     if until:
         fields.append(("until", until))
+    if by:
+        fields.append(("by", by))
     return fields
 
 
@@ -454,6 +484,7 @@ def claim(
     config = config or Config()
     settings = settings or Settings.from_env(env)
     clock = now or (lambda: datetime.now(timezone.utc))
+    named = bool(run)  # only a named run can be a replay: a fresh name has no claims anywhere
     run = run or uuid.uuid4().hex[:12]
     base: dict[str, Any] = {"owner": owner, "run": run}
 
@@ -464,51 +495,64 @@ def claim(
                             fields={**base, "reason": "api-key-set"})  # fmt: skip
     try:
         login = resolve_login(gateway, "dispatcher", env)
-        queue = read_queue(gateway)
-        states = {item["issue"]: derive_state(item["issue"], _own_marks(gateway, item["issue"], login),
-                                              now=clock(), config=config) for item in queue}  # fmt: skip
+        cards = gateway.list_board_items().cards
+        queue = _queue(cards)
+        # A named run also reads every other executor:codex issue: its claimed item may have left the queue (for
+        # example to In review, or closed), and a replay must find that claim rather than claim a second item.
+        numbers = _codex_issues(cards) if named else [item["issue"] for item in queue]
+        numbers = sorted(set(numbers) | {item["issue"] for item in queue})
+        states = {n: derive_state(n, _own_marks(gateway, n, login), now=clock(), config=config) for n in numbers}
     except (GatewayError, Unreadable) as exc:
         return WorkerResult("claim", "unreadable", error=str(exc), fields=base)
 
-    # A replayed run continues the attempt it already claimed, and claims nothing new.
+    # A replayed run continues the attempt it already claimed, and claims nothing new. Its newest claim on any
+    # issue names the item (comment ids grow across the repository).
+    queued = {item["issue"]: item for item in queue}
+    own = [(m.order, n) for n, st in states.items() for m in st.marks
+           if m.action == "claim" and m.fields.get("run") == run]  # fmt: skip
     candidates = queue
-    for item in queue:
-        st = states[item["issue"]]
+    replaying = False
+    if own:
+        issue_no = max(own)[1]
+        st = states[issue_no]
         mine = [m for m in st.marks if m.action == "claim" and m.fields.get("run") == run]
-        if not mine:
-            continue
         if st.state == "conflict":
-            return WorkerResult("claim", "lost", fields={**base, "issue": item["issue"], "reason": st.reason})
+            return WorkerResult("claim", "lost", fields={**base, "issue": issue_no, "reason": st.reason})
         number = int(mine[-1].fields["attempt"])
-        fields = {**base, "issue": item["issue"], "attempt": number}
+        fields = {**base, "issue": issue_no, "attempt": number}
         current = st.attempt
-        if current is not None and current.number == number and current.run == run:
-            if current.end is not None:
-                return WorkerResult("claim", "ended", fields={**fields, "reason": current.end.get("reason")})
-            if st.state == "expired":
-                # The lease ran out, so a new run may already treat the attempt as interrupted: the replay takes
-                # the claim rule's recovery path for this item only and starts only on a newly won attempt.
-                candidates = [item]
-                break
-            # A replay starts the session too, so it re-reads the remote resume facts and asks the hook again,
-            # as a new claim does; a refusal keeps the claim.
+        item = queued.get(issue_no)
+        if current is None or current.number != number or current.run != run:
+            return WorkerResult("claim", "lost", fields={**fields, "reason": "another-run-owns-the-attempt"})
+        if current.end is not None:
+            return WorkerResult("claim", "ended", fields={**fields, "reason": current.end.get("reason")})
+        if item is None:
+            # The item left the queue while the attempt is open: nothing starts, and no other item is claimed.
+            return WorkerResult("claim", "waiting", fields={**fields, "skipped": [{"issue": issue_no,
+                                                                                  "reason": "not-queued"}]})  # fmt: skip
+        if st.state == "expired":
+            # The lease ran out, so a new run may already treat the attempt as interrupted: the replay takes the
+            # claim rule's recovery path for this item only and starts only on a newly won attempt.
+            candidates, replaying = [item], True
+        else:
+            # A replay starts the session too, so it re-reads the remote resume facts and asks the hook again, as
+            # a new claim does; a refusal keeps the claim.
             try:
-                resume = resolve_resume(gateway, item["issue"], st.recorded)
+                resume = resolve_resume(gateway, issue_no, st.recorded)
                 eligible, reason = True, ""
             except Waiting as exc:
                 eligible, reason = False, str(exc)
             except GatewayError as exc:
                 return WorkerResult("claim", "unreadable", error=str(exc), fields=fields)
             if eligible:
-                eligible, reason = eligibility(repo, item["issue"], current.command)
+                eligible, reason = eligibility(repo, issue_no, current.command)
             if not eligible:
-                skipped = [{"issue": item["issue"], "reason": reason,
-                            "evidence": _wait(gateway, item["issue"], number, reason, settings, env, dry_run,
+                skipped = [{"issue": issue_no, "reason": reason,
+                            "evidence": _wait(gateway, issue_no, number, reason, settings, env, dry_run,
                                               claimed=True)}]  # fmt: skip
                 return WorkerResult("claim", "waiting", fields={**fields, "skipped": skipped})
             return WorkerResult("claim", "continued", fields={**fields, "invocation": invocation(
-                repo, item["issue"], number, owner, run, current.command, resume)})  # fmt: skip
-        return WorkerResult("claim", "lost", fields={**fields, "reason": "another-run-owns-the-attempt"})
+                repo, issue_no, number, owner, run, current.command, resume)})  # fmt: skip
 
     skipped: list[dict[str, Any]] = []
     for item in candidates:
@@ -521,16 +565,32 @@ def claim(
             continue
         if st.state == "expired":
             assert st.attempt is not None
+            # Not ``once``: an interruption that an owner record voided must not block a later, valid one.
             ended = write_marker(
                 gateway, issue, "codex-end",
-                _end_fields(issue, st.attempt.number, st.attempt.run, "wait", "interrupted", None, None),
+                _end_fields(issue, st.attempt.number, st.attempt.run, "wait", "interrupted", None, None, by=run),
                 body=(f"Codex worker: attempt {st.attempt.number} on #{issue} (run `{st.attempt.run}`) recorded no "
-                      f"progress for {int(config.lease.total_seconds() // 60)} minutes; it is treated as interrupted."),
-                once=True, dry_run=dry_run, settings=settings, env=env,
+                      f"progress for {int(config.lease.total_seconds() // 60)} minutes; run `{run}` treats it as "
+                      "interrupted."),
+                dry_run=dry_run, settings=settings, env=env,
             )  # fmt: skip
-            if ended.result not in ("written", "already", "dry-run"):
+            if ended.result not in ("written", "dry-run"):
                 return WorkerResult("claim", "failed", error=f"record interruption: {ended.error}",
                                     fields={**base, "issue": issue, "skipped": skipped})  # fmt: skip
+            if ended.result == "written":
+                # The owner may have recorded progress between this run's read and its write; then the interruption
+                # does not count (GitHub's timestamps decide), the owner keeps the attempt and nothing starts here.
+                try:
+                    after = derive_state(issue, _own_marks(gateway, issue, login), now=clock(), config=config)
+                except GatewayError as exc:
+                    return WorkerResult("claim", "unreadable", error=f"read back interruption: {exc}",
+                                        fields={**base, "issue": issue, "skipped": skipped})  # fmt: skip
+                if after.state == "conflict":
+                    skipped.append({"issue": issue, "reason": after.reason})
+                    continue
+                if after.attempt is not None and after.attempt.number == st.attempt.number and after.attempt.end is None:
+                    skipped.append({"issue": issue, "reason": "lease-held"})
+                    continue
         elif st.not_before is not None and clock() < st.not_before:
             skipped.append({"issue": issue, "reason": "retry-later", "not_before": _iso(st.not_before)})
             continue
@@ -593,6 +653,26 @@ def _owned(gateway: Gateway, issue: int, attempt: int, run: str, env: Mapping[st
     return st, owns
 
 
+def _still_owned(gateway: Gateway, op: str, issue: int, attempt: int, run: str, env: Mapping[str, str], now: datetime,
+                 config: Config, base: dict[str, Any], *, end_marker: str | None = None) -> WorkerResult | None:  # fmt: skip
+    """Re-read after a written record: ``None`` while the run still owns the attempt, else the result to report.
+
+    A run that recovered the attempt between this call's read and its write wins when its interruption landed first
+    (the claim rule decides by comment order), so the session must stop rather than trust its own write.
+    """
+
+    try:
+        st, owns = _owned(gateway, issue, attempt, run, env, now, config)
+    except (GatewayError, Unreadable) as exc:
+        return WorkerResult(op, "unreadable", error=f"read back: {exc}", fields=base)
+    end = st.attempt.end if st.attempt else None
+    held = owns and (end is None if end_marker is None else end is not None and end_marker in end.body)
+    if held:
+        return None
+    return WorkerResult(op, "not-owner", error="check owner: the attempt ended or moved to another run before this "
+                        "record landed; stop the session", fields=base)  # fmt: skip
+
+
 def record_progress(
     gateway: Gateway, repo: str, issue: int, attempt: int, run: str, *, branch: str, head: str, pr: int | None = None,
     now: Callable[[], datetime] | None = None, config: Config | None = None, settings: Settings | None = None,
@@ -601,10 +681,11 @@ def record_progress(
     """Record the owning session's pushed branch and head; a replay of the same record writes nothing."""
 
     env = os.environ if env is None else env
+    clock = now or (lambda: datetime.now(timezone.utc))
+    config = config or Config()
     base: dict[str, Any] = {"issue": issue, "attempt": attempt, "run": run}
     try:
-        st, owns = _owned(gateway, issue, attempt, run, env, (now or (lambda: datetime.now(timezone.utc)))(),
-                          config or Config())  # fmt: skip
+        st, owns = _owned(gateway, issue, attempt, run, env, clock(), config)
     except (GatewayError, Unreadable) as exc:
         return WorkerResult("progress", "unreadable", error=str(exc), fields=base)
     if not owns or (st.attempt and st.attempt.end is not None):
@@ -615,6 +696,10 @@ def record_progress(
     outcome = write_marker(gateway, issue, "codex-progress", fields,
                            body=f"Codex worker: attempt {attempt} on #{issue} pushed `{branch}` at `{head}`.",
                            once=True, dry_run=dry_run, settings=settings, env=env)  # fmt: skip
+    if outcome.result in ("written", "already"):
+        lost = _still_owned(gateway, "progress", issue, attempt, run, env, clock(), config, base)
+        if lost:
+            return lost
     return WorkerResult("progress", outcome.result, error=outcome.error, fields={**base, **outcome.fields})
 
 
@@ -630,9 +715,10 @@ def finish(
     base: dict[str, Any] = {"issue": issue, "attempt": attempt, "run": run, "end": result}
     fields = _end_fields(issue, attempt, run, result, reason, head, until)
     marker = dispatcher_marker(marker_text("codex-end", fields))
+    clock = now or (lambda: datetime.now(timezone.utc))
+    config = config or Config()
     try:
-        st, owns = _owned(gateway, issue, attempt, run, env, (now or (lambda: datetime.now(timezone.utc)))(),
-                          config or Config())  # fmt: skip
+        st, owns = _owned(gateway, issue, attempt, run, env, clock(), config)
     except (GatewayError, Unreadable) as exc:
         return WorkerResult("finish", "unreadable", error=str(exc), fields=base)
     if owns and st.attempt and st.attempt.end is not None:
@@ -647,6 +733,11 @@ def finish(
             "The item is not moved to Claude.")  # fmt: skip
     outcome = write_marker(gateway, issue, "codex-end", fields, body=text, once=True, dry_run=dry_run,
                            settings=settings, env=env)  # fmt: skip
+    if outcome.result in ("written", "already"):
+        # Only the end that counts hands the attempt off; one that landed after an interruption does not.
+        lost = _still_owned(gateway, "finish", issue, attempt, run, env, clock(), config, base, end_marker=marker)
+        if lost:
+            return lost
     return WorkerResult("finish", outcome.result, error=outcome.error, fields={**base, **outcome.fields})
 
 
