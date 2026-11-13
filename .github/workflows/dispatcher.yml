@@ -263,6 +263,19 @@ jobs:
       # started it, before the retry step, with the retry step's conditions. A
       # non-default ref only reports (--dry-run). It never fails the run on an
       # API read error.
+      # Issue #478: the board's only status writer (`hpw dispatcher status
+      # sync`, #476) runs once per enabled run, after the invoke step, also when
+      # the poll found no work, the invoke step was skipped or it failed. It is
+      # read-only (--dry-run) off the default branch, like the poll.
+      - name: Write the board status
+        if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/dispatcher-workflow-step.sh status-sync
+
       - name: Check the dispatch trigger
         if: ${{ !cancelled() && steps.poll.outcome == 'success' && steps.guard.outputs.enabled == 'true' }}
         env:
