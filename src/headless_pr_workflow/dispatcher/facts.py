@@ -38,6 +38,8 @@ _CHECK_RESULT = re.compile(
     r"^[ \t]*Checks run:[^\n]*?(?<![\w-])refine-check\s*[—–-]+\s*(pass|fail|unreadable)\b", re.I | re.M
 )
 _UNBLOCK_LINE = re.compile(r"^\s*/unblock\s*$")
+# The "Unblocked" comment of the Blocked Status Protocol; dispatcher/status.py reads the same line for the other types.
+_UNBLOCKED_COMMENT = re.compile(r"^\s*Unblocked\b(?!\s+when\b)", re.M | re.I)
 
 
 def parse_sections(body: str) -> dict[str, str]:
@@ -106,6 +108,41 @@ def hard_dependencies(sections: dict[str, str], own: int) -> list[int] | None:
         return None
     numbers = [int(n) for n in re.findall(r"#(\d+)", "\n".join(collected))]
     return sorted({n for n in numbers if n != own})
+
+
+_NONE_ENTRY = re.compile(r"^[\s*_]*none\b", re.I)
+
+
+def unnumbered_dependencies(sections: dict[str, str]) -> list[str]:
+    """The ``Hard depends on:`` entries that name no issue number and are not a ``none`` entry (#529).
+
+    Entries are the text on the label line and each list item (or loose paragraph) after it, up to the next
+    ``Soft depends on`` / ``Revalidate after`` line. Own copy of the rule in scripts/refine-check;
+    tests/test_dispatcher_facts_block.py checks that they agree.
+    """
+
+    entries: list[list[str]] = []
+    active = False
+    for line in sections.get("Dependencies", "").split("\n"):
+        bare = line.strip().strip("*_ ").lower()
+        if bare.startswith("hard depends on"):
+            active = True
+            rest = re.sub(r"^[\s*_]*hard depends on[\s*_]*:?[\s*_]*", "", line.strip(), flags=re.I).strip()
+            entries = [[rest]] if rest else []
+            continue
+        if bare.startswith(("soft depends on", "revalidate after")):
+            active = False
+        if not active or not line.strip():
+            continue
+        item = re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?(.*)$", line)
+        if item:
+            entries.append([item.group(1)])
+        elif entries:
+            entries[-1].append(line.strip())
+        else:
+            entries.append([line.strip()])
+    texts = [" ".join(part for part in entry if part).strip() for entry in entries]
+    return [t for t in texts if t and not re.search(r"#\d+", t) and not _NONE_ENTRY.match(t)]
 
 
 class _Unreadable(Exception):
@@ -219,10 +256,32 @@ class _Facts:
                 "url": latest.get("html_url")}  # fmt: skip
 
     def decision_blocker(self, comments: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._blocker(comments, "decision")
+
+    def dependency_blocker(self, comments: list[dict[str, Any]], refinement: dict[str, Any]) -> dict[str, Any]:
+        """Like ``decision_blocker``; a passing refine summary or a trusted ``Unblocked`` comment after it lifts it too (#529)."""
+
+        found = self._blocker(comments, "dependency")
+        if found["state"] == "open":
+            lifted = [
+                str(c.get("created_at") or "") for c in comments
+                if self.trusted(c) and str(c.get("created_at") or "") > str(found["created_at"] or "")
+                and "## Blocked Declaration" not in str(c.get("body") or "")
+                and _UNBLOCKED_COMMENT.search(str(c.get("body") or ""))
+            ]  # fmt: skip
+            if lifted:
+                found = {**found, "state": "unblocked", "unblocked_at": max(lifted)}
+        if found["state"] == "open" and refinement.get("refine_check") == "pass":
+            summary_at = str(refinement.get("created_at") or "")
+            if summary_at > str(found["created_at"] or ""):
+                found = {**found, "state": "unblocked", "unblocked_at": summary_at}
+        return found
+
+    def _blocker(self, comments: list[dict[str, Any]], kind: str) -> dict[str, Any]:
         blocker = None
         for comment in comments:
             body = str(comment.get("body") or "")
-            if self.trusted(comment) and "## Blocked Declaration" in body and "Type: decision" in body:
+            if self.trusted(comment) and "## Blocked Declaration" in body and f"Type: {kind}" in body:
                 if blocker is None or str(comment.get("created_at") or "") >= str(blocker.get("created_at") or ""):
                     blocker = comment
         if blocker is None:
@@ -274,7 +333,7 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
     entry: dict[str, Any] = {
         "number": number, "title": issue.get("title"), "type": kind, "prio": _label(_labels(issue), "prio:"),
         "epic": parent, "feature": None, "criterion_prefix": None, "record": None, "refinement": None,
-        "decision_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
+        "decision_blocker": None, "dependency_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
         "stale": False, "reasons": [],
     }  # fmt: skip
     if "body" not in issue:
@@ -333,7 +392,17 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
                 reasons.append(f"blocked-by #{item['number']}")
             elif item["state"] != "closed":
                 reasons.append(f"unresolvable #{item['number']}")
-        entry["ready"] = refined and deps["state"] == "read" and all(i["state"] == "closed" for i in deps["items"])
+        unnumbered = unnumbered_dependencies(parse_sections(body)) if deps["state"] == "read" else []
+        if unnumbered:
+            reasons.append("dependency-without-issue")
+        entry["dependency_blocker"] = facts.dependency_blocker(comments, entry["refinement"])
+        dependency_blocked = entry["dependency_blocker"]["state"] == "open"
+        if dependency_blocked:
+            reasons.append("open-dependency-blocker")
+        entry["ready"] = (
+            refined and deps["state"] == "read" and all(i["state"] == "closed" for i in deps["items"])
+            and not unnumbered and not dependency_blocked
+        )
     entry["reasons"] = reasons
     return entry
 

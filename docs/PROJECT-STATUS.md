@@ -263,6 +263,8 @@ Exactly five blocker types are recognised:
 | **conflict** | A file conflict or WIP overlap with another active story prevents progress. |
 | **resource** | A required resource (token budget, execution environment, tool access) is unavailable. |
 
+The scheduler reads an open `Type: dependency` declaration on a Story, Task or Bug (`dependency_blocker` in `hpw dispatcher facts`): the story is not ready and is not started until the PO's `/unblock` line or a later passing refine Session Summary lifts it.
+
 ### Declaration format
 
 When declaring a blocker, post a structured GitHub comment on the issue or PR using this format exactly:
