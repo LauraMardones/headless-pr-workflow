@@ -201,22 +201,17 @@ def test_session_environment_keeps_gh_token_and_drops_anthropic_variables():
     assert [k for k in seen if k.startswith("ANTHROPIC_")] == []
 
 
-# ── Command files name the command (AC6) ────────────────────────────────────
+# ── Command files no longer write a status (#477) ───────────────────────────
 
 COMMAND = "scripts/set-project-status"
-STATUS_TEXT = re.compile(r"board status|story status|Project/status field|Project status", re.IGNORECASE)
 
 
-def test_every_command_that_writes_a_status_names_the_command():
-    checked = []
+def test_no_command_file_writes_a_status():
     for path in sorted((REPO_ROOT / ".claude" / "commands").glob("*.md")):
         text = path.read_text(encoding="utf-8")
-        if path.name in ("spec.md", "verify-closure.md"):
-            continue  # these never write a status
-        if re.search(r"set the story status|move the GitHub Project/status field|Board status writes", text, re.IGNORECASE):
-            checked.append(path.name)
-            assert COMMAND in text, f"{path.name} writes a board status but does not name {COMMAND}"
-    assert {"implement.md", "review.md", "merge.md", "refine-story.md", "refine-bug.md"} <= set(checked)
+        assert not re.search(
+            r"set the story status|move the GitHub Project/status field|Board status writes|set-project-status",
+            text, re.IGNORECASE), f"{path.name} still writes a board status"
 
 
 def test_documented_in_dispatcher_config():
