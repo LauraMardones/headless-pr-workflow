@@ -511,7 +511,6 @@ def claim(
     own = [(m.order, n) for n, st in states.items() for m in st.marks
            if m.action == "claim" and m.fields.get("run") == run]  # fmt: skip
     candidates = queue
-    replaying = False
     if own:
         issue_no = max(own)[1]
         st = states[issue_no]
@@ -533,7 +532,7 @@ def claim(
         if st.state == "expired":
             # The lease ran out, so a new run may already treat the attempt as interrupted: the replay takes the
             # claim rule's recovery path for this item only and starts only on a newly won attempt.
-            candidates, replaying = [item], True
+            candidates = [item]
         else:
             # A replay starts the session too, so it re-reads the remote resume facts and asks the hook again, as
             # a new claim does; a refusal keeps the claim.

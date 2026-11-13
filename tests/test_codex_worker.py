@@ -634,6 +634,27 @@ def test_an_owner_record_that_lands_after_the_interruption_reports_not_owner(gh,
     assert late.result == "not-owner" and late.exit_code == 1 and "stop the session" in late.error
 
 
+@pytest.mark.parametrize("operation", ["progress", "finish"])
+def test_a_record_whose_read_back_fails_is_unreadable_not_written(gh, settings, monkeypatch, operation):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    real, reads = codex_worker._owned, []
+
+    def owned(*args, **kwargs):
+        reads.append(1)
+        if len(reads) > 1:
+            raise GatewayError("read comments on #5", "HTTP 502")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(codex_worker, "_owned", owned)
+    if operation == "progress":
+        result = owner_progress(gh, settings)
+    else:
+        result = finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H1, settings=settings, env={},
+                        config=CONFIG, now=lambda: gh.at)
+    assert result.result == "unreadable" and result.exit_code == 3 and len(reads) == 2
+
+
 def test_a_replay_whose_own_session_renewed_the_lease_recovers_after_a_later_expiry(gh, settings):
     gh.story(5)
     do_claim(gh, settings)
