@@ -86,15 +86,31 @@ This Epic never closes, so its criteria are standing outcomes. Each is verified 
 
 ## Checked Against
 
-- <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
+- `specs/README.md` → Definition of Ready ("an outcome the PO can verify at Epic closure") and ADR-008 item 2 — conflict in wording: this Epic never closes. Resolved: each criterion is verified at a closure the PO confirms, #504's or the second Feature's. No change to `specs/README.md`.
+- ADR-008 items 3, 5 and 7 — no conflict. The Epic issue was created before the spec file, scope changes only by spec PR, and the Epic issue is an index.
+- ADR-009 item 3 (criteria traced to their parent) — no conflict. The catch-all Feature's criteria serve E1 and E2, the second Feature's serve E3. Catch-all stories trace to the catch-all Feature's criteria, bounded by M1–M10.
+- ADR-009 item 4 (refinement makes no product decision) — no conflict. The line under Decisions makes the classification mechanical, and every finding outside it reaches the PO.
+- ADR-009 item 7 (re-refinement after a scope change) — no conflict. Consequence: each scope change to this spec makes every refined catch-all issue stale, and the Tech Lead re-refines them.
+- ADR-010 (status from facts, deterministic scheduling) — no conflict. P1 uses the scheduler's existing ordering, and no periodic trigger with stored state is added.
+- ADR-011 (decision documents approved by the PO's merge) — no conflict. The PO merges this spec, and M9 keeps decision documents out of the catch-all.
+- Spec #504 decisions of 2026-11-08 and 2026-11-09 — no conflict. M1 restates the closed-Epic bug decision, the allowed-maintenance list is written here as #504 decided, and "slask" is mapped to "catch-all".
+- `.claude/commands/verify-closure.md` (evaluates any Epic or Feature it is given) — conflict. Resolved: the second Feature makes it refuse this Epic and its catch-all Feature.
+- `scripts/dispatcher-invoke.sh` (`feature_closure_confirmation` and `epic_closure_approval` when every story or Feature is Done) — conflict. Resolved: the second Feature exempts this Epic and its catch-all Feature.
+- `src/headless_pr_workflow/dispatcher/facts.py` and `scheduler.py` (`no-parent`, `no-feature`, Epic priority first, one ready buffer across Epics) — no conflict. Catch-all issues carry `Parent epic:` and `Feature group:`, and P1 follows the existing sort key.
+- `docs/ROADMAP.md` milestones and `scripts/refine-check` — no conflict. `scripts/refine-check` does not check a milestone.
 
 ## Delegated to the Tech Lead
 
-- <Choices refinement may make on its own, e.g. slicing, technical approach, ordering.>
+- Slicing the catch-all Feature and the second Feature, their Feature criteria, titles and criterion prefixes, and the order of their stories.
+- Classifying each catch-all finding against M1–M10 by the line under Decisions.
+- The `prio:` and `executor:` labels of each catch-all issue; `prio:` orders only among catch-all issues.
+- How the dispatcher and `/verify-closure` read the constants, and the wording of the refusal.
+- Renaming the titles and bodies of #504 and #513 to #517, and the module name `catch_all.py` in #516 and #517 (decided above).
 
 ## Dependencies
 
-- <Other Epics or external work this depends on, or "None".>
+- #504 — E1 and E2 are verified through its closure evidence. Order: this spec merges, the Tech Lead creates the catch-all Feature, #504's F1 (#513) and F2 (#514) can start, #504 closes, E1 and E2 are verified. A chain, not a cycle.
+- #516 and #517 need this Epic's number (#530) and the catch-all Feature's number as constants in `src/headless_pr_workflow/catch_all.py`. The Feature's number exists only after the Epic refinement.
 
 ## Open Questions
 
