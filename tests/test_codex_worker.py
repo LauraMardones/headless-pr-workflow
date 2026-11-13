@@ -256,6 +256,71 @@ def test_a_replay_asks_the_eligibility_hook_again_and_keeps_the_claim_on_refusal
     assert later.result == "continued" and later.fields["invocation"]["attempt"] == 1
 
 
+def test_a_replay_resumes_the_branch_its_session_pushed_before_recording_progress(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    posts = len(gh.posts())
+    gh.branches[BRANCH] = H1
+    gh.add_pr(12, BRANCH, H1, body="Closes #5")
+    again = do_claim(gh, settings)
+    assert again.result == "continued" and again.fields["invocation"]["attempt"] == 1
+    assert again.fields["invocation"]["resume"] == {"pr": 12, "branch": BRANCH, "head": H1}
+    assert len(gh.posts()) == posts and list(gh.prs) == [12]
+
+
+def test_a_replay_resumes_from_the_current_remote_head_not_the_recorded_one(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.branches[BRANCH] = H1
+    gh.add_pr(12, BRANCH, H1, body="Closes #5")
+    record_progress(gh, REPO, 5, 1, "run-a", branch=BRANCH, head=H1, pr=12, settings=settings, env={}, config=CONFIG,
+                    now=lambda: gh.at)
+    gh.branches[BRANCH] = H2
+    gh.ancestors.add((H1, H2))
+    again = do_claim(gh, settings)
+    assert again.result == "continued" and again.fields["invocation"]["resume"] == {"pr": 12, "branch": BRANCH, "head": H2}
+
+
+@pytest.mark.parametrize("change, reason", [
+    (lambda gh: gh.ancestors.clear(), "head-diverged"),
+    (lambda gh: gh.branches.clear(), "branch-missing"),
+    (lambda gh: gh.prs[12].update(state="closed"), "pr-closed"),
+    (lambda gh: gh.prs.clear(), "pr-missing"),
+    (lambda gh: gh.add_pr(40, "claude/issue-5-x", H3, body="Closes #5"), "foreign-pr"),
+])
+def test_a_replay_on_resume_facts_that_no_longer_hold_starts_nothing_and_keeps_the_claim(gh, settings, change, reason):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.branches[BRANCH] = H1
+    gh.add_pr(12, BRANCH, H1, body="Closes #5")
+    record_progress(gh, REPO, 5, 1, "run-a", branch=BRANCH, head=H1, pr=12, settings=settings, env={}, config=CONFIG,
+                    now=lambda: gh.at)
+    gh.branches[BRANCH] = H2
+    gh.ancestors.add((H1, H2))
+    change(gh)
+    gate = Gate()
+    again = do_claim(gh, settings, gate=gate)
+    assert again.result == "waiting" and again.exit_code == 1 and "invocation" not in again.fields
+    assert again.fields["attempt"] == 1 and again.fields["skipped"][0]["reason"] == reason and gate.calls == []
+    assert [(m.fields["attempt"], m.fields["reason"]) for m in gh.marks(5) if m.action == "wait"] == [("1", reason)]
+    assert len(claims(gh)) == 1 and not [m for m in gh.marks(5) if m.action == "end"]
+
+
+def test_a_replay_that_cannot_read_the_remote_branches_is_unreadable(gh, settings, monkeypatch):
+    gh.story(5)
+    do_claim(gh, settings)
+    posts = len(gh.posts())
+
+    def broken(prefix):
+        raise GatewayError("list branches", "HTTP 502")
+
+    monkeypatch.setattr(gh, "matching_branches", broken)
+    gate = Gate()
+    again = do_claim(gh, settings, gate=gate)
+    assert again.result == "unreadable" and again.exit_code == 3 and "invocation" not in again.fields
+    assert gate.calls == [] and len(gh.posts()) == posts
+
+
 def test_a_retry_after_a_lost_claim_response_asks_the_eligibility_hook_again(gh, settings):
     gh.story(5)
     gh.post_modes = ["lost"]
