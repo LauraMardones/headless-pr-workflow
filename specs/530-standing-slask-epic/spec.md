@@ -54,6 +54,26 @@ Out:
 **Chosen:** "catch-all": the catch-all Epic, the catch-all Feature, a catch-all issue, and the module `src/headless_pr_workflow/catch_all.py`. Spec #504 keeps "slask" as merged, and this spec maps the two words once. The Tech Lead renames the titles and bodies of #504 and #513 to #517 when refining them. The folder and branch slug keep `slask`, since a slug does not change once pushed.
 **Rejected:** Keeping "slask" — a Swedish word in an English repository. "inbox" — work is refined and implemented there, not only held. "triage" — collides with the sort step (#514). "backlog" — collides with `PO status: Backlog`. "KTLO" or "sustaining" — jargon, and it does not cover findings that wait for the PO.
 
+### Allowed maintenance and where the line goes — 2026-11-13
+
+**Chosen:** A catch-all finding is allowed maintenance only if the fix changes no behaviour that a merged spec, an accepted ADR or a `docs/*.md` rule describes, or restores behaviour one of them already describes. A change to a command's output, exit codes, flags or contract counts as behaviour. Anything else reaches the PO as spec #504 describes. Applied to the kinds of finding expected:
+
+- **M1** A bug that breaks an acceptance criterion of a closed Epic's merged spec — allowed (spec #504, 2026-11-08).
+- **M2** A bug that breaks a rule in an accepted ADR or a `docs/*.md` rule that no open Epic owns — allowed.
+- **M3** Flaky or broken tests, and test infrastructure — allowed.
+- **M4** Documentation that contradicts an accepted ADR, a merged spec, or code that follows them — allowed; the documentation is corrected.
+- **M5** Documentation that contradicts code when no ADR or spec settles which is right — to the PO.
+- **M6** Patch and minor updates of dependencies and GitHub Actions — allowed.
+- **M7** Major updates and new dependencies — to the PO.
+- **M8** Refactoring — allowed only as part of the fix of an allowed finding that needs it; a refactoring on its own goes to the PO.
+- **M9** Any change to `docs/MERGE-POLICY.md`, `docs/required-check-policy.json`, the approval gate, an ADR or a spec — never allowed, whatever M1–M8 say.
+- **M10** A security fix that needs a major update — to the PO, as M7.
+
+**Rejected:**
+- A list of kinds without the general line — every kind not listed would need interpretation in refinement.
+- M8: every refactoring allowed — at P1 it has no natural bound, "no behaviour change" cannot be checked before the work is done, and a broad refactoring holds back other stories through the scheduler's file-overlap rule. Every refactoring to the PO — a refactoring that an allowed fix needs would block that fix.
+- M10: a security exception to M7 — catch-all work still queues behind the P1 Epics, so it saves little time, a major update is the change most likely to break CI, and the agent itself would judge what counts as a security fix. Fixes inside the pinned major version (`@v4`) already arrive with the moving tag.
+
 ## Checked Against
 
 - <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
