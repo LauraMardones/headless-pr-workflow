@@ -32,10 +32,10 @@ Required behavior:
 5. Keep the work strictly within the issue scope and acceptance criteria.
 6. If the issue is dependency-heavy, verify that hard dependencies are complete before implementation starts.
 7. Run the WIP pre-flight check defined in `docs/PROJECT-STATUS.md` before pulling the story:
-   - skip this check when the story already has an open PR linked to it (continuing work, or fixing review blockers under steps 10 and 17): the check applies only when a story is pulled before any PR exists, and this story already holds its place within the WIP limit
+   - skip this check when the story is already "In implementation" and has an open PR linked to it (continuing work, or fixing review blockers under steps 10 and 17): the check applies only when a story is pulled from "Ready for implementation", and this story already holds its place within the WIP limit
    - read the candidate story's `## Files affected` section
-   - scan open stories that have an open linked PR in progress (a Draft PR, or a Ready PR that review sent back)
-   - stop if 2 or more stories are already in implementation
+   - scan open stories with status "In implementation"
+   - stop if 2 or more stories are already "In implementation"
    - stop if any active story declares overlapping files
    - report any WIP limit failure or file overlap as a conflict blocker using the Blocked Status Protocol
 8. If you discover blocked prerequisites, unclear acceptance criteria, scope drift, unresolved dependency decisions, WIP limit violations, or file ownership conflicts:
