@@ -318,6 +318,13 @@ def test_blocked_or_failed_story_does_not_hold_the_feature_back(story):
     assert chosen(d) == ("refine", 21, 4, "not-refined")
 
 
+@pytest.mark.parametrize("reason", ["dependency-without-issue", "open-dependency-blocker"])
+def test_refined_story_with_a_dependency_reason_is_not_started_and_counts_as_waiting(reason):
+    d = decide([epic()], [feature(20), issue(30, ready=False, reasons=[reason])])
+    assert chosen(d) is None or chosen(d)[:2] != ("implement", 30)
+    assert d.counts["ready"] == 0 and d.counts["waiting"] == 1
+
+
 def test_other_stories_do_not_hold_the_feature_back():
     items = [feature(20), feature(21, refined=False), feature(22, refined=False, stale=False),
              issue(31, refined=False), issue(32, refined=False, feature=22), issue(33, refined=False, parent=11, feature=24),
