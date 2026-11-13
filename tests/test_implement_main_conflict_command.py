@@ -23,7 +23,7 @@ def test_conflict_check_precedes_the_final_push_and_uses_a_merge() -> None:
 def test_unresolvable_conflict_keeps_draft_and_reports_the_blocker() -> None:
     step = step_16()
 
-    assert "keep the PR Draft and the story \"In implementation\"" in step
+    assert "keep the PR Draft, and report" in step
     assert "`merge conflict with main on PR #<n>`" in step
     assert "generate the handoff with `--next implementation`" in step
     assert "without `--next review`" not in step
