@@ -27,10 +27,14 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <An outcome the PO can verify at Epic closure.>
-  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
-- **E2:** <…>
-  - **Verified by:** <…>
+This Epic never closes, so its criteria are standing outcomes. Each is verified at a closure the PO confirms: #504's, or that of the second Feature under this Epic.
+
+- **E1:** A catch-all issue filed with the lines spec #504 decides is scheduled like any other issue. It is never skipped as `no-feature` or `no-parent`.
+  - **Verified by:** #504's closure evidence: a catch-all issue under this Epic's catch-all Feature refined and implemented by the scheduler, and the scheduler log for it with no `no-feature` or `no-parent` skip.
+- **E2:** A catch-all finding is refined without the PO only when it is allowed maintenance (M1–M10 under Decisions). Every other finding reaches the PO.
+  - **Verified by:** #504's closure evidence (its E2 proof): one allowed finding refined with no PO action, and one finding that is not allowed, such as a refactoring on its own, raised as a decision blocker.
+- **E3:** The PO never gets a closure request or a closure verification for this Epic or its catch-all Feature, even when the catch-all is empty.
+  - **Verified by:** the second Feature's closure evidence: the catch-all Feature with every issue closed, no `feature_closure_confirmation` or `epic_closure_approval` notification for it or for this Epic, and `/verify-closure 530` refusing with a stated reason.
 
 ## Decisions
 
@@ -73,6 +77,12 @@ Out:
 - A list of kinds without the general line — every kind not listed would need interpretation in refinement.
 - M8: every refactoring allowed — at P1 it has no natural bound, "no behaviour change" cannot be checked before the work is done, and a broad refactoring holds back other stories through the scheduler's file-overlap rule. Every refactoring to the PO — a refactoring that an allowed fix needs would block that fix.
 - M10: a security exception to M7 — catch-all work still queues behind the P1 Epics, so it saves little time, a major update is the change most likely to break CI, and the agent itself would judge what counts as a security fix. Fixes inside the pinned major version (`@v4`) already arrive with the moving tag.
+
+### No periodic maintenance round for now — 2026-11-13
+
+**Chosen:** No periodic or counted trigger for maintenance work. Refactorings and other findings that are not allowed maintenance reach the PO as spec #504 describes; the PO batches them by leaving the decision blockers unanswered until it suits, or by taking them at Epic closure (#504 E3), and starts a maintenance Epic with `/spec` when the list grows. An unanswered decision blocker is not refined and takes no ready-buffer slot.
+**Rejected:** A maintenance round every fifth Epic or every third month, whichever comes first — a counted or timed trigger needs scheduler logic and stored state (ADR-010), and agents have no context-switch cost that batching the work would save. Letting refactorings wait without a decision blocker — changes spec #504's rule that every other finding reaches the PO as a decision blocker.
+**Revisit:** if unanswered refactoring decision blockers grow many, or often stay open longer than one Epic, consider a periodic maintenance round as a scope change.
 
 ## Checked Against
 
