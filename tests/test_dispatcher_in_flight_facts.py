@@ -137,7 +137,9 @@ def test_ac2_each_failing_gate_keeps_the_pr_out_of_the_merge_step(tmp_path, line
     assert not _gates_pass(tmp_path, f"Merge gate: {line}", 1)
 
 
-@pytest.mark.parametrize("mergeable", ["yes", "no", "unknown"])
+@pytest.mark.parametrize("mergeable", ["yes", "fail(conflicting)", "warn(unknown)",
+                                        "fail(wrong-base)", "fail(draft)",
+                                        "warn(expected-base-unavailable)"])
 def test_ac2_mergeability_is_left_to_the_merge_step(tmp_path, mergeable):
     line = ("Merge gate: policy=pass(present_non_required), checks=absent-ok, approval=codex-review, "
             f"threads=none, mergeable={mergeable}, head=aaaaaaa")
@@ -160,7 +162,7 @@ def _gates_pass(tmp_path, line: str, rc: int) -> bool:
 def test_ac2_unknown_mergeability_still_waits(d):
     d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY, owned=True, mergeable=None, mergeable_state="unknown")
-    d.set_gates(PR, "pass")
+    d.set_gates(PR, "unknown")
 
     proc = d.resume()
 

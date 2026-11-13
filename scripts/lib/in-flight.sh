@@ -72,7 +72,7 @@ inflight_gates_pass() {
     line=$("$script" --pr "$pr" --repo "$REPO" 2>/dev/null) || rc=$?
     [[ $rc -le 1 ]] || return 1
     line=$(grep -m1 '^Merge gate:' <<< "$line") || return 1
-    local re='policy=pass\([A-Za-z_]+\), checks=(pass|absent-ok), approval=(formal|codex-review|separate-session), threads=none, mergeable=[A-Za-z-]+, head=([0-9a-fA-F]{7})$'
+    local re='policy=pass\([A-Za-z_]+\), checks=(pass|absent-ok), approval=(formal|codex-review|separate-session), threads=none, mergeable=[^,]+, head=([0-9a-fA-F]{7})$'
     [[ "$line" =~ $re ]] || return 1
     gate_head="${BASH_REMATCH[3],,}"
     [[ "$head" == "$gate_head"* ]]

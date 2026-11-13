@@ -352,7 +352,8 @@ if [[ -z "$mode" ]]; then
 fi
 case "$mode" in
     pass)        echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=$head" ;;
-    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=no, head=$head"; exit 1 ;;
+    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=fail(conflicting), head=$head"; exit 1 ;;
+    unknown)     echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=warn(unknown), head=$head"; exit 1 ;;
     unreadable)  echo "merge-gate-summary: could not read the pull request" >&2; exit 2 ;;
     *)           echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=none, threads=none, mergeable=yes, head=$head"; exit 1 ;;
 esac
@@ -367,7 +368,8 @@ head=$(jq -r --argjson n "$pr" '[.[] | select(.number == $n)][0].head.sha[0:7] /
 mode=$(jq -r --arg n "$pr" '.[$n] // "fail"' "$GATES_FILE" 2>/dev/null || echo fail)
 case "$mode" in
     pass)        echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=$head" ;;
-    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=no, head=$head"; exit 1 ;;
+    conflicting) echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=fail(conflicting), head=$head"; exit 1 ;;
+    unknown)     echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=warn(unknown), head=$head"; exit 1 ;;
     unreadable)  echo "merge-gate-summary: could not read the pull request" >&2; exit 2 ;;
     *)           echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=none, threads=none, mergeable=yes, head=$head"; exit 1 ;;
 esac
