@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, read_facts
 from .gateway import Gateway, GatewayError
 from .scheduler import _refine_gate
-from .write import Result, log
+from .write import Result, _po_unblocked_after, log
 
 BLOCK = "status"
 OPERATION = "read"
@@ -146,7 +146,7 @@ def _resolves(body: str) -> bool:
     return "## Blocked Declaration" not in body and _UNBLOCKED_LINE.search(body) is not None
 
 
-def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
+def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]], *, po_unblock: bool = False) -> bool:
     """An open Blocked Declaration of type dependency, external, conflict or resource (see the command page)."""
 
     declared = ""
@@ -158,10 +158,10 @@ def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
             declared = max(declared, str(comment.get("created_at") or ""))
     if not declared:
         return False
-    return not any(
+    return not ((po_unblock and _po_unblocked_after(comments, facts.po_login, declared)) or any(
         facts.trusted(c) and str(c.get("created_at") or "") > declared and _resolves(str(c.get("body") or ""))
         for c in comments
-    )
+    ))
 
 
 def _epic_refined(entry: Mapping[str, Any]) -> bool:

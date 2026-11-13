@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler`` and ``status``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status`` and ``in-flight``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from .board_sync import sync_board
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
+from .in_flight import plan as plan_in_flight
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .scheduler import next_action
 from .state import FILE_NAMES, read_pending, read_state, write_state
@@ -113,8 +114,18 @@ def build_parser() -> argparse.ArgumentParser:
     s_next.add_argument("--repo", required=True)
     s_next.add_argument("--facts-file")
     s_next.add_argument("--in-implementation", type=_issue_list, default=[])
+    s_next.add_argument("--in-flight", type=_issue_list, default=[])
     s_next.add_argument("--exclude", type=_issue_list, default=[])
     s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
+    in_flight = blocks.add_parser("in-flight", add_help=False)
+    in_flight_ops = in_flight.add_subparsers(dest="operation", parser_class=_Parser)
+    i_plan = in_flight_ops.add_parser("plan", add_help=False)
+    i_plan.add_argument("--repo", required=True)
+    i_plan.add_argument("--input", required=True)
+    i_plan.add_argument("--dispatcher", default="")
+    i_plan.add_argument("--bookkeeping", default="")
+    i_plan.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     status = blocks.add_parser("status", add_help=False)
     status_ops = status.add_subparsers(dest="operation", parser_class=_Parser)
@@ -187,14 +198,15 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker", "state", "facts", "scheduler", "status") or not args.operation:
+    if args.block not in ("write", "marker", "state", "facts", "scheduler", "status", "in-flight") or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ... "
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
-            "| hpw dispatcher status read|sync ...")
+            "| hpw dispatcher status read|sync ... "
+            "| hpw dispatcher in-flight plan ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -237,11 +249,12 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler", "status") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler", "status",
+                                                    "in-flight") else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler", "status") else "write"
+    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler", "status", "in-flight") else "write"
 
 
 def _emit(result: Result) -> int:
@@ -287,7 +300,17 @@ def _run_scheduler(args: argparse.Namespace, gateway: Gateway) -> int:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             facts = {"result": "unreadable", "error": f"read facts file: {exc}"}
     return _emit(next_action(None if facts is not None else gateway, args.repo,
-                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts))  # fmt: skip
+                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts,
+                             in_flight=args.in_flight))  # fmt: skip
+
+
+def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        rows = json.loads(Path(args.input).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return _emit(Result("plan", "unreadable", error=f"read input file: {exc}", block="in-flight"))
+    return _emit(plan_in_flight(rows, dispatcher=args.dispatcher.strip(), bookkeeping=args.bookkeeping.strip(),
+                                po=settings.po_login))  # fmt: skip
 
 
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
@@ -314,6 +337,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _emit(read_facts(gateway, args.repo, epic=args.epic))
     if args.block == "scheduler":
         return _run_scheduler(args, gateway)
+    if args.block == "in-flight":
+        return _run_in_flight(args, settings)
     if args.block == "status":
         if args.operation == "sync":
             return _emit(sync_board(gateway, args.repo, epic=args.epic, attempts=args.attempts, dry_run=args.dry_run,

@@ -8,10 +8,13 @@
 #
 # Source this file and call:
 #
-#   scheduler_next <in-implementation list> [--dry-run]
+#   scheduler_next <in-implementation list> <in-flight list> [--dry-run]
 #
-# <in-implementation list> is the comma-separated issue numbers the dispatcher
-# treats as in flight ("" for none). The scheduler's own `[SCHEDULER] ...`
+# Both lists are comma-separated issue numbers ("" for none), found from pull
+# request facts by scripts/lib/in-flight.sh (issue #475): <in-implementation
+# list> is the stories with a draft linked PR or a fix round due (they count
+# for the WIP limit and the file overlap), <in-flight list> every other story
+# with work in flight (never started, not counted). The scheduler's own `[SCHEDULER] ...`
 # lines (the action, idle, unreadable and every skipped entry, such as
 # no-merged-spec) go to stderr unchanged, so they reach the run log.
 #
@@ -26,9 +29,10 @@
 # Requires: bash 4+, jq, HPW_BIN and REPO set by the caller.
 
 scheduler_next() {
-    local in_impl="$1" out rc=0
-    shift
-    local -a args=(dispatcher scheduler next --repo "$REPO" --in-implementation "$in_impl" "$@")
+    local in_impl="$1" in_flight="$2" out rc=0
+    shift 2
+    local -a args=(dispatcher scheduler next --repo "$REPO" --in-implementation "$in_impl"
+                   --in-flight "$in_flight" "$@")
     out=$("$HPW_BIN" "${args[@]}") || rc=$?
     SCHEDULER_RESULT=$(jq -r 'if type == "object" then (.result // "") else "" end' <<< "$out" 2>/dev/null) \
         || SCHEDULER_RESULT=""

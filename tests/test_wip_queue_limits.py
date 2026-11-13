@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.dispatcher_fakes import BASH, Dispatcher, needs_tools
+from tests.hpw_dispatcher_route import fake_in_flight_route
 from tests.script_tools import host_env, script_path, windows_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -223,10 +224,15 @@ def test_poll_does_not_hide_the_flow_review_error(tmp_path):
     bin_dir.mkdir()
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
     curl = bin_dir / "curl"
-    curl.write_text('#!/usr/bin/env bash\ncat "$BOARD_FILE"\n', encoding="utf-8", newline="\n")
+    # The board for flow-review.sh's GraphQL query; the REST lists of the poll (#475) are empty.
+    curl.write_text('#!/usr/bin/env bash\ncase "$*" in *graphql*) cat "$BOARD_FILE" ;; *) echo "[]" ;; esac\n',
+                    encoding="utf-8", newline="\n")
     curl.chmod(0o755)
+    hpw = bin_dir / "hpw"  # no account and no scheduler: the poll warns and goes on to flow-review.sh
+    hpw.write_text('#!/usr/bin/env bash\n' + fake_in_flight_route() + 'exit 1\n', encoding="utf-8", newline="\n")
+    hpw.chmod(0o755)
     env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
-           "BOARD_FILE": (tmp_path / "board.json").as_posix(),
+           "HPW_BIN": hpw.as_posix(), "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(), **windows_env()}
     proc = subprocess.run([BASH, POLL.as_posix(), "--repo", "o/r", "--dry-run"], env=env,
                           capture_output=True, text=True, encoding="utf-8", timeout=120)

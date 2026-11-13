@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # scripts/dispatcher-poll.sh
 #
-# Reads the work in flight from the GitHub Projects v2 board and asks the
-# scheduler (`hpw dispatcher scheduler next`, issue #473) for the next
-# new-work action, then outputs one JSON object the workflow decides from.
-# New work never comes from a board status: the poll reads no "Ready for
-# implementation" or "Ready for refinement" status (issue #474, ADR-010).
+# Finds the work in flight from pull request facts and asks the scheduler
+# (`hpw dispatcher scheduler next`, issue #473) for the next new-work action,
+# then outputs one JSON object the workflow decides from. No work, new or in
+# flight, comes from a board status: the poll reads no board column (issues
+# #474 and #475, ADR-010). Moving a card starts nothing.
 # Contract: issue #170 (initial implementation), issue #180 (Red flow health
 #           notification), issue #474 (new work from the scheduler; the
-#           ready-for-refinement notification of issue #182 is retired)
+#           ready-for-refinement notification of issue #182 is retired),
+#           issue #475 (work in flight from pull request facts)
 #
 # Usage:
 #   GH_TOKEN=<token> bash scripts/dispatcher-poll.sh --repo <owner/repo> [--dry-run]
@@ -30,7 +31,7 @@
 #   reach the run log. No comment is posted.
 #   Side-effect log lines appear only on stderr; stdout JSON output is unaffected.
 #
-# Requirements: bash 4+, curl, jq
+# Requirements: bash 4+, curl, jq (and gh for scripts/merge-gate-summary)
 #
 # Output (stdout):
 #   JSON object:
@@ -54,43 +55,44 @@
 #   the poll's exit code.
 #   evidence_pending is true when a story is labelled evidence:pending (issue
 #   #348) or the label cannot be read: a failed read counts as pending.
+#   in_merge (issue #475) lists the stories in the merge step (an open,
+#   non-draft linked PR whose merge gates pass on its current head, ignoring
+#   mergeability) and the stories to finish (no open linked PR, a merged linked
+#   PR); in_implementation lists the fix rounds due and the pending hand-offs
+#   of review-loop stories. Both come from scripts/lib/in-flight.sh.
 #   resumable is true when any of in_merge, in_implementation, review_due,
 #   conflict_due or owner_missing_due is not empty, or evidence_pending is true;
 #   the workflow runs the invoke step for it (issue #293).
-#   review_due (issue #315) lists the stories "In review" that
-#   dispatcher-invoke.sh reviews with a /review session: one executor: label
-#   with a REVIEW_EXECUTOR_ROUTING row (scripts/lib/review-routing.sh) and an
-#   open, non-draft PR that closes the story.
+#   review_due (issue #315) lists the stories with an open, non-draft linked
+#   PR outside the merge step that dispatcher-invoke.sh reviews with a /review
+#   session: one executor: label with a REVIEW_EXECUTOR_ROUTING row
+#   (scripts/lib/review-routing.sh).
 #   conflict_due (issue #409, issue #449) lists the review-loop stories
-#   "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) that
-#   are owed a conflict round by the rule of scripts/lib/conflict-round.sh;
+#   (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) with such a PR
+#   that are owed a conflict round by the rule of scripts/lib/conflict-round.sh;
 #   dispatcher-invoke.sh starts the round.
-#   owner_missing_due (issue #449) lists the review-loop stories "In review"
+#   owner_missing_due (issue #449) lists those review-loop stories
 #   whose clean PR head has no merge-owner evidence and no missing-merge-owner
 #   blocker yet, by the same rule; dispatcher-invoke.sh posts that blocker.
 #
 # Prototype divergences from expected behaviour:
-#   D1  Pagination: fetches all project items via cursor pagination, 100 per
-#       page, capped at 50 pages (5000 items) as a runaway-loop safety valve.
-#       A repo with >5000 project items still produces incomplete results;
-#       a warning is logged to stderr if the cap is hit.
-#   D2  Project auto-detection: uses the first linked GitHub Projects (v2)
-#       board. Repos with multiple linked projects may detect the wrong board.
-#   D3  Label fetch: executor labels are fetched from the GraphQL project
-#       item's linked issue. Items with no linked issue (draft notes, PR
-#       items) are skipped entirely.
+#   D1  Pagination: every REST list is read page by page (100 per page) until
+#       a short page; an unreadable page stops the poll with exit 1.
+#   D2  The stories are the open issues with a type:story, type:task or
+#       type:bug label (or that native issue type); the board is not read.
+#   D3  The linked PR is the first open PR whose body says Closes, Fixes or
+#       Resolves #<n> (a Draft PR counts, a closed one does not).
 #   D4  No executor invocation or GitHub state mutation occurs in any run.
 #       The --dry-run flag adds a header line to stderr and suppresses the
 #       Slack notification.
-#   D5  Every status filter is applied in jq against the same accumulated
-#       items list, so full-board pagination is done once per poll, not once
-#       per status. The statuses read are those of work in flight ("In merge",
-#       "In implementation", "In review"); finding them from PR facts is #475.
+#   D5  The work in flight costs one read of the open PRs and the open
+#       issues, one of the closed PRs, one merge-gate evaluation per open
+#       non-draft linked PR, and the comments of a review-loop story and its
+#       PR, or of a story with comments and no PR (its blockers).
 #   D6  The scheduler reads its own facts (`hpw dispatcher facts read`), so a
 #       poll makes a second set of GitHub reads; it needs no model.
-#   D7  Duplicate GitHub API call: flow-review.sh re-queries the board
-#       independently. Acceptable at current scale; future refactor can share
-#       the query result.
+#   D7  flow-review.sh reads the board independently for the flow health
+#       signal only; it chooses no session.
 
 set -euo pipefail
 
@@ -136,9 +138,6 @@ done
 
 # ─── Variables ────────────────────────────────────────────────────────────────
 
-OWNER="${REPO%%/*}"
-REPO_NAME="${REPO##*/}"
-GRAPHQL="https://api.github.com/graphql"
 REST="https://api.github.com"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,179 +152,36 @@ source "$SCRIPT_DIR/lib/conflict-round.sh"
 # The scheduler call, shared with dispatcher-invoke.sh (issue #474).
 # shellcheck source=scripts/lib/scheduler.sh
 source "$SCRIPT_DIR/lib/scheduler.sh"
+# The work in flight from pull request facts, shared with dispatcher-invoke.sh (issue #475).
+# shellcheck source=scripts/lib/in-flight.sh
+source "$SCRIPT_DIR/lib/in-flight.sh"
 
-# ─── GraphQL helper ───────────────────────────────────────────────────────────
-
-graphql() {
-    local payload resp
-    payload=$(jq -nc --arg q "$1" '{query: $q}')
-    resp=$(curl -sf \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Content-Type: application/json" \
-        -X POST --data "$payload" "$GRAPHQL")
-    if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
-        echo "Error: GraphQL: $(echo "$resp" | jq -r '.errors[0].message // "unknown"')" >&2
-        exit 1
-    fi
-    echo "$resp"
-}
-
-# ─── Locate project board ─────────────────────────────────────────────────────
-
-PROJECTS=$(graphql "{
-  repository(owner:\"$OWNER\", name:\"$REPO_NAME\") {
-    projectsV2(first:10) { nodes { number title } }
-  }
-}")
-
-COUNT=$(echo "$PROJECTS" | jq '.data.repository.projectsV2.nodes | length')
-
-if [[ "$COUNT" -eq 0 ]]; then
-    echo "Error: No GitHub Projects (v2) board linked to $REPO." >&2
-    exit 1
-fi
-
-# D2: uses the first linked project board
-PROJECT_NUMBER=$(echo "$PROJECTS" | jq '.data.repository.projectsV2.nodes[0].number')
-
-# ─── Fetch project items with status (paginated) ──────────────────────────────
-
-# D1: walks every page via cursor pagination, capped at 50 pages as a
-# runaway-loop safety valve. Items accumulate on disk, not in a shell
-# variable passed via --argjson: past a few hundred project items the
-# growing JSON blob risks exceeding the OS argument-length limit
-# ("Argument list too long") — jq reading file contents directly has no
-# such limit. See scripts/dispatcher-invoke.sh's fetch_board_data() for the
-# same fix, hit in production once its richer per-item query (which
-# includes full issue bodies) crossed that limit at ~130 items.
-POLL_TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$POLL_TMP_DIR"' EXIT
-ITEMS_FILE="$POLL_TMP_DIR/items.json"
-echo '[]' > "$ITEMS_FILE"
-CURSOR=""
-PAGE_COUNT=0
-MAX_PAGES=50
-
-while :; do
-    PAGE_COUNT=$(( PAGE_COUNT + 1 ))
-    if [[ "$PAGE_COUNT" -gt "$MAX_PAGES" ]]; then
-        echo "Warning: hit ${MAX_PAGES}-page pagination cap ($((MAX_PAGES * 100)) items); results may be incomplete." >&2
-        break
-    fi
-
-    if [[ -z "$CURSOR" ]]; then
-        AFTER_ARG=""
-    else
-        AFTER_ARG=", after:\"$CURSOR\""
-    fi
-
-    PAGE=$(graphql "{
-  repository(owner:\"$OWNER\", name:\"$REPO_NAME\") {
-    projectsV2(first:1) { nodes { items(first:100$AFTER_ARG) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        content {
-          ... on Issue {
-            number
-            title
-            labels(first:20) { nodes { name } }
-          }
-        }
-        fieldValues(first:20) { nodes {
-          ... on ProjectV2ItemFieldSingleSelectValue {
-            name
-            field { ... on ProjectV2SingleSelectField { name } }
-          }
-        }}
-      }
-    }}}
-  }
-}")
-
-    PAGE_FILE="$POLL_TMP_DIR/page_${PAGE_COUNT}.json"
-    echo "$PAGE" | jq '.data.repository.projectsV2.nodes[0].items.nodes' > "$PAGE_FILE"
-    jq -s 'add' "$ITEMS_FILE" "$PAGE_FILE" > "$POLL_TMP_DIR/items_new.json"
-    mv "$POLL_TMP_DIR/items_new.json" "$ITEMS_FILE"
-    rm -f "$PAGE_FILE"
-
-    HAS_NEXT=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.hasNextPage')
-    CURSOR=$(echo "$PAGE" | jq -r '.data.repository.projectsV2.nodes[0].items.pageInfo.endCursor')
-
-    [[ "$HAS_NEXT" == "true" ]] || break
-done
-
-ITEMS=$(jq -n --slurpfile nodes "$ITEMS_FILE" '{data:{repository:{projectsV2:{nodes:[{items:{nodes:$nodes[0]}}]}}}}')
-
-# ─── Work in flight by status (D5: single response) ─────────────────────────
-
-# Resumable work for dispatcher-invoke.sh (issue #293): stories "In merge" are
-# resumed at /merge, and stories "In implementation" may have a fix round due.
-status_items() {
-    echo "$ITEMS" | jq --arg s "$1" '[
-      .data.repository.projectsV2.nodes[0].items.nodes[] |
-      select(
-        (.content.number? != null) and
-        ([ .fieldValues.nodes[] |
-           select((.field.name? // "") == "Status" and (.name? // "") == $s)
-        ] | length > 0)
-      ) |
-      { number: .content.number, title: .content.title }
-    ]'
-}
-
-IN_MERGE=$(status_items "In merge")
-IN_IMPLEMENTATION=$(status_items "In implementation")
-
-# Stories "In review" that dispatcher-invoke.sh reviews with a /review session
-# (issue #315): exactly one executor: label with a REVIEW_EXECUTOR_ROUTING row
-# (scripts/lib/review-routing.sh, the table the invoke script reads) and an
-# open, non-draft PR linked by "Closes #<n>". A story that waits for Codex
-# Cloud is not listed.
-REVIEW_CANDIDATES=$(echo "$ITEMS" | jq -c '[
-  .data.repository.projectsV2.nodes[0].items.nodes[] |
-  select(
-    (.content.number? != null) and
-    ([ .fieldValues.nodes[] |
-       select((.field.name? // "") == "Status" and (.name? // "") == "In review")
-    ] | length > 0)
-  ) |
-  { number: .content.number, title: .content.title,
-    executors: [ (.content.labels.nodes // [])[] | .name | select(startswith("executor:")) | ltrimstr("executor:") ] }
-]')
-# The open-PR list, read once per poll and only when a candidate needs it.
-OPEN_PRS=""
-load_open_prs() {
-    [[ -z "$OPEN_PRS" ]] || return 0
-    OPEN_PRS=$(curl -sf \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Accept: application/vnd.github+json" \
-        "$REST/repos/$REPO/pulls?state=open&per_page=100") || {
-        echo "[POLL] Warning: could not read open pull requests; review_due, conflict_due and owner_missing_due may be incomplete" >&2
-        OPEN_PRS="[]"
-    }
-}
-
-# linked_ready_pr <issue> — the open, non-draft PR that closes the story.
-linked_ready_pr() {
-    echo "$OPEN_PRS" | jq -r --argjson n "$1" '
-        [.[] | select((.draft | not) and ((.body // "") | ascii_downcase
-            | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))][0].number // empty'
-}
+# ─── REST helpers ─────────────────────────────────────────────────────────────
 
 # rest_get_all <path> — every page of a REST list as one JSON array; fails
-# when a page cannot be read.
+# when a page cannot be read. <path> may carry a query string.
 rest_get_all() {
-    local path="$1" page=1 chunk all='[]'
+    local path="$1" page=1 chunk all='[]' sep='?'
+    [[ "$path" == *"?"* ]] && sep='&'
     while :; do
         chunk=$(curl -sf \
             -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "$REST/$path?per_page=100&page=$page") || return 1
+            "$REST/$path${sep}per_page=100&page=$page") || return 1
         all=$(printf '%s\n%s\n' "$all" "$chunk" | jq -cs 'add') || return 1
         [[ "$(jq 'length' <<< "$chunk")" -ge 100 ]] || break
         page=$(( page + 1 ))
     done
     echo "$all"
+}
+
+# The readers scripts/lib/in-flight.sh calls.
+inflight_get_all() { rest_get_all "$1"; }
+inflight_get_page() {
+    curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/$1"
 }
 
 # The token's own login: the dispatcher's account, and the bookkeeping job's
@@ -341,19 +197,38 @@ load_token_login() {
 # The PO account, as DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh.
 PO_LOGIN="LauraMardones"
 
-# Issue #409, issue #449: conflict_due lists the review-loop stories
-# "In review" (one executor: label with a CODEX_REVIEW_LOOP_ROUTING row) for
-# which a conflict round is owed, by the rule the invoke step applies too
-# (conflict_round_rule, scripts/lib/conflict-round.sh): the open, non-draft PR
-# conflicts with main, no fix round is due, the story has no open blocker and
-# no conflict-round attempt marker holds for the PR's current head.
-# owner_missing_due lists, by the same rule, the review-loop stories
-# "In review" whose clean PR head has no merge-owner evidence and no
-# missing-merge-owner blocker yet: a session stopped after its push, and the
-# invoke step posts that blocker once. Stories "In implementation" need no
-# key: in_implementation already starts the invoke step for them. A PR with
-# unknown mergeability is read again on the next poll. A PR or a comment list
-# that cannot be read lists nothing and warns.
+# ─── Work in flight from pull request facts (issue #475, ADR-010) ────────────
+
+# The stories whose linked PR, merge gates and markers put them in a resume
+# step (scripts/lib/in-flight.sh); no board status is read. The facts that
+# cannot be read stop the poll: a story must not be missed for a failed read.
+MERGE_GATE_SCRIPT="${MERGE_GATE_SCRIPT:-$SCRIPT_DIR/merge-gate-summary}"
+load_token_login || echo "[POLL] Warning: could not resolve the dispatcher's account; fix rounds, hand-offs, conflict_due and owner_missing_due find nothing this cycle" >&2
+INFLIGHT_BOT="$TOKEN_LOGIN"
+INFLIGHT_BK="${CODEX_BOOKKEEPING_LOGIN:-$TOKEN_LOGIN}"
+INFLIGHT_PO="$PO_LOGIN"
+inflight_compute || { echo "Error: could not read the work in flight." >&2; exit 1; }
+
+# in_merge: the merge step and the finish step; in_implementation: the fix
+# rounds due and the pending hand-offs (a story the dispatcher resumes).
+IN_MERGE=$(jq -c '[(.merge + .finish)[] | {number, title}] | sort_by(.number)' <<< "$INFLIGHT_JSON")
+IN_IMPLEMENTATION=$(jq -c '[(.fix_round + .hand_off)[] | {number, title}] | sort_by(.number)' <<< "$INFLIGHT_JSON")
+REVIEW_CANDIDATES=$(jq -c '.review' <<< "$INFLIGHT_JSON")
+
+# conflict_due lists the review-loop stories (one executor: label with a
+# CODEX_REVIEW_LOOP_ROUTING row) with a non-draft linked PR that is not in the
+# merge step, for which a conflict round is owed (issues #409, #449), by the
+# rule the invoke step applies too (conflict_round_rule,
+# scripts/lib/conflict-round.sh): the PR conflicts with main, no fix round is
+# due, the story has no open blocker and no conflict-round attempt marker holds
+# for the PR's current head. owner_missing_due lists, by the same rule, those
+# whose clean PR head has no merge-owner evidence and no missing-merge-owner
+# blocker yet: a session stopped after its push, and the invoke step posts that
+# blocker once. review_due lists the stories dispatcher-invoke.sh reviews with
+# a /review session (issue #315): one executor: label with a
+# REVIEW_EXECUTOR_ROUTING row. A PR with unknown mergeability is read again on
+# the next poll. A PR or a comment list that cannot be read lists nothing and
+# warns.
 REVIEW_DUE='[]'
 CONFLICT_DUE='[]'
 OWNER_MISSING_DUE='[]'
@@ -362,15 +237,10 @@ if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
     while IFS= read -r row; do
         mapfile -t EXEC_SUFFIXES < <(echo "$row" | jq -r '.executors[]')
         STORY_NUMBER=$(echo "$row" | jq '.number')
+        PR_NUMBER=$(echo "$row" | jq -r '.pr')
         if review_by_dispatcher_session "${EXEC_SUFFIXES[@]}"; then
-            load_open_prs
-            if [[ -n "$(linked_ready_pr "$STORY_NUMBER")" ]]; then
-                REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
-            fi
+            REVIEW_DUE=$(echo "$REVIEW_DUE" | jq -c --argjson r "$row" '. + [{number: $r.number, title: $r.title}]')
         elif [[ ${#EXEC_SUFFIXES[@]} -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[${EXEC_SUFFIXES[0]}]:-}" ]]; then
-            load_open_prs
-            PR_NUMBER=$(linked_ready_pr "$STORY_NUMBER")
-            [[ -n "$PR_NUMBER" ]] || continue
             PR_DETAIL=$(curl -sf \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Accept: application/vnd.github+json" \
@@ -381,7 +251,7 @@ if [[ "$(echo "$REVIEW_CANDIDATES" | jq 'length')" -gt 0 ]]; then
             # Unknown mergeability (null) decides nothing: read again next poll.
             echo "$PR_DETAIL" | jq -e '.mergeable != null or .mergeable_state == "dirty"' >/dev/null 2>&1 \
                 || continue
-            if ! load_token_login \
+            if [[ -z "$TOKEN_LOGIN" ]] \
                     || ! STORY_COMMENTS=$(rest_get_all "repos/$REPO/issues/$STORY_NUMBER/comments") \
                     || ! PR_COMMENTS=$(rest_get_all "repos/$REPO/issues/$PR_NUMBER/comments"); then
                 echo "[POLL] Warning: could not read the comments of #$STORY_NUMBER or PR #$PR_NUMBER; conflict_due and owner_missing_due skip it this cycle" >&2
@@ -407,19 +277,18 @@ if $DRY_RUN; then
 fi
 
 # ─── New work: the scheduler's decision (issue #474) ─────────────────────────
-# The scheduler decides from GitHub facts; the poll reads no "Ready" status.
-# --in-implementation lists the work in flight as the dispatcher finds it
-# today: the board's "In implementation", "In review" and "In merge" stories,
-# so the scheduler never starts one of them again. Finding them from PR facts
-# is #475 (PO decision on PR #485).
+# The scheduler decides from GitHub facts; the poll reads no board status.
+# --in-implementation lists the stories with a draft linked PR or a fix round
+# due (they count for the WIP limit and the file overlap); --in-flight lists
+# every other story with work in flight: never started again, not counted
+# (issue #475).
 
 echo "Resumable: $(echo "$IN_MERGE" | jq 'length') item(s) in merge, $(echo "$IN_IMPLEMENTATION" | jq 'length') item(s) in implementation, $(echo "$REVIEW_DUE" | jq 'length') item(s) due for review." >&2
 
 SCHEDULER_ARGS=()
 $DRY_RUN && SCHEDULER_ARGS+=(--dry-run)
-IN_FLIGHT_LIST=$(jq -rn --argjson a "$IN_IMPLEMENTATION" --argjson b "$REVIEW_CANDIDATES" --argjson c "$IN_MERGE" \
-    '$a + $b + $c | map(.number) | unique | map(tostring) | join(",")')
-scheduler_next "$IN_FLIGHT_LIST" \
+inflight_scheduler_lists
+scheduler_next "$IN_IMPLEMENTATION_LIST" "$IN_FLIGHT_LIST" \
     ${SCHEDULER_ARGS[@]+"${SCHEDULER_ARGS[@]}"}
 echo "[POLL] Scheduler result: $SCHEDULER_RESULT${SCHEDULER_ISSUE:+ #$SCHEDULER_ISSUE}" >&2
 

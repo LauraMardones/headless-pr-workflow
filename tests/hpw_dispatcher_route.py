@@ -45,6 +45,20 @@ def fake_state_route() -> str:
     )
 
 
+def fake_in_flight_route() -> str:
+    """Bash lines for a fake ``hpw``: ``hpw dispatcher in-flight ...`` runs the real rule (issue #475).
+
+    The rule decides from the facts in its input file only, so it needs no ``gh`` fake.
+    """
+
+    python = Path(sys.executable).as_posix()
+    return (
+        'if [[ "${1:-} ${2:-}" == "dispatcher in-flight" ]]; then\n'
+        f'    shift; PYTHONPATH="{(REPO_ROOT / "src").as_posix()}" exec "{python}" -m headless_pr_workflow.dispatcher "$@"\n'
+        "fi\n"
+    )
+
+
 def main(argv: list[str]) -> int:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     from headless_pr_workflow.dispatcher.cli import main as dispatcher_main

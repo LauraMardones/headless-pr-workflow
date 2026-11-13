@@ -18,8 +18,9 @@ import pytest
 from headless_pr_workflow import codex_review_bookkeeping as bookkeeping
 from tests.dispatcher_fakes import (
     BASH, BOARD_OPTIONS, BOT, INVOKE, PO, REPO_ROOT, Dispatcher, bookkeeping_marker, needs_tools,
-    scheduler_output,
+    poll_fakes, scheduler_output,
 )
+from tests.hpw_dispatcher_route import fake_in_flight_route
 from tests.script_tools import script_path, windows_env
 
 STORY = 500
@@ -131,7 +132,11 @@ def test_ac2_no_write_while_a_fix_round_is_still_due(d):
     """Findings are recorded for the head /implement left behind: "In review" is not written."""
     d.add_story(STORY, "Ready for implementation")
     d.add_pr(PR, STORY)
-    d.add_findings(PR, HEAD)
+    # During the session: findings recorded before it would be a fix round for the resume pass (#475).
+    findings = json.dumps([{"user": {"login": BOT}, "created_at": "2026-10-13T10:59:00Z",
+                            "body": bookkeeping_marker("move-in-implementation", HEAD)}])
+    (d.mock / "comments_after.json").write_text(findings, encoding="utf-8", newline="\n")
+    d.on_session("implement", f'cp "$MOCK_DIR/comments_after.json" "$MOCK_DIR/comments_{PR}.json"\n')
 
     proc = d.run_issue(STORY)
 
@@ -502,7 +507,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         encoding="utf-8", newline="\n")
     (scripts / "lib").mkdir()
     for lib in ("claude-session.sh", "decision-blocker.sh", "evidence-pending.sh", "limits.sh",
-                "conflict-round.sh", "scheduler.sh"):  # sourced (#314, #296, #348, #358, #449, #474)
+                "conflict-round.sh", "scheduler.sh", "in-flight.sh"):  # sourced (#314, #296, #348, #358, #449, #474, #475)
         (scripts / "lib" / lib).write_text(
             (REPO_ROOT / "scripts" / "lib" / lib).read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
@@ -561,7 +566,8 @@ def test_ac7_in_merge_story_with_merged_pr_is_finished_without_merge(d):
 
 @needs_tools
 @pytest.mark.parametrize("pr", ["none", "closed-unmerged", "draft"])
-def test_ac8_in_merge_story_without_a_pr_gets_one_external_blocker(d, pr):
+def test_ac8_in_merge_story_without_a_pr_gets_no_blocker(d, pr):
+    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; the card "In merge" decides nothing."""
     d.add_story(STORY, "In merge")
     if pr == "closed-unmerged":
         d.add_pr(PR, STORY, state="closed")
@@ -572,11 +578,10 @@ def test_ac8_in_merge_story_without_a_pr_gets_one_external_blocker(d, pr):
     second = d.resume()
 
     assert first.returncode == 0 and second.returncode == 0, first.stderr + second.stderr
-    assert d.sessions == [] and d.board_writes == []
-    blockers = d.posted(STORY)
-    assert len(blockers) == 1
-    assert "## Blocked Declaration\nType: external\n" in blockers[0]
-    assert f"[RESUME SKIP] #{STORY}:" in second.stdout
+    assert d.sessions == [] and d.board_writes == [] and d.phases == []
+    assert d.posted(STORY) == [] and d.posted(PR) == []
+    assert "in-merge-without-pr" not in first.stdout + second.stdout
+    assert f"[RESUME SKIP] #{STORY}:" not in first.stdout + second.stdout
 
 
 @needs_tools
@@ -677,7 +682,8 @@ def test_ac11_no_fix_round(d, case):
         if case == "two-executor-labels" else None
     d.add_story(STORY, "In implementation", executor=executor, labels=labels)
     if case != "no-open-pr":
-        d.add_pr(PR, STORY)
+        # A codex story's ready PR would be in the review step (#475): its PR is still a draft.
+        d.add_pr(PR, STORY, draft=case == "executor-not-on-loop")
         owned(d)
     if case == "older-head":
         d.add_findings(PR, "c" * 40)
@@ -973,30 +979,41 @@ def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
 
 def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evidence: str = "[]",
               scheduler: tuple = ("idle",), dry_run: bool = True, raw_scheduler: str | None = None,
-              stderr: list | None = None) -> dict:
-    """Run the real dispatcher-poll.sh against a fake ``curl`` that serves one board page.
+              stderr: list | None = None, gates: dict[int, str] | None = None,
+              comments: dict[int, list] | None = None) -> dict:
+    """Run the real dispatcher-poll.sh against a fake ``curl`` that serves the open issues and PRs.
 
-    An item is ``(number, status)`` or ``(number, status, [labels])``; ``pulls`` is the open-PR list.
-    A fake ``hpw`` answers ``hpw dispatcher scheduler next`` with ``scheduler`` (the arguments of
-    ``scheduler_output``) or the text ``raw_scheduler``, and logs its arguments to ``scheduler.log``;
-    any other ``hpw`` call runs the real one. The fake ``curl`` logs Slack calls to ``slack.log``.
-    ``stderr``, when given, receives the poll's stderr.
+    An item is ``(number, status)`` or ``(number, status, [labels])``. The poll finds work in flight
+    from PR facts (issue #475), so the status is not served: it only names the card the test moved.
+    ``pulls`` is the open-PR list, ``gates`` the merge gates of a PR (``pass``; default ``fail``) and
+    ``comments`` the comments of an issue or PR. A fake ``hpw`` answers ``hpw dispatcher scheduler
+    next`` with ``scheduler`` (the arguments of ``scheduler_output``) or the text ``raw_scheduler``,
+    and logs its arguments to ``scheduler.log``; it answers ``dispatcher marker whoami`` with the
+    dispatcher's account; any other ``hpw`` call runs the real one. The fake ``curl`` logs Slack
+    calls to ``slack.log``. ``stderr``, when given, receives the poll's stderr.
     """
-    nodes = [{"content": {"number": n, "title": f"Story {n}",
-                          "labels": {"nodes": [{"name": name} for name in (rest[0] if rest else [])]}},
-              "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}}
-             for n, status, *rest in items]
     board = {"data": {"repository": {"projectsV2": {"nodes": [{
         "number": 3, "title": "board",
-        "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}]}}}}
+        "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}]}}}}
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    fakes = poll_fakes(tmp_path, bin_dir, [(n, rest[0] if rest else []) for n, _status, *rest in items],
+                       gates=gates, comments=comments)
+    comment_dir = tmp_path / "comments"
+    comment_dir.mkdir()
+    for number, rows in (comments or {}).items():
+        (comment_dir / f"{number}.json").write_text(json.dumps(rows), encoding="utf-8")
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
     curl = bin_dir / "curl"
     (tmp_path / "pulls.json").write_text(json.dumps(pulls or []), encoding="utf-8")
-    curl.write_text('#!/usr/bin/env bash\ncase "$*" in\n  *hooks.slack*) echo "$*" >> "$SLACK_LOG" ;;\n'
+    curl.write_text('#!/usr/bin/env bash\nurl="${@: -1}"\ncase "$*" in\n  *hooks.slack*) echo "$*" >> "$SLACK_LOG" ;;\n'
+                    '  */comments*) n="${url%/comments*}"; n="${n##*/}"; f="$COMMENT_DIR/$n.json"\n'
+                    '      if [[ "$url" == *page=1 && -f "$f" ]]; then cat "$f"; else echo "[]"; fi ;;\n'
+                    '  */pulls/[0-9]*) n="${url##*/}"; jq --argjson n "$n" \'.[] | select(.number == $n)\' "$PULLS_FILE" ;;\n'
+                    '  *state=closed*) echo "[]" ;;\n'
                     '  */pulls*) cat "$PULLS_FILE" ;;\n'
-                    '  *labels=evidence*) [ "$EVIDENCE" = fail ] && exit 22; echo "$EVIDENCE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
+                    '  *labels=evidence*) [ "$EVIDENCE" = fail ] && exit 22; echo "$EVIDENCE" ;;\n'
+                    '  *"/issues?state=open"*) cat "$ISSUES_FILE" ;;\n  *) cat "$BOARD_FILE" ;;\nesac\n',
                     encoding="utf-8", newline="\n")
     curl.chmod(0o755)
     result, issue, error, skipped = (*scheduler, *(None, None, "", None)[len(scheduler):])
@@ -1004,22 +1021,25 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evi
     (tmp_path / "scheduler.json").write_text(out if raw_scheduler is None else raw_scheduler, encoding="utf-8")
     (tmp_path / "scheduler.err").write_text(err, encoding="utf-8")
     hpw = bin_dir / "hpw"
-    hpw.write_text('#!/usr/bin/env bash\n'
-                   'if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then\n'
+    hpw.write_text('#!/usr/bin/env bash\n' + fake_in_flight_route()
+                   + 'if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then\n'
                    f'    echo "$*" >> "{(tmp_path / "scheduler.log").as_posix()}"\n'
                    f'    cat "{(tmp_path / "scheduler.err").as_posix()}" >&2\n'
                    f'    cat "{(tmp_path / "scheduler.json").as_posix()}"\n'
                    f'    exit {rc}\nfi\n'
+                   'if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher marker whoami" ]]; then\n'
+                   f'    echo \'{{"result": "read", "dispatcher": "{BOT}", "bookkeeping": "{BOT}"}}\'; exit 0\nfi\n'
                    f'exec "{(REPO_ROOT / "scripts" / "hpw").as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
     hpw.chmod(0o755)
     (tmp_path / "slack.log").write_text("")
     env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "PULLS_FILE": (tmp_path / "pulls.json").as_posix(), "EVIDENCE": evidence,
+           "COMMENT_DIR": comment_dir.as_posix(),
            "SLACK_LOG": (tmp_path / "slack.log").as_posix(),
            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T000/B000",
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
-           "HPW_BIN": hpw.as_posix(),
+           "HPW_BIN": hpw.as_posix(), **fakes,
            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5", **windows_env()}
     args = ["--dry-run"] if dry_run else []
     proc = subprocess.run(
@@ -1031,15 +1051,33 @@ def poll_json(tmp_path, items: list[tuple], pulls: list[dict] | None = None, evi
     return json.loads(proc.stdout)
 
 
+def poll_pr(number: int, issue: int, head: str = HEAD, draft: bool = False) -> dict:
+    """An open PR as the poll reads it, with a head."""
+    return {"number": number, "draft": draft, "body": f"Closes #{issue}", "state": "open",
+            "head": {"sha": head}, "mergeable": True, "mergeable_state": "clean"}
+
+
+def poll_findings(head: str = HEAD) -> dict:
+    """The bookkeeping job's findings on ``head``, as the poll reads the PR's comments."""
+    return {"user": {"login": BOT}, "author_association": "COLLABORATOR", "created_at": "2026-10-13T10:00:00Z",
+            "body": "## Session Summary\nCommand: review\n\n" + bookkeeping_marker("move-in-implementation", head)}
+
+
 @needs_tools
 def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
+    """#475 AC 7: in_merge and in_implementation come from PR facts; each card shows another status."""
     out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"),
-                               (3, "In merge"), (4, "In implementation"), (5, "In review"), (6, "Done")],
+                               (3, "In review", ["executor:codex"]),
+                               (4, "In review", ["executor:claude-code-sonnet"]),
+                               (5, "In merge", ["executor:codex"]), (6, "Done"),
+                               (7, "In implementation", ["executor:codex"])],
+                    pulls=[poll_pr(13, 3), poll_pr(14, 4), poll_pr(15, 5), poll_pr(17, 7, draft=True)],
+                    gates={13: "pass"}, comments={14: [poll_findings()]},
                     scheduler=("implement", 1))
     assert out == {
         "in_merge": [{"number": 3, "title": "Story 3"}],
         "in_implementation": [{"number": 4, "title": "Story 4"}],
-        "review_due": [],
+        "review_due": [{"number": 5, "title": "Story 5"}],
         "conflict_due": [],
         "owner_missing_due": [],
         "evidence_pending": False,
@@ -1048,9 +1086,37 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "scheduler_result": "implement",
         "resumable": True,
     }
-    # Issue #474: the scheduler gets the work in flight ("In implementation", "In review", "In merge").
+    # #475 AC 8: a draft PR or a fix round due counts for the WIP limit; the other open PRs are in flight.
     assert (tmp_path / "scheduler.log").read_text().splitlines() == [
-        "dispatcher scheduler next --repo o/r --in-implementation 3,4,5 --dry-run"]
+        "dispatcher scheduler next --repo o/r --in-implementation 4,7 --in-flight 3,5 --dry-run"]
+
+
+@needs_tools
+@pytest.mark.parametrize("status", ["In merge", "In review", "In implementation", "Ready for implementation"])
+def test_475_ac6_a_moved_card_without_a_pr_is_in_no_poll_key(tmp_path, status):
+    """#475 AC 6: a story with no linked PR and no dispatcher marker is in no key, whatever its card says."""
+    out = poll_json(tmp_path, [(8, status, ["executor:codex"]), (9, status, ["executor:claude-code-sonnet"])])
+    for key in ("in_merge", "in_implementation", "review_due", "conflict_due", "owner_missing_due"):
+        assert out[key] == [], key
+    assert out["resumable"] is False
+    assert (tmp_path / "scheduler.log").read_text().splitlines() == [
+        "dispatcher scheduler next --repo o/r --in-implementation  --in-flight  --dry-run"]
+
+
+@needs_tools
+def test_475_ac8_poll_lists_a_story_with_an_open_dependency_blocker_as_in_flight(tmp_path):
+    """#475 AC 8: an open non-decision blocker without a later /unblock keeps the story in flight."""
+    blocker = {"user": {"login": BOT}, "author_association": "COLLABORATOR", "created_at": "2026-10-13T10:00:00Z",
+               "body": "## Blocked Declaration\nType: external\nDeclared by: dispatcher"}
+    decision = dict(blocker, body="## Blocked Declaration\nType: decision\nDeclared by: dispatcher")
+    lifted = {"user": {"login": PO}, "author_association": "OWNER", "created_at": "2026-10-13T11:00:00Z",
+              "body": "/unblock"}
+    out = poll_json(tmp_path, [(11, "Ready for implementation"), (12, "Ready for implementation"),
+                               (13, "Ready for implementation")],
+                    comments={11: [blocker], 12: [decision], 13: [blocker, lifted]})
+    assert out["resumable"] is False
+    assert (tmp_path / "scheduler.log").read_text().splitlines() == [
+        "dispatcher scheduler next --repo o/r --in-implementation  --in-flight 11 --dry-run"]
 
 
 # ── Issue #474: the poll asks the scheduler (AC 1, 5, 8, 9, 10) ─────────────
@@ -1136,7 +1202,7 @@ def test_ac16_only_claude_tier_in_review_gives_an_empty_review_due(tmp_path):
 
 @needs_tools
 def test_ac14_poll_lists_are_empty_arrays_when_nothing_matches(tmp_path):
-    out = poll_json(tmp_path, [(5, "In review")])
+    out = poll_json(tmp_path, [(5, "In review")])  # no linked PR
     assert out["in_merge"] == [] and out["in_implementation"] == [] and out["review_due"] == []
     assert "ready_for_implementation" not in out and "ready_for_refinement" not in out
 
@@ -1224,15 +1290,16 @@ def test_ac14_workflow_poll_step_reports_resumable_work():
 
 
 @needs_tools
-@pytest.mark.parametrize("items,pulls,key", [
-    ([(3, "In merge")], None, "in_merge"),
-    ([(4, "In implementation")], None, "in_implementation"),
-    ([(5, "In review", ["executor:codex"])], [open_pr(15, 5)], "review_due"),
+@pytest.mark.parametrize("items,pulls,gates,comments,key", [
+    ([(3, "Ready for implementation", ["executor:codex"])], [poll_pr(13, 3)], {13: "pass"}, None, "in_merge"),
+    ([(4, "In review", ["executor:claude-code-sonnet"])], [poll_pr(14, 4)], None, {14: [poll_findings()]},
+     "in_implementation"),
+    ([(5, "In merge", ["executor:codex"])], [open_pr(15, 5)], None, None, "review_due"),
 ])
-def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, key):
-    """The RESUMABLE rule of issue #293, now in the poll (issue #434); conflict_due and owner_missing_due
-    are covered in test_dispatcher_conflict_round.py."""
-    out = poll_json(tmp_path, items, pulls=pulls)
+def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, gates, comments, key):
+    """The RESUMABLE rule of issue #293, now in the poll (issue #434), from PR facts (#475 AC 7);
+    conflict_due and owner_missing_due are covered in test_dispatcher_conflict_round.py."""
+    out = poll_json(tmp_path, items, pulls=pulls, gates=gates, comments=comments)
     assert out[key] and out["resumable"] is True and out["evidence_pending"] is False
 
 
@@ -1278,7 +1345,7 @@ def section(path: str, heading: str) -> str:
 
 def test_ac16_adapters_describes_the_review_loop():
     pairing = section("docs/ADAPTERS.md", "### Cross-Provider Review Pairing")
-    for needle in ("Codex review loop", "ADR-006", "`In merge`", "fix round", "CODEX_FIX_ROUND_MAX",
+    for needle in ("Codex review loop", "ADR-006", "**Merge step.**", "fix round", "CODEX_FIX_ROUND_MAX",
                    "one `/merge` attempt per PR head"):
         assert needle in pairing, needle
     for tier in CLAUDE_TIERS:
@@ -1291,7 +1358,7 @@ def test_ac16_dispatcher_config_describes_hand_off_and_resume():
     text = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
     assert "Ready to merge" not in text
     flow = section("docs/DISPATCHER-CONFIG.md", "## Codex review loop hand-off and resume")
-    for needle in ("### Hand-off after `/implement`", "### Resume at `In merge`", "### Fix round",
+    for needle in ("### Hand-off after `/implement`", "### The merge step", "### Fix round",
                    "### Order", "`CODEX_FIX_ROUND_MAX`", "One merge attempt per head",
                    "`--resume`", "[RESUME SKIP]", "`in_merge`", "`in_implementation`"):
         assert needle in flow, needle
@@ -1543,6 +1610,7 @@ def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_
 
     d.fail("cleanup", False)
     (d.mock / "on_cleanup.sh").unlink()
+    d.close_issue(STORY)  # the merged PR closed it; only the evidence:pending label leads back (#475)
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
