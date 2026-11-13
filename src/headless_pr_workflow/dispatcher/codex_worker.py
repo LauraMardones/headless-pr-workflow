@@ -426,10 +426,11 @@ def _resume_of(attempt: Attempt) -> Resume:
 
 
 def _wait(gateway: Gateway, issue: int, attempt: int, reason: str, settings: Settings, env: Mapping[str, str],
-          dry_run: bool) -> str:  # fmt: skip
+          dry_run: bool, *, claimed: bool = False) -> str:  # fmt: skip
     """Post the item's waiting evidence once per attempt and reason; returns Block 1's result word."""
 
-    text = (f"Codex worker: #{issue} waits before attempt {attempt} ({reason}). A later scheduled run retries it; "
+    where = f"to start its claimed attempt {attempt}" if claimed else f"before attempt {attempt}"
+    text = (f"Codex worker: #{issue} waits {where} ({reason}). A later scheduled run retries it; "
             "the item is not moved to Claude.")  # fmt: skip
     outcome = write_marker(gateway, issue, "codex-wait", [("issue", str(issue)), ("attempt", str(attempt)),
                                                           ("reason", reason)],
@@ -489,6 +490,13 @@ def claim(
         if current is not None and current.number == number and current.run == run:
             if current.end is not None:
                 return WorkerResult("claim", "ended", fields={**fields, "reason": current.end.get("reason")})
+            # A replay starts the session too, so the hook is asked again; a refusal keeps the claim.
+            eligible, reason = eligibility(repo, item["issue"], current.command)
+            if not eligible:
+                skipped = [{"issue": item["issue"], "reason": reason,
+                            "evidence": _wait(gateway, item["issue"], number, reason, settings, env, dry_run,
+                                              claimed=True)}]  # fmt: skip
+                return WorkerResult("claim", "waiting", fields={**fields, "skipped": skipped})
             return WorkerResult("claim", "continued", fields={**fields, "invocation": invocation(
                 repo, item["issue"], number, owner, run, current.command, _resume_of(current))})  # fmt: skip
         return WorkerResult("claim", "lost", fields={**fields, "reason": "another-run-owns-the-attempt"})

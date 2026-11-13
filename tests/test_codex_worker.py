@@ -235,6 +235,44 @@ def test_a_replay_of_the_same_run_continues_and_posts_nothing(gh, settings):
     assert again.fields["invocation"]["attempt"] == first.fields["invocation"]["attempt"] == 1
 
 
+@pytest.mark.parametrize("answer, reason", [
+    ((False, "reserve"), "reserve"),
+    ((False, "eligibility-unreadable"), "eligibility-unreadable"),
+])
+def test_a_replay_asks_the_eligibility_hook_again_and_keeps_the_claim_on_refusal(gh, settings, answer, reason):
+    gh.story(5)
+    do_claim(gh, settings)
+    gate = Gate(answer)
+    again = do_claim(gh, settings, gate=gate)
+    assert gate.calls == [(REPO, 5, "implement")]
+    assert again.result == "waiting" and again.exit_code == 1 and "invocation" not in again.fields
+    assert again.fields["attempt"] == 1 and again.fields["skipped"][0]["reason"] == reason
+    assert [(m.fields["attempt"], m.fields["reason"]) for m in gh.marks(5) if m.action == "wait"] == [("1", reason)]
+    assert len(claims(gh)) == 1 and not [m for m in gh.marks(5) if m.action == "end"]
+    # The claim is kept: once the hook answers eligible, the same replay continues the same attempt.
+    assert do_claim(gh, settings, gate=gate).result == "waiting"
+    assert len([m for m in gh.marks(5) if m.action == "wait"]) == 1
+    later = do_claim(gh, settings)
+    assert later.result == "continued" and later.fields["invocation"]["attempt"] == 1
+
+
+def test_a_retry_after_a_lost_claim_response_asks_the_eligibility_hook_again(gh, settings):
+    gh.story(5)
+    gh.post_modes = ["lost"]
+
+    def github_goes_away():
+        gh.list_failures = 50
+
+    gh.on_post = github_goes_away
+    do_claim(gh, settings)
+    gh.list_failures = 0
+    gate = Gate((False, "eligibility-unreadable"))
+    retry = do_claim(gh, settings, gate=gate)
+    assert gate.calls == [(REPO, 5, "implement")]
+    assert retry.result == "waiting" and retry.exit_code == 1 and "invocation" not in retry.fields
+    assert len(claims(gh)) == 1
+
+
 def test_a_new_run_of_the_task_while_the_claim_is_held_starts_nothing(gh, settings):
     gh.story(5)
     do_claim(gh, settings)

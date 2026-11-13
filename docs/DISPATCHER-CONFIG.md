@@ -811,7 +811,7 @@ Every fact is a hidden marker on the issue, written through [GitHub writes](#git
 | `codex-claim` | `claim` | `issue`, `attempt`, `owner`, `run`, `command`, and the `pr`, `branch` and `head` the attempt resumes (`-` for none) |
 | `codex-progress` | `progress`, after each push | `issue`, `attempt`, `run`, `pr`, `branch` (`codex/issue-<n>-<slug>`), `head` |
 | `codex-end` | `finish`, or a later run for an interrupted attempt | `issue`, `attempt`, `run`, `result` (`done` or `wait`), `reason`, `head`, and `until` when given |
-| `codex-wait` | `claim`, when an item cannot be claimed | `issue`, the `attempt` it waits before, `reason` |
+| `codex-wait` | `claim`, when an item cannot be claimed, or a replayed run cannot start its claimed attempt | `issue`, the `attempt` it waits before (or the claimed attempt it waits to start), `reason` |
 
 The claim rule, for each item:
 
@@ -823,7 +823,7 @@ The claim rule, for each item:
 6. The eligibility hook is asked. A refusal posts one `codex-wait` with the hook's reason and ends the run: the reserve is shared, so no other item is tried.
 7. The run posts its `codex-claim` for the next attempt number, reads the markers back, and starts only when its own claim owns the attempt (`claimed`, exit `0`). Otherwise it reports `lost` (exit `1`); its claim stays on the issue as a losing claim that the rule ignores.
 
-A replay of a run (the same `CODEX_WORKER_RUN_ID`) finds its own claim first and claims nothing new: `continued` with the same invocation while it owns the open attempt, `lost` when another run owns it, `ended` after its `codex-end`. A claim write whose response was lost is found on the re-read before any retry (Block 1), so it is never posted twice and never becomes a new attempt; `progress` and `finish` post their marker once, so a retried call reports `already`.
+A replay of a run (the same `CODEX_WORKER_RUN_ID`) finds its own claim first and claims nothing new: `continued` with the same invocation while it owns the open attempt and the eligibility hook still answers eligible (a replay starts the session too, so the hook is asked again; a refusal keeps the claim, posts one `codex-wait` for the claimed attempt with the hook's reason and reports `waiting`), `lost` when another run owns it, `ended` after its `codex-end`. A claim write whose response was lost is found on the re-read before any retry (Block 1), so it is never posted twice and never becomes a new attempt; `progress` and `finish` post their marker once, so a retried call reports `already`.
 
 ### Recovery
 
