@@ -77,12 +77,12 @@ WIP count: 2/3
 The dispatcher starts new work from the scheduler's decision, never from a board status (issue #474, ADR-010, Feature #460). Moving a card to "Ready for implementation" or "Ready for refinement" starts nothing, and the scheduler's choice gets its session whatever its board status. The decision rule is `hpw dispatcher scheduler next` (issue #473); `scripts/dispatcher-poll.sh` and `scripts/dispatcher-invoke.sh` only call it, through `scripts/lib/scheduler.sh`, and act on its result.
 
 ```
-scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] [--exclude <n>[,<n>...]] [--dry-run]
+scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] --in-flight <n>[,<n>...] [--exclude <n>[,<n>...]] [--dry-run]
 ```
 
 **Order of actions in a run** (#460 → Decisions "Order of actions in a run"). One model session at a time:
 
-1. work in flight, as before (the resume pass: "In merge", fix rounds, pending hand-offs, "In review", conflict rounds);
+1. work in flight, found from pull request facts (the resume pass: the merge step, fix rounds, pending hand-offs, the review step, conflict rounds; see [Work in flight from PR facts](#work-in-flight-from-pr-facts));
 2. then one scheduler decision for new work. The scheduler orders the rest: re-refinement of stale issues (Epic first), Epic refinement after a new spec merge, Feature refinement, the start of a ready story's implementation, and story refinement for the ready buffer.
 
 **When it is asked.** The poll asks to decide whether the invoke step runs. The invoke step (`dispatcher-invoke.sh --repo <owner/repo>`, no `--issue`) asks again right before it starts new work, after the work in flight, so the decision uses fresh facts. After a finished `/implement` cycle (the hand-off to the Codex review loop), and after a story the run skips as non-executable, the next story also comes from a new scheduler call, not from the board.
@@ -104,11 +104,11 @@ scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n
 - **No-spec rule.** Nothing under an Epic with no merged spec is refined. The run log carries the scheduler's `[SCHEDULER] skip #<epic> no-merged-spec: <reason>` line; no comment is posted.
 - Every skipped issue gets one `[SCHEDULER] skip #<n> <reason>` line on stderr. The poll and the invoke step pass these lines to the run log unchanged.
 
-**`--in-implementation`.** The dispatcher passes the stories on the board in "In implementation", "In review" and "In merge": the work in flight as it finds it today. The scheduler never starts a listed story, so a story in review or merge is not started again. Until #475 finds work in flight from PR facts (with its own `--in-flight` list), the stories in review and merge also count for the scheduler's WIP limit and file overlap, so fewer new stories may start than the limit allows (PO decision on PR #485).
+**`--in-implementation` and `--in-flight`.** The dispatcher passes two lists, found from pull request facts with no board status read (issue #475; see [Work in flight from PR facts](#work-in-flight-from-pr-facts)). `--in-implementation` lists the stories with an open linked PR that is a draft, or whose current head has a fix round due: they count for the WIP limit and the file overlap. `--in-flight` lists every other story with an open linked PR, and every story with an open non-decision blocker without a later `/unblock`: the scheduler never starts them and refines them only when stale, but does not count them for the WIP limit or the file overlap. So a story in review or in the merge step is never started again, and it no longer holds a WIP slot.
 
 **`--exclude`.** The invoke step lists the stories this run already started or skipped (for example an `executor:codex` story, which the dispatcher does not start). The scheduler never chooses them (`excluded`) and, unlike `--in-implementation`, does not count them for the WIP limit or file overlap, so the next ready story is reached instead of the same one being chosen again.
 
-**Stale recovery first.** In the scheduled run, a story "In implementation" with no activity for more than two hours and no hand-off note is rolled back to "Ready for implementation" (Recovery Protocol, `docs/PROJECT-STATUS.md`) before the scheduler is asked, so a stale story does not hold a WIP slot and block the decision with `wip-limit`.
+**Stale recovery first.** In the scheduled run, a story "In implementation" with no activity for more than two hours and no hand-off note is rolled back to "Ready for implementation" (Recovery Protocol, `docs/PROJECT-STATUS.md`) before the scheduler is asked. It reads the board and writes a status, so it stays until #461; it starts no session itself.
 
 **Gates, unchanged for both kinds.** The pause switch (`DISPATCHER_ENABLED` not `true`: the workflow guard skips the poll and the invoke step, so the scheduler is not called and no session starts), the [usage limit](#usage-limit), the [allowance reserve](#subscription-allowance-and-reserve) and one session at a time (the workflow's `concurrency` group).
 
@@ -454,9 +454,34 @@ Under `--dry-run` the check is logged and nothing is counted or sent:
 
 ## Codex review loop hand-off and resume
 
-A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the board status, the linked PR and hidden markers in comments. Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect. Both rules live in `hpw dispatcher marker` (see [Markers](#markers--hpw-dispatcher-marker)).
+A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the linked PR, its merge gates and hidden markers in comments. No board status chooses a step: moving a card starts nothing (issue #475, ADR-010). Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect. Both rules live in `hpw dispatcher marker` (see [Markers](#markers--hpw-dispatcher-marker)).
 
 The `codex-review-bookkeeping` workflow does the part in between. It acts only on a story in `In review`, and moves it to `In merge` after a clean review with green required checks and a passed approval gate, or to `In implementation` after findings. `/implement` posts the review request; the dispatcher posts none.
+
+### Work in flight from PR facts
+
+The resume pass of `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` find every step from the facts below, whatever the story's board status (issue #475). One rule decides for both: `hpw dispatcher in-flight plan` (`src/headless_pr_workflow/dispatcher/in_flight.py`), on the facts `scripts/lib/in-flight.sh` reads. The *linked PR* of an open Story, Task or Bug is the first open PR whose body says `Closes #<n>`, `Fixes #<n>` or `Resolves #<n>`. A story counts as a *review-loop story* when it has exactly one `executor:` label and that label has a `CODEX_REVIEW_LOOP_ROUTING` row.
+
+| Step | Fact that selects the story |
+|---|---|
+| [Merge](#the-merge-step) | an open, non-draft linked PR whose merge gates all pass on its current head, ignoring the mergeability gate: `policy`, `checks`, `approval`, `threads` and `head` pass, as `scripts/merge-gate-summary` evaluates them |
+| [Finish](#the-merge-step) | no open linked PR, and a merged linked PR among the 100 most recently updated closed PRs |
+| [Fix round](#fix-round) | a review-loop story with an open linked PR whose current head has the bookkeeping job's findings marker |
+| [Pending hand-off](#hand-off-after-implement) | a review-loop story with an open, non-draft linked PR and the dispatcher's own `hand-off-pending` marker for it, with no `hand-off-done` marker |
+| [Review](#review-of-a-codex-implemented-pr) | a story with an open, non-draft linked PR that is not in the merge step: `/review` once per head for a story with a `REVIEW_EXECUTOR_ROUTING` row; the [conflict-round](#conflict-round) and missing-owner rules for a review-loop story |
+
+A merge gate that cannot be read counts as not passing, so the story stays in the review step until the next run. A comment list that cannot be read finds no fix round, hand-off or blocker for that story in this run, and a warning says so. Without the dispatcher's account (`hpw dispatcher marker whoami` fails) no fix round or pending hand-off is found in that run. When the open issues or the open PRs cannot be read, no in-flight session starts in that run.
+
+**Moving a card starts nothing.** A story with no linked PR and no dispatcher marker gets no session, whatever its card says, and it is in no poll key. The dispatcher's board writes stay until #461. A board read that only checks such a write, or names a status in a comment (the hand-off status check, the usage-limit pause text, stale recovery), chooses no session.
+
+**The two scheduler lists.** Every `hpw dispatcher scheduler next` call, from the poll and from `ask_scheduler` in the invoke step (both through `scheduler_next` in `scripts/lib/scheduler.sh`), gets two lists built from the same facts:
+
+- `--in-implementation`: the stories with an open linked PR that is a draft, or whose current head has a fix round due. They count against `WIP_LIMIT_IMPLEMENTATION` and for the file overlap.
+- `--in-flight`: every other open Story, Task or Bug with an open linked PR, and every one with an open Blocked Declaration of type `dependency`, `external`, `conflict` or `resource` that no later PO `/unblock` line resolves. The scheduler never starts them and refines them only when stale, and does not count them for the WIP limit or the file overlap.
+
+**Stale spec record (F2.7).** Before a fix round, conflict round, `/review` or `/merge`, the invoke step reads the facts of `hpw dispatcher facts read` (#283), once per run. When a story's facts say `stale`, that session does not start, and the run log carries `[RESUME SKIP] #<n>: stale spec record (<record commit> is older than the Epic's <current commit>); no fix round, conflict round, /review or /merge until it is re-refined`. The story stays in the scheduler's lists, so it is not started as new work, and the scheduler chooses its re-refinement (step 2). Finishing a PR that is already merged (`Done` and `/cleanup`) is not held back: no implementation session runs. The check fails closed: when the facts cannot be read, no fix round, conflict round, `/review` or `/merge` starts in that run, and the log carries `[RESUME SKIP] facts unreadable: <error>; no in-flight session in this run`. When only one story's facts are unreadable, only that story is skipped: `[RESUME SKIP] #<n>: facts unreadable (<reason>); trying again on the next run`. A story with no parent Epic, or under an Epic with no merged spec, is never stale and continues as before.
+
+**Retired.** The `in-merge-without-pr` blocker is no longer posted: without "In merge" as a trigger there is no contradiction to report.
 
 ### Hand-off after `/implement`
 
@@ -470,9 +495,9 @@ For a story whose executor has a `CODEX_REVIEW_LOOP_ROUTING` row, after `/implem
 - starts no `/review` session;
 - logs `[HANDOFF] #<n>: handed to the Codex review loop (Codex Cloud) on PR #<pr>; no /review session started` and goes on to the next ready story.
 
-### Resume at `In merge`
+### The merge step
 
-A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` and `/cleanup` here are the script-only phases (issue #264): no session starts and no allowance is checked. The board status is not trusted on its own: the merge gates inside `scripts/dispatcher-merge.sh` decide whether the PR merges.
+A story is in the merge step when its open, non-draft linked PR passes every merge gate except mergeability on its current head, whatever its executor and its board status ([Work in flight from PR facts](#work-in-flight-from-pr-facts)). It is taken up at `/merge`. `/merge` and `/cleanup` here are the script-only phases (issue #264): no session starts and no allowance is checked. The merge gates inside `scripts/dispatcher-merge.sh` still decide whether the PR merges.
 
 | Facts | What the dispatcher does |
 |---|---|
@@ -480,8 +505,9 @@ A story in `In merge` is taken up at `/merge`, whatever its executor. `/merge` a
 | That PR conflicts with main, and the story is a review-loop story (one `executor:` label with a `CODEX_REVIEW_LOOP_ROUTING` row) | No `/merge` and no merge-attempt marker. When the [conflict-round rule](#conflict-round) owes a round, it starts after every `/merge` of the run. Log: `[RESUME] #<n>: PR #<pr> conflicts with main; the conflict round starts after this run's merges` |
 | That PR conflicts with main, and the story has no review-loop row (for example `executor:codex`) | No `/merge` and no session. One `Type: external` blocker that names the merge conflict with main and the PR, once per PR head, sent as a `po_blocker`. Unblocked when: the PR branch is merged with main and the conflict resolved, or the PO posts `/unblock`. |
 | GitHub has not computed the PR's mergeability yet (`mergeable == null`) | Nothing in this run: no `/merge`, no conflict round, no marker, no blocker. Log: `[RESUME SKIP] #<n>: GitHub has not computed mergeability for PR #<pr> yet; trying again on the next run` |
-| No open PR, and a merged PR that closes the story | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
-| Neither (including a PR that is still a draft) | One `Type: external` blocker on the story, posted once. |
+| No open PR, and a merged PR that closes the story (the finish step) | `Done` and `/cleanup`, no `/merge`. This finishes a run that stopped between merge and cleanup. |
+
+A story with neither, including one with a PR that is still a draft, is not in the merge step: no blocker is posted (the `in-merge-without-pr` blocker is retired, issue #475).
 
 "Conflicts with main" is the test of the hand-off above: `mergeable == false` or `mergeable_state == "dirty"` from `gh api repos/<repo>/pulls/<n>` (issue #409). When that read fails, `/merge` runs as before and its merge gate decides.
 
@@ -509,25 +535,23 @@ Two gaps have no pending comment to retry, so they are closed separately. (1) A 
 
 `executor:codex` stories are not started for `/implement` by the dispatcher; the [local Codex worker](#local-codex-worker) on the PO's computer starts them. In "Ready for implementation" they are skipped with `Warning: #<n> has executor:codex, which the dispatcher does not start for /implement (no subscription mechanism, ADR-012); skipping it for this run and continuing selection.` The skip changes and spends nothing (no board write, comment, blocker, notification, counted session or allowance probe), and the story is not returned again in the same run. It is a lookup, not a branch on the label: an executor with no `EXECUTOR_PROVIDER` row is not started for `/implement`.
 
-A PR that Codex implemented outside the dispatcher is still reviewed by it. The resume pass has a fourth entry, after the three above. A review is due when all of these hold:
+A PR that Codex implemented outside the dispatcher is still reviewed by it. The resume pass has a fourth entry, the review step. A review is due when all of these hold, whatever the story's board status (issue #475):
 
-- the story's board status is `In review`;
-- it has exactly one `executor:` label, and that label has a `REVIEW_EXECUTOR_ROUTING` row (`scripts/lib/review-routing.sh`, shared with `scripts/dispatcher-poll.sh`);
-- it has a linked open PR that is not a draft.
+- it has a linked open PR that is not a draft and is not in the [merge step](#the-merge-step);
+- it has exactly one `executor:` label, and that label has a `REVIEW_EXECUTOR_ROUTING` row (`scripts/lib/review-routing.sh`, shared with `scripts/dispatcher-poll.sh`).
 
-The dispatcher then runs `/review <pr>` through `invoke_executor_command()` under the executor the table names (`claude-code-opus`). The usage limit and the allowance reserve apply as for any session. Log: `[RESUME] #<n>: /review on PR #<pr> under claude-code-opus`. A story that waits for Codex Cloud (a `CODEX_REVIEW_LOOP_ROUTING` row) logs nothing; a story with zero or two `executor:` labels, no linked open PR or a draft PR logs one `[RESUME SKIP] #<n>: <reason>` line.
+The dispatcher then runs `/review <pr>` through `invoke_executor_command()` under the executor the table names (`claude-code-opus`). The usage limit and the allowance reserve apply as for any session. Log: `[RESUME] #<n>: /review on PR #<pr> under claude-code-opus`. A story that waits for Codex Cloud (a `CODEX_REVIEW_LOOP_ROUTING` row) logs nothing; a story with zero or two `executor:` labels logs one `[RESUME SKIP] #<n>: <reason>` line. A story with no linked open PR or a draft PR is not in the review step.
 
-After `/review` succeeds the board status is read again. When it is `In merge`, the script-only `/merge` and `/cleanup` and the closure check run as for any `In merge` story. Otherwise the entry ends with `[RESUME] #<n>: /review left the story in "<status>"; no merge`: when `/review` found blockers the fixes are made outside the dispatcher, as the implementation was.
+After `/review` succeeds the PR's merge gates are read again; the board status decides nothing. When the gates put the PR in the merge step, the script-only `/merge` and `/cleanup` and the closure check run as for any story in the merge step. Otherwise the entry ends with `[RESUME] #<n>: /review left PR #<pr> outside the merge step; no merge`: when `/review` found blockers the fixes are made outside the dispatcher, as the implementation was.
 
 **One `/review` attempt per head.** When `/review` fails, the mid-cycle blocker records the PR head it was tried on. Later runs log `[RESUME SKIP] #<n>: /review was already tried on PR #<pr> head <sha7>; waiting for a new head or /unblock` and start no session. A new PR head, or the PO's `/unblock`, allows one new attempt.
 
-`scripts/dispatcher-poll.sh` lists such stories as `review_due` (number and title), and the workflow counts `review_due` in `resumable`, so the invoke step runs for them even when nothing else is due. A board whose only `In review` story is Claude-tier gives `review_due: []`. Under `--dry-run` the entry logs `[DRY RUN] Would start Claude Code (opus) on the subscription for /review <pr>` and starts nothing.
+`scripts/dispatcher-poll.sh` lists such stories as `review_due` (number and title), and the workflow counts `review_due` in `resumable`, so the invoke step runs for them even when nothing else is due. A run whose only story in the review step is Claude-tier gives `review_due: []`. Under `--dry-run` the entry logs `[DRY RUN] Would start Claude Code (opus) on the subscription for /review <pr>` and starts nothing.
 
 ### Fix round
 
-A fix round is due when all of these hold:
+A fix round is due when all of these hold, whatever the story's board status (issue #475):
 
-- the story's board status is `In implementation`;
 - it has exactly one `executor:` label, and that label has a `CODEX_REVIEW_LOOP_ROUTING` row;
 - it has a linked open PR;
 - the PR has a comment by the bookkeeping job's account that carries the job's hidden marker with `action=move-in-implementation` and `head=` equal to the PR's current head.
@@ -556,13 +580,13 @@ When the dispatcher merges one story, another dispatcher PR can start to conflic
 
 **The rule (issue #449).** A stopped conflict round is never resumed. The dispatcher keeps no record of an open round. Every run decides from GitHub facts only, with one rule that `scripts/dispatcher-poll.sh` and the resume pass of `scripts/dispatcher-invoke.sh` share (`conflict_round_rule` in `scripts/lib/conflict-round.sh`). A conflict round is owed when all of these hold, and only then:
 
-- the story is a review-loop story in `In implementation`, `In review` or `In merge`;
+- the story is a review-loop story, whatever its board status;
 - its linked open, non-draft PR conflicts with main (`mergeable == false` or `mergeable_state == "dirty"`);
 - no fix round is due: no bookkeeping `move-in-implementation` marker for the current head without a fix-round attempt marker that holds for it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
 - the story has no open blocker: a `## Blocked Declaration` with no later standalone `/unblock` line from the PO. A dispatcher blocker whose hidden marker names an older PR head is not open;
 - no conflict-round attempt marker holds for the current head.
 
-The poll lists such stories in `In review` under `conflict_due`; stories in `In implementation` and `In merge` are already listed under `in_implementation` and `in_merge`. The next run starts one fresh round.
+The poll lists such stories in the review step under `conflict_due`; a story with a fix round due is already listed under `in_implementation`, and one in the merge step under `in_merge`. The next run starts one fresh round.
 
 What the round does:
 
@@ -576,21 +600,21 @@ What the round does:
 
 **A stopped round.** A usage-limit pause posts only the standard [pause record](#pause-at-a-provider-usage-limit), with step `conflict round`, for the PO's information; the dispatcher never reads it. A cancelled run or a failed write of the pause record leaves nothing at all. In each case the next run applies the rule to the PR as it is then. While the PR still conflicts, a fresh round starts. When the session pushed before it stopped and the PR is clean, its head has no merge-owner evidence, and the story gets the blocker below. Only pushed commits survive.
 
-**A head left without an owner.** A review-loop story is `In implementation` or `In review`, its linked open non-draft PR is not conflicting, no fix round is due, no hand-off is pending, and the current head has no merge-owner evidence: a session stopped after its push, before the hand-off finished. The dispatcher starts no session. It posts one `Type: resource` blocker, once per head, sent as one `po_blocker`. The blocker says that the merge owner is missing for head `<sha7>` on PR #<pr>, that a session stopped after its push before the hand-off finished, and that the PO can follow [`docs/TAKEOVER-RULES.md` → Merge Takeover](TAKEOVER-RULES.md) or post `/unblock` after pushing a new head. Log: `[RESUME SKIP] #<n>: PR #<pr> head <sha7> has no merge-owner evidence; blocker posted`. A later run on the same head posts nothing more. The poll reports such a story in `In review` under `owner_missing_due` until the blocker is posted, so the workflow runs the invoke step even when nothing else is due; a story in `In implementation` is already reported under `in_implementation`. The blocker applies to every review-loop story, so a fix round or a first `/implement` stopped after its push gets it too. **In `In merge` (issue #406).** The same rule holds for every story `In merge`, whatever its executor: when the linked open non-draft PR is not conflicting and its head still has no dispatcher merge-owner marker after the pending copy was posted (`ensure_merge_owner`), the dispatcher does not run `/merge`. It posts one `Type: resource` blocker per head with the `merge-owner-missing` marker, sent as one `po_blocker` (no `merge-attempt` marker, no `dispatcher_error`). The blocker says that the head was not pushed by a dispatcher session (for example a manual fix round), so the dispatcher does not merge it, and that the PO merges PR #<pr> by hand with `/merge <pr>` and then runs `/cleanup <pr>` ([`docs/TAKEOVER-RULES.md` → Merge Takeover](TAKEOVER-RULES.md)). Later runs on the same head, also after `/unblock`, log `...; the blocker is already posted` and post nothing. A head with the marker or a pending copy for exactly that head still goes to the merge script. A manual fix round after `fix-round-max` ends the same way: the head it pushes is merged by the PO by hand. If the story stays `In merge` after a manual merge, the merged-PR path asks for the dispatcher's own merge confirmation (issue #348 give-up blocker applies).
+**A head left without an owner.** A review-loop story is in the review step: its linked open non-draft PR is not conflicting, no fix round is due, no hand-off is pending, and the current head has no merge-owner evidence: a session stopped after its push, before the hand-off finished. The dispatcher starts no session. It posts one `Type: resource` blocker, once per head, sent as one `po_blocker`. The blocker says that the merge owner is missing for head `<sha7>` on PR #<pr>, that a session stopped after its push before the hand-off finished, and that the PO can follow [`docs/TAKEOVER-RULES.md` → Merge Takeover](TAKEOVER-RULES.md) or post `/unblock` after pushing a new head. Log: `[RESUME SKIP] #<n>: PR #<pr> head <sha7> has no merge-owner evidence; blocker posted`. A later run on the same head posts nothing more. The poll reports such a story under `owner_missing_due` until the blocker is posted, so the workflow runs the invoke step even when nothing else is due. The blocker applies to every review-loop story, so a fix round or a first `/implement` stopped after its push gets it too. **In the merge step (issue #406).** The same rule holds for every story in the merge step, whatever its executor: when the linked open non-draft PR is not conflicting and its head still has no dispatcher merge-owner marker after the pending copy was posted (`ensure_merge_owner`), the dispatcher does not run `/merge`. It posts one `Type: resource` blocker per head with the `merge-owner-missing` marker, sent as one `po_blocker` (no `merge-attempt` marker, no `dispatcher_error`). The blocker says that the head was not pushed by a dispatcher session (for example a manual fix round), so the dispatcher does not merge it, and that the PO merges PR #<pr> by hand with `/merge <pr>` and then runs `/cleanup <pr>` ([`docs/TAKEOVER-RULES.md` → Merge Takeover](TAKEOVER-RULES.md)). Later runs on the same head, also after `/unblock`, log `...; the blocker is already posted` and post nothing. A head with the marker or a pending copy for exactly that head still goes to the merge script. A manual fix round after `fix-round-max` ends the same way: the head it pushes is merged by the PO by hand. If the story stays `In merge` after a manual merge, the merged-PR path asks for the dispatcher's own merge confirmation (issue #348 give-up blocker applies).
 
-**Not a fix round.** Conflict rounds do not count toward `CODEX_FIX_ROUND_MAX`: only the bookkeeping job's findings markers count. A story without a review-loop row gets no conflict round; see the `In merge` table.
+**Not a fix round.** Conflict rounds do not count toward `CODEX_FIX_ROUND_MAX`: only the bookkeeping job's findings markers count. A story without a review-loop row gets no conflict round; see the [merge step](#the-merge-step) table.
 
 ### Order and entry into a run
 
 Each run handles resumable work before it starts new work:
 
-1. stories in `In merge`. The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`. A conflicting PR of a review-loop story is only queued here;
+1. stories in the merge step, then the stories to finish (a merged linked PR). The board is read again after each one that finishes, so the feature and epic closure check sees stories finished earlier in the same run as `Done`. A conflicting PR of a review-loop story is only queued here;
 2. fix rounds that are due, and hand-offs that are still pending;
-3. stories in `In review` (a `/review` session for a Codex-implemented PR; a conflicting review-loop PR is queued);
+3. stories in the review step (a `/review` session for a Codex-implemented PR; a conflicting review-loop PR is queued);
 4. the queued conflict rounds. Every `/merge` of the run has run by then, so each round starts from the newest `main`;
 5. then one [scheduler](#scheduler-new-work-from-github-facts) decision for new work, asked right then.
 
-`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due`, `conflict_due` and `owner_missing_due` (each `[{number, title}]`). `conflict_due` lists the review-loop stories in `In review` that the [conflict-round rule](#conflict-round) owes a round. `owner_missing_due` lists, by the same rule, the review-loop stories in `In review` whose clean head has no merge-owner evidence and no missing-merge-owner blocker yet ([A head left without an owner](#conflict-round)). Together they cost one PR read per review-loop story in `In review` per poll, and two comment reads when GitHub has computed that PR's mergeability. A story whose PR or comments cannot be read is not listed, and the poll writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due and owner_missing_due skip it this cycle` or `[POLL] Warning: could not read the comments of #<n> or PR #<pr>; conflict_due and owner_missing_due skip it this cycle`. The poll also reports the scheduler's choice (`next_issue`, `next_action`, `scheduler_result`). `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when the scheduler chose new work (`next_issue` is set) **or** any of these lists is non-empty:
+`scripts/dispatcher-poll.sh` reports the candidates in more keys of its JSON, `in_merge`, `in_implementation`, `review_due`, `conflict_due` and `owner_missing_due` (each `[{number, title}]`). Each key is built from the [PR facts](#work-in-flight-from-pr-facts), whatever the board status (issue #475): `in_merge` lists the merge and finish steps, `in_implementation` the fix rounds due and the pending hand-offs, `review_due` the review step for a story with a `REVIEW_EXECUTOR_ROUTING` row. `conflict_due` lists the review-loop stories in the review step that the [conflict-round rule](#conflict-round) owes a round. `owner_missing_due` lists, by the same rule, the review-loop stories in the review step whose clean head has no merge-owner evidence and no missing-merge-owner blocker yet ([A head left without an owner](#conflict-round)). Together they cost one PR read per review-loop story in the review step per poll, and two comment reads when GitHub has computed that PR's mergeability. A story whose PR or comments cannot be read is not listed, and the poll writes `[POLL] Warning: could not read PR #<pr> for #<n>; conflict_due and owner_missing_due skip it this cycle` or `[POLL] Warning: could not read the comments of #<n> or PR #<pr>; conflict_due and owner_missing_due skip it this cycle`. The poll also reports the scheduler's choice (`next_issue`, `next_action`, `scheduler_result`). `.github/workflows/dispatcher.yml` starts the invoke step, and the steps that prepare a session before it, when the scheduler chose new work (`next_issue` is set) **or** any of these lists is non-empty:
 
 ```
 bash scripts/dispatcher-invoke.sh --repo <owner/repo>               # resumable work first, then the scheduler's new work
@@ -598,7 +622,7 @@ bash scripts/dispatcher-invoke.sh --repo <owner/repo> --issue <n>   # resumable 
 bash scripts/dispatcher-invoke.sh --repo <owner/repo> --resume      # resumable work only (manual)
 ```
 
-The workflow always uses the first form (or `--refine <n>` for the `refine_issue` input); `--issue` and `--resume` stay for manual runs. It runs the invoke step when the scheduler chose new work, when a story is `In merge` or `In implementation`, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
+The workflow always uses the first form (or `--refine <n>` for the `refine_issue` input); `--issue` and `--resume` stay for manual runs. It runs the invoke step when the scheduler chose new work, when `in_merge` or `in_implementation` is non-empty, when `review_due`, `conflict_due` or `owner_missing_due` is non-empty, or when an issue carries the `evidence:pending` label (issue #348). A run in which nothing is due starts no session and exits `0`.
 
 The board must have the `In review` and `In merge` Status options. A missing option stops the run with an error that names it, before any session starts. It is not skipped with a warning.
 
@@ -617,9 +641,11 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 - A session that ends without an error counts as a success. After `/merge` the dispatcher writes `Done` without reading the PR's merged state itself; `scripts/dispatcher-merge.sh` exits 0 only after `hpw merge-pr` confirmed the merge (or GitHub already reported it merged).
 - The bookkeeping job resolves Codex's own finding threads from older heads when Codex returns a clean result on the current head, and does not move a story to `In merge` while an unresolved thread it may not resolve remains (a human's thread, a Codex thread on the current head, or one whose review commit cannot be read): it posts a `Type: external` blocker instead. A thread the PO or another reviewer opened is still resolved by a person, and a defect named in an auto-resolved thread that Codex did not re-check can reach `main` (accepted risk, ADR-006 revisit rule). See [HEADLESS-PR-WORKFLOW.md → Codex review loop](HEADLESS-PR-WORKFLOW.md#codex-review-loop).
 - Stale recovery does not roll back a story that waits for a fix round. While the allowance is below the reserve, the run ends at the fix round, before the stale check. A story held by one of the two fix-round blockers above, by a conflict-round blocker or by the missing-merge-owner blocker is skipped by the stale check: it waits for the PO.
-- A session that stops after its push, before the hand-off finished, is not continued, except a fix round stopped by a provider usage limit (issues #446, #447), whether the session had already written `In review` or not: the pause finishes it in the same run by recording the merge owner for the pushed head and handing it off. In the remaining cases the story gets one `Type: resource` blocker for a head without merge-owner evidence ([conflict round](#conflict-round) → A head left without an owner), and the PO finishes it by a merge takeover or a new head. This applies to every review-loop story in `In implementation` or `In review`, including one whose PR was implemented outside the dispatcher; a story `In merge` gets the same blocker with the manual-merge way out (see above).
+- A session that stops after its push, before the hand-off finished, is not continued, except a fix round stopped by a provider usage limit (issues #446, #447), whether the session had already written `In review` or not: the pause finishes it in the same run by recording the merge owner for the pushed head and handing it off. In the remaining cases the story gets one `Type: resource` blocker for a head without merge-owner evidence ([conflict round](#conflict-round) → A head left without an owner), and the PO finishes it by a merge takeover or a new head. This applies to every review-loop story in the review step, including one whose PR was implemented outside the dispatcher; a story in the merge step gets the same blocker with the manual-merge way out (see above).
 - A story paused at a provider usage limit waits at its step (fix round, `/review`) or in `Ready for implementation` (new `/implement`) until the usage limit and the allowance check allow a start; the run ends at that refused start, before the stale check, so stale recovery does not roll back a fix-round or `/review` story. Only pushed commits survive a pause.
-- The merged-PR lookup for a story in `In merge` reads the 100 most recently updated closed PRs.
+- The merged-PR lookup of the finish step reads the 100 most recently updated closed PRs, and the work in flight reads open issues only: GitHub closes the story when its PR merges, so a closed story whose cleanup failed comes back only through the `evidence:pending` label (issue #348).
+- The merge gates cost one `scripts/merge-gate-summary` evaluation per open non-draft linked PR, in each poll and each time the invoke step reads the work in flight.
+- The `codex-review-bookkeeping` job still acts only on a story in `In review`. A card moved out of `In review` before Codex answers gets no findings marker and no move to `In merge` until #461 replaces the board guard; the dispatcher itself no longer depends on the column.
 
 ---
 

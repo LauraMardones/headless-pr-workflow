@@ -204,6 +204,9 @@ cat > "$FAKE_BIN/hpw" << EOF
 if [[ "\${1:-} \${2:-}" == "dispatcher state" ]]; then  # Block 3 (issue #434): the real block, local files only
     shift; PYTHONPATH="$SCRIPT_DIR/src" exec "\$(command -v python3 || command -v python)" -m headless_pr_workflow.dispatcher "\$@"
 fi
+if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" ]]; then  # issue #475: the real rule, on the facts the script read
+    shift; PYTHONPATH="$SCRIPT_DIR/src" exec "\$(command -v python3 || command -v python)" -m headless_pr_workflow.dispatcher "\$@"
+fi
 EOF
 cat >> "$FAKE_BIN/hpw" << 'EOF'
 if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then  # issue #474

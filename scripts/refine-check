@@ -216,6 +216,35 @@ def hard_dependencies(sections: dict[str, str], own: int) -> list[int]:
     return sorted({n for n in numbers if n != own})
 
 
+def unnumbered_dependencies(sections: dict[str, str]) -> list[str]:
+    """Hard-dependency entries with no issue number that are not a `none` entry (#529).
+
+    Own copy lives in src/headless_pr_workflow/dispatcher/facts.py; tests check that they agree.
+    """
+    entries: list[list[str]] = []
+    active = False
+    for line in sections.get("Dependencies", "").split("\n"):
+        bare = line.strip().strip("*_ ").lower()
+        if bare.startswith("hard depends on"):
+            active = True
+            rest = re.sub(r"^[\s*_]*hard depends on[\s*_]*:?[\s*_]*", "", line.strip(), flags=re.I).strip()
+            entries = [[rest]] if rest else []
+            continue
+        if bare.startswith(("soft depends on", "revalidate after")):
+            active = False
+        if not active or not line.strip():
+            continue
+        item = re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?(.*)$", line)
+        if item:
+            entries.append([item.group(1)])
+        elif entries:
+            entries[-1].append(line.strip())
+        else:
+            entries.append([line.strip()])
+    texts = [" ".join(part for part in entry if part).strip() for entry in entries]
+    return [t for t in texts if t and not re.search(r"#\d+", t) and not re.match(r"^[\s*_]*none\b", t, re.I)]
+
+
 SPEC_LINE = re.compile(r"^[ \t]*Spec:\s*\[`([^`]+)`\]\((\S+)\)\s+at\s+`([0-9a-fA-F]{7,40})`(?:\s.*)?$", re.M)
 FEATURE_PREFIX = re.compile(r"^[ \t]*Criterion prefix:\s*F(\d+)\b", re.I | re.M)
 # Same format as scripts/criteria-check: `**F<k>.<m>** (serves E<n>, ...) - text`.
@@ -294,7 +323,11 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
         if issue_reader(repo, dep).state.upper() == "OPEN":
             open_deps.append(dep)
     refs = ", ".join(f"#{n}" for n in open_deps)
-    if open_deps and body_status == READY:
+    unnumbered = unnumbered_dependencies(sections)
+    if unnumbered:
+        listed = "; ".join(f"'{entry}'" for entry in unnumbered)
+        checks.append(Check("hard_dependencies", "fail", f"hard dependency without an issue number: {listed}; create or name an issue"))
+    elif open_deps and body_status == READY:
         checks.append(Check("hard_dependencies", "fail", f"{READY} while hard dependencies are open: {refs}"))
     elif open_deps and body_status == REFINED and not blocked_marker:
         checks.append(Check("hard_dependencies", "fail", f"open hard dependencies {refs}; status must be '{REFINED}; blocked by #X'"))

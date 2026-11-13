@@ -18,7 +18,14 @@ from pathlib import Path
 import pytest
 
 from headless_pr_workflow.dispatcher import cli
-from headless_pr_workflow.dispatcher.facts import SPEC_LINE, files_affected, hard_dependencies, parse_sections, read_facts
+from headless_pr_workflow.dispatcher.facts import (
+    SPEC_LINE,
+    files_affected,
+    hard_dependencies,
+    parse_sections,
+    read_facts,
+    unnumbered_dependencies,
+)
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 
 PO = "LauraMardones"
@@ -46,6 +53,8 @@ def summary(result="pass", command="refine"):
 
 
 BLOCKER = "## Blocked Declaration\nType: decision\nQuestion: x"
+DEPENDENCY_BLOCKER = "## Blocked Declaration\nType: dependency\nQuestion: x"
+UNNUMBERED = "- The standing slask Epic and its slask Feature (no issue yet)"
 
 
 class FakeGateway:
@@ -399,6 +408,88 @@ def test_none_dependency_is_ready(gw, capsys):
     assert facts_of(out, 30)["dependencies"] == {"state": "read", "items": []} and facts_of(out, 30)["ready"]
 
 
+@pytest.mark.parametrize("hard", [UNNUMBERED, "- #40\n" + UNNUMBERED, "- None.\n" + UNNUMBERED])
+def test_dependency_without_issue_is_not_ready(gw, capsys, hard):
+    gw.states = {40: "closed"}
+    story(gw, body=story_body(hard=hard))
+    rc, out, err = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert not entry["ready"] and entry["refined"] and "dependency-without-issue" in entry["reasons"]
+    assert "[FACTS] #30 story refined=yes ready=no stale=no dependency-without-issue" in err
+
+
+def test_dependency_without_issue_on_the_label_line(gw, capsys):
+    story(gw, body=story_body().replace("Hard depends on:\n\n- None.", "Hard depends on: the slask Epic"))
+    _, out, _ = run(capsys, gw)
+    assert not facts_of(out, 30)["ready"] and "dependency-without-issue" in facts_of(out, 30)["reasons"]
+
+
+@pytest.mark.parametrize("hard", ["- none", "None.", "- None open. Everything shipped.", "- #40"])
+def test_none_and_numbered_dependencies_stay_ready(gw, capsys, hard):
+    gw.states = {40: "closed"}
+    story(gw, body=story_body(hard=hard))
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["ready"] and "dependency-without-issue" not in facts_of(out, 30)["reasons"]
+
+
+def test_open_dependency_blocker(gw, capsys):
+    story(gw)
+    gw.comment(30, DEPENDENCY_BLOCKER)
+    _, out, err = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["dependency_blocker"]["state"] == "open" and entry["refined"] and not entry["ready"]
+    assert entry["reasons"] == ["open-dependency-blocker"] and entry["decision_blocker"]["state"] == "none"
+    assert "ready=no stale=no open-dependency-blocker" in err
+
+
+def test_dependency_blocker_is_lifted_by_unblock(gw, capsys):
+    story(gw)
+    gw.comment(30, DEPENDENCY_BLOCKER)
+    gw.comment(30, "/unblock")
+    _, out, _ = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["dependency_blocker"]["state"] == "unblocked" and entry["ready"] and entry["refined"]
+
+
+def test_dependency_blocker_is_lifted_by_a_trusted_unblocked_comment(gw, capsys):
+    story(gw)
+    gw.comment(30, DEPENDENCY_BLOCKER)
+    gw.comment(30, "Unblocked: #99 is merged", login="stranger", assoc="NONE")
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["dependency_blocker"]["state"] == "open"
+    gw.comment(30, "Unblocked: #99 is merged", login=PO)
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["dependency_blocker"]["state"] == "unblocked" and facts_of(out, 30)["ready"]
+
+
+def test_dependency_blocker_is_lifted_by_a_later_passing_summary(gw, capsys):
+    story(gw)
+    gw.comment(30, DEPENDENCY_BLOCKER)
+    _, out, _ = run(capsys, gw)
+    assert not facts_of(out, 30)["ready"]
+    gw.comment(30, summary("fail"))
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["dependency_blocker"]["state"] == "open"
+    gw.comment(30, summary())
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["dependency_blocker"]["state"] == "unblocked" and facts_of(out, 30)["ready"]
+
+
+def test_dependency_blocker_by_a_stranger_is_ignored(gw, capsys):
+    story(gw)
+    gw.comment(30, DEPENDENCY_BLOCKER, login="stranger")
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["dependency_blocker"]["state"] == "none" and facts_of(out, 30)["ready"]
+
+
+def test_decision_blocker_still_makes_the_story_unrefined_not_dependency_blocked(gw, capsys):
+    story(gw)
+    gw.comment(30, BLOCKER)
+    _, out, _ = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["dependency_blocker"]["state"] == "none" and not entry["refined"]
+
+
 @pytest.mark.parametrize("body", [story_body(dependencies=False), story_body().replace("Hard depends on:", "Needs:")])
 def test_missing_dependencies_section_or_line_is_unreadable(gw, capsys, body):
     story(gw, body=body)
@@ -647,6 +738,13 @@ BODIES = [
     "Spec: [`specs/10-epic/spec.md`](https://x/y) at `xyz`\n",
     "Spec: specs/10-epic/spec.md\n",
     "\r\n".join(story_body().split("\n")),
+    story_body(hard=UNNUMBERED),
+    story_body(hard="- #5\n" + UNNUMBERED),
+    story_body(hard="- none"),
+    story_body(hard="- None open. Done."),
+    story_body().replace("Hard depends on:\n\n- None.", "Hard depends on: the slask Epic"),
+    story_body().replace("Hard depends on:", "**Hard depends on:** nothing numbered"),
+    "## Dependencies\n\nHard depends on:\n- a thing\n  continued with #12\n- other\nSoft depends on:\n- x\n",
 ]
 
 
@@ -657,6 +755,7 @@ def test_parsers_agree_with_refine_check(refine_check, body):
     mine = hard_dependencies(parse_sections(body), 30)
     expected = refine_check.hard_dependencies(sections, 30)
     assert (mine or []) == expected
+    assert unnumbered_dependencies(parse_sections(body)) == refine_check.unnumbered_dependencies(sections)
     found = SPEC_LINE.search(body.replace("\r\n", "\n"))
     other = refine_check.SPEC_LINE.search(body.replace("\r\n", "\n"))
     assert (found.groups() if found else None) == (other.groups() if other else None)

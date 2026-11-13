@@ -16,9 +16,9 @@ import subprocess
 
 import pytest
 
-from tests.dispatcher_fakes import BASH, BOT, PO, REPO_ROOT, Dispatcher, needs_tools
+from tests.dispatcher_fakes import BASH, BOT, PO, REPO_ROOT, Dispatcher, needs_tools, poll_fakes
 from tests.phase_script_fakes import PhaseHarness
-from tests.hpw_dispatcher_route import fake_state_route
+from tests.hpw_dispatcher_route import fake_in_flight_route, fake_state_route
 from tests.script_tools import script_path, windows_env
 
 pytestmark = needs_tools
@@ -318,17 +318,16 @@ def poll(tmp_path, items: list[tuple], pulls: list[dict], details: dict[int, dic
     ``details`` maps a PR number to its single-PR read; a PR missing from it
     cannot be read (curl fails, as on an HTTP error). ``comments`` maps an
     issue or PR number to its comments; a ``details/unreadable_<n>`` file
-    makes the comment read of <n> fail.
+    makes the comment read of <n> fail. An item is ``(number, status, executor)``: the poll finds
+    work in flight from PR facts (issue #475), so the status is not served; it only names the card.
     """
-    nodes = [{"content": {"number": n, "title": f"Story {n}",
-                          "labels": {"nodes": [{"name": f"executor:{executor}"}]}},
-              "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}}
-             for n, status, executor in items]
     board = {"data": {"repository": {"projectsV2": {"nodes": [{
         "number": 3, "title": "board",
-        "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}]}}}}
+        "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}]}}}}
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    fakes = poll_fakes(tmp_path, bin_dir, [(n, [f"executor:{executor}"]) for n, _status, executor in items],
+                       comments=comments)
     detail_dir = tmp_path / "details"
     detail_dir.mkdir(exist_ok=True)
     (tmp_path / "board.json").write_text(json.dumps(board), encoding="utf-8")
@@ -349,8 +348,10 @@ case "$url" in
     [[ -f "$DETAIL_DIR/unreadable_$n" ]] && exit 22
     f="$DETAIL_DIR/comments_$n.json"; [[ -f "$f" ]] && cat "$f" || echo '[]' ;;
   */pulls/[0-9]*) f="$DETAIL_DIR/pr_${{url##*/}}.json"; [[ -f "$f" ]] || exit 22; cat "$f" ;;
+  *state=closed*) echo '[]' ;;
   */pulls*) cat "$PULLS_FILE" ;;
   *labels=evidence*) echo '[]' ;;
+  *"/issues?state=open"*) cat "$ISSUES_FILE" ;;
   *) cat "$BOARD_FILE" ;;
 esac
 """, encoding="utf-8", newline="\n")
@@ -358,14 +359,14 @@ esac
     # The token's login comes from Block 2 (`hpw dispatcher marker whoami`, issue #433).
     hpw = bin_dir / "hpw"
     hpw.write_text(f"""#!/usr/bin/env bash
-{fake_state_route()}[[ "$1 $2 $3" == "dispatcher marker whoami" ]] || {{ echo "fake hpw: unsupported: $*" >&2; exit 2; }}
+{fake_state_route()}{fake_in_flight_route()}[[ "$1 $2 $3" == "dispatcher marker whoami" ]] || {{ echo "fake hpw: unsupported: $*" >&2; exit 2; }}
 echo '{{"ok": true, "block": "marker", "operation": "whoami", "result": "read", "error": null, "dispatcher": "{BOT}", "bookkeeping": "{BOT}"}}'
 """, encoding="utf-8", newline="\n")
     hpw.chmod(0o755)
     env = {"PATH": script_path(bin_dir.as_posix()), "GH_TOKEN": "fake", "HPW_BIN": hpw.as_posix(), "HOME": tmp_path.as_posix(),
            "BOARD_FILE": (tmp_path / "board.json").as_posix(),
            "PULLS_FILE": (tmp_path / "pulls.json").as_posix(),
-           "DETAIL_DIR": detail_dir.as_posix(), "CURL_LOG": (tmp_path / "curl.log").as_posix(),
+           "DETAIL_DIR": detail_dir.as_posix(), "CURL_LOG": (tmp_path / "curl.log").as_posix(), **fakes,
            "DISPATCHER_STATE_DIR": (tmp_path / "state").as_posix(),
            "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5", **windows_env()}
     proc = subprocess.run(
@@ -402,7 +403,7 @@ def test_ac2_poll_lists_only_review_loop_stories_in_review_with_a_conflicting_pr
          (5, "In review", "claude-code-opus"),     # PR cannot be read
          (6, "In review", "claude-code-opus"),     # draft PR
          (7, "In review", "codex"),                # no review-loop row
-         (8, "In merge", "claude-code-opus")],     # not "In review"
+         (8, "In merge", "claude-code-opus")],     # conflicting: the card decides nothing (#475)
         pulls=[open_pr(11, 1), open_pr(12, 2), open_pr(13, 3), open_pr(14, 4), open_pr(15, 5),
                open_pr(16, 6, draft=True), open_pr(17, 7), open_pr(18, 8)],
         details={11: {"mergeable": False, "mergeable_state": "dirty", "head": {"sha": HEAD}},
@@ -413,7 +414,8 @@ def test_ac2_poll_lists_only_review_loop_stories_in_review_with_a_conflicting_pr
                  17: {"mergeable": False, "mergeable_state": "dirty"},
                  18: {"mergeable": False, "mergeable_state": "dirty"}},
     )
-    assert out["conflict_due"] == [{"number": 1, "title": "Story 1"}, {"number": 2, "title": "Story 2"}]
+    assert out["conflict_due"] == [{"number": 1, "title": "Story 1"}, {"number": 2, "title": "Story 2"},
+                                   {"number": 8, "title": "Story 8"}]
     assert "[POLL] Warning: could not read PR #15 for #5; conflict_due and owner_missing_due skip it this cycle" in stderr
     assert out["review_due"] == [{"number": 7, "title": "Story 7"}]  # unchanged for the codex story
     # #449: the clean head of story 3 has no merge-owner evidence (no comments at all)
@@ -456,7 +458,8 @@ OWNER_CONDITIONS = {
 @pytest.mark.parametrize("condition", list(OWNER_CONDITIONS))
 def test_449_ac4_poll_lists_an_ownerless_head_in_review(tmp_path, condition):
     fields, story_comments, pr_comments, listed = OWNER_CONDITIONS[condition]
-    out, stderr = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
+    # #475 AC 7: the card shows "In implementation"; the PR facts decide.
+    out, stderr = poll(tmp_path, [(1, "In implementation", "claude-code-opus")], pulls=[open_pr(11, 1)],
                        details={11: {**fields, "head": {"sha": NEW_HEAD}}},
                        comments={1: story_comments, 11: pr_comments})
     assert out["owner_missing_due"] == ([{"number": 1, "title": "Story 1"}] if listed else []), stderr
@@ -497,7 +500,8 @@ POLL_CONDITIONS = {
 @pytest.mark.parametrize("condition", list(POLL_CONDITIONS))
 def test_449_ac2_poll_applies_the_owed_round_rule(tmp_path, condition):
     story_comments, pr_comments, listed = POLL_CONDITIONS[condition]
-    out, stderr = poll(tmp_path, [(1, "In review", "claude-code-opus")], pulls=[open_pr(11, 1)],
+    # #475 AC 7: the card shows "Ready for implementation"; the PR facts decide.
+    out, stderr = poll(tmp_path, [(1, "Ready for implementation", "claude-code-opus")], pulls=[open_pr(11, 1)],
                        details={11: {**DIRTY, "head": {"sha": HEAD}}},
                        comments={1: story_comments, 11: pr_comments})
     assert out["conflict_due"] == ([{"number": 1, "title": "Story 1"}] if listed else []), stderr

@@ -158,10 +158,11 @@ def _stories_left_to_refine(issues: Mapping[int, dict[str, Any]], epics: Mapping
 
 
 def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits,
-                exclude: Sequence[int] = ()) -> Decision:  # fmt: skip
+                exclude: Sequence[int] = (), in_flight: Sequence[int] = ()) -> Decision:  # fmt: skip
     """The next action from the facts (the ``read`` output of ``hpw dispatcher facts read``). No GitHub call."""
 
-    active = set(in_implementation)
+    implementing = set(in_implementation)  # counts for the WIP limit and the file overlap
+    active = implementing | set(in_flight)  # every story with work in flight: never started, refined only when stale
     epics = {int(e["number"]): e for e in facts.get("epics") or []}
     issues = {int(i["number"]): i for i in facts.get("issues") or []}
     stories = [i for i in issues.values() if i.get("type") in STORY_TYPES]
@@ -279,11 +280,11 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
 
     # ── Implementation start: step 5 ─────────────────────────────────────────
     starts = [s for s in stories if s.get("ready") and not s.get("stale") and s["number"] not in active]
-    if starts and len(active) >= limits.wip:
+    if starts and len(implementing) >= limits.wip:
         for entry in starts:
             skip(entry["number"], "wip-limit")
     elif starts:
-        running = sorted(active)
+        running = sorted(implementing)
 
         def note(number: int) -> None:
             if f"files-affected-missing #{number}" not in notes:
@@ -322,7 +323,7 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
         action=chosen.action() if chosen else None,
         skipped=[{"issue": n, "reason": r} for n, r in sorted(skipped.items())],
         notes=notes,
-        counts={"ready": ready, "waiting": waiting, "in_implementation": len(active)},
+        counts={"ready": ready, "waiting": waiting, "in_implementation": len(implementing)},
     )
 
 
@@ -348,7 +349,8 @@ def _usable(facts: Any) -> str | None:
 
 
 def next_action(gateway: Gateway | None, repo: str, *, in_implementation: Sequence[int], exclude: Sequence[int] = (),
-                env: Mapping[str, str] | None = None, facts: Mapping[str, Any] | None = None) -> Result:  # fmt: skip
+                env: Mapping[str, str] | None = None, facts: Mapping[str, Any] | None = None,
+                in_flight: Sequence[int] = ()) -> Result:  # fmt: skip
     """Load the limits, read the facts (unless given) and print-ready the decision."""
 
     env = os.environ if env is None else env
@@ -363,7 +365,8 @@ def next_action(gateway: Gateway | None, repo: str, *, in_implementation: Sequen
     problem = _usable(facts)
     if problem:
         return _unreadable(f"facts: {problem}", limits)
-    decision = choose_next(facts, in_implementation=in_implementation, limits=limits, exclude=exclude)
+    decision = choose_next(facts, in_implementation=in_implementation, limits=limits, exclude=exclude,
+                           in_flight=in_flight)
     action = decision.action
     if action:
         log(f"[SCHEDULER] {action['kind']} #{action['issue']} step={action['step']} reason={action['reason']}")

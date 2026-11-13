@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler``, ``status`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -19,6 +19,7 @@ from typing import Callable, Sequence
 from .board_sync import sync_board
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
+from .in_flight import plan as plan_in_flight
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .scheduler import next_action
 from .state import FILE_NAMES, read_pending, read_state, write_state
@@ -41,7 +42,7 @@ _SHA_OR_DASH = re.compile(r"^(-|[0-9a-fA-F]{7,40})$")
 _ITEM = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "codex-worker")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker")
 
 
 class InvalidArguments(Exception):
@@ -117,8 +118,18 @@ def build_parser() -> argparse.ArgumentParser:
     s_next.add_argument("--repo", required=True)
     s_next.add_argument("--facts-file")
     s_next.add_argument("--in-implementation", type=_issue_list, default=[])
+    s_next.add_argument("--in-flight", type=_issue_list, default=[])
     s_next.add_argument("--exclude", type=_issue_list, default=[])
     s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
+    in_flight = blocks.add_parser("in-flight", add_help=False)
+    in_flight_ops = in_flight.add_subparsers(dest="operation", parser_class=_Parser)
+    i_plan = in_flight_ops.add_parser("plan", add_help=False)
+    i_plan.add_argument("--repo", required=True)
+    i_plan.add_argument("--input", required=True)
+    i_plan.add_argument("--dispatcher", default="")
+    i_plan.add_argument("--bookkeeping", default="")
+    i_plan.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     status = blocks.add_parser("status", add_help=False)
     status_ops = status.add_subparsers(dest="operation", parser_class=_Parser)
@@ -227,6 +238,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
+            "| hpw dispatcher in-flight plan ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
@@ -359,7 +371,17 @@ def _run_scheduler(args: argparse.Namespace, gateway: Gateway) -> int:
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             facts = {"result": "unreadable", "error": f"read facts file: {exc}"}
     return _emit(next_action(None if facts is not None else gateway, args.repo,
-                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts))  # fmt: skip
+                             in_implementation=args.in_implementation, exclude=args.exclude, facts=facts,
+                             in_flight=args.in_flight))  # fmt: skip
+
+
+def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        rows = json.loads(Path(args.input).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return _emit(Result("plan", "unreadable", error=f"read input file: {exc}", block="in-flight"))
+    return _emit(plan_in_flight(rows, dispatcher=args.dispatcher.strip(), bookkeeping=args.bookkeeping.strip(),
+                                po=settings.po_login))  # fmt: skip
 
 
 def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
@@ -406,6 +428,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _emit(read_facts(gateway, args.repo, epic=args.epic))
     if args.block == "scheduler":
         return _run_scheduler(args, gateway)
+    if args.block == "in-flight":
+        return _run_in_flight(args, settings)
     if args.block == "codex-worker":
         return _run_worker(args, gateway, settings)
     if args.block == "status":

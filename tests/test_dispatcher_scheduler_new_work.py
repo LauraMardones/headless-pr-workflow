@@ -55,16 +55,22 @@ def code_lines(path) -> list[str]:
 
 
 def test_ac1_a_scheduled_run_asks_the_scheduler_with_the_work_in_flight(d):
-    d.add_story(10, "In implementation")
+    # Issue #475 AC 8: the lists come from PR facts; the cards show other statuses.
+    d.add_story(10, "In review")
     fresh(d, 10)
-    d.add_story(11, "In review")
+    d.add_pr(910, 10, draft=True)            # a draft PR: in implementation
+    d.add_story(11, "In implementation")
+    fresh(d, 11)
+    d.add_pr(911, 11)                         # a ready PR with its merge owner: in flight
+    d.add_comment(911, f"<!-- hpw:dispatcher action=merge-owner pr=911 head={'a' * 40} -->")
+    d.add_story(12, "In review")              # no PR: nothing in flight
     d.add_story(STORY, "Ready for implementation")
     d.schedule(("idle",))
 
     proc = scheduled(d)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation 10,11"]
+    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation 10 --in-flight 11"]
     assert d.sessions == []
 
 
@@ -72,7 +78,7 @@ def test_ac1_dry_run_passes_dry_run_to_the_scheduler(d):
     proc = scheduled(d, "--dry-run")
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation  --dry-run"]
+    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation  --in-flight  --dry-run"]
 
 
 @pytest.mark.parametrize("path", [INVOKE, POLL], ids=["invoke", "poll"])
@@ -81,19 +87,9 @@ def test_ac1_no_script_selects_board_items_by_a_ready_status(path):
     # The jq filter that picks board items by their Status value.
     assert not re.search(r'\(\.name\? // ""\) == "Ready', code)
     assert "find_next_ready_story" not in code
-    # Board item lists by status are read only for work in flight. The one
-    # "Ready for implementation" read left is the resume pass's pending hand-off:
-    # work already on a PR, which #475 moves to PR facts.
-    reads = re.findall(r'(?:board_items_in_status|status_items) "([^"]+)"', code)
-    allowed = {"In merge", "In implementation", "In review"} | ({"Ready for implementation"} if path == INVOKE else set())
-    assert set(reads) <= allowed, reads
-    if path == INVOKE:
-        ready_reads = [line for line in code_lines(path) if 'board_items_in_status "Ready for implementation"' in line]
-        assert ready_reads == ['    items=$(board_items_in_status "Ready for implementation")']
-        resume_pass = code.split("run_resume_pass() {", 1)[1].split("\n}\n", 1)[0]
-        assert 'board_items_in_status "Ready for implementation"' in resume_pass
-        assert "resume_pending_hand_off" in resume_pass
-    else:
+    # No board item list by status is read at all: work in flight comes from PR facts (#475).
+    assert not re.findall(r'(?:board_items_in_status|status_items) "([^"]+)"', code)
+    if path == POLL:
         assert "Ready for refinement" not in code and "Ready for implementation" not in code
 
 
@@ -232,9 +228,9 @@ def test_ac6_work_in_flight_runs_before_the_scheduler_decision(d):
 
 def test_ac6_the_next_story_after_a_finished_cycle_comes_from_a_new_scheduler_call(d):
     d.add_story(STORY, "Ready for implementation")
-    d.add_pr(PR, STORY)
+    d.add_pr(PR, STORY, opened_by_implement=True)
     d.add_story(OTHER, "Ready for implementation")
-    d.add_pr(PR + 1, OTHER)
+    d.add_pr(PR + 1, OTHER, opened_by_implement=True)
     d.schedule(("implement", STORY), ("implement", OTHER), ("idle",))
 
     proc = scheduled(d)
@@ -242,8 +238,8 @@ def test_ac6_the_next_story_after_a_finished_cycle_comes_from_a_new_scheduler_ca
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}", f"implement {OTHER}"]
     assert len(d.scheduler_calls) == 3
-    # The second call sees the first story in flight ("In review" after the hand-off).
-    assert d.scheduler_calls[1].startswith(f"dispatcher scheduler next --repo o/r --in-implementation {STORY} ")
+    # The second call sees the first story in flight: its PR is ready for review after the hand-off (#475).
+    assert d.scheduler_calls[1].startswith(f"dispatcher scheduler next --repo o/r --in-implementation  --in-flight {STORY} ")
 
 
 def test_ac6_the_board_order_does_not_choose_the_next_story(d):
@@ -295,15 +291,15 @@ def test_review_a_skipped_story_is_unavailable_to_the_next_decision(d):
     # The real rule (#473) does not filter executors: it chooses #700 again unless the run excludes it.
     d.add_story(STORY, "Ready for implementation", executor="codex")
     d.add_story(OTHER, "Ready for implementation")
-    d.add_pr(PR, OTHER)
+    d.add_pr(PR, OTHER, opened_by_implement=True)
     d.schedule_from_facts(_ready_facts(STORY, OTHER))
 
     proc = scheduled(d)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {OTHER}"]
-    assert d.scheduler_calls[0].endswith("--in-implementation ")
-    assert d.scheduler_calls[1].endswith(f"--in-implementation  --exclude {STORY}")
+    assert d.scheduler_calls[0].endswith("--in-implementation  --in-flight ")
+    assert d.scheduler_calls[1].endswith(f"--in-implementation  --in-flight  --exclude {STORY}")
 
 
 def test_review_an_excluded_story_does_not_count_for_the_wip_limit():
@@ -323,7 +319,7 @@ def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
     # WIP limit 1 and a stale story hold the slot: the scheduler says wip-limit until the stale story is rolled back.
     d.add_story(STORY, "In implementation")  # no PR, no hand-off, old updatedAt: stale
     d.add_story(OTHER, "Ready for implementation")
-    d.add_pr(PR, OTHER)
+    d.add_pr(PR, OTHER, opened_by_implement=True)
     d.schedule(("idle",))
 
     proc = scheduled(d)
@@ -331,8 +327,8 @@ def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert f'STALE: #{STORY}' in proc.stdout
     assert [c for c in d.posted(STORY) if "## Recovery Comment" in c]
-    # The rolled-back story is no longer "In implementation" when the scheduler is asked.
-    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation "]
+    # The rolled-back story has no PR, so it is in neither list when the scheduler is asked (#475).
+    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation  --in-flight "]
 
 
 # ── AC7: the gates, for both kinds ───────────────────────────────────────────

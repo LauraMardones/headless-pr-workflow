@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # tests/test_dispatcher_poll_pagination.sh
 #
-# Regression test for issue #248: dispatcher-poll.sh fetched only the first
-# 100 project items and silently missed ready items added after that page
-# (e.g. #240). This test runs the actual script against a mocked `curl` and
-# proves the paginated fetch:
-#   1. surfaces a ready item that exists only on page 2,
-#   2. issues the page-2 request with page 1's real endCursor (not a
-#      hardcoded value), and
-#   3. stops paginating once hasNextPage is false (exactly 3 GraphQL calls:
-#      project lookup, page 1, page 2 — no spurious extra request).
+# Regression test for issue #248: dispatcher-poll.sh read only the first 100
+# items and silently missed work added after that page (e.g. #240). Since
+# issue #475 the poll reads no board: it finds work in flight from the open
+# issues and pull requests, read page by page through the REST API. This test
+# runs the actual script against a mocked `curl` and proves the paginated read:
+#   1. surfaces a story that exists only on page 2 of the open issues, whose
+#      linked PR exists only on page 2 of the open pull requests,
+#   2. asks for page 2 of each list after a full page 1 (100 entries), and
+#   3. stops after the short page 2: no page 3 request.
 #
 # Usage: bash tests/test_dispatcher_poll_pagination.sh
-# Requires: bash 4+, jq
+# Requires: bash 4+, jq, python 3
 
 set -euo pipefail
 
@@ -28,68 +28,63 @@ GLOBAL_TMP=$(mktemp -d)
 trap 'rm -rf "$GLOBAL_TMP"' EXIT
 
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not available"; exit 0; }
+PYTHON=$(command -v python3 || command -v python || true)
+[[ -n "$PYTHON" ]] || { echo "SKIP: python not available"; exit 0; }
 
-# ─── Mock curl: fakes the GraphQL responses dispatcher-poll.sh depends on ─────
+# ─── Mock curl: the REST lists dispatcher-poll.sh reads ──────────────────────
 #
-# Recognizes three request shapes by substring and logs every call (as the
-# joined argv, which includes the --data payload) to CALL_LOG so the test can
-# assert on call count and on the exact cursor used for the page-2 request.
-#
-#   projectsV2(first:10)        -> project lookup: one project linked
-#   items(first:100 ... cursor1 -> page 2: hasNextPage=false, item #240 ready
-#   items(first:100 (no cursor) -> page 1: hasNextPage=true, endCursor=cursor1,
-#                                   one non-matching item (#100, Done)
-#
-# flow-review.sh (called by dispatcher-poll.sh after pagination) makes the
-# same two request shapes without pagination; it is satisfied by the same
-# project-lookup and page-1 responses and never sees "Red" flow health, so
-# no Slack call is triggered.
-
+# Logs every URL to CALL_LOG.
+#   issues?state=open  page 1: 100 Done-free issues without a type: label;
+#                      page 2: story #240 (executor:codex)
+#   pulls?state=open   page 1: 100 PRs that close no issue; page 2: PR #340 closes #240
+#   anything else      an empty list, or the empty board for flow-review.sh
 FAKE_BIN=$(mktemp -d "$GLOBAL_TMP/bin.XXXXXX")
 CALL_LOG="$GLOBAL_TMP/curl-calls.log"
 : > "$CALL_LOG"
 
 cat > "$FAKE_BIN/curl" << 'CURLMOCK'
 #!/usr/bin/env bash
-ARGS="$*"
-echo "$ARGS" >> "$MOCK_CALL_LOG"
-
-if [[ "$ARGS" == *"projectsV2(first:10)"* ]]; then
-    cat <<'JSON'
-{"data":{"repository":{"projectsV2":{"nodes":[{"number":3,"title":"project Headless PR workflow (hpw)"}]}}}}
-JSON
-elif [[ "$ARGS" == *'after:\"cursor1\"'* ]]; then
-    cat <<'JSON'
-{"data":{"repository":{"projectsV2":{"nodes":[{"items":{
-  "pageInfo": {"hasNextPage": false, "endCursor": null},
-  "nodes": [
-    {"content": {"number": 240, "title": "Story: Define delivery-baseline"},
-     "fieldValues": {"nodes": [{"name": "In implementation", "field": {"name": "Status"}}]}}
-  ]
-}}]}}}}
-JSON
-elif [[ "$ARGS" == *"items(first:100"* ]]; then
-    cat <<'JSON'
-{"data":{"repository":{"projectsV2":{"nodes":[{"items":{
-  "pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
-  "nodes": [
-    {"content": {"number": 100, "title": "Old done story"},
-     "fieldValues": {"nodes": [{"name": "Done", "field": {"name": "Status"}}]}}
-  ]
-}}]}}}}
-JSON
-else
-    echo '{"data":{}}'
-fi
+url="${@: -1}"
+echo "$url" >> "$MOCK_CALL_LOG"
+case "$url" in
+    *"/issues?state=open"*"page=1")
+        jq -nc '[range(1; 101) | {number: ., title: "Note \(.)", labels: [], comments: 0}]' ;;
+    *"/issues?state=open"*"page=2")
+        echo '[{"number": 240, "title": "Story: Define delivery-baseline", "comments": 0,
+                "labels": [{"name": "type:story"}, {"name": "executor:codex"}]}]' ;;
+    *"/pulls?state=open"*"page=1")
+        jq -nc '[range(1000; 1100) | {number: ., draft: false, body: "no link", head: {sha: "abcdef0"}}]' ;;
+    *"/pulls?state=open"*"page=2")
+        echo '[{"number": 340, "draft": false, "body": "Closes #240", "head": {"sha": "1234567"}}]' ;;
+    *graphql*)
+        echo '{"data":{"repository":{"projectsV2":{"nodes":[{"number":3,"title":"board","items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}]}}}}' ;;
+    *)
+        echo '[]' ;;
+esac
 exit 0
 CURLMOCK
 chmod +x "$FAKE_BIN/curl"
 
-# The scheduler (issue #474) on HPW_BIN: idle, with no GitHub call.
-cat > "$FAKE_BIN/hpw" << 'HPWMOCK'
+# The merge gates of PR #340 do not pass: the story is in the review step.
+cat > "$FAKE_BIN/gate" << 'GATEMOCK'
 #!/usr/bin/env bash
-echo "[SCHEDULER] idle" >&2
-echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[]}'
+echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=none, threads=none, mergeable=yes, head=1234567"
+exit 1
+GATEMOCK
+chmod +x "$FAKE_BIN/gate"
+
+# The scheduler (issue #474) on HPW_BIN: idle, with no GitHub call; the
+# in-flight rule (issue #475) runs for real; no account is known.
+cat > "$FAKE_BIN/hpw" << HPWMOCK
+#!/usr/bin/env bash
+if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" ]]; then
+    shift; PYTHONPATH="$REPO_ROOT/src" exec "$PYTHON" -m headless_pr_workflow.dispatcher "\$@"
+fi
+if [[ "\${1:-} \${2:-}" == "dispatcher scheduler" ]]; then
+    echo "[SCHEDULER] idle" >&2
+    echo '{"ok":true,"block":"scheduler","operation":"next","result":"idle","action":null,"skipped":[]}'
+    exit 1
+fi
 exit 1
 HPWMOCK
 chmod +x "$FAKE_BIN/hpw"
@@ -103,41 +98,40 @@ test_pagination_surfaces_page_two_item() {
         MOCK_CALL_LOG="$CALL_LOG" \
         GH_TOKEN="fake-token" \
         HPW_BIN="$FAKE_BIN/hpw" \
-        bash "$REPO_ROOT/scripts/dispatcher-poll.sh" --repo "acme/example" 2>/dev/null
+        MERGE_GATE_SCRIPT="$FAKE_BIN/gate" \
+        bash "$REPO_ROOT/scripts/dispatcher-poll.sh" --repo "acme/example" 2>"$GLOBAL_TMP/err.log"
     )
 
-    # 1. An item that exists only on page 2 is surfaced.
+    # 1. A story and its PR that exist only on page 2 are surfaced.
     local found_number
-    found_number=$(echo "$poll_output" | jq -r '.in_implementation[0].number // empty')
+    found_number=$(echo "$poll_output" | jq -r '.review_due[0].number // empty')
     if [[ "$found_number" == "240" ]]; then
-        echo "PASS: item present only on page 2 (#240) is surfaced"
+        echo "PASS: story present only on page 2 (#240) is surfaced"
         PASS=$(( PASS + 1 ))
     else
-        echo "FAIL: expected #240 in in_implementation, got: $poll_output"
+        echo "FAIL: expected #240 in review_due, got: $poll_output $(cat "$GLOBAL_TMP/err.log")"
         FAIL=$(( FAIL + 1 ))
     fi
 
-    # 2. The page-2 request used page 1's real endCursor, not a hardcoded value.
-    if grep -qF 'after:\"cursor1\"' "$CALL_LOG"; then
-        echo "PASS: page-2 request carried page 1's endCursor (cursor1)"
-        PASS=$(( PASS + 1 ))
-    else
-        echo "FAIL: no request found using endCursor 'cursor1'"
-        FAIL=$(( FAIL + 1 ))
-    fi
-
-    # 3. Pagination stopped at hasNextPage=false: exactly one project lookup,
-    #    one page-1 fetch, one page-2 fetch from dispatcher-poll.sh itself —
-    #    no extra items request beyond page 2.
-    local cursor_calls
-    cursor_calls=$(grep -cF 'after:\"cursor1\"' "$CALL_LOG")
-    if [[ "$cursor_calls" -eq 1 ]]; then
-        echo "PASS: exactly one request used the page-2 cursor (loop terminated on hasNextPage=false)"
-        PASS=$(( PASS + 1 ))
-    else
-        echo "FAIL: expected exactly 1 request with the page-2 cursor, got $cursor_calls"
-        FAIL=$(( FAIL + 1 ))
-    fi
+    # 2. Page 2 of each list was asked for after a full page 1.
+    local list
+    for list in "issues?state=open" "pulls?state=open"; do
+        if grep -F "/$list" "$CALL_LOG" | grep -q 'page=2$'; then
+            echo "PASS: page 2 of $list was read"
+            PASS=$(( PASS + 1 ))
+        else
+            echo "FAIL: no page-2 request for $list"
+            FAIL=$(( FAIL + 1 ))
+        fi
+        # 3. The short page 2 ends the list: no page 3.
+        if grep -F "/$list" "$CALL_LOG" | grep -q 'page=3$'; then
+            echo "FAIL: $list was read past its short page 2"
+            FAIL=$(( FAIL + 1 ))
+        else
+            echo "PASS: $list stopped after its short page 2"
+            PASS=$(( PASS + 1 ))
+        fi
+    done
 }
 
 echo "Running dispatcher-poll pagination regression tests..."

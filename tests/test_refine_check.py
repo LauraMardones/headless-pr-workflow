@@ -136,6 +136,19 @@ def test_ready_with_open_hard_dependency_fails(mod):
     assert failing(env.run()) == ["hard_dependencies"]
 
 
+@pytest.mark.parametrize("hard", ["- The standing slask Epic (no issue yet)", "- #7\n- a thing without number"])
+def test_hard_dependency_without_issue_number_fails_and_names_the_entry(mod, hard):
+    checks = Env(mod, make_issue(mod, hard=hard), states={7: "CLOSED"}).run()
+    assert failing(checks) == ["hard_dependencies"]
+    assert "without an issue number" in checks["hard_dependencies"].detail
+    assert any(text in checks["hard_dependencies"].detail for text in ("slask Epic", "a thing without number"))
+
+
+@pytest.mark.parametrize("hard", ["- none", "None.", "- None open. All shipped.", "- #7 thing"])
+def test_none_and_numbered_hard_dependencies_pass(mod, hard):
+    assert failing(Env(mod, make_issue(mod, hard=hard), states={7: "CLOSED"}).run()) == []
+
+
 def test_closed_hard_dependency_and_open_soft_dependency_pass(mod):
     env = Env(mod, make_issue(mod, hard="- #7 thing"), states={7: "CLOSED", 99: "OPEN"})
     assert failing(env.run()) == []
