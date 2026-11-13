@@ -24,16 +24,15 @@ Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and
 - If something appears obsolete, move it to Notes instead of deleting it silently.
 - If you do not have permission or tooling to update GitHub, stop and say exactly what is missing.
 
-## Status Workflow
+## Outcome
 
-- `Backlog`: not actively prepared.
-- `In refinement`: refinement is in progress.
-- `Refined`: scope is clear but delivery planning or hard dependencies remain open.
-- `Ready for implementation`: seed stories/features are created and the first one is ready to be picked up.
-- `Done`: all success criteria delivered and closed.
+Refinement writes no board status and no status line in the issue body. The outcome is a fact in the Session Summary, as `Next action:`:
 
-When starting: move status to `In refinement`.
-When complete: move status to `Refined` or `Ready for implementation` depending on whether blockers remain.
+- `Next action: Ready for implementation`: the contract is clear, `refine-check` passed and no hard dependency is open.
+- `Next action: Refined; blocked by #X`: the contract is clear and `refine-check` passed, but hard dependencies are still open.
+- `Next action: Needs PO decision`: a decision blocker is declared on the issue.
+
+Never report `Ready for implementation` while hard dependencies are still unresolved.
 
 ## Existing Issues Inventory
 
@@ -170,7 +169,7 @@ After the breakdown is finalized, derive implementation order from the Dependenc
 - Group issues that can run in parallel within the same step.
 - If a seed issue has an unresolved hard dependency outside the seed set, do not place it in a runnable step. List it under `Blocked / Unresolved Hard Dependencies` with the external dependency.
 - If the seed issue hard-dependency graph has a cycle, do not invent an order for the cyclic issues. List the cycle under `Blocked / Unresolved Hard Dependencies`.
-- If any seed issue is blocked by an external unresolved hard dependency or a cycle, leave final PO status as `Refined`, not `Ready for implementation`, until those hard dependencies are resolved.
+- If any seed issue is blocked by an external unresolved hard dependency or a cycle, report `Next action: Refined; blocked by #X`, not `Ready for implementation`, until those hard dependencies are resolved.
 - Document the derived sequence as numbered steps under `## Implementation Order` in the epic body.
 
 ## Devil's Advocate Closing Step
@@ -234,7 +233,6 @@ Update the issue body to this structure:
 
 ```md
 Milestone: {MILESTONE}
-PO status: {In refinement | Refined | Ready for implementation.}
 Spec: [`specs/{EPIC_NUMBER}-{slug}/spec.md`]({blob link at the commit}) at `{commit}`
 
 ## Goal
@@ -312,15 +310,14 @@ Soft depends on:
 
 ## Refinement Completeness Gate (mandatory)
 
-The last step of every refinement, after the board write, is the deterministic check; the model is not the judge of its own completeness.
+The last step of every refinement, is the deterministic check; the model is not the judge of its own completeness.
 
-- Write the board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` and require exit `0`: that exit is the board read-back. A non-zero exit means the board was not confirmed; report it, never claim the status.
-- Then run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and the board and checks the `type:`, `executor:` and `prio:` labels, the body `PO status:` against the board Status, open hard dependencies, the required body sections, open questions, parent references, the spec record and (for a Feature) the criterion ids.
+- Run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and checks the `type:`, `executor:` and `prio:` labels, open hard dependencies, the required body sections, open questions and parent references. It reads no board.
 - Run it on every refinement, including a re-refinement of an issue that is already `Ready for implementation`.
-- Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels, dependencies or board could not be read) forbids it.
-- On a non-zero exit after the board write: fix what can be fixed and re-run the check; if a failure remains, move the board back with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`, set `PO status: In refinement` in the issue body, and list the failing checks as blockers, so the body and the board never claim a status the check did not confirm.
+- Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels or dependencies could not be read) forbids it.
+- On a non-zero exit: fix what can be fixed and re-run the check; if a failure remains, list the failing checks as blockers and do not report `Next action: Ready for implementation` or `Refined`.
 - `executor:` label rule: a `type:story`, `type:task` or `type:bug` issue carries exactly one existing `executor:` label (`docs/PROJECT-STATUS.md`); a `type:epic` or `type:feature` issue needs none. Apply it before the check, choosing among the repository's existing labels.
-- Any statement about labels or board status in the reply or the Session Summary comes from the check output, not from memory or from the issue text.
+- Any statement about labels in the reply or the Session Summary comes from the check output, not from memory or from the issue text.
 - The Session Summary `Checks run:` line carries the result: `refine-check — pass`, or `refine-check — fail: <check-ids>` / `refine-check — unreadable`. `none` is not valid for a refinement that reports a status.
 
 ## Final Reply Format
@@ -328,7 +325,7 @@ The last step of every refinement, after the board write, is the deterministic c
 After updating GitHub, reply only with:
 
 - Issue URL
-- Final PO status
+- Next action: Ready for implementation, Refined; blocked by #X, or Needs PO decision
 - Existing issues found and included (with numbers)
 - Features created (if any) with issue numbers
 - Stories/Tasks created (if any) with issue numbers

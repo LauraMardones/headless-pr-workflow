@@ -28,11 +28,10 @@ Important:
 - If GitHub blocks approval because the authenticated account owns the PR, record the separate-session review summary documented in docs/MERGE-POLICY.md exactly, including the `Reviewer provider:` line.
 - Never compose or paraphrase the separate-session review summary. Generate it with `hpw review-evidence-text` or copy the template below verbatim; the approval gate rejects any other wording.
 
-Workflow status goals:
-- If blockers are found: "In review" -> "In implementation"
-- If no blockers remain for the current head SHA and no Out of scope finding is unwaived: "In review" -> "In merge"
-- If no blockers remain but an Out of scope finding is unwaived: stay in "In review" until the PO waives it
-- Write a board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` (exit `0` only after it read the status back; non-zero with the reason on stderr otherwise). Board status writes are best-effort. If a status write fails because `gh` or GraphQL is unavailable, do not stop: continue the command and record the skipped status change in the Session Summary with `--deviation` (for example `--deviation "board status not updated: gh GraphQL unavailable; intended: In merge"`).
+Workflow facts this command records (it writes no board status; the board shows these facts):
+- If blockers are found: a `REQUEST_CHANGES` review on the current head and `--next implementation` in the Session Summary.
+- If no blockers remain for the current head SHA and no Out of scope finding is unwaived: approval evidence on the current head and `--next merge` in the Session Summary.
+- If no blockers remain but an Out of scope finding is unwaived: a `COMMENT` review and a `Type: decision` blocker until the PO waives it.
 
 Required behavior:
 1. Refresh PR state from GitHub before reviewing.
@@ -60,11 +59,10 @@ Required behavior:
    - record findings on GitHub in the correct PR review surfaces
    - use "Request changes" when available
    - clearly describe the blockers
-   - set the story status to "In implementation" (best-effort, as described under Workflow status goals)
    - state that the next action is implementation
    - before resolving an older review thread, refresh it, confirm it belongs to the verified PR, and resolve it only if the finding is superseded; never resolve a still-actionable thread
    - if a superseded thread cannot be resolved because `gh` or GraphQL is unavailable, leave the thread open and list it in the Session Summary with `--deviation`; never treat it as resolved
-7. If no blockers remain (while an Out of scope finding is unwaived, the Out of scope bullets at the end of this step replace approval and "In merge"):
+7. If no blockers remain (while an Out of scope finding is unwaived, the Out of scope bullets at the end of this step replace approval and `--next merge`):
    - if the PR is still Draft, mark it Ready for review before final approval output when possible
    - if GitHub allows formal approval, approve the PR
    - if GitHub blocks formal approval because the authenticated account owns the PR, submit a `COMMENT` review that carries the separate-session review summary from docs/MERGE-POLICY.md (Path 2)
@@ -89,14 +87,13 @@ Required behavior:
    - ensure the approval evidence is recorded against the current head SHA
    - after posting a separate-session review summary, run `hpw approval-check $ARGUMENTS --repo LauraMardones/headless-pr-workflow` and confirm it prints `separate-session review: accepted`
    - if it is not accepted, post one corrected review on the same head SHA and run the check again
-   - if it is still not accepted, do not claim the PR is ready to merge: leave the story in "In review", name the rejected evidence in `--blockers`, do not use `--next merge` (use `--next implementation`, the only other value the script accepts), and add a `--deviation` saying that only the review evidence needs redoing, not the code
+   - if it is still not accepted, do not claim the PR is ready to merge: record no approval, name the rejected evidence in `--blockers`, do not use `--next merge` (use `--next implementation`, the only other value the script accepts), and add a `--deviation` saying that only the review evidence needs redoing, not the code
    - if `hpw approval-check` cannot be run in the session, say so with `--deviation`; the verbatim-template rule still applies
-   - set the story status to "In merge" (best-effort, as described under Workflow status goals)
    - state that the next action is merge
    - an Out of scope finding is reported with a proposed follow-up issue (title and one-line reason) or a link to an existing issue
    - post every Out of scope finding that has no review thread yet as an inline review comment on the current head, so it opens an unresolved thread; a finding named only in the review body leaves the review-thread gate nothing to hold. When the finding has no line in the PR's diff (for example a defect in a file the PR did not change), put the comment on the changed line closest to it, or on the first changed line of the PR, and name the finding's real file and line in the comment
    - it is not listed in `--blockers`, does not by itself cause `REQUEST_CHANGES`, and is recorded with a `--deviation` line
-   - the PR stays unmergeable until the PO waives it (`Type: decision` blocker), so do not set the story to "In merge" or use `--next merge` while one is unwaived
+   - the PR stays unmergeable until the PO waives it (`Type: decision` blocker), so do not use `--next merge` while one is unwaived
    - when the only findings are unwaived Out of scope ones, this session records them itself and does not rely on a later `/implement` round: create or link the follow-up issues, declare one `Type: decision` blocker on the story (Question: waive the listed findings for this PR; Options: A) waive and track in the follow-up issues, B) bring them into this story's scope and fix them here; Recommendation: A), submit the review with event `COMMENT` (neither `APPROVE` nor `REQUEST_CHANGES`), leave the story in "In review", use `--blockers none` and `--next implementation` (the only other value the script accepts; it records that no merge is possible yet, not that code must change), and name the findings and follow-up issues in the `--deviation` line; the missing approval and the unresolved thread keep `/merge` from succeeding if the orchestrator reaches it anyway
 8. If the PR head SHA changes during review, stop and re-evaluate against the new SHA instead of continuing on stale review context.
 

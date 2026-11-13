@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that a refined issue's labels, board status, dependencies and body are complete.
+"""Check that a refined issue's labels, dependencies and body are complete.
 
 Usage:
   scripts/refine-check --issue <n> [--repo <owner/repo>] [--json]
@@ -10,8 +10,8 @@ then one line per check: `<check-id>: pass|fail|skip - <detail>`.
 Exit codes:
   0  every applicable check passes.
   1  one or more checks fail; each failure is named.
-  2  the issue, its labels, the repository label list, a dependency, the board
-     item or the recorded spec could not be read (a spec read that fails for a
+  2  the issue, its labels, the repository label list, a dependency or the
+     recorded spec could not be read (a spec read that fails for a
      reason other than not found), or the arguments are invalid. Never a pass.
 """
 
@@ -28,12 +28,9 @@ from dataclasses import dataclass
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
-# Source of the values: docs/PROJECT-STATUS.md (statuses) and
-# EXECUTABLE_ISSUE_TYPES in scripts/dispatcher-invoke.sh.
+# Source of the values: EXECUTABLE_ISSUE_TYPES in scripts/dispatcher-invoke.sh.
 ISSUE_TYPES = ("epic", "feature", "story", "task", "bug")
 EXECUTABLE_TYPES = ("story", "task", "bug")
-READY = "Ready for implementation"
-REFINED = "Refined"
 
 _TASK_SECTIONS = (
     "Goal", "Scope", "Out of Scope", "Acceptance Criteria",
@@ -120,43 +117,6 @@ def read_repo_labels(repo: str) -> set[str]:
         raise ReadError(f"repository labels: payload could not be parsed ({error})") from error
 
 
-_BOARD_QUERY = """query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    projectsV2(first: 1) { nodes { id } }
-    issue(number: $number) {
-      projectItems(first: 20) {
-        nodes {
-          project { id }
-          fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-        }
-      }
-    }
-  }
-}"""
-
-
-def read_board_status(repo: str, number: int) -> str:
-    owner, name = repo.split("/", 1)
-    out = _gh(["api", "graphql", "-f", f"query={_BOARD_QUERY}", "-f", f"owner={owner}",
-               "-f", f"repo={name}", "-F", f"number={number}"], "board status")
-    try:
-        data = json.loads(out)
-        if data.get("errors"):
-            raise ReadError("board status: GraphQL returned errors")
-        repository = data["data"]["repository"]
-        nodes = repository["projectsV2"]["nodes"]
-        if not nodes:
-            raise ReadError("board status: no Projects v2 board is visible")
-        project_id = nodes[0]["id"]
-        for item in repository["issue"]["projectItems"]["nodes"]:
-            if item["project"]["id"] == project_id:
-                value = item.get("fieldValueByName") or {}
-                return str(value.get("name") or "(none)")
-    except (ValueError, KeyError, TypeError) as error:
-        raise ReadError(f"board status: payload could not be parsed ({error})") from error
-    raise ReadError(f"board status: issue #{number} is not on the project board")
-
-
 def spec_exists(repo: str, path: str, ref: str) -> bool:
     """True when `path` exists at `ref`; False when GitHub answers not found."""
     try:
@@ -188,17 +148,6 @@ def parse_sections(body: str) -> dict[str, str]:
     return {name: "\n".join(lines).strip() for name, lines in sections.items()}
 
 
-def parse_po_status(body: str) -> str | None:
-    match = re.search(r"^[ \t>*_-]*PO status:?\**\s*(.+?)\s*$", body.replace("\r\n", "\n"), re.I | re.M)
-    return match.group(1).strip() if match else None
-
-
-def split_po_status(text: str) -> tuple[str, bool]:
-    """Return (board-comparable status, blocked-by marker present)."""
-    head, _, rest = text.partition(";")
-    return head.strip().rstrip(".").strip().strip("*_").strip(), bool(re.search(r"blocked by\s+#\d+", rest, re.I))
-
-
 def hard_dependencies(sections: dict[str, str], own: int) -> list[int]:
     text = sections.get("Dependencies", "")
     collected: list[str] = []
@@ -214,6 +163,12 @@ def hard_dependencies(sections: dict[str, str], own: int) -> list[int]:
             collected.append(line)
     numbers = [int(n) for n in re.findall(r"#(\d+)", "\n".join(collected))]
     return sorted({n for n in numbers if n != own})
+
+
+def has_hard_dependency_entry(sections: dict[str, str]) -> bool:
+    """True when `## Dependencies` has a `Hard depends on` label (an entry reading `None.` counts)."""
+    return any(line.strip().strip("*_ ").lower().startswith("hard depends on")
+               for line in sections.get("Dependencies", "").split("\n"))
 
 
 def unnumbered_dependencies(sections: dict[str, str]) -> list[str]:
@@ -272,10 +227,9 @@ def type_labels(issue: Issue) -> list[str]:
 
 # --- checks --------------------------------------------------------------------------
 
-def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, board_reader=None, spec_reader=None) -> tuple[str | None, list[Check]]:
+def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None) -> tuple[str | None, list[Check]]:
     issue_reader = issue_reader or read_issue
     labels_reader = labels_reader or read_repo_labels
-    board_reader = board_reader or read_board_status
     spec_reader = spec_reader or spec_exists
     checks: list[Check] = []
 
@@ -308,16 +262,6 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
     checks.append(Check("prio_label", "pass", ", ".join(prios)) if prios else Check("prio_label", "fail", "no prio: label"))
 
     sections = parse_sections(issue.body)
-    raw_status = parse_po_status(issue.body)
-    body_status, blocked_marker = split_po_status(raw_status) if raw_status else ("", False)
-    board = board_reader(repo, issue.number)
-    if raw_status is None:
-        checks.append(Check("po_status_board", "fail", f"no 'PO status:' field in the body (board: {board})"))
-    elif body_status != board:
-        checks.append(Check("po_status_board", "fail", f"body says '{body_status}' but the board says '{board}'"))
-    else:
-        checks.append(Check("po_status_board", "pass", f"body and board agree: {board}"))
-
     open_deps = []
     for dep in hard_dependencies(sections, issue.number):
         if issue_reader(repo, dep).state.upper() == "OPEN":
@@ -327,12 +271,8 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
     if unnumbered:
         listed = "; ".join(f"'{entry}'" for entry in unnumbered)
         checks.append(Check("hard_dependencies", "fail", f"hard dependency without an issue number: {listed}; create or name an issue"))
-    elif open_deps and body_status == READY:
-        checks.append(Check("hard_dependencies", "fail", f"{READY} while hard dependencies are open: {refs}"))
-    elif open_deps and body_status == REFINED and not blocked_marker:
-        checks.append(Check("hard_dependencies", "fail", f"open hard dependencies {refs}; status must be '{REFINED}; blocked by #X'"))
-    elif not open_deps and blocked_marker:
-        checks.append(Check("hard_dependencies", "fail", "status says 'blocked by' but no hard dependency is open"))
+    elif effective in EXECUTABLE_TYPES and not has_hard_dependency_entry(sections):
+        checks.append(Check("hard_dependencies", "fail", "no 'Hard depends on' entry in Dependencies (write 'None.' when there is none)"))
     else:
         checks.append(Check("hard_dependencies", "pass", f"open: {refs}" if open_deps else "no open hard dependency"))
 
@@ -347,20 +287,15 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
             Check("required_sections", "fail", "missing or empty: " + ", ".join(missing))
             if missing else Check("required_sections", "pass", f"all {len(REQUIRED_SECTIONS[effective])} sections present"))
 
-    ready = body_status == READY or board == READY
     questions = sections.get("Open Questions", "")
-    if not ready:
-        checks.append(Check("open_questions", "pass", f"only enforced for {READY}"))
-    elif re.search(r"^###\s+\S", questions, re.M):
+    if re.search(r"^###\s+\S", questions, re.M):
         checks.append(Check("open_questions", "fail", "Open Questions still contains a '### ' question"))
     elif not re.fullmatch(r"(?:[-*]\s*)?none\.?", questions.strip(), re.I) and questions.strip():
         checks.append(Check("open_questions", "fail", "Open Questions lists an unresolved item (a decision blocker link); it must read 'None.'"))
     else:
         checks.append(Check("open_questions", "pass", "no open question"))
 
-    if not ready:
-        checks.append(Check("parent_refs", "pass", f"only enforced for {READY}"))
-    elif effective == "epic":
+    if effective == "epic":
         checks.append(Check("parent_refs", "skip", "an Epic has no parent"))
     else:
         problems = []

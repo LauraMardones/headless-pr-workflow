@@ -36,10 +36,12 @@ STORY_SECTIONS = [
 SPEC_LINE = "Spec: [`specs/10-epic/spec.md`](https://github.com/owner/repo/blob/abc1234/specs/10-epic/spec.md) at `abc1234`"
 
 
-def body(*, status="Ready for implementation.", skip=(), hard="- None.", questions="None.", header=True, spec=SPEC_LINE):
+def body(*, po_line=None, skip=(), hard="- None.", questions="None.", header=True, spec=SPEC_LINE):
     lines = []
     if header:
-        lines += ["Parent epic: #10 Epic", "Feature group: #11 Feature", f"PO status: {status}"]
+        lines += ["Parent epic: #10 Epic", "Feature group: #11 Feature"]
+        if po_line:
+            lines.append(po_line)
         if spec:
             lines.append(spec)
         lines.append("")
@@ -57,8 +59,8 @@ def make_issue(mod, *, labels=("type:story", "prio:P2", "executor:claude-code-so
 
 
 class Env:
-    def __init__(self, mod, issue, board="Ready for implementation", states=None, repo_labels=None, spec=True):
-        self.mod, self.issue, self.board, self.spec = mod, issue, board, spec
+    def __init__(self, mod, issue, states=None, repo_labels=None, spec=True):
+        self.mod, self.issue, self.spec = mod, issue, spec
         self.states = states or {}
         self.repo_labels = repo_labels if repo_labels is not None else {"executor:claude-code-sonnet"}
 
@@ -75,7 +77,7 @@ class Env:
     def run(self):
         _, checks = self.mod.run_checks(
             self.issue, REPO, issue_reader=self.issue_reader,
-            labels_reader=lambda repo: self.repo_labels, board_reader=lambda repo, n: self.board,
+            labels_reader=lambda repo: self.repo_labels,
             spec_reader=self.spec_reader,
         )
         return {c.id: c for c in checks}
@@ -88,7 +90,7 @@ def failing(checks):
 def test_all_pass(mod):
     checks = Env(mod, make_issue(mod)).run()
     assert failing(checks) == []
-    assert set(checks) >= {"type_label", "executor_label", "prio_label", "po_status_board",
+    assert set(checks) >= {"type_label", "executor_label", "prio_label",
                            "hard_dependencies", "required_sections", "open_questions", "parent_refs",
                            "spec_record", "feature_criteria"}
 
@@ -117,23 +119,48 @@ def test_executor_label_must_exist_in_repository(mod):
 
 
 def test_epic_needs_no_executor(mod):
-    issue = mod.Issue(5, "Epic: x", "PO status: Refined\n", ("type:epic", "prio:P2"), "OPEN")
-    checks = Env(mod, issue, board="Refined").run()
+    issue = mod.Issue(5, "Epic: x", "", ("type:epic", "prio:P2"), "OPEN")
+    checks = Env(mod, issue).run()
     assert checks["executor_label"].status == "skip"
-    assert checks["parent_refs"].status == "pass"
+    assert checks["parent_refs"].status == "skip"
 
 
-def test_body_status_must_match_board(mod):
-    assert failing(Env(mod, make_issue(mod), board="Ready for refinement").run()) == ["po_status_board"]
+def test_body_without_po_status_passes(mod):
+    issue = make_issue(mod)
+    assert "PO status" not in issue.body
+    assert failing(Env(mod, issue).run()) == []
 
 
-def test_missing_po_status_fails(mod):
-    assert failing(Env(mod, make_issue(mod, header=False)).run()) == ["parent_refs", "po_status_board", "spec_record"]
+@pytest.mark.parametrize("line", ["PO status: Refined; blocked by #7", "PO status: In refinement", "PO status: nonsense"])
+def test_po_status_line_is_not_read(mod, line):
+    checks = Env(mod, make_issue(mod, po_line=line)).run()
+    assert failing(checks) == []
+    assert "po_status_board" not in checks
 
 
-def test_ready_with_open_hard_dependency_fails(mod):
-    env = Env(mod, make_issue(mod, hard="- #7 thing"), states={7: "OPEN"})
-    assert failing(env.run()) == ["hard_dependencies"]
+def test_refine_check_has_no_board_reader(mod):
+    for name in ("read_board_status", "parse_po_status", "split_po_status", "_BOARD_QUERY"):
+        assert not hasattr(mod, name)
+
+
+def test_open_hard_dependency_passes_and_names_the_number(mod):
+    checks = Env(mod, make_issue(mod, hard="- #7 thing"), states={7: "OPEN"}).run()
+    assert failing(checks) == []
+    assert checks["hard_dependencies"].status == "pass"
+    assert "#7" in checks["hard_dependencies"].detail
+
+
+@pytest.mark.parametrize("kind", ["story", "task", "bug"])
+def test_missing_hard_depends_on_entry_fails_for_executable_types(mod, kind):
+    issue = typed_issue(mod, kind, with_mapping=True)
+    text = issue.body.replace("Hard depends on:", "Depends on:")
+    issue = mod.Issue(5, issue.title, text, issue.labels, "OPEN")
+    assert "hard_dependencies" in failing(Env(mod, issue).run())
+
+
+def test_missing_hard_depends_on_entry_is_not_checked_for_feature_or_epic(mod):
+    issue = mod.Issue(5, "Epic: x", "## Dependencies\n\n- nothing\n", ("type:epic", "prio:P2"), "OPEN")
+    assert Env(mod, issue).run()["hard_dependencies"].status == "pass"
 
 
 @pytest.mark.parametrize("hard", ["- The standing slask Epic (no issue yet)", "- #7\n- a thing without number"])
@@ -154,18 +181,6 @@ def test_closed_hard_dependency_and_open_soft_dependency_pass(mod):
     assert failing(env.run()) == []
 
 
-def test_refined_needs_blocked_by_marker(mod):
-    env = Env(mod, make_issue(mod, status="Refined", hard="- #7"), board="Refined", states={7: "OPEN"})
-    assert failing(env.run()) == ["hard_dependencies"]
-    env = Env(mod, make_issue(mod, status="Refined; blocked by #7", hard="- #7"), board="Refined", states={7: "OPEN"})
-    assert failing(env.run()) == []
-
-
-def test_stale_blocked_by_marker_fails(mod):
-    env = Env(mod, make_issue(mod, status="Refined; blocked by #7", hard="- #7"), board="Refined", states={7: "CLOSED"})
-    assert failing(env.run()) == ["hard_dependencies"]
-
-
 @pytest.mark.parametrize("skip", [("Acceptance Criteria",), ("Definition of Done", "Scope")])
 def test_missing_section_fails(mod, skip):
     checks = Env(mod, make_issue(mod, skip=skip)).run()
@@ -184,29 +199,25 @@ def test_heading_inside_code_fence_is_not_a_section(mod):
     assert list(sections) == ["A"]
 
 
-def test_open_question_blocks_ready_only(mod):
+def test_open_question_fails_on_every_run(mod):
     q = "### Which?\n**Context:** x"
     assert failing(Env(mod, make_issue(mod, questions=q)).run()) == ["open_questions"]
-    env = Env(mod, make_issue(mod, status="In refinement", questions=q), board="In refinement")
-    assert failing(env.run()) == []
 
 
 @pytest.mark.parametrize("q", [
     "- https://github.com/owner/repo/issues/5#issuecomment-1",
     "Blocked: https://github.com/owner/repo/issues/5#issuecomment-1",
 ])
-def test_decision_blocker_link_blocks_ready_only(mod, q):
+def test_decision_blocker_link_fails_on_every_run(mod, q):
     assert failing(Env(mod, make_issue(mod, questions=q)).run()) == ["open_questions"]
-    env = Env(mod, make_issue(mod, status="In refinement", questions=q), board="In refinement")
-    assert failing(env.run()) == []
 
 
 @pytest.mark.parametrize("q", ["None.", "none", "- None."])
-def test_none_open_questions_pass_ready(mod, q):
+def test_none_open_questions_pass(mod, q):
     assert failing(Env(mod, make_issue(mod, questions=q)).run()) == []
 
 
-def test_parent_refs_required_for_ready(mod):
+def test_parent_refs_required_on_every_run(mod):
     issue = make_issue(mod)
     issue = mod.Issue(5, issue.title, issue.body.replace("Parent epic: #10 Epic\n", ""), issue.labels, "OPEN")
     assert failing(Env(mod, issue).run()) == ["parent_refs", "spec_record"]
@@ -226,22 +237,21 @@ def test_unresolvable_parent_fails(mod):
 
 
 def test_issue_264_replay(mod):
-    """No executor label, board at Ready for refinement, body says ready."""
+    """No executor label fails; the board is no longer read."""
     issue = make_issue(mod, labels=("type:story", "prio:P2"))
-    checks = Env(mod, issue, board="Ready for refinement").run()
-    assert failing(checks) == ["executor_label", "po_status_board"]
+    checks = Env(mod, issue).run()
+    assert failing(checks) == ["executor_label"]
     assert mod.verdict_line(5, list(checks.values())).startswith(
-        "Refine check: #5 fail (2 of 9): executor_label, po_status_board")
+        "Refine check: #5 fail (1 of 8): executor_label")
 
 
-def patch_reads(mod, monkeypatch, issue, *, board="Ready for implementation", fail=None):
+def patch_reads(mod, monkeypatch, issue, *, fail=None):
     def boom(*a, **k):
         raise mod.ReadError(f"{fail}: unreadable")
 
     monkeypatch.setattr(mod, "read_issue", boom if fail == "issue" else lambda repo, n: issue if n == 5 else mod.Issue(n, "t", "", (), "CLOSED"))
     monkeypatch.setattr(mod, "read_repo_labels", boom if fail == "labels" else lambda repo: {"executor:claude-code-sonnet"})
     monkeypatch.setattr(mod, "spec_exists", boom if fail == "spec" else lambda repo, path, ref: True)
-    monkeypatch.setattr(mod, "read_board_status", boom if fail == "board" else lambda repo, n: board)
 
 
 def test_main_exit_0_human_first_line_is_verdict(mod, monkeypatch, capsys):
@@ -253,18 +263,18 @@ def test_main_exit_0_human_first_line_is_verdict(mod, monkeypatch, capsys):
 
 
 def test_main_exit_1_json(mod, monkeypatch, capsys):
-    patch_reads(mod, monkeypatch, make_issue(mod), board="Backlog")
+    patch_reads(mod, monkeypatch, make_issue(mod, labels=("type:story", "prio:P2")))
     assert mod.main(["--issue", "5", "--repo", REPO, "--json"]) == 1
     data = json.loads(capsys.readouterr().out)
     assert (data["issue"], data["type"], data["verdict"], data["exit_code"]) == (5, "story", "fail", 1)
     assert [c["id"] for c in data["checks"]] == [
-        "type_label", "executor_label", "prio_label", "po_status_board",
+        "type_label", "executor_label", "prio_label",
         "hard_dependencies", "required_sections", "open_questions", "parent_refs",
         "spec_record", "feature_criteria"]
-    assert {c["id"]: c["status"] for c in data["checks"]}["po_status_board"] == "fail"
+    assert {c["id"]: c["status"] for c in data["checks"]}["executor_label"] == "fail"
 
 
-@pytest.mark.parametrize("what", ["issue", "labels", "board", "spec"])
+@pytest.mark.parametrize("what", ["issue", "labels", "spec"])
 @pytest.mark.parametrize("as_json", [False, True])
 def test_unreadable_is_exit_2_never_pass(mod, monkeypatch, capsys, what, as_json):
     patch_reads(mod, monkeypatch, make_issue(mod), fail=what)
@@ -342,8 +352,8 @@ def test_spec_record_wrong_epic_path_fails(mod, path):
 
 def test_spec_record_uses_own_number_for_an_epic(mod):
     labels = ("type:epic", "prio:P2")
-    ok = mod.Issue(5, "Epic: x", f"PO status: Refined\n{spec_line('specs/5-e/spec.md')}\n", labels, "OPEN")
-    bad = mod.Issue(5, "Epic: x", f"PO status: Refined\n{spec_line('specs/10-e/spec.md')}\n", labels, "OPEN")
+    ok = mod.Issue(5, "Epic: x", f"{spec_line('specs/5-e/spec.md')}\n", labels, "OPEN")
+    bad = mod.Issue(5, "Epic: x", f"{spec_line('specs/10-e/spec.md')}\n", labels, "OPEN")
     assert spec_check(mod, ok).status == "pass"
     assert spec_check(mod, bad).status == "fail"
 
@@ -391,14 +401,14 @@ FEATURE_SECTIONS = ["Goal", "Why", "Scope", "Out of Scope", "Success Criteria", 
 def feature_issue(mod, *, prefix="Criterion prefix: F2", criteria=None, labels=("type:feature", "prio:P2")):
     criteria = criteria if criteria is not None else [
         "- [ ] **F2.1** (serves E1, E3) - first", "- [ ] **F2.2** (serves E2) - second\n  continued"]
-    lines = ["Parent epic: #10 Epic", "PO status: In refinement", spec_line(), prefix, ""]
+    lines = ["Parent epic: #10 Epic", spec_line(), prefix, ""]
     for name in FEATURE_SECTIONS:
         lines += [f"## {name}", "", "\n".join(criteria) if name == "Success Criteria" else "text", ""]
     return mod.Issue(5, "Feature: x", "\n".join(lines), labels, "OPEN")
 
 
 def criteria_check(mod, issue):
-    return Env(mod, issue, board="In refinement").run()["feature_criteria"]
+    return Env(mod, issue).run()["feature_criteria"]
 
 
 def test_feature_criteria_pass(mod):
@@ -435,7 +445,7 @@ def typed_issue(mod, kind, *, with_mapping):
     sections = [s for s in STORY_SECTIONS if s not in ("User Story / Problem Statement", "Business Value", "Why")]
     if kind == "bug":
         sections = sections[:1] + BUG_ONLY + sections[1:]
-    lines = ["Parent epic: #10 Epic", "Feature group: #11 Feature", "PO status: Ready for implementation.", SPEC_LINE, ""]
+    lines = ["Parent epic: #10 Epic", "Feature group: #11 Feature", SPEC_LINE, ""]
     for name in sections:
         if name == MAPPING and not with_mapping:
             continue

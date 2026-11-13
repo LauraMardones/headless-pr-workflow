@@ -49,7 +49,7 @@ def test_implement_fix_round_classifies_before_changing_code() -> None:
             "`--deviation`",
             "push nothing and post no review request",
             "`/unblock`",
-            'return the story to "In review"; for an `executor:claude-code-*` story post exactly one new review request for the current head',
+            'there is nothing left to fix; for an `executor:claude-code-*` story post exactly one new review request for the current head',
             "for an `executor:codex` story post none",
             "only the PO waives",
             "the waived thread is resolved by the PO",

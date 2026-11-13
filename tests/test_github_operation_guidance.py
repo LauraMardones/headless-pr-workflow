@@ -77,7 +77,6 @@ def test_merge_graphql_preflight_precedes_every_mutation() -> None:
 
     preflight = text.index("gh api graphql -f query='{ viewer { login } }'")
 
-    assert preflight < text.index("set the story status")
     assert preflight < text.index("merge the PR")
     assert "exits non-zero, stop" in text
     assert "Make no GitHub mutation" in text
@@ -85,13 +84,12 @@ def test_merge_graphql_preflight_precedes_every_mutation() -> None:
     assert "Do not fall back to the GitHub plugin/MCP integration or REST for the merge gate" in text
 
 
-def test_implement_and_review_status_writes_are_best_effort() -> None:
+def test_implement_and_review_write_no_board_status() -> None:
     for name in ("implement.md", "review.md"):
         text = command_text(name)
 
-        assert "Board status writes are best-effort" in text, name
-        assert "do not stop: continue the command" in text, name
-        assert "record the skipped status change in the Session Summary with `--deviation`" in text, name
+        assert "it writes no board status" in text, name
+        assert "set-project-status" not in text, name
 
 
 def test_implement_falls_back_to_issue_body_when_ac_summary_lacks_gh() -> None:
@@ -116,7 +114,6 @@ def test_agents_guidance_names_gh_graphql_dependency() -> None:
     operations = " ".join(operations.split())
 
     for step in (
-        "board status writes",
         "`scripts/ac-summary.sh`",
         "review-thread resolution",
         "`scripts/merge-gate-summary`",
@@ -126,11 +123,10 @@ def test_agents_guidance_names_gh_graphql_dependency() -> None:
     assert "GitHub Actions and a local session" in operations
     assert "Claude Code cloud session does not" in operations
     assert 'HTTP 403 "GraphQL is not available from Claude Code sessions"' in operations
-    assert "Board writes are best-effort" in operations
+    assert "The commands write no board status" in operations
     assert "The merge gate is never skipped" in operations
 
     sandbox_row = next(line for line in agents.splitlines() if line.startswith("| `gh` CLI blocked"))
-    assert "Board status writes are skipped" in sandbox_row
     assert "`/merge` cannot run there" in sandbox_row
 
 
@@ -160,20 +156,19 @@ def test_implement_requests_one_codex_review_per_finished_head() -> None:
     assert CODEX_REVIEW_TRIGGER_PHRASE not in text.lower()
 
     ready = text.index("mark the PR Ready for review, or explicitly request review")
-    in_review = text.index('set the story status to "In review"', ready)
     request = text.index(
         "once the PR is Ready for review, post exactly one PR conversation comment "
         f"whose first line is {phrase}",
-        in_review,
+        ready,
     )
     handoff = text.index("generate the handoff with `scripts/session-summary.sh --command implement", request)
     fix_round = text.index(
         "after a round of fixes for Codex findings on an `executor:claude-code-*` story, "
         "post exactly one new review request (a PR conversation comment whose first line is the same trigger phrase), "
-        "after the round's last push and after the story is back in \"In review\"",
+        "after the round's last push and after the PR is Ready for review again",
         handoff,
     )
-    assert ready < in_review < request < handoff < fix_round
+    assert ready < request < handoff < fix_round
 
     assert "if the story carries an `executor:claude-code-*` label, request the Codex review (ADR-006)" in text
     assert "post no review request on intermediate pushes" in text
