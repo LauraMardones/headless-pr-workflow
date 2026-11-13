@@ -93,7 +93,6 @@ def test_project_status_limits_ci_gate_to_implement_handoff() -> None:
 
     assert "binds the implementing session only" in status
     assert "does not read checks" in status
-    assert "In review" in read("scripts/project-status-sync.sh")
 
 
 def test_implement_redrafts_ready_pr_until_current_head_pytest_is_green() -> None:

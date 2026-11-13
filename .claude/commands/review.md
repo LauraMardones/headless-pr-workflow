@@ -10,7 +10,7 @@ Do not merge the PR from the review session.
 ## When this command applies
 
 - It remains the review path for `executor:codex` stories, which Claude Opus reviews, and for a separate-session review under ADR-007 path 2.
-- A Claude-implemented story (`executor:claude-code-*`) is reviewed by Codex (ADR-006). The `codex-review-bookkeeping` workflow then moves the story and posts the review Session Summary with no model session, so do not run this command for it unless a path 2 review is explicitly wanted.
+- A Claude-implemented story (`executor:claude-code-*`) is reviewed by Codex (ADR-006). The `codex-review-bookkeeping` workflow then posts the review Session Summary with no model session, so do not run this command for it unless a path 2 review is explicitly wanted.
 
 ## GitHub operation fallback
 
