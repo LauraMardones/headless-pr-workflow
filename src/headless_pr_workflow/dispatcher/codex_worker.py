@@ -471,6 +471,7 @@ def claim(
         return WorkerResult("claim", "unreadable", error=str(exc), fields=base)
 
     # A replayed run continues the attempt it already claimed, and claims nothing new.
+    candidates = queue
     for item in queue:
         st = states[item["issue"]]
         mine = [m for m in st.marks if m.action == "claim" and m.fields.get("run") == run]
@@ -478,12 +479,17 @@ def claim(
             continue
         if st.state == "conflict":
             return WorkerResult("claim", "lost", fields={**base, "issue": item["issue"], "reason": st.reason})
-        number = int(mine[0].fields["attempt"])
+        number = int(mine[-1].fields["attempt"])
         fields = {**base, "issue": item["issue"], "attempt": number}
         current = st.attempt
         if current is not None and current.number == number and current.run == run:
             if current.end is not None:
                 return WorkerResult("claim", "ended", fields={**fields, "reason": current.end.get("reason")})
+            if st.state == "expired":
+                # The lease ran out, so a new run may already treat the attempt as interrupted: the replay takes
+                # the claim rule's recovery path for this item only and starts only on a newly won attempt.
+                candidates = [item]
+                break
             # A replay starts the session too, so it re-reads the remote resume facts and asks the hook again,
             # as a new claim does; a refusal keeps the claim.
             try:
@@ -505,7 +511,7 @@ def claim(
         return WorkerResult("claim", "lost", fields={**fields, "reason": "another-run-owns-the-attempt"})
 
     skipped: list[dict[str, Any]] = []
-    for item in queue:
+    for item in candidates:
         issue, st = item["issue"], states[item["issue"]]
         if st.state in ("held", "conflict"):
             entry = {"issue": issue, "reason": st.reason or st.state}

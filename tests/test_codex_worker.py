@@ -353,6 +353,54 @@ def test_a_replay_of_a_run_that_lost_its_attempt_reports_lost(gh, settings):
     assert result.result == "lost" and result.exit_code == 1 and len(gh.posts()) == 0
 
 
+def test_a_replay_after_the_lease_ran_out_renews_ownership_through_a_new_attempt(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=5)
+    replay = do_claim(gh, settings, at=gh.at)
+    # The replay does not continue the expired attempt: it records the interruption and wins a new attempt.
+    assert replay.result == "claimed" and replay.fields["invocation"]["attempt"] == 2
+    assert [(m.fields["attempt"], m.fields["reason"]) for m in gh.marks(5) if m.action == "end"] == [("1", "interrupted")]
+    # A new run half an hour later finds the renewed claim held and starts nothing.
+    gh.at = T0 + timedelta(hours=5, minutes=30)
+    later = do_claim(gh, settings, run="run-b", at=gh.at)
+    assert later.result == "waiting" and later.fields["skipped"] == [{"issue": 5, "reason": "claimed"}]
+    assert [m.fields["run"] for m in claims(gh)] == ["run-a", "run-a"]
+    again = do_claim(gh, settings, at=gh.at)
+    assert again.result == "continued" and again.fields["invocation"]["attempt"] == 2
+
+
+def test_a_replay_after_the_lease_ran_out_asks_the_eligibility_hook_before_a_new_attempt(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=5)
+    gate = Gate((False, "reserve"))
+    replay = do_claim(gh, settings, gate=gate, at=gh.at)
+    assert replay.result == "waiting" and "invocation" not in replay.fields and gate.calls == [(REPO, 5, "implement")]
+    assert len(claims(gh)) == 1
+
+
+def test_a_replay_after_another_run_recovered_the_expired_attempt_reports_lost(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=5)
+    assert do_claim(gh, settings, run="run-b", at=gh.at).result == "claimed"
+    replay = do_claim(gh, settings, at=gh.at)
+    assert replay.result == "lost" and "invocation" not in replay.fields and len(claims(gh)) == 2
+
+
+def test_a_replay_and_a_new_run_recovering_one_expired_attempt_give_one_owner(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=5)
+    seen = {}
+    # Both read attempt 1 as expired; the new run recovers it before the replay's first write is stored.
+    gh.before_post = lambda: seen.setdefault("b", do_claim(gh, settings, run="run-b", at=gh.at))
+    replay = do_claim(gh, settings, at=gh.at)
+    assert (seen["b"].result, replay.result) == ("claimed", "lost") and "invocation" not in replay.fields
+    assert [(m.fields["attempt"], m.fields["run"]) for m in claims(gh)] == [("1", "run-a"), ("2", "run-b"), ("2", "run-a")]
+
+
 @pytest.mark.parametrize("marker", [
     "action=codex-claim issue=5 attempt=one owner=x run=r command=implement",
     "action=codex-claim issue=5 attempt=1 owner=x run=r command=deploy",
