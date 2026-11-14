@@ -154,3 +154,15 @@ def test_a_finished_refinement_does_not_suppress_the_first_implementation_claim(
     second = claim(gh, REPO, owner="po", run="r2", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
                    settings=settings, env={})  # fmt: skip
     assert second.result == "claimed" and second.fields["invocation"]["command"] == "implement"
+
+
+def test_a_finished_refinement_does_not_suppress_a_later_re_refinement(gh, settings):  # noqa: F811
+    gh.story(10, "Backlog", "type:story", "executor:codex")
+    first = claim(gh, REPO, owner="po", run="r1", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
+                  settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
+    gh.branches[first.fields["invocation"]["branch_prefix"] + "refine"] = H1
+    finish(gh, REPO, 10, 1, "r1", result="done", reason="refined", head=H1, until=None, config=CONFIG,
+           settings=settings)  # fmt: skip
+    second = claim(gh, REPO, owner="po", run="r2", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
+                   settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
+    assert second.result == "claimed" and second.fields["invocation"]["command"] == "refine"

@@ -693,8 +693,9 @@ def claim(
             continue
         except GatewayError as exc:
             return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
-        # A finished refinement is not an implementation handoff: only the same command's done head suppresses.
-        if (st.done_head and st.done_command == item["command"] and resume.head
+        # Only an implementation handoff suppresses: a finished refinement neither blocks the first implementation
+        # nor a later re-refinement, because its branch head does not move when the spec changes.
+        if (st.done_head and st.done_command == "implement" == item["command"] and resume.head
                 and resume.head.lower() == st.done_head.lower()):
             skipped.append({"issue": issue, "reason": "handed-off-on-head"})
             continue
