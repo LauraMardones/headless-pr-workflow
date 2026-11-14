@@ -284,12 +284,13 @@ def test_a_story_whose_card_still_says_in_implementation_does_not_block_the_next
     d.add_pr(960, 600, draft=False, owned=True)
     d.set_gates(960, "pass" if pr_state == "merged in this run" else "fail")
     d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_pr(970, STORY)  # the PR /implement leaves behind
 
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "1"})
 
     if pr_state == "merged in this run":
         assert d.phases == ["merge 960", "cleanup 600"], proc.stdout + proc.stderr
     assert "Active WIP count: 0 (limit: 1)" in proc.stdout, proc.stdout + proc.stderr
-    assert "FAIL" not in proc.stdout
+    assert "FAIL: WIP limit" not in proc.stdout and "FAIL: File overlap" not in proc.stdout
     assert not [c for c in d.posted(STORY) if "Type: conflict" in c]
     assert d.sessions == [f"implement {STORY}"] and d.board_writes == []

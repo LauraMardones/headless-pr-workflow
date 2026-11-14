@@ -424,7 +424,8 @@ def test_fix_round_that_moved_to_in_review_before_the_stop_is_handed_off_and_nam
     assert not [b for b in d.posted(PR) if "hpw:codex-review" in b.lower() and "@codex" in b]
     pauses = [c for c in d.posted(STORY) if c.startswith(PAUSE)]
     assert len(pauses) == 1
-    assert 'the story is "In review"' in pauses[0] and "handed off to the Codex review loop" in pauses[0]
+    # Issue #478: the record names no board status (the board writer sets it after the run).
+    assert "on the board" not in pauses[0] and "handed off to the Codex review loop" in pauses[0]
     assert "In implementation" not in pauses[0]
 
     second = d.resume()
