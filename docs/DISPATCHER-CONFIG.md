@@ -821,7 +821,7 @@ Until #524 supplies the reserve check, the hook stays unset and the worker start
 
 The task: create one automation in the Codex app for the repository's project, running every 30 minutes, with this prompt:
 
-> Run `scripts/codex-worker.sh claim --repo LauraMardones/headless-pr-workflow`. If it exits non-zero, stop. Otherwise read `invocation` from its JSON line and follow `invocation.command_file` for `invocation.issue`. When `invocation.resume` is set, continue on that branch and PR from that head; never open a new branch or PR. After each push run the `invocation.progress` command with the branch, head and PR. At the end run the `invocation.finish` command: `--result done --head <sha>` after the hand-off, or `--result wait --reason <word>` (for example `usage-limit` with `--until <reset time>`) when the session cannot finish.
+> Run `scripts/codex-worker.sh claim --repo LauraMardones/headless-pr-workflow`. If it exits non-zero, stop. Otherwise read `invocation` from its JSON line and follow `invocation.command_file` for `invocation.issue`. When `invocation.resume` is set, continue on that branch and PR from that head; never open a new branch or PR. After each push run the `invocation.progress` command with the branch, the full head SHA and the PR. At the end run the `invocation.finish` command: `--result done --head <full-sha>` (the full 40-character SHA, as `git rev-parse HEAD` prints it) after the hand-off, or `--result wait --reason <word>` (for example `usage-limit` with `--until <reset time>`) when the session cannot finish.
 
 Thirty minutes keeps at most one idle read of the board per half hour; the lease, not the interval, bounds how long a stopped session blocks its item.
 
@@ -885,12 +885,13 @@ No path moves an item to Claude, changes its `executor:` label or writes a board
 
 ```
 scripts/codex-worker.sh claim    --repo <owner/repo> [--owner <id>] [--run <id>] [--dry-run]
-scripts/codex-worker.sh progress --repo <owner/repo> --issue <n> --attempt <k> --run <id> --branch codex/issue-<n>-<slug> --head <sha> [--pr <n>] [--dry-run]
-scripts/codex-worker.sh finish   --repo <owner/repo> --issue <n> --attempt <k> --run <id> (--result done --head <sha> | --result wait --reason <word> [--until <iso>]) [--dry-run]
+scripts/codex-worker.sh progress --repo <owner/repo> --issue <n> --attempt <k> --run <id> --branch codex/issue-<n>-<slug> --head <full-sha> [--pr <n>] [--dry-run]
+scripts/codex-worker.sh finish   --repo <owner/repo> --issue <n> --attempt <k> --run <id> (--result done --head <full-sha> | --result wait --reason <word> [--until <iso>]) [--dry-run]
 scripts/codex-worker.sh status   --repo <owner/repo>
 ```
 
 - **stdout:** one JSON line (`ok`, `block: "codex-worker"`, `operation`, `result`, `error`). `claim` adds `owner`, `run`, `issue`, `attempt`, `skipped` (each item it passed over, with `reason` and, where it posted one, the `evidence` result of its `codex-wait`) and, for `claimed` and `continued`, `invocation`: `repo`, `issue`, `attempt`, `owner`, `run`, `command`, `command_file`, `branch_prefix`, `resume` (`pr`, `branch`, `head`, or `null`), and the `progress` and `finish` command lines. `status` lists each queued item with its state (`free`, `held`, `expired`, `conflict`), attempt, owner, run, end and recorded facts: the operator's view, read from GitHub only.
+- **Heads:** `--head` takes the full 40-character SHA, the form GitHub reports, and the worker stores it in lower case; an abbreviated SHA is an invalid argument (exit `2`), because the worker compares recorded heads with the remote head.
 - **Exit codes:** `0` `claimed`, `continued`, `written`, `already`, `read`, `dry-run`; `1` `idle`, `waiting`, `lost`, `ended`, `refused`, `not-owner`, `failed`; `2` invalid arguments or an invalid `CODEX_WORKER_*_MINUTES`; `3` `unreadable`.
 
 ## The dispatcher script is read completely before any session starts

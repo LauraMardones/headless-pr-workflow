@@ -41,6 +41,8 @@ _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA_OR_DASH = re.compile(r"^(-|[0-9a-fA-F]{7,40})$")
 _ITEM = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
+# The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
+_FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
 _BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker")
 
@@ -298,15 +300,18 @@ def _validate_worker(args: argparse.Namespace) -> None:
         prefix = codex_worker.branch_prefix(args.issue)
         if not _BRANCH.match(args.branch) or not args.branch.startswith(prefix) or len(args.branch) == len(prefix):
             raise InvalidArguments(f"--branch must be {prefix}<short-slug> (docs/WORKTREE-MODEL.md)")
-        if not _SHA.match(args.head):
-            raise InvalidArguments("--head must be a commit SHA")
+        if not _FULL_SHA.match(args.head):
+            raise InvalidArguments("--head must be the full 40-character commit SHA")
+        args.head = args.head.lower()
     if args.operation == "finish":
-        if args.result == "done" and not (args.head and _SHA.match(args.head)):
-            raise InvalidArguments("--result done needs --head <sha>, the head that was handed off")
+        if args.result == "done" and not (args.head and _FULL_SHA.match(args.head)):
+            raise InvalidArguments("--result done needs --head <sha>, the full SHA of the head that was handed off")
         if args.result == "wait" and not args.reason:
             raise InvalidArguments("--result wait needs --reason, for example usage-limit")
-        if args.head is not None and not _SHA.match(args.head):
-            raise InvalidArguments("--head must be a commit SHA")
+        if args.head is not None and not _FULL_SHA.match(args.head):
+            raise InvalidArguments("--head must be the full 40-character commit SHA")
+        if args.head is not None:
+            args.head = args.head.lower()
         if args.reason is not None and not _ITEM.match(args.reason):
             raise InvalidArguments("--reason must be a word such as usage-limit")
         if args.until is not None:

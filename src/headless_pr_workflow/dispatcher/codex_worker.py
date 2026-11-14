@@ -372,14 +372,14 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
         return Resume()
     head = branches[branch]
     old = recorded.get("head")
-    if old and recorded.get("branch") == branch and old != head:
+    if old and recorded.get("branch") == branch and old.lower() != head.lower():
         try:
             status = gateway.compare_commits(old, head)
         except GatewayError as exc:
             if exc.not_found:
                 raise Waiting("head-diverged") from None
             raise
-        if status != "ahead":
+        if status not in ("ahead", "identical"):  # identical: the same commit spelled another way
             raise Waiting("head-diverged")
     pr: int | None = None
     if recorded.get("pr"):
@@ -451,8 +451,8 @@ def invocation(repo: str, issue: int, attempt: int, owner: str, run: str, comman
     return {
         "repo": repo, "issue": issue, "attempt": attempt, "owner": owner, "run": run, "command": command,
         "command_file": COMMAND_FILES[command], "branch_prefix": branch_prefix(issue), "resume": resume.to_dict(),
-        "progress": base.format(op="progress") + " --branch <branch> --head <sha> [--pr <n>]",
-        "finish": base.format(op="finish") + " --result done --head <sha> | --result wait --reason <word> [--until <iso>]",
+        "progress": base.format(op="progress") + " --branch <branch> --head <full-sha> [--pr <n>]",
+        "finish": base.format(op="finish") + " --result done --head <full-sha> | --result wait --reason <word> [--until <iso>]",
     }  # fmt: skip
 
 
@@ -651,7 +651,7 @@ def claim(
             continue
         except GatewayError as exc:
             return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
-        if st.done_head and resume.head == st.done_head:
+        if st.done_head and resume.head and resume.head.lower() == st.done_head.lower():
             skipped.append({"issue": issue, "reason": "handed-off-on-head"})
             continue
 

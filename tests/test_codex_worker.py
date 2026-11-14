@@ -95,6 +95,8 @@ class WorkerGitHub(FakeGateway):
 
     def compare_commits(self, base: str, head: str) -> str:
         self.calls.append(f"compare {base[:7]} {head[:7]}")
+        if head.lower().startswith(base.lower()):
+            return "identical"  # GitHub's answer for the same commit, also when one SHA is abbreviated
         return "ahead" if (base, head) in self.ancestors else "diverged"
 
     def writes(self) -> list[str]:
@@ -993,6 +995,10 @@ def test_the_cli_without_a_hook_waits(gh, settings, capsys):
     ["progress", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--branch", "claude/issue-5-x", "--head", H1],
     ["progress", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--branch", "codex/issue-5-", "--head", H1],
     ["progress", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--branch", BRANCH, "--head", "main"],
+    ["progress", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--branch", BRANCH, "--head", H1[:7]],
+    ["finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--result", "done", "--head", H1[:7]],
+    ["finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--result", "wait", "--reason", "x",
+     "--head", H1[:12]],
     ["finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--result", "done"],
     ["finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--result", "wait"],
     ["finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r", "--result", "wait", "--reason", "a b"],
@@ -1003,6 +1009,29 @@ def test_the_cli_without_a_hook_waits(gh, settings, capsys):
 def test_invalid_arguments_exit_2_without_github_calls(gh, settings, capsys, argv):
     rc, out = run_cli(gh, settings, capsys, *argv)
     assert rc == 2 and out["result"] == "invalid" and out["block"] == "codex-worker" and gh.calls == []
+
+
+def test_a_handed_off_head_in_another_spelling_still_stops_a_new_attempt(gh, settings, capsys):
+    head = "ab" * 20
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.branches[BRANCH] = head
+    rc, out = run_cli(gh, settings, capsys, "finish", "--repo", REPO, "--issue", "5", "--attempt", "1", "--run", "r1",
+                      "--result", "done", "--head", head.upper())
+    assert rc == 0 and out["result"] == "written"
+    [end] = [m for m in gh.marks(5) if m.action == "end"]
+    assert end.fields["head"] == head
+    later = do_claim(gh, settings, run="r2")
+    assert later.fields["skipped"] == [{"issue": 5, "reason": "handed-off-on-head"}] and len(claims(gh)) == 1
+
+
+def test_a_recorded_head_that_names_the_remote_head_another_way_is_not_diverged(gh, settings):
+    interrupted(gh, progress=False)
+    gh.add(5, codex_worker.dispatcher_marker(
+        f"action=codex-progress issue=5 attempt=1 run=r1 pr=12 branch={BRANCH} head={H2[:7]}"))
+    result = do_claim(gh, settings, run="r2", at=T0 + timedelta(hours=5))
+    assert result.result == "claimed" and result.fields["invocation"]["resume"] == {"pr": 12, "branch": BRANCH,
+                                                                                  "head": H2}
 
 
 def test_an_invalid_lease_setting_exits_2(gh, settings, capsys, monkeypatch):
