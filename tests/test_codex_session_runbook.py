@@ -129,7 +129,7 @@ def test_the_api_key_refusal_still_applies_to_a_refine_claim(gh, settings):  # n
 @pytest.mark.parametrize("needle", [
     "### Session runbook", "`command: refine`", "`command: implement`", "branch_prefix", "invocation.resume",
     "open no second branch or PR", "gh-graphql-missing", "required-check-unreadable", "decision-blocker",
-    "`refine-check`, `set-project-status`, `ac-summary` and the required `pytest` check are never skipped",
+    "`refine-check`, `ac-summary` and the required `pytest` check are never skipped",
     "no Codex review trigger comment", "`finish --result done --head <full-sha>`", "No `OPENAI_API_KEY`",
     "codex-assigned", "`refine` |",
 ])  # fmt: skip
