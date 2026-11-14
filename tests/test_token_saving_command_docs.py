@@ -92,7 +92,7 @@ def test_project_status_limits_ci_gate_to_implement_handoff() -> None:
     status = read("docs/PROJECT-STATUS.md")
 
     assert "binds the implementing session only" in status
-    assert "does not read checks" in status
+    assert "the board derives In review from the draft flag and the merge gates" in status
 
 
 def test_implement_redrafts_ready_pr_until_current_head_pytest_is_green() -> None:

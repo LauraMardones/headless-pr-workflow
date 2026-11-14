@@ -54,7 +54,8 @@ def test_resolution_section_documents_automated_unblock_detection() -> None:
 
     assert "/unblock" in resolution_section
     assert "automatically" in resolution_section
-    assert "Ready for implementation" in resolution_section
+    assert "Ready to implement" in resolution_section
+    assert "No manual board-status change is required" in resolution_section
 
 
 def test_decision_blockers_section_requires_resume_field_be_filled_in() -> None:

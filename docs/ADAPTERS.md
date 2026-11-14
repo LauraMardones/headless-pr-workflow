@@ -93,17 +93,17 @@ The Executor Roles table above describes the intended split, but a story's `exec
 
 An executor with a row in neither table stops with a mid-cycle blocker after `/implement`, so a typo or a new tier never skips review silently.
 
-**Claude-implemented stories (Codex review loop).** Each Claude-implemented head is reviewed once, by Codex Cloud (ADR-006). `/implement` posts the review request, and the `codex-review-bookkeeping` workflow reads the answer and moves the story. The dispatcher's part is:
+**Claude-implemented stories (Codex review loop).** Each Claude-implemented head is reviewed once, by Codex Cloud (ADR-006). `/implement` posts the review request, and the `codex-review-bookkeeping` workflow reads the answer; the PR's facts then show the story's status. The dispatcher's part is:
 
-1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and counts no review session. It checks that the story has a linked open PR that is not a draft, writes `In review` only when the story is still `In implementation` and no fix round is due, and ends that story's run.
-2. **Merge step.** On a later run, a story whose open, non-draft PR passes every merge gate except mergeability on its current head gets `/merge`, then `Done` and `/cleanup`, both as scripts (see Script-only phases below). This applies to every story, whatever its executor and its board status (issue #475). There is one `/merge` attempt per PR head.
-3. **Fix round.** A story for which the bookkeeping job recorded findings on the PR's current head gets `/implement` again on the same PR, whatever its board status. After that the hand-off applies again. The number of fix rounds per PR is limited by the repository variable `CODEX_FIX_ROUND_MAX` (default `3`).
+1. **Hand-off.** After `/implement` succeeds, the dispatcher starts no `/review` session and counts no review session. It checks that the story has a linked open PR that is not a draft, and ends that story's run. It writes no board status: the board shows the non-draft PR as In review (see [PROJECT-STATUS.md](PROJECT-STATUS.md)).
+2. **Merge step.** On a later run, a story whose open, non-draft PR passes every merge gate except mergeability on its current head gets `/merge`, then the issue is closed (the board shows Done) and `/cleanup`, both as scripts (see Script-only phases below). This applies to every story, whatever its executor (issue #475). There is one `/merge` attempt per PR head.
+3. **Fix round.** A story for which the bookkeeping job recorded findings on the PR's current head gets `/implement` again on the same PR, whatever its executor. After that the hand-off applies again. The number of fix rounds per PR is limited by the repository variable `CODEX_FIX_ROUND_MAX` (default `3`).
 
 Each run handles resumable work before new work: the merge step, then fix rounds and pending hand-offs, then the review step, all found from pull request facts, not from board statuses (issue #475); then the scheduler's new work. The rules, bounds and log lines are in [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#codex-review-loop-hand-off-and-resume).
 
 **Codex-implemented stories (paired session).** The dispatcher does not start `/implement` for an `executor:codex` story (no subscription mechanism, ADR-012, issue #315); it skips it with a warning. A story with an open, non-draft PR that Codex implemented outside the dispatcher, and that is not in the merge step, gets a resume entry: `/review` under Claude Opus on the subscription, followed by the script-only `/merge` and `/cleanup` when the PR's merge gates then put it in the merge step. One `/review` attempt per PR head; see [DISPATCHER-CONFIG.md](DISPATCHER-CONFIG.md#review-of-a-codex-implemented-pr).
 
-**Script-only phases: `/merge` and `/cleanup` (issue #264).** No executor tier applies to these two phases. The dispatcher starts no model session for them: no Claude Code session, no model API call, no subscription-allowance check and no executor budget increment. `run_merge_or_block()` and `finish_story()` in `scripts/dispatcher-invoke.sh` run `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh`, which reuse `scripts/merge-gate-summary` and the `hpw` helpers. This holds in every path: the Claude-tier cycle, the review entry for a Codex-implemented PR and the resume pass at `In merge`. A step the scripts cannot judge (for example a dirty file that is neither clearly a stale copy of the merged PR nor clearly unrelated) is kept and reported, never forced. The step-by-step map from `merge.md` and `cleanup.md` to the scripts and their tests is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md). A manually run `/merge` or `/cleanup` still follows `.claude/commands/merge.md` and `cleanup.md`, which are unchanged; a later edit to either file needs the matching script change. ADR-012's session-start mechanism does not cover these two phases.
+**Script-only phases: `/merge` and `/cleanup` (issue #264).** No executor tier applies to these two phases. The dispatcher starts no model session for them: no Claude Code session, no model API call, no subscription-allowance check and no executor budget increment. `run_merge_or_block()` and `finish_story()` in `scripts/dispatcher-invoke.sh` run `scripts/dispatcher-merge.sh` and `scripts/dispatcher-cleanup.sh`, which reuse `scripts/merge-gate-summary` and the `hpw` helpers. This holds in every path: the Claude-tier cycle, the review entry for a Codex-implemented PR and the resume pass for a story whose PR is mergeable. A step the scripts cannot judge (for example a dirty file that is neither clearly a stale copy of the merged PR nor clearly unrelated) is kept and reported, never forced. The step-by-step map from `merge.md` and `cleanup.md` to the scripts and their tests is in [DISPATCHER-MERGE-CLEANUP-MAP.md](DISPATCHER-MERGE-CLEANUP-MAP.md). A manually run `/merge` or `/cleanup` still follows `.claude/commands/merge.md` and `cleanup.md`, which are unchanged; a later edit to either file needs the matching script change. ADR-012's session-start mechanism does not cover these two phases.
 
 This applies only to the dispatcher's own invocation path in `scripts/dispatcher-invoke.sh`. A human or interactive session running `/review` manually (`.claude/commands/review.md`) chooses its own reviewer and is unaffected.
 
@@ -137,7 +137,7 @@ Four label values are defined:
 - `executor:claude-code-opus`
 - `executor:codex`
 
-The `executor:` label is applied to a story when its status moves to **Ready for implementation**. It signals which executor profile should pick up the story. Executors pull only from "Ready for implementation" — never from "Refined" or any other status.
+The `executor:` label is set in refinement: `scripts/refine-check` requires exactly one on a story, task or bug. It is not tied to a board status, and a status change does not apply or move it. It signals which executor profile should pick up the story. A story is ready when it is refined and every hard dependency is closed (Ready to implement, see [PROJECT-STATUS.md](PROJECT-STATUS.md)); no executor pulls from a status.
 
 ### Capability Profile Structure
 
@@ -164,7 +164,7 @@ Routing logic must read declared profiles, not branch on executor names. This is
 
 The canonical executor routing entry points are split by responsibility:
 
-- Status semantics, pull eligibility, WIP pre-flight checks, handoff format, blocker protocol, closure protocol, and OSS compatibility invariants are defined in `docs/PROJECT-STATUS.md`.
+- Status semantics, readiness, WIP pre-flight checks, handoff format, blocker protocol, closure protocol, and OSS compatibility invariants are defined in `docs/PROJECT-STATUS.md`.
 - Adapter boundaries, executor roles, `executor:` labels, and capability profile structure are defined in this file.
 - Lifecycle and source-of-truth rules are defined in `docs/HEADLESS-PR-WORKFLOW.md`.
 

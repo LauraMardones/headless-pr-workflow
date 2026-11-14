@@ -804,9 +804,9 @@ def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_i
     assert "steps 10 and 17" in skip
     assert any(b.startswith("stop if 2 or more stories") for b in bullets[1:])
     assert any(b.startswith("stop if any active story declares overlapping files") for b in bullets[1:])
-    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull of a ready story (#479 renames it there).
+    # The canonical rule in docs/PROJECT-STATUS.md covers only the start of a ready story (issue #479 renamed the statuses).
     policy = (REPO_ROOT / "docs" / "PROJECT-STATUS.md").read_text(encoding="utf-8")
-    assert "Before pulling a story from **Ready for implementation** into **In implementation**" in policy
+    assert "Before a story that shows **Ready to implement** starts (its first draft PR)" in policy
 
 
 # ── Order and entry ─────────────────────────────────────────────────────────
