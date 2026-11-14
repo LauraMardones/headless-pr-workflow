@@ -1567,10 +1567,8 @@ record_session_start() {
 #   - no board status is written (issue #478); a new /implement starts again
 #     when the scheduler chooses the story on a later run; a fix round
 #     that pushed a new head before the stop (issue #446) gets the merge-owner
-#     marker for that head and the usual hand-off first, in this run, also when
-#     the session already wrote "In review" (issue #447; the hand-off leaves it
-#     there); the fix-round record's Next line names the status read from the
-#     board after the session;
+#     marker for that head and the usual hand-off first, in this run (issues
+#     #446, #447); the record names no board status;
 #   - no mid-cycle blocker and no attempt marker is written, so the resume
 #     pass (or the next selection) starts the same step again once the usage
 #     limit and the allowance check let it;
@@ -1642,17 +1640,9 @@ pause_at_usage_limit() {
             FIX_ROUND_SESSION=true
           fi
         fi
-        # The story's status is read from the board after the session (and the
-        # hand-off), never assumed.
-        local board_status="unreadable"
-        if BOARD_DATA=$(fetch_board_data 2>/dev/null); then
-            board_status=$(board_status_of "$issue")
-            [[ -n "$board_status" ]] || board_status="unreadable"
-        fi
+        # No board status is named: the board writer sets it after this run (issue #478).
         if $handed_off; then
-            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run, and the story is \"${board_status}\" on the board. Codex reviews it, and any findings start a new fix round."
-        else
-            next+=" The story is \"${board_status}\" on the board."
+            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run. Codex reviews it, and any findings start a new fix round."
         fi
     elif [[ "$step" == "refine" ]]; then
         next="a later \`--refine $issue\` starts a fresh session from the issue as it is on GitHub then, once the usage limit and the allowance check allow it. Nothing is written to the board."
@@ -2067,14 +2057,6 @@ classify_issue_type() {
 }
 
 # ─── Utility: board facts from the current $BOARD_DATA snapshot ──────────────
-
-board_status_of() {
-    local issue_num="$1"
-    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select((.content | type) == "object" and .content.number == $n)
-        | [.fieldValues.nodes[] | select((.field.name? // "") == "Status") | .name][0] // empty' | head -1
-}
 
 # board_item_id_of <issue> — the board item of the issue, for the status writes
 # that stay until #461. No status is read: the item is looked up by number.
@@ -3547,22 +3529,25 @@ echo "Executor: $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
 # (docs/PROJECT-STATUS.md, docs/DISPATCHER-CONFIG.md)
 
 LAST_ACTION="WIP limit check"
-# The pre-flight judges the target against the other stories (issue #496): it
-# reads the board data of the latest fetch (the scheduler call's, in a scheduled
-# run) and leaves the target out.
-IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq --argjson target "$ISSUE_NUMBER" '[
-    .data.repository.projectsV2.nodes[0].items.nodes[]
-    | select(
-        (.content | type) == "object" and
-        (.content.number != null) and
-        (.content.number != $target) and
-        ([ .fieldValues.nodes[]
-           | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-         ] | length > 0)
-      )
-    | { id: .id, number: .content.number, title: .content.title,
-        body: (.content.body // ""), updatedAt: .content.updatedAt }
-]')
+# The pre-flight judges the target against the other stories (issue #496) and
+# leaves the target out. Issue #478: it reads the work in implementation from
+# pull request facts, read fresh now, as the scheduler's --in-implementation list
+# does (scripts/lib/in-flight.sh: a draft linked PR or a fix round due). It reads
+# no board status: the board writer sets it only after this run, so a story
+# merged, finished or handed off earlier in the run would still count there.
+if ! inflight_prepare || ! inflight_compute; then
+    echo "Error: could not read the work in flight for the WIP pre-flight of #$ISSUE_NUMBER; /implement not started." >&2
+    exit 1
+fi
+IN_IMPL_ITEMS="[]"
+for active_num in $(jq -r --argjson target "$ISSUE_NUMBER" '.in_implementation[] | select(. != $target)' <<< "$INFLIGHT_JSON"); do
+    active_issue=$(gh api "repos/$REPO/issues/$active_num") || {
+        echo "Error: could not read #$active_num for the WIP pre-flight of #$ISSUE_NUMBER; /implement not started." >&2
+        exit 1
+    }
+    IN_IMPL_ITEMS=$(jq -c --argjson i "$active_issue" \
+        '. + [{number: $i.number, title: ($i.title // ""), body: ($i.body // "")}]' <<< "$IN_IMPL_ITEMS")
+done
 IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
 echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"
 
@@ -3570,7 +3555,7 @@ if [[ $IN_IMPL_COUNT -ge $WIP_LIMIT ]]; then
     active_list=$(echo "$IN_IMPL_ITEMS" | jq -r '.[] | "  #\(.number) \(.title)"')
     echo "FAIL: WIP limit reached ($IN_IMPL_COUNT >= $WIP_LIMIT)"
     echo "$active_list"
-    unblocked_when="Fewer than $WIP_LIMIT stories are in \"In implementation\" status on the project board"
+    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a draft linked PR or a fix round due)"
     post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
 fi
 
@@ -3613,7 +3598,7 @@ else
     if $OVERLAP_FOUND; then
         echo "FAIL: File overlap detected:"
         echo "$OVERLAP_DETAILS"
-        unblocked_when="The overlapping files are no longer owned by an active \"In implementation\" story: $(echo "$OVERLAP_DETAILS" | head -1 | sed 's/^ *//')"
+        unblocked_when="The overlapping files are no longer owned by a story with work in implementation: $(echo "$OVERLAP_DETAILS" | head -1 | sed 's/^ *//')"
         post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
     fi
 fi

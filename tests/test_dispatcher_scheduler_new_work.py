@@ -452,6 +452,7 @@ def _target_in_implementation_on_first_read_only(d: Dispatcher, other_status: st
     d.add_story(STORY, "In implementation", body=FILES)
     if other_status:
         d.add_story(OTHER, other_status, body=other_body)
+        d.add_pr(PR + 50, OTHER, draft=True)  # the pre-flight counts a draft linked PR, not the card (#478)
         fresh(d, OTHER)
     fresh(d, STORY)
     d.add_pr(PR, STORY)

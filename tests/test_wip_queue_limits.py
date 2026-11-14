@@ -95,9 +95,10 @@ def d(tmp_path):
 
 
 def add_active_stories(d, count):
-    """Stories "In implementation" that are not stale (updated in the future), so none is rolled back."""
+    """Stories with work in implementation: each has a draft linked PR, the fact the pre-flight counts (#478)."""
     for n in range(count):
         d.add_story(600 + n, "In implementation", body="## Files affected\n- `other/file.txt`\n")
+        d.add_pr(960 + n, 600 + n, draft=True)
     board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"
@@ -129,7 +130,7 @@ def test_ac1_blocker_text_shows_the_configured_limit(tmp_path):
     d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "3"})
     assert proc.returncode != 0
-    assert any('Fewer than 3 stories are in "In implementation"' in c for c in d.posted(STORY))
+    assert any("Fewer than 3 stories have work in implementation" in c for c in d.posted(STORY))
 
 
 @pytest.mark.parametrize("name", VARIABLES)
@@ -258,3 +259,37 @@ def test_workflow_passes_the_variables_to_the_poll_and_invoke_steps():
         block = text.split(f"id: {step_id}\n", 1)[1].split("\n      - name:", 1)[0]
         for name in VARIABLES:
             assert f"{name}: ${{{{ vars.{name} }}}}" in block, (step_id, name)
+
+
+def test_cards_without_work_in_implementation_do_not_fill_the_wip_limit(tmp_path):
+    """Issue #478: three cards on "In implementation" with no draft PR count nothing; the board is a display."""
+    d = Dispatcher(tmp_path)
+    for n in range(3):
+        d.add_story(600 + n, "In implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
+
+    proc = d.run_issue(STORY, "--dry-run", env={"WIP_LIMIT_IMPLEMENTATION": "1"})
+
+    assert "Active WIP count: 0 (limit: 1)" in proc.stdout
+    assert "FAIL" not in proc.stdout and d.posted(STORY) == []
+
+
+@pytest.mark.parametrize("pr_state", ["merged in this run", "in review"])
+def test_a_story_whose_card_still_says_in_implementation_does_not_block_the_next_one(tmp_path, pr_state):
+    """Codex finding on PR #541: the board writer runs only after the invoke step, so a card can still say
+    "In implementation" for a story the run merged and finished, or whose PR is ready for review. The
+    pre-flight counts PR facts read fresh, so the next story starts with WIP limit 1 and gets no blocker."""
+    d = Dispatcher(tmp_path)
+    d.add_story(600, "In implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_pr(960, 600, draft=False, owned=True)
+    d.set_gates(960, "pass" if pr_state == "merged in this run" else "fail")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
+
+    proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "1"})
+
+    if pr_state == "merged in this run":
+        assert d.phases == ["merge 960", "cleanup 600"], proc.stdout + proc.stderr
+    assert "Active WIP count: 0 (limit: 1)" in proc.stdout, proc.stdout + proc.stderr
+    assert "FAIL" not in proc.stdout
+    assert not [c for c in d.posted(STORY) if "Type: conflict" in c]
+    assert d.sessions == [f"implement {STORY}"] and d.board_writes == []

@@ -597,6 +597,7 @@ def test_ac10_fix_round_runs_implement_without_wip_or_overlap_checks(d):
     files = "## Files affected\n\n- `scripts/a.sh`\n"
     d.add_story(STORY, "In implementation", body=files)
     d.add_story(501, "In implementation", executor="codex", body=files)  # WIP limit reached, same file
+    d.add_pr(PR + 1, 501, draft=True)  # its draft PR is the fact that holds the slot (#478)
     d.add_pr(PR, STORY)
     d.add_findings(PR, HEAD)
     new_head_on_implement(d, status=None)  # the session pushes but skips the status write
@@ -606,7 +607,7 @@ def test_ac10_fix_round_runs_implement_without_wip_or_overlap_checks(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
     assert f"[RESUME] #{STORY}: fix round 1 of 3, /implement on PR #{PR}" in proc.stdout
-    assert d.board_writes == []  # AC2: still "In implementation", no round due
+    assert d.board_writes == []  # the dispatcher writes no status (#478)
     assert d.posted(STORY) == [] and d.posted(501) == []
     assert "WIP limit" not in proc.stdout and "File overlap" not in proc.stdout
 

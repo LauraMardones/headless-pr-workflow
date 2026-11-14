@@ -44,7 +44,7 @@ The PO sets every WIP and queue limit in repository variables (issue #358). No s
 
 | Variable | Valid values | Suggested value | Read by |
 |---|---|---|---|
-| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories in "In implementation" at the same time. | `2` | the [scheduler](#scheduler-new-work-from-github-facts), `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
+| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories with work in implementation (a draft linked PR or a fix round due) at the same time. | `2` | the [scheduler](#scheduler-new-work-from-github-facts), `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
 | `READY_BUFFER_MIN` | A whole number of zero or more. The fewest ready stories the scheduler keeps. | `3` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
 | `READY_BUFFER_MAX` | A whole number, `READY_BUFFER_MIN` or more. The most ready and waiting stories the scheduler keeps. | `5` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
 
@@ -68,7 +68,7 @@ WIP count: 2/3
 
 **Unset or invalid value.** There is no fallback to `2`, `3` or `5`. When any of the three is unset, empty or invalid (`abc`, `0` for the WIP limit, `-1`, `2.5`, or a minimum above the maximum), `dispatcher-invoke.sh` starts nothing before it reads the board: no board status is written, no blocker comment is posted and no `dispatcher_error` Slack message is sent; the job fails with the `[LIMITS ERROR]` line, like `[USAGE LIMIT ERROR]`. `flow-review.sh` prints the error to stderr, exits `2` and prints no report or status. `dispatcher-poll.sh` does not hide it: it exits `2`. The dispatcher therefore stops until the PO sets all three variables.
 
-**When the WIP limit is reached** the dispatcher posts a conflict blocker whose "Unblocked when" line names the configured limit (`Fewer than <limit> stories are in "In implementation"…`).
+**When the WIP limit is reached** the dispatcher posts a conflict blocker whose "Unblocked when" line names the configured limit (`Fewer than <limit> stories have work in implementation …`). The pre-flight of `scripts/dispatcher-invoke.sh` (Step 5, WIP limit and file overlap) counts the same stories as the scheduler's `--in-implementation` list, read fresh from pull request facts right before `/implement`; it reads no board status (issue #478), so a story merged, finished or handed off earlier in the same run no longer counts.
 
 ---
 
@@ -479,7 +479,7 @@ The resume pass of `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.s
 
 A merge gate that cannot be read counts as not passing, so the story stays in the review step until the next run. A comment list that cannot be read finds no fix round, hand-off or blocker for that story in this run, and a warning says so. Without the dispatcher's account (`hpw dispatcher marker whoami` fails) no fix round or pending hand-off is found in that run. When the open issues or the open PRs cannot be read, no in-flight session starts in that run.
 
-**Moving a card starts nothing.** A story with no linked PR and no dispatcher marker gets no session, whatever its card says, and it is in no poll key. The dispatcher writes no board status (issue #478); the board writer corrects a moved card on its next run. A board read that names a status in a comment (the usage-limit pause text, the WIP pre-flight of a manual `--issue` run) chooses no session.
+**Moving a card starts nothing.** A story with no linked PR and no dispatcher marker gets no session, whatever its card says, and it is in no poll key. The dispatcher writes no board status (issue #478); the board writer corrects a moved card on its next run. The dispatcher reads no board status to decide anything: the WIP pre-flight also counts from PR facts.
 
 **The two scheduler lists.** Every `hpw dispatcher scheduler next` call, from the poll and from `ask_scheduler` in the invoke step (both through `scheduler_next` in `scripts/lib/scheduler.sh`), gets two lists built from the same facts:
 
@@ -780,8 +780,8 @@ A session stopped by the subscription's provider usage limit (issue #316, ADR-01
 | Session | Story afterwards | Written |
 |---|---|---|
 | New `/implement` (Step E1) | no board write; the next start continues on the existing branch and PR | the pause record |
-| Fix round, no new head | no board write; the same round starts again on a later poll | the pause record, whose `Next:` line names the board status read after the session; no fix-round attempt marker, no merge-owner marker |
-| Fix round that pushed a new head (issues #446, #447) | handed off, the Codex review requested for the new head (the bookkeeping job posts a missing review request); no board write | in the same run: the merge-owner marker for the new head, the usual hand-off, then the pause record saying the head was handed off and naming the story's board status; no fix-round attempt marker, nothing read back later; the dispatcher posts no review request itself |
+| Fix round, no new head | no board write; the same round starts again on a later poll | the pause record; no fix-round attempt marker, no merge-owner marker |
+| Fix round that pushed a new head (issues #446, #447) | handed off, the Codex review requested for the new head (the bookkeeping job posts a missing review request); no board write | in the same run: the merge-owner marker for the new head, the usual hand-off, then the pause record saying the head was handed off; no fix-round attempt marker, nothing read back later; the dispatcher posts no review request itself |
 | Fix round that pushed a new head while the PR is still a draft (issue #446) | no board write | the pause record says the head is not ready for review; no merge-owner marker, no hand-off, no blocker (a draft PR is outside the missing-merge-owner rule) |
 | `/review` of a Codex-implemented PR | no board write | the pause record; no per-head review attempt marker |
 | Conflict round | no board write; the next run decides from the PR ([conflict round](#conflict-round)) | the pause record with step `conflict round`, for the PO only; no marker |

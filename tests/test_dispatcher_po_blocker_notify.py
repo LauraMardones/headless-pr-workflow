@@ -179,7 +179,8 @@ def test_ac2_a_failed_blocker_write_registers_nothing(d):
 @needs_tools
 def test_ac3_conflict_blockers_register_nothing(d):
     d.add_story(501, "In implementation")
-    board = d._read("board.json")  # a recently updated story is active, not stale
+    d.add_pr(901, 501, draft=True)  # its draft PR holds the WIP slot (#478)
+    board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"
     d._write("board.json", board)
