@@ -166,3 +166,10 @@ def test_a_finished_refinement_does_not_suppress_a_later_re_refinement(gh, setti
     second = claim(gh, REPO, owner="po", run="r2", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
                    settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
     assert second.result == "claimed" and second.fields["invocation"]["command"] == "refine"
+
+
+def test_a_due_refinement_is_queued_for_a_story_already_in_implementation(gh, settings):  # noqa: F811
+    gh.story(10, "In implementation", "type:story", "executor:codex")
+    result = claim(gh, REPO, owner="po", run="r1", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
+                   settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
+    assert result.result == "claimed" and result.fields["invocation"]["command"] == "refine"

@@ -325,7 +325,7 @@ def _queue(cards: list[Any], refine_due: list[int] | None = None) -> list[dict[s
             continue
         if not any(label in TYPE_LABELS for label in card.labels):
             continue
-        if card.number in due and card.status not in COMMAND_BY_STATUS:
+        if card.number in due:  # a due refinement comes before implementation, whatever the board status shows
             queue.append({"issue": card.number, "status": card.status, "command": "refine",
                           "rank": (0.5, _prio(card.labels), card.number)})  # fmt: skip
             continue
