@@ -859,11 +859,9 @@ def test_449_ac5_pause_before_the_push_gets_a_fresh_round(d, from_status):
     assert d.board_writes == [] and blockers(d) == []
 
 
-@pytest.mark.parametrize("session, left_in", [
-    (session_merges_main, "In implementation"),
-    (session_merges_main_and_hands_off, "In review"),
-], ids=["after the push", "after In review"])
-def test_449_ac5_pause_after_the_push_gets_one_blocker(d, session, left_in):
+@pytest.mark.parametrize("session", [session_merges_main, session_merges_main_and_hands_off],
+                         ids=["after the push", "after In review"])
+def test_449_ac5_pause_after_the_push_gets_one_blocker(d, session):
     conflicting_story(d, "Mergeable")
     session(d)
     stop_the_session_at_the_usage_limit(d)
@@ -871,7 +869,7 @@ def test_449_ac5_pause_after_the_push_gets_one_blocker(d, session, left_in):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == left_in and len(pause_records(d)) == 1 and blockers(d) == []
+    assert d.board_writes == [] and len(pause_records(d)) == 1 and blockers(d) == []
 
     let_sessions_finish(d)
     d.on_session("implement", "")
@@ -914,7 +912,7 @@ def test_449_ac5_failed_write_of_the_pause_record_gets_a_fresh_round(d):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "In implementation" and d.posted(STORY) == []
+    assert d.board_writes == [] and d.posted(STORY) == []
     assert "could not post the pause record" in proc.stderr
 
     let_sessions_finish(d)

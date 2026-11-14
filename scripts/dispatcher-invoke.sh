@@ -708,10 +708,10 @@ FINISHED_ISSUES="${FINISHED_ISSUES:-}"
 
 notify_closure_if_complete() {
     local completed_story_num="$1" finished_json
-    [[ " $FINISHED_ISSUES " == *" $completed_story_num "* ]] \
+    [[ " ${FINISHED_ISSUES:-} " == *" $completed_story_num "* ]] \
         || FINISHED_ISSUES="${FINISHED_ISSUES:+$FINISHED_ISSUES }$completed_story_num"
     export FINISHED_ISSUES
-    finished_json=$(tr ' ' '\n' <<< "$FINISHED_ISSUES" | jq -R 'select(length > 0) | tonumber' | jq -cs '.')
+    finished_json=$(jq -cn --arg s "$FINISHED_ISSUES" '$s | split(" ") | map(select(length > 0) | tonumber)')
 
     # ── Feature closure ──────────────────────────────────────────────────────
     local feature_num
