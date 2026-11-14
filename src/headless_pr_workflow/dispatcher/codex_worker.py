@@ -13,6 +13,7 @@ Markers (own account only, ``<!-- hpw:dispatcher action=<action> ... -->``):
 - ``codex-claim issue= attempt= owner= run= command= pr= branch= head=``: the claim; the claim with
   the lowest comment id of an attempt owns it.
 - ``codex-progress issue= attempt= run= pr= branch= head=``: what the owning session pushed.
+- ``codex-renew issue= attempt= run=``: a replay renews the lease before its session starts; it carries no resume facts.
 - ``codex-end issue= attempt= run= result=done|wait reason= head= until= by=``: the attempt is over; ``by`` names
   the run that recorded an interruption, which counts only when the lease had run out by GitHub's timestamps.
 - ``codex-wait issue= attempt= reason=``: the item waits before that attempt could be claimed.
@@ -57,7 +58,7 @@ _EXIT_BY_RESULT = {
     "claimed": EXIT_OK, "continued": EXIT_OK, "written": EXIT_OK, "already": EXIT_OK, "read": EXIT_OK,
     "dry-run": EXIT_OK, "unreadable": EXIT_UNREADABLE,
 }  # fmt: skip
-_MARK = re.compile(r"<!-- hpw:dispatcher action=codex-(claim|progress|end|wait) ([^<>]*?) -->")
+_MARK = re.compile(r"<!-- hpw:dispatcher action=codex-(claim|progress|renew|end|wait) ([^<>]*?) -->")
 _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PRIO = re.compile(r"^prio:P(\d+)$")
 _CLOSES = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{n}\b"
@@ -159,7 +160,13 @@ class Attempt:
     number: int
     claim: Mark
     progress: list[Mark] = field(default_factory=list)
+    renewals: list[Mark] = field(default_factory=list)
     end: Mark | None = None
+
+    def records(self) -> tuple[Mark, ...]:
+        """The records that hold the lease: the claim, each progress record and each renewal."""
+
+        return (self.claim, *self.progress, *self.renewals)
 
     @property
     def run(self) -> str:
@@ -218,14 +225,14 @@ def _end_counts(end: Mark, attempt: Attempt, config: Config) -> bool:
     """Whether ``end`` ends ``attempt``; ``attempt.progress`` holds only the records older than ``end``.
 
     The owner's own ``finish`` always counts. An interruption (``by=`` the recovering run) counts only when, by
-    GitHub's own timestamps, the attempt's newest earlier claim or progress record is older than the lease: an owner
+    GitHub's own timestamps, the attempt's newest earlier claim, progress or renewal record is older than the lease: an owner
     record that landed between the recovering run's read and its write renews the lease and voids the interruption.
     """
 
     if not end.get("by"):
         return True
     ended = _time(end.created_at)
-    times = [_time(m.created_at) for m in (attempt.claim, *attempt.progress)]
+    times = [_time(m.created_at) for m in attempt.records()]
     if ended is None or any(t is None for t in times):
         return False  # a lease that cannot be read is never expired
     return ended - max(t for t in times if t) > config.lease
@@ -242,7 +249,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
             number = int(mark.fields["attempt"])
             winners.setdefault(number, Attempt(number, mark))
     for mark in marks:
-        if mark.action not in ("progress", "end"):
+        if mark.action not in ("progress", "renew", "end"):
             continue
         attempt = winners.get(int(mark.fields["attempt"]))
         if attempt is None or mark.fields["run"] != attempt.run:
@@ -250,6 +257,8 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
             return IssueState(issue, "conflict", reason="foreign-run", marks=marks)
         if mark.action == "progress":
             attempt.progress.append(mark)
+        elif mark.action == "renew":
+            attempt.renewals.append(mark)
         elif attempt.end is None and _end_counts(mark, attempt, config):
             attempt.end = mark
 
@@ -272,7 +281,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
             if state.not_before is None:
                 state.state, state.reason = "held", "unreadable-time"
         return state
-    times = [_time(m.created_at) for m in (current.claim, *current.progress)]
+    times = [_time(m.created_at) for m in current.records()]
     if any(t is None for t in times):
         state.state, state.reason = "held", "unreadable-time"  # a lease that cannot be read is never expired
     elif now - max(t for t in times if t) > config.lease:
@@ -551,8 +560,31 @@ def claim(
                             "evidence": _wait(gateway, issue_no, number, reason, settings, env, dry_run,
                                               claimed=True)}]  # fmt: skip
                 return WorkerResult("claim", "waiting", fields={**fields, "skipped": skipped})
-            return WorkerResult("claim", "continued", fields={**fields, "invocation": invocation(
-                repo, issue_no, number, owner, run, current.command, resume)})  # fmt: skip
+            # Time passes during the reads and the hook, so the lease read at the start no longer decides. The replay
+            # renews the lease on GitHub and starts only when the read-back shows it still owns the open attempt:
+            # GitHub's order decides against any interruption, as it does for a claim (no local clock in the answer).
+            call = invocation(repo, issue_no, number, owner, run, current.command, resume)
+            renewed = write_marker(
+                gateway, issue_no, "codex-renew", [("issue", str(issue_no)), ("attempt", str(number)), ("run", run)],
+                body=f"Codex worker: run `{run}` resumes its claimed attempt {number} on #{issue_no}.",
+                dry_run=dry_run, settings=settings, env=env,
+            )  # fmt: skip
+            if renewed.result == "dry-run":
+                return WorkerResult("claim", "dry-run", fields={**fields, "invocation": call})
+            if renewed.result != "written":
+                return WorkerResult("claim", "failed", error=f"renew claim: {renewed.error}", fields=fields)
+            try:
+                after = derive_state(issue_no, _own_marks(gateway, issue_no, login), now=clock(), config=config)
+            except GatewayError as exc:
+                return WorkerResult("claim", "unreadable", error=f"read back renewal: {exc}", fields=fields)
+            held = after.attempt
+            if after.state == "conflict" or held is None or held.number != number or held.run != run:
+                return WorkerResult("claim", "lost", fields={**fields, "reason": after.reason or
+                                                             "another-run-owns-the-attempt"})  # fmt: skip
+            if held.end is not None:
+                # An interruption or an end landed before the renewal: the attempt is over and nothing starts.
+                return WorkerResult("claim", "lost", fields={**fields, "reason": held.end.get("reason") or "ended"})
+            return WorkerResult("claim", "continued", fields={**fields, "invocation": call})
 
     skipped: list[dict[str, Any]] = []
     for item in candidates:

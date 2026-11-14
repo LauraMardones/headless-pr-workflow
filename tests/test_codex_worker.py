@@ -229,13 +229,51 @@ def test_an_item_another_run_holds_is_skipped_without_a_write(gh, settings):
     assert gh.writes() == []
 
 
-def test_a_replay_of_the_same_run_continues_and_posts_nothing(gh, settings):
+def renewals(gh, number=5):
+    return [m for m in gh.marks(number) if m.action == "renew"]
+
+
+def test_a_replay_of_the_same_run_continues_and_only_renews_its_claim(gh, settings):
     gh.story(5)
     first = do_claim(gh, settings)
     posts = len(gh.posts())
     again = do_claim(gh, settings)
-    assert again.result == "continued" and again.exit_code == 0 and len(gh.posts()) == posts
+    assert again.result == "continued" and again.exit_code == 0 and len(gh.posts()) == posts + 1
     assert again.fields["invocation"]["attempt"] == first.fields["invocation"]["attempt"] == 1
+    assert len(claims(gh)) == 1
+    assert [m.fields for m in renewals(gh)] == [{"issue": "5", "attempt": "1", "run": "run-a"}]
+
+
+def test_a_replay_whose_lease_runs_out_during_its_checks_starts_nothing_when_another_run_took_over(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    seen = {}
+
+    def slow_gate(repo, issue, command):
+        # The lease was valid when the replay read it; it runs out while the hook answers, and another run recovers.
+        gh.at = T0 + timedelta(hours=4, minutes=1)
+        seen["b"] = do_claim(gh, settings, run="run-b", at=gh.at)
+        return True, "eligible"
+
+    gh.at = T0 + timedelta(hours=3, minutes=59)
+    replay = claim(gh, REPO, owner="po-laptop", run="run-a", eligibility=slow_gate, now=lambda: gh.at, config=CONFIG,
+                   settings=settings, env={})
+    assert seen["b"].result == "claimed" and seen["b"].fields["attempt"] == 2
+    assert replay.result == "lost" and replay.exit_code == 1 and "invocation" not in replay.fields
+
+
+def test_a_replay_renewal_that_lands_before_another_runs_recovery_keeps_the_attempt(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings)
+    gh.at = T0 + timedelta(hours=4, minutes=1)
+    seen = {}
+    # The replay's renewal reaches GitHub first; the other run then reads a fresh lease and starts nothing.
+    gh.on_post = lambda: seen.setdefault("b", do_claim(gh, settings, run="run-b", at=gh.at))
+    replay = claim(gh, REPO, owner="po-laptop", run="run-a", eligibility=Gate(), now=lambda: T0 + timedelta(hours=3),
+                   config=CONFIG, settings=settings, env={})
+    assert replay.result == "continued" and replay.fields["invocation"]["attempt"] == 1
+    assert seen["b"].result == "waiting" and seen["b"].fields["skipped"] == [{"issue": 5, "reason": "claimed"}]
+    assert len(claims(gh)) == 1
 
 
 @pytest.mark.parametrize("answer, reason", [
@@ -268,7 +306,7 @@ def test_a_replay_resumes_the_branch_its_session_pushed_before_recording_progres
     again = do_claim(gh, settings)
     assert again.result == "continued" and again.fields["invocation"]["attempt"] == 1
     assert again.fields["invocation"]["resume"] == {"pr": 12, "branch": BRANCH, "head": H1}
-    assert len(gh.posts()) == posts and list(gh.prs) == [12]
+    assert len(gh.posts()) == posts + 1 and len(renewals(gh)) == 1 and list(gh.prs) == [12]
 
 
 def test_a_replay_resumes_from_the_current_remote_head_not_the_recorded_one(gh, settings):
@@ -510,7 +548,7 @@ def test_a_retry_after_a_lost_claim_response_continues_the_attempt(gh, settings)
     gh.list_failures = 0
     retry = do_claim(gh, settings)
     assert retry.result == "continued" and retry.fields["attempt"] == 1
-    assert len(claims(gh)) == 1 and len(gh.posts()) == 1
+    assert len(claims(gh)) == 1 and len(gh.posts()) == 2 and len(renewals(gh)) == 1
 
 
 def test_a_retried_progress_write_is_not_recorded_twice(gh, settings):
@@ -694,6 +732,7 @@ def test_another_runs_recovery_that_lands_first_holds_the_item(gh, settings):
 RACE_OPS = {
     "recover-r2": lambda gh, s: do_claim(gh, s, run="r2", at=gh.at),
     "recover-r3": lambda gh, s: do_claim(gh, s, run="r3", at=gh.at),
+    "replay-r1": lambda gh, s: do_claim(gh, s, run="r1", at=gh.at),
     "progress": lambda gh, s: owner_progress(gh, s),
     "finish-wait": lambda gh, s: finish(gh, REPO, 5, 1, "r1", result="wait", reason="usage-limit",
                                         until="2026-11-14T03:00:00Z", settings=s, env={}, config=CONFIG,
@@ -701,8 +740,9 @@ RACE_OPS = {
     "finish-done": lambda gh, s: finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H1, settings=s,
                                         env={}, config=CONFIG, now=lambda: gh.at),
 }
+OWNER_OPS = ("progress", "finish", "replay")
 RACES = [(outer, inner) for outer in RACE_OPS for inner in RACE_OPS
-         if outer != inner and not (outer.startswith(("progress", "finish")) and inner.startswith(("progress", "finish")))]
+         if outer != inner and not (outer.startswith(OWNER_OPS) and inner.startswith(OWNER_OPS))]
 
 
 @pytest.mark.parametrize("outer, inner", RACES)
@@ -716,7 +756,8 @@ def test_every_write_order_on_an_expired_attempt_leaves_one_owner(gh, settings, 
     results[outer] = RACE_OPS[outer](gh, settings)
     final = codex_worker.derive_state(5, gh.marks(5), now=gh.at, config=CONFIG)
     live = {"r1"} if any(results.get(op) and results[op].result == "written" for op in ("progress",)) else set()
-    live |= {r.fields["run"] for op, r in results.items() if op.startswith("recover") and r.result == "claimed"}
+    live |= {r.fields["run"] for op, r in results.items()
+             if op.startswith(("recover", "replay")) and r.result in ("claimed", "continued")}
     assert len(live) <= 1, results
     if live:
         assert final.attempt.run == live.pop() and final.attempt.end is None
@@ -992,7 +1033,7 @@ def test_the_dispatcher_config_documents_the_worker_protocol():
     doc = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
     section = doc[doc.index("## Local Codex worker"):]
     section = section[:section.index("\n## ", 3)]
-    for word in ("codex-claim", "codex-progress", "codex-end", "codex-wait", "CODEX_WORKER_ID", "CODEX_WORKER_RUN_ID",
+    for word in ("codex-claim", "codex-progress", "codex-renew", "codex-end", "codex-wait", "CODEX_WORKER_ID", "CODEX_WORKER_RUN_ID",
                  "CODEX_WORKER_ELIGIBILITY_COMMAND", "CODEX_WORKER_LEASE_MINUTES", "CODEX_WORKER_RETRY_MINUTES",
                  "scripts/codex-worker.sh claim", "interrupted", "usage-limit", "eligibility-unconfigured",
                  "lowest comment id", "OPENAI_API_KEY", *codex_worker.COMMAND_BY_STATUS):
