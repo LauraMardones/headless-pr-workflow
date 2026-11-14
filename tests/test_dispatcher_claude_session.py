@@ -48,7 +48,7 @@ def expected_argv(alias: str) -> list[str]:
 def d(tmp_path):
     """A Claude-tier story ready for implementation, with its PR already open."""
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(STORY, "Ready for implementation")
+    dispatcher.add_story(STORY, "Ready to implement")
     dispatcher.add_pr(PR, STORY)
     return dispatcher
 
@@ -69,7 +69,7 @@ def assert_failed_closed(d: Dispatcher, proc) -> None:
 @pytest.mark.parametrize("tier,alias", TIERS.items())
 def test_session_starts_with_the_ac1_flags_and_the_tier_alias(tmp_path, tier, alias):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor=tier)
+    d.add_story(STORY, "Ready to implement", executor=tier)
     d.add_pr(PR, STORY)
 
     proc = d.run_issue(STORY)
@@ -307,7 +307,7 @@ def test_resume_pass_sessions_run_on_claude_code(tmp_path):
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
     d.add_findings(PR, HEAD)
-    d.add_story(600, "In merge")
+    d.add_story(600, "Mergeable")
     d.add_pr(960, 600)
     d.on_session("implement", f"""
 jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" else . end)' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"

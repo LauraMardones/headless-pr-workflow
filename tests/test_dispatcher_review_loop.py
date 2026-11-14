@@ -82,7 +82,7 @@ fi
 @needs_tools
 @pytest.mark.parametrize("tier", CLAUDE_TIERS)
 def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
-    d.add_story(STORY, "Ready for implementation", executor=tier)
+    d.add_story(STORY, "Ready to implement", executor=tier)
     d.add_pr(PR, STORY)
 
     proc = d.run_issue(STORY)
@@ -99,7 +99,7 @@ def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
 @needs_tools
 @pytest.mark.parametrize("with_pr", [True, False])
 def test_ac1_dry_run_names_the_hand_off(d, with_pr):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     if with_pr:
         d.add_pr(PR, STORY)
 
@@ -113,9 +113,9 @@ def test_ac1_dry_run_names_the_hand_off(d, with_pr):
 
 
 @needs_tools
-@pytest.mark.parametrize("status_after_implement", ["In review", "In merge"])
+@pytest.mark.parametrize("status_after_implement", ["In review", "Mergeable"])
 def test_ac2_no_write_when_the_story_already_moved_on(d, status_after_implement):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.session_sets_status("implement", STORY, status_after_implement)
 
@@ -130,7 +130,7 @@ def test_ac2_no_write_when_the_story_already_moved_on(d, status_after_implement)
 @needs_tools
 def test_ac2_no_write_while_a_fix_round_is_still_due(d):
     """Findings are recorded for the head /implement left behind: "In review" is not written."""
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     # During the session: findings recorded before it would be a fix round for the resume pass (#475).
     findings = json.dumps([{"user": {"login": BOT}, "created_at": "2026-10-13T10:59:00Z",
@@ -150,7 +150,7 @@ def test_ac2_no_write_while_a_fix_round_is_still_due(d):
 @pytest.mark.parametrize("pr_before", [True, False])
 def test_ac2_findings_recorded_during_the_session_are_not_a_tried_fix_round(d, pr_before):
     """Codex answers, and the bookkeeping job acts, before the /implement session returns."""
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     if pr_before:
         d.add_pr(PR, STORY)  # a story that already had a PR, at the old head
     findings = json.dumps({"user": {"login": BOT}, "created_at": "2026-10-13T10:59:00Z",
@@ -193,7 +193,7 @@ fi
 @pytest.mark.parametrize("head_changes", [False, True])
 def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
     """The bookkeeping job acts only on "In review": a failed write must not end the hand-off for good."""
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.fail_status_write("In review")
 
@@ -238,7 +238,7 @@ def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
 @pytest.mark.parametrize("failure", ["transient", "persistent"])
 def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
     """The dispatcher's "In implementation" write fails and the session sets no status."""
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.fail_status_write("In implementation")
 
@@ -247,7 +247,7 @@ def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
     assert first.returncode == 1
     assert "[HANDOFF]" not in first.stdout
     assert d.sessions == [f"implement {STORY}"]  # not selected again as the next ready story
-    assert d.status(STORY) == "Ready for implementation"
+    assert d.status(STORY) == "Ready to implement"
     comments = d.posted(STORY)
     assert len(comments) == 1 and f"action=hand-off-pending pr={PR} head={HEAD}" in comments[0]
 
@@ -256,7 +256,7 @@ def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
         second = d.run_issue(STORY)
         assert second.returncode == 0, second.stdout + second.stderr
         assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
-        assert d.status(STORY) == "Ready for implementation"
+        assert d.status(STORY) == "Ready to implement"
         d.fail_status_write("In review", False)
 
     # The board works again. The poll still reports the story as ready: no second session.
@@ -273,9 +273,9 @@ def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
 @needs_tools
 def test_pending_hand_off_that_still_fails_does_not_block_other_ready_stories(d):
     """The pending story is kept out of the next-story search; another ready story still runs."""
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->")
     d.fail_status_write("In review")
@@ -285,7 +285,7 @@ def test_pending_hand_off_that_still_fails_does_not_block_other_ready_stories(d)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == ["implement 700"]
-    assert d.status(STORY) == "Ready for implementation"
+    assert d.status(STORY) == "Ready to implement"
 
 
 @needs_tools
@@ -312,7 +312,7 @@ def test_forged_dispatcher_markers_are_ignored(d):
     d.add_findings(PR, HEAD)
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->", login="someone-else")
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-max pr={PR} -->", login="someone-else")
-    d.add_story(600, "In merge")
+    d.add_story(600, "Mergeable")
     d.add_pr(960, 600)
     d.add_comment(600, f"<!-- hpw:dispatcher action=merge-attempt pr=960 head={HEAD} -->", login="someone-else")
     new_head_on_implement_once(d)
@@ -367,7 +367,7 @@ def test_dispatcher_markers_by_its_own_account_are_honoured(d):
     d.add_pr(PR, STORY)
     d.add_findings(PR, HEAD)
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=fix-round-attempt pr={PR} head={HEAD} -->")
-    d.add_story(600, "In merge")
+    d.add_story(600, "Mergeable")
     d.add_pr(960, 600)
     d.add_comment(600, f"<!-- hpw:dispatcher action=merge-attempt pr=960 head={HEAD} -->")
 
@@ -380,7 +380,7 @@ def test_dispatcher_markers_by_its_own_account_are_honoured(d):
 @needs_tools
 @pytest.mark.parametrize("draft", [None, True])
 def test_ac3_no_open_pr_or_draft_pr_blocks_after_implement(d, draft):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     if draft:
         d.add_pr(PR, STORY, draft=True)
 
@@ -407,7 +407,7 @@ UNBLOCK_PHRASE = "Unblocked when: the PR branch is merged with main and the conf
     {"mergeable": False},
 ])
 def test_381_conflicting_draft_pr_gets_the_conflict_blocker(d, extra):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY, draft=True, **extra)
 
     proc = d.run_issue(STORY)
@@ -430,7 +430,7 @@ def test_381_conflicting_draft_pr_gets_the_conflict_blocker(d, extra):
     {},
 ])
 def test_381_clean_or_unknown_draft_pr_keeps_the_generic_blocker(d, extra):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY, draft=True, **extra)
 
     proc = d.run_issue(STORY)
@@ -444,7 +444,7 @@ def test_381_clean_or_unknown_draft_pr_keeps_the_generic_blocker(d, extra):
 
 @needs_tools
 def test_381_unreadable_mergeability_keeps_the_generic_blocker_and_fails(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY, draft=True, mergeable=False, mergeable_state="dirty")
     d.fail_pr_read()
 
@@ -460,7 +460,7 @@ def test_381_unreadable_mergeability_keeps_the_generic_blocker_and_fails(d):
 def test_ac4_codex_story_in_review_is_reviewed_on_opus_then_merged(d):
     d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY, owned=True)
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
 
     proc = d.resume()
 
@@ -518,7 +518,7 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
         (commands / f"{name}.md").write_text(
             (REPO_ROOT / ".claude" / "commands" / f"{name}.md").read_text(encoding="utf-8"),
             encoding="utf-8", newline="\n")
-    d.add_story(STORY, "Ready for implementation", executor="claude-code-haiku")
+    d.add_story(STORY, "Ready to implement", executor="claude-code-haiku")
     d.add_pr(PR, STORY)
 
     monkeypatch.setattr("tests.dispatcher_fakes.INVOKE", scripts / "dispatcher-invoke.sh")
@@ -531,13 +531,13 @@ def test_ac5_executor_with_no_review_path_gets_the_blocker(d, tmp_path, monkeypa
     assert len(d.posted(STORY)) == 1 and "/review completes successfully" in d.posted(STORY)[0]
 
 
-# ── Resume at "In merge" ────────────────────────────────────────────────────
+# ── Resume at "Mergeable" ────────────────────────────────────────────────────
 
 
 @needs_tools
 @pytest.mark.parametrize("executor", ["claude-code-sonnet", "codex"])
 def test_ac6_in_merge_story_with_open_pr_is_merged_and_cleaned_up(d, executor):
-    d.add_story(STORY, "In merge", executor=executor)
+    d.add_story(STORY, "Mergeable", executor=executor)
     d.add_pr(PR, STORY)
 
     proc = d.resume()
@@ -552,7 +552,7 @@ def test_ac6_in_merge_story_with_open_pr_is_merged_and_cleaned_up(d, executor):
 
 @needs_tools
 def test_ac7_in_merge_story_with_merged_pr_is_finished_without_merge(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
 
     proc = d.resume()
@@ -567,8 +567,8 @@ def test_ac7_in_merge_story_with_merged_pr_is_finished_without_merge(d):
 @needs_tools
 @pytest.mark.parametrize("pr", ["none", "closed-unmerged", "draft"])
 def test_ac8_in_merge_story_without_a_pr_gets_no_blocker(d, pr):
-    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; the card "In merge" decides nothing."""
-    d.add_story(STORY, "In merge")
+    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; the card "Mergeable" decides nothing."""
+    d.add_story(STORY, "Mergeable")
     if pr == "closed-unmerged":
         d.add_pr(PR, STORY, state="closed")
     elif pr == "draft":
@@ -586,7 +586,7 @@ def test_ac8_in_merge_story_without_a_pr_gets_no_blocker(d, pr):
 
 @needs_tools
 def test_ac9_one_merge_attempt_per_head(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
 
@@ -596,7 +596,7 @@ def test_ac9_one_merge_attempt_per_head(d):
     blockers = d.posted(STORY)
     assert len(blockers) == 1 and "/merge completes successfully" in blockers[0]
     assert f"pr={PR} head={HEAD}" in blockers[0]
-    assert d.status(STORY) == "In merge"
+    assert d.status(STORY) == "Mergeable"
 
     # Same head: no session, no comment.
     second = d.resume()
@@ -743,8 +743,8 @@ def test_ac12_invalid_maximum_stops_the_run(d, value):
 @needs_tools
 @pytest.mark.parametrize("seq,returncode,line", [("1", 0, "[RESERVE SKIP]"), ("2", 1, "[ALLOWANCE ERROR]")])
 def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, returncode, line):
-    """A fix round is unfinished work: it is not put back to "Ready for implementation"."""
-    d.add_story(700, "Ready for implementation")
+    """A fix round is unfinished work: it is not put back to "Ready to implement"."""
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
@@ -757,7 +757,7 @@ def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, ret
         assert proc.returncode == returncode, proc.stdout + proc.stderr
         assert f"{line} #{STORY}:" in proc.stdout + proc.stderr
     assert d.sessions == [] and d.board_writes == []
-    assert d.status(STORY) == "In implementation" and d.status(700) == "Ready for implementation"
+    assert d.status(STORY) == "In implementation" and d.status(700) == "Ready to implement"
     assert d.posted(STORY) == [] and d.posted(700) == [] and d.slack_calls == []
 
     # With allowance back, the fix round runs before the ready story.
@@ -769,7 +769,7 @@ def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, ret
 
 
 @needs_tools
-@pytest.mark.parametrize("status_after_session", ["In review", "In merge", None])
+@pytest.mark.parametrize("status_after_session", ["In review", "Mergeable", None])
 def test_fix_round_that_pushes_nothing_is_recorded_whatever_the_status(d, status_after_session):
     """The session moved the story on without a commit; the bookkeeping job would move it back."""
     d.add_story(STORY, "In implementation")
@@ -818,7 +818,7 @@ def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
 @pytest.mark.parametrize("held", [True, False])
 def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held):
     """Stale recovery would restart /implement as a ready story and pass the maximum."""
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
@@ -855,9 +855,9 @@ def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_i
     assert "steps 10 and 17" in skip
     assert any(b.startswith("stop if 2 or more stories") for b in bullets[1:])
     assert any(b.startswith("stop if any active story declares overlapping files") for b in bullets[1:])
-    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull from "Ready for implementation".
+    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull from "Ready to implement".
     policy = (REPO_ROOT / "docs" / "PROJECT-STATUS.md").read_text(encoding="utf-8")
-    assert "Before pulling a story from **Ready for implementation** into **In implementation**" in policy
+    assert "Before pulling a story from **Ready to implement** into **In implementation**" in policy
 
 
 # ── Order and entry ─────────────────────────────────────────────────────────
@@ -865,12 +865,12 @@ def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_i
 
 @needs_tools
 def test_ac13_in_merge_then_fix_round_then_ready_story(d):
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
     d.add_findings(PR, HEAD)
-    d.add_story(600, "In merge")
+    d.add_story(600, "Mergeable")
     d.add_pr(960, 600)
     new_head_on_implement_once(d)
 
@@ -885,9 +885,9 @@ def test_ac13_in_merge_then_fix_round_then_ready_story(d):
 @needs_tools
 def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_resume_pass(d):
     feature = "Feature group: #50 Feature: something"
-    d.add_story(600, "In merge", body=feature)
+    d.add_story(600, "Mergeable", body=feature)
     d.add_pr(960, 600)
-    d.add_story(601, "In merge", body=feature)
+    d.add_story(601, "Mergeable", body=feature)
     d.add_pr(961, 601)
     d.add_story(602, "Done", body=feature)
 
@@ -903,10 +903,10 @@ def test_feature_closure_is_notified_when_its_last_two_stories_finish_in_one_res
 
 
 def _closure_then_other_feature(d):
-    d.add_story(600, "In merge", body="Feature group: #50 Feature: a")
+    d.add_story(600, "Mergeable", body="Feature group: #50 Feature: a")
     d.add_pr(960, 600)
     d.add_story(602, "Done", body="Feature group: #50 Feature: a")
-    d.add_story(601, "In merge", body="Feature group: #51 Feature: b")
+    d.add_story(601, "Mergeable", body="Feature group: #51 Feature: b")
     d.add_pr(961, 601)
     d.add_story(603, "Ready for refinement", body="Feature group: #51 Feature: b")
 
@@ -925,10 +925,10 @@ def test_event_is_delivered_before_the_next_resume_item_starts(d):
 
 @needs_tools
 def test_event_is_delivered_before_the_requested_implement_session(d):
-    d.add_story(600, "In merge", body="Feature group: #50 Feature: a")
+    d.add_story(600, "Mergeable", body="Feature group: #50 Feature: a")
     d.add_pr(960, 600)
     d.add_story(602, "Done", body="Feature group: #50 Feature: a")
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
 
     proc = d.run_issue(700)
@@ -966,7 +966,7 @@ def test_dry_run_drain_between_resume_items_sends_nothing(d):
 @needs_tools
 def test_feature_closure_is_not_notified_while_a_story_is_still_open(d):
     feature = "Feature group: #50 Feature: something"
-    d.add_story(600, "In merge", body=feature)
+    d.add_story(600, "Mergeable", body=feature)
     d.add_pr(960, 600)
     d.add_story(601, "In review", body=feature)
 
@@ -1066,10 +1066,10 @@ def poll_findings(head: str = HEAD) -> dict:
 @needs_tools
 def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
     """#475 AC 7: in_merge and in_implementation come from PR facts; each card shows another status."""
-    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"),
+    out = poll_json(tmp_path, [(1, "Ready to implement"), (2, "Ready for refinement"),
                                (3, "In review", ["executor:codex"]),
                                (4, "In review", ["executor:claude-code-sonnet"]),
-                               (5, "In merge", ["executor:codex"]), (6, "Done"),
+                               (5, "Mergeable", ["executor:codex"]), (6, "Done"),
                                (7, "In implementation", ["executor:codex"])],
                     pulls=[poll_pr(13, 3), poll_pr(14, 4), poll_pr(15, 5), poll_pr(17, 7, draft=True)],
                     gates={13: "pass"}, comments={14: [poll_findings()]},
@@ -1092,7 +1092,7 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
 
 
 @needs_tools
-@pytest.mark.parametrize("status", ["In merge", "In review", "In implementation", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["Mergeable", "In review", "In implementation", "Ready to implement"])
 def test_475_ac6_a_moved_card_without_a_pr_is_in_no_poll_key(tmp_path, status):
     """#475 AC 6: a story with no linked PR and no dispatcher marker is in no key, whatever its card says."""
     out = poll_json(tmp_path, [(8, status, ["executor:codex"]), (9, status, ["executor:claude-code-sonnet"])])
@@ -1111,8 +1111,8 @@ def test_475_ac8_poll_lists_a_story_with_an_open_dependency_blocker_as_in_flight
     decision = dict(blocker, body="## Blocked Declaration\nType: decision\nDeclared by: dispatcher")
     lifted = {"user": {"login": PO}, "author_association": "OWNER", "created_at": "2026-10-13T11:00:00Z",
               "body": "/unblock"}
-    out = poll_json(tmp_path, [(11, "Ready for implementation"), (12, "Ready for implementation"),
-                               (13, "Ready for implementation")],
+    out = poll_json(tmp_path, [(11, "Ready to implement"), (12, "Ready to implement"),
+                               (13, "Ready to implement")],
                     comments={11: [blocker], 12: [decision], 13: [blocker, lifted]})
     assert out["resumable"] is False
     assert (tmp_path / "scheduler.log").read_text().splitlines() == [
@@ -1130,7 +1130,7 @@ def test_475_ac8_poll_lists_a_story_with_an_open_dependency_blocker_as_in_flight
     (("unreadable", None, "facts: down"), "unreadable", None),
 ])
 def test_474_poll_json_shape_for_each_scheduler_result(tmp_path, scheduler, result, issue):
-    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement")], scheduler=scheduler)
+    out = poll_json(tmp_path, [(1, "Ready to implement"), (2, "Ready for refinement")], scheduler=scheduler)
     assert set(out) == {"in_merge", "in_implementation", "review_due", "conflict_due", "owner_missing_due",
                         "evidence_pending", "next_issue", "next_action", "scheduler_result", "resumable"}
     assert out["scheduler_result"] == result and out["next_issue"] == issue
@@ -1141,7 +1141,7 @@ def test_474_poll_json_shape_for_each_scheduler_result(tmp_path, scheduler, resu
 @needs_tools
 def test_474_poll_output_that_cannot_be_read_is_unreadable(tmp_path):
     err: list = []
-    out = poll_json(tmp_path, [(1, "Ready for implementation")], raw_scheduler="oops", scheduler=("unreadable", None, "x"),
+    out = poll_json(tmp_path, [(1, "Ready to implement")], raw_scheduler="oops", scheduler=("unreadable", None, "x"),
                     stderr=err)
     assert out["scheduler_result"] == "unreadable" and out["next_issue"] is None and out["next_action"] is None
     assert "[SCHEDULER] unreadable: hpw dispatcher scheduler next exited 3 without a result" in err[0]
@@ -1208,12 +1208,12 @@ def test_ac14_poll_lists_are_empty_arrays_when_nothing_matches(tmp_path):
 
 
 @needs_tools
-@pytest.mark.parametrize("missing", ["In review", "In merge"])
+@pytest.mark.parametrize("missing", ["In review", "Mergeable"])
 @pytest.mark.parametrize("mode", ["issue", "resume", "dry-run"])
 def test_ac15_missing_board_option_stops_the_run_before_any_session(tmp_path, missing, mode):
     options = {name: value for name, value in BOARD_OPTIONS.items() if name != missing}
     d = Dispatcher(tmp_path, options=options)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
 
     proc = {"issue": lambda: d.run_issue(STORY), "resume": d.resume,
@@ -1227,7 +1227,7 @@ def test_ac15_missing_board_option_stops_the_run_before_any_session(tmp_path, mi
 
 @needs_tools
 def test_ac15_allowance_never_holds_the_script_only_merge_at_a_resume_entry(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
 
     proc = d.resume(seq="1")  # a refusing allowance is never consulted for /merge or /cleanup (#264)
@@ -1291,10 +1291,10 @@ def test_ac14_workflow_poll_step_reports_resumable_work():
 
 @needs_tools
 @pytest.mark.parametrize("items,pulls,gates,comments,key", [
-    ([(3, "Ready for implementation", ["executor:codex"])], [poll_pr(13, 3)], {13: "pass"}, None, "in_merge"),
+    ([(3, "Ready to implement", ["executor:codex"])], [poll_pr(13, 3)], {13: "pass"}, None, "in_merge"),
     ([(4, "In review", ["executor:claude-code-sonnet"])], [poll_pr(14, 4)], None, {14: [poll_findings()]},
      "in_implementation"),
-    ([(5, "In merge", ["executor:codex"])], [open_pr(15, 5)], None, None, "review_due"),
+    ([(5, "Mergeable", ["executor:codex"])], [open_pr(15, 5)], None, None, "review_due"),
 ])
 def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, gates, comments, key):
     """The RESUMABLE rule of issue #293, now in the poll (issue #434), from PR facts (#475 AC 7);
@@ -1305,7 +1305,7 @@ def test_ac14_poll_is_resumable_for_each_resumable_list(tmp_path, items, pulls, 
 
 @needs_tools
 def test_ac14_poll_is_not_resumable_with_nothing_to_resume(tmp_path):
-    out = poll_json(tmp_path, [(1, "Ready for implementation"), (2, "Ready for refinement"), (6, "Done")],
+    out = poll_json(tmp_path, [(1, "Ready to implement"), (2, "Ready for refinement"), (6, "Done")],
                     scheduler=("implement", 1))
     assert out["resumable"] is False and out["next_issue"] == 1
 
@@ -1389,7 +1389,7 @@ def count_of(d: Dispatcher, target: int, text: str) -> int:
 @needs_tools
 def test_348_owner_marker_and_pending_copy_both_failing_stops_before_the_hand_off(d):
     """No durable record exists: the run fails loudly and the story does not advance to review."""
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     new_head_on_implement(d)
     d.fail_comment_writes(PR, 6)  # three marker attempts and three pending attempts
@@ -1403,7 +1403,7 @@ def test_348_owner_marker_and_pending_copy_both_failing_stops_before_the_hand_of
 
 @needs_tools
 def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_session_produced(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     new_head_on_implement(d)
     d.fail_comment_writes(PR, 3)  # the three marker attempts fail, the pending comment works
@@ -1419,7 +1419,7 @@ def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_sess
 
 @needs_tools
 def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_merge(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, owned=False)
     d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
 
@@ -1430,7 +1430,7 @@ def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
 
     # Idempotent: the marker is on the PR now, so a retry posts nothing more.
-    d.set_status(STORY, "In merge")
+    d.set_status(STORY, "Mergeable")
     d.add_pr(PR, STORY, owned=False)
     assert d.resume().returncode == 0
     assert d.posted(PR) == [OWNER_MARKER]
@@ -1438,7 +1438,7 @@ def test_348_ac1_pending_owner_marker_is_posted_for_the_current_head_before_the_
 
 @needs_tools
 def test_348_ac1_pending_owner_marker_for_another_head_is_never_posted(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, head=NEW_HEAD)  # the head moved on after the session
     d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD))
 
@@ -1451,7 +1451,7 @@ def test_348_ac1_pending_owner_marker_for_another_head_is_never_posted(d):
 
 @needs_tools
 def test_348_ac5_pending_comments_of_another_account_are_ignored(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.add_comment(PR, pending("merge-owner", OWNER_MARKER, HEAD), login="someone-else")
 
@@ -1461,7 +1461,7 @@ def test_348_ac5_pending_comments_of_another_account_are_ignored(d):
 
 @needs_tools
 def test_348_ac2_pending_merge_confirmation_is_posted_once_before_cleanup(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
 
@@ -1473,14 +1473,14 @@ def test_348_ac2_pending_merge_confirmation_is_posted_once_before_cleanup(d):
     assert d.status(STORY) == "Done"
 
     # A second retry finds the confirmation and posts nothing.
-    d.set_status(STORY, "In merge")
+    d.set_status(STORY, "Mergeable")
     assert d.resume().returncode == 0
     assert d.posted(PR) == [CONFIRMATION]
 
 
 @needs_tools
 def test_348_ac4_confirmation_that_is_already_posted_is_not_posted_again(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
     d.add_comment(PR, CONFIRMATION)  # the first write succeeded although it looked failed
@@ -1492,7 +1492,7 @@ def test_348_ac4_confirmation_that_is_already_posted_is_not_posted_again(d):
 
 @needs_tools
 def test_348_ac2_confirmation_written_by_another_account_is_not_proof(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
     d.add_comment(PR, CONFIRMATION, login="someone-else")
@@ -1504,7 +1504,7 @@ def test_348_ac2_confirmation_written_by_another_account_is_not_proof(d):
 @needs_tools
 def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blocker(d):
     """The script merged, then failed to post the confirmation: the PR is merged and the script exits 1."""
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
     d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
@@ -1523,7 +1523,7 @@ def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blo
 @needs_tools
 def test_348_merge_script_failing_after_a_merge_without_pending_evidence_still_blocks(d):
     """A failure that left no pending confirmation (e.g. summary generation) must not be treated as retryable."""
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
     d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
@@ -1594,7 +1594,7 @@ def test_348_ac3_pending_cleanup_summary_of_another_account_is_ignored(d):
 @needs_tools
 @pytest.mark.parametrize("label_exists", [False, True])  # GitHub answers 404 when adding a label the repo lacks
 def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_later_run(d, label_exists):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     if label_exists:
         (d.mock / "repo_labels").write_text("evidence:pending\n", encoding="utf-8", newline="\n")
@@ -1622,7 +1622,7 @@ def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_
 @needs_tools
 def test_348_ac3_pending_copy_without_the_label_goes_back_to_in_merge(d):
     """The label write failed too: nothing would lead a later run back to the Done story."""
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     leave_pending_cleanup_summary(d)
     d.fail("cleanup")
@@ -1631,13 +1631,13 @@ def test_348_ac3_pending_copy_without_the_label_goes_back_to_in_merge(d):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "In merge"
+    assert d.status(STORY) == "Mergeable"
     assert "evidence:pending" not in labels_of(d, STORY)
 
 
 @needs_tools
 def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_one_blocker(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD))
     d.fail_comment_writes(PR, 1000)
@@ -1645,7 +1645,7 @@ def test_348_ac6_ac7_a_write_that_keeps_failing_gives_up_after_three_runs_with_o
     for run in (1, 2):
         proc = d.resume()
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert d.status(STORY) == "In merge" and d.phases == []  # cleanup waits for the evidence
+        assert d.status(STORY) == "Mergeable" and d.phases == []  # cleanup waits for the evidence
         assert len(d.slack_calls) == 0 and not any("Blocked Declaration" in b for b in d.posted(STORY))
     assert count_of(d, STORY, "action=evidence-retry-failed") == 2
 
@@ -1699,7 +1699,7 @@ def decision_events(d: Dispatcher) -> list[dict]:
 
 @needs_tools
 def test_357_first_implement_that_exits_0_with_a_decision_blocker_registers_one_event(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     session_declares_blocker(d, "implement", push=True)
 
@@ -1711,7 +1711,7 @@ def test_357_first_implement_that_exits_0_with_a_decision_blocker_registers_one_
 
 @needs_tools
 def test_357_first_implement_without_a_decision_blocker_registers_nothing(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     new_head_on_implement(d, status="In review")
 
@@ -1968,7 +1968,7 @@ def test_357_codex_review_that_leaves_the_story_in_review_runs_no_merge_and_unbl
     assert d.sessions == [f"review {PR}"] and "/review was already tried" in skipped.stdout
 
     d.add_comment(STORY, "Waived.\n/unblock\n", login=PO)
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
     third = d.resume()
 
     assert third.returncode == 0, third.stdout + third.stderr

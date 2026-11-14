@@ -38,7 +38,7 @@ LIMITED = (INIT, {"type": "rate_limit_event", "rate_limit_info": {"status": "rej
             "duration_ms": 1000, "result": "limit reached", "error": "rate_limit"})
 ROUND_LOG = f"[RESUME] #{STORY}: PR #{PR} conflicts with main; conflict round, /implement on PR #{PR}"
 OWNERLESS_LOG = f"[RESUME SKIP] #{STORY}: PR #{PR} head {NEW_HEAD[:7]} has no merge-owner evidence; blocker posted"
-REVIEW_LOOP_STATUSES = ["In implementation", "In review", "In merge"]
+REVIEW_LOOP_STATUSES = ["In implementation", "In review", "Mergeable"]
 
 
 @pytest.fixture
@@ -124,11 +124,11 @@ def assert_one_ownerless_blocker(d: Dispatcher, head: str = NEW_HEAD) -> None:
     assert len(po_events(d)) == 1
 
 
-# ── #409 AC 1, AC 3: conflict in "In merge" ─────────────────────────────────
+# ── #409 AC 1, AC 3: conflict in "Mergeable" ─────────────────────────────────
 
 
 def test_ac1_ac3_in_merge_conflict_starts_a_conflict_round_and_hands_the_new_head_off(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     # The story already holds its place: a full WIP limit does not stop the round.
     for other in (601, 602):
         d.add_story(other, "In implementation")
@@ -149,7 +149,7 @@ def test_ac1_ac3_in_merge_conflict_starts_a_conflict_round_and_hands_the_new_hea
 
 
 def test_ac3_the_new_head_reaches_merge_only_through_the_bookkeeping_job(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     session_merges_main(d)
     d.resume()
     assert d.status(STORY) == "In review"
@@ -160,9 +160,9 @@ def test_ac3_the_new_head_reaches_merge_only_through_the_bookkeeping_job(d):
     assert proc.returncode == 0, proc.stderr
     assert d.phases == [] and d.sessions == [f"implement {STORY}"] and blockers(d) == []
 
-    # The bookkeeping job moves it to "In merge" after a clean review; the
+    # The bookkeeping job moves it to "Mergeable" after a clean review; the
     # next resume pass merges the new head with the script-only /merge.
-    d.set_status(STORY, "In merge")
+    d.set_status(STORY, "Mergeable")
     proc = d.resume()
     assert proc.returncode == 0, proc.stderr
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
@@ -403,7 +403,7 @@ def test_ac2_poll_lists_only_review_loop_stories_in_review_with_a_conflicting_pr
          (5, "In review", "claude-code-opus"),     # PR cannot be read
          (6, "In review", "claude-code-opus"),     # draft PR
          (7, "In review", "codex"),                # no review-loop row
-         (8, "In merge", "claude-code-opus")],     # conflicting: the card decides nothing (#475)
+         (8, "Mergeable", "claude-code-opus")],     # conflicting: the card decides nothing (#475)
         pulls=[open_pr(11, 1), open_pr(12, 2), open_pr(13, 3), open_pr(14, 4), open_pr(15, 5),
                open_pr(16, 6, draft=True), open_pr(17, 7), open_pr(18, 8)],
         details={11: {"mergeable": False, "mergeable_state": "dirty", "head": {"sha": HEAD}},
@@ -500,8 +500,8 @@ POLL_CONDITIONS = {
 @pytest.mark.parametrize("condition", list(POLL_CONDITIONS))
 def test_449_ac2_poll_applies_the_owed_round_rule(tmp_path, condition):
     story_comments, pr_comments, listed = POLL_CONDITIONS[condition]
-    # #475 AC 7: the card shows "Ready for implementation"; the PR facts decide.
-    out, stderr = poll(tmp_path, [(1, "Ready for implementation", "claude-code-opus")], pulls=[open_pr(11, 1)],
+    # #475 AC 7: the card shows "Ready to implement"; the PR facts decide.
+    out, stderr = poll(tmp_path, [(1, "Ready to implement", "claude-code-opus")], pulls=[open_pr(11, 1)],
                        details={11: {**DIRTY, "head": {"sha": HEAD}}},
                        comments={1: story_comments, 11: pr_comments})
     assert out["conflict_due"] == ([{"number": 1, "title": "Story 1"}] if listed else []), stderr
@@ -521,7 +521,7 @@ def test_449_ac2_poll_lists_nothing_when_the_comments_cannot_be_read(tmp_path):
 
 
 def test_ac4_unknown_mergeability_in_merge_waits_for_the_next_run(d):
-    d.add_story(STORY, "In merge", executor="claude-code-opus")
+    d.add_story(STORY, "Mergeable", executor="claude-code-opus")
     d.add_pr(PR, STORY, **UNKNOWN)
 
     proc = d.resume()
@@ -543,8 +543,8 @@ def test_ac4_unknown_mergeability_in_merge_waits_for_the_next_run(d):
 
 
 def test_ac5_every_merge_of_the_run_comes_before_any_conflict_round(d):
-    conflicting_story(d, "In merge", story=501, pr=901)   # first on the board
-    d.add_story(502, "In merge", executor="claude-code-opus")
+    conflicting_story(d, "Mergeable", story=501, pr=901)   # first on the board
+    d.add_story(502, "Mergeable", executor="claude-code-opus")
     d.add_pr(902, 502, head=OTHER_HEAD)                  # clean
     session_merges_main(d, pr=901)
 
@@ -570,7 +570,7 @@ def assert_one_conflict_blocker(d: Dispatcher, head: str = HEAD) -> None:
 
 @pytest.mark.parametrize("outcome", ["session fails", "no new head"])
 def test_ac6_round_that_cannot_resolve_gives_one_blocker_and_no_second_round(d, outcome):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     if outcome == "session fails":
         d.fail("implement")
 
@@ -593,7 +593,7 @@ def test_ac6_round_that_cannot_resolve_gives_one_blocker_and_no_second_round(d, 
 
 def test_449_ac3_a_clean_pr_on_the_same_head_gets_the_owner_and_the_hand_off(d):
     """Main moved so the conflict is gone; the session pushed nothing. The PR decides."""
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     d.on_session("implement", f"""
 jq 'map(if .number == {PR} then .mergeable = true | .mergeable_state = "clean" else . end)' \\
     "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
@@ -659,7 +659,7 @@ def test_449_the_conflict_round_never_converts_the_pr_to_draft():
 
 
 def test_ac6_po_unblock_allows_one_new_attempt(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     d.fail("implement")
     d.resume()
     d.fail("implement", False)
@@ -675,7 +675,7 @@ def test_ac6_po_unblock_allows_one_new_attempt(d):
 
 
 def test_ac6_a_new_head_allows_one_new_attempt(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     d.fail("implement")
     d.resume()
     d.fail("implement", False)
@@ -690,7 +690,7 @@ def test_ac6_a_new_head_allows_one_new_attempt(d):
 
 
 def test_ac6_a_forged_attempt_marker_does_not_stop_the_round(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     d.add_comment(STORY, attempt_marker(), login="someone-else")
     session_merges_main(d)
 
@@ -703,7 +703,7 @@ def test_ac6_a_forged_attempt_marker_does_not_stop_the_round(d):
 # ── #409 AC 7: a refused round changes nothing ──────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["In merge", "In review"])
+@pytest.mark.parametrize("status", ["Mergeable", "In review"])
 @pytest.mark.parametrize("refusal", ["allowance", "usage limit"])
 def test_ac7_refused_round_changes_nothing_and_runs_on_a_later_run(d, status, refusal):
     conflicting_story(d, status)
@@ -727,13 +727,13 @@ def test_ac7_refused_round_changes_nothing_and_runs_on_a_later_run(d, status, re
 
 
 def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     d.fail_status_write("In implementation")
 
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stderr
-    assert d.sessions == [] and d.status(STORY) == "In merge"
+    assert d.sessions == [] and d.status(STORY) == "Mergeable"
     assert d.posted(STORY) == [] and d.queued_events == []
     assert "the conflict round on PR #900 is tried again on the next run" in proc.stdout
 
@@ -828,7 +828,7 @@ def test_449_ac4_a_draft_or_undecided_pr_posts_no_blocker(d, pr_fields):
 
 def test_449_ac4_the_blocker_holds_the_story_against_stale_recovery(d):
     """Stale recovery would restart /implement as a ready story past the blocker."""
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation", executor="claude-code-opus")
     d.add_pr(PR, STORY, head=NEW_HEAD)
@@ -844,7 +844,7 @@ def test_449_ac4_the_blocker_holds_the_story_against_stale_recovery(d):
 # ── #449 AC 5: no stop point leaves a story silent ──────────────────────────
 
 
-@pytest.mark.parametrize("from_status", ["In merge", "In review"])
+@pytest.mark.parametrize("from_status", ["Mergeable", "In review"])
 def test_449_ac5_pause_before_the_push_gets_a_fresh_round(d, from_status):
     conflicting_story(d, from_status)
     stop_the_session_at_the_usage_limit(d)
@@ -872,7 +872,7 @@ def test_449_ac5_pause_before_the_push_gets_a_fresh_round(d, from_status):
     (session_merges_main_and_hands_off, "In review"),
 ], ids=["after the push", "after In review"])
 def test_449_ac5_pause_after_the_push_gets_one_blocker(d, session, left_in):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     session(d)
     stop_the_session_at_the_usage_limit(d)
 
@@ -958,7 +958,7 @@ def test_449_ac5_round_on_a_head_with_a_completed_fix_round_is_not_hidden(d, sta
                                     ["type:story", "executor:claude-code-opus", "executor:codex"]],
                          ids=["codex", "two executor labels"])
 def test_ac8_story_without_a_review_loop_row_gets_one_clear_blocker(d, labels):
-    d.add_story(STORY, "In merge", labels=labels)
+    d.add_story(STORY, "Mergeable", labels=labels)
     d.add_pr(PR, STORY, head=HEAD, **CONFLICTING)
 
     proc = d.resume()
@@ -980,7 +980,7 @@ def test_ac8_story_without_a_review_loop_row_gets_one_clear_blocker(d, labels):
 
 
 def test_ac9_conflict_round_does_not_count_toward_the_fix_round_maximum(d):
-    conflicting_story(d, "In merge")
+    conflicting_story(d, "Mergeable")
     session_merges_main(d)
     d.resume()
 

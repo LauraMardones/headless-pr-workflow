@@ -26,7 +26,7 @@ HEAD = "a" * 40
 INVOKE = REPO_ROOT / "scripts" / "dispatcher-invoke.sh"
 POLL = REPO_ROOT / "scripts" / "dispatcher-poll.sh"
 IN_FLIGHT_LIB = REPO_ROOT / "scripts" / "lib" / "in-flight.sh"
-BOARD_STATUSES = ("In merge", "In review", "In implementation", "Ready for implementation")
+BOARD_STATUSES = ("Mergeable", "In review", "In implementation", "Ready to implement")
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def _code(text: str) -> str:
 
 RESUME_FUNCTIONS = ("run_resume_pass", "resume_row_story", "resume_in_merge_story", "resume_fix_round",
                     "resume_pending_hand_off", "resume_review_story", "inflight_prepare", "ask_scheduler")
-STATUS_NAMES = ("In merge", "In implementation", "In review", "Ready for implementation")
+STATUS_NAMES = ("Mergeable", "In implementation", "In review", "Ready to implement")
 
 
 def test_ac1_no_script_selects_in_flight_work_by_a_board_status():
@@ -77,7 +77,7 @@ def test_ac1_no_script_selects_in_flight_work_by_a_board_status():
         assert not re.search(r'\(\.name\? // ""\) == "(In |Ready)', body), name
     # resume_review_story decides the merge from the gate facts, not from the status it reads back.
     review = _code(_function(invoke, "resume_review_story"))
-    assert "inflight_gates_pass" in review and '"In merge" ]]' not in review
+    assert "inflight_gates_pass" in review and '"Mergeable" ]]' not in review
     poll = _code(POLL.read_text(encoding="utf-8"))
     for status in STATUS_NAMES:
         assert f'"{status}"' not in poll, status
@@ -87,7 +87,7 @@ def test_ac1_no_script_selects_in_flight_work_by_a_board_status():
 # ── AC 2: the merge step ─────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["In review", "In implementation", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["In review", "In implementation", "Ready to implement"])
 def test_ac2_gates_passing_on_the_head_give_the_merge_step_whatever_the_card(d, status):
     d.add_story(STORY, status, executor="codex")
     d.add_pr(PR, STORY, draft=False, owned=True)
@@ -115,7 +115,7 @@ def test_ac2_passing_gates_merge_even_with_a_pending_hand_off(d):
 
 @pytest.mark.parametrize("gate", ["fail", "unreadable"])
 def test_ac2_a_failing_or_unreadable_gate_gives_no_merge_even_in_merge(d, gate):
-    d.add_story(STORY, "In merge", executor="claude-code-sonnet")
+    d.add_story(STORY, "Mergeable", executor="claude-code-sonnet")
     d.add_pr(PR, STORY)  # owned: the merge-owner marker is on the head
     d.set_gates(PR, gate)
 
@@ -188,7 +188,7 @@ def test_ac2_a_conflict_still_gets_the_conflict_blocker(d):
 # ── AC 3: finish a merged PR ─────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["In review", "In implementation", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["In review", "In implementation", "Ready to implement"])
 def test_ac3_a_merged_linked_pr_is_finished_whatever_the_card(d, status):
     d.add_story(STORY, status)
     d.add_pr(PR, STORY, state="closed", merged=True)
@@ -202,7 +202,7 @@ def test_ac3_a_merged_linked_pr_is_finished_whatever_the_card(d, status):
 # ── AC 4: the review step ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["In implementation", "In merge", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["In implementation", "Mergeable", "Ready to implement"])
 def test_ac4_review_once_per_head_whatever_the_card(d, status):
     d.add_story(STORY, status, executor="codex")
     d.add_pr(PR, STORY, draft=False)
@@ -234,7 +234,7 @@ def test_ac4_review_leaving_the_gates_failing_runs_no_merge_even_when_the_card_s
     d.add_story(STORY, "In implementation", executor="codex")
     d.add_pr(PR, STORY, owned=True)
     d.set_gates(PR, "fail")
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
 
     proc = d.resume()
 
@@ -244,7 +244,7 @@ def test_ac4_review_leaving_the_gates_failing_runs_no_merge_even_when_the_card_s
 
 
 def test_ac4_review_loop_story_gets_the_missing_owner_blocker_whatever_the_card(d):
-    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
+    d.add_story(STORY, "Ready to implement", executor="claude-code-sonnet")
     d.add_pr(PR, STORY, draft=False, owned=False)
 
     proc = d.resume()
@@ -256,7 +256,7 @@ def test_ac4_review_loop_story_gets_the_missing_owner_blocker_whatever_the_card(
 
 
 def test_ac4_review_loop_story_gets_the_conflict_round_whatever_the_card(d):
-    d.add_story(STORY, "In merge", executor="claude-code-sonnet")
+    d.add_story(STORY, "Mergeable", executor="claude-code-sonnet")
     d.add_pr(PR, STORY, mergeable=False, mergeable_state="dirty")
     d.set_gates(PR, "fail")
 
@@ -269,7 +269,7 @@ def test_ac4_review_loop_story_gets_the_conflict_round_whatever_the_card(d):
 # ── AC 5: fix round and pending hand-off ─────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", ["In review", "In merge", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["In review", "Mergeable", "Ready to implement"])
 def test_ac5_findings_on_the_head_give_the_fix_round_whatever_the_card(d, status):
     d.add_story(STORY, status)
     d.add_pr(PR, STORY, draft=False)
@@ -283,7 +283,7 @@ def test_ac5_findings_on_the_head_give_the_fix_round_whatever_the_card(d, status
     assert d.sessions == [f"implement {STORY}"]
 
 
-@pytest.mark.parametrize("status", ["In merge", "In implementation", "Ready for implementation"])
+@pytest.mark.parametrize("status", ["Mergeable", "In implementation", "Ready to implement"])
 def test_ac5_a_pending_hand_off_is_completed_whatever_the_card(d, status):
     d.add_story(STORY, status)
     d.add_pr(PR, STORY, draft=False)
@@ -349,7 +349,7 @@ def review_due(d: Dispatcher, story: int = STORY, pr: int = PR) -> None:
 
 
 def merge_due(d: Dispatcher, story: int = STORY, pr: int = PR) -> None:
-    d.add_story(story, "In merge", executor="codex")
+    d.add_story(story, "Mergeable", executor="codex")
     d.add_pr(pr, story)
     d.set_gates(pr, "pass")
 
@@ -382,7 +382,7 @@ def test_ac10_a_current_story_still_gets_its_session(d, kind):
 
 
 def test_ac10_finishing_a_merged_pr_is_not_held_back(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.set_facts(STALE)
 

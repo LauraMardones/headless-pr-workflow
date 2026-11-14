@@ -44,7 +44,7 @@ def events(d: Dispatcher) -> list[dict]:
 
 
 def pending_confirmation_setup(d: Dispatcher, age_minutes: int, login: str | None = None) -> None:
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     kwargs = {"login": login} if login else {}
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD), at=ago(age_minutes), **kwargs)
@@ -80,7 +80,7 @@ def test_ac3_a_later_run_with_the_same_item_queues_no_second_event(d):
 
 
 def test_ac2_writable_story_posts_the_348_marker_and_queues_no_event(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     d.add_comment(PR, pending("merge-confirmation", CONFIRMATION, HEAD), at=ago(60))
     d.fail_comment_writes(PR, MANY)
@@ -91,7 +91,7 @@ def test_ac2_writable_story_posts_the_348_marker_and_queues_no_event(d):
 
 def test_ac1_without_a_pending_comment_the_time_runs_from_the_prs_merge(d):
     """merge-confirmation-missing: no confirmation and no pending text exist."""
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True, merged_at=ago(30))
     d._write(f"comments_{PR}.json", [])
     d.fail_comment_writes(STORY, MANY)
@@ -101,7 +101,7 @@ def test_ac1_without_a_pending_comment_the_time_runs_from_the_prs_merge(d):
 
 
 def test_ac2_without_a_pending_comment_a_recent_merge_queues_no_event(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True, merged_at=ago(3))
     d._write(f"comments_{PR}.json", [])
     d.fail_comment_writes(STORY, MANY)
@@ -110,7 +110,7 @@ def test_ac2_without_a_pending_comment_a_recent_merge_queues_no_event(d):
 
 
 def test_ac1_cleanup_summary_unrecorded_is_timed_from_the_merge(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True, merged_at=ago(40))
     d.fail("cleanup")
     d.fail_comment_writes(STORY, MANY)
@@ -120,7 +120,7 @@ def test_ac1_cleanup_summary_unrecorded_is_timed_from_the_merge(d):
 
 
 def test_ac3_a_different_missing_item_on_the_same_story_is_a_separate_event(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True, merged_at=ago(40))
     d._write(f"comments_{PR}.json", [])
     d.fail_comment_writes(STORY, MANY)
@@ -138,7 +138,7 @@ def test_ac3_a_different_missing_item_on_the_same_story_is_a_separate_event(d):
 
 
 def test_ac7_a_pending_comment_of_another_account_starts_no_timer(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.add_comment(PR, pending("merge-owner", "<!-- hpw:dispatcher action=merge-owner -->", HEAD),
                   login="someone-else", at=ago(120))

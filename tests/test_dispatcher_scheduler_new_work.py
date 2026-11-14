@@ -64,7 +64,7 @@ def test_ac1_a_scheduled_run_asks_the_scheduler_with_the_work_in_flight(d):
     d.add_pr(911, 11)                         # a ready PR with its merge owner: in flight
     d.add_comment(911, f"<!-- hpw:dispatcher action=merge-owner pr=911 head={'a' * 40} -->")
     d.add_story(12, "In review")              # no PR: nothing in flight
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.schedule(("idle",))
 
     proc = scheduled(d)
@@ -90,7 +90,7 @@ def test_ac1_no_script_selects_board_items_by_a_ready_status(path):
     # No board item list by status is read at all: work in flight comes from PR facts (#475).
     assert not re.findall(r'(?:board_items_in_status|status_items) "([^"]+)"', code)
     if path == POLL:
-        assert "Ready for refinement" not in code and "Ready for implementation" not in code
+        assert "Ready for refinement" not in code and "Ready to implement" not in code
 
 
 # ── AC2: refine ───────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ def test_ac1_no_script_selects_board_items_by_a_ready_status(path):
 
 def test_ac2_a_refine_decision_starts_one_refinement_session_and_ends_the_run(d):
     d.add_story(STORY, "In refinement")
-    d.add_story(OTHER, "Ready for implementation")
+    d.add_story(OTHER, "Ready to implement")
     d.schedule(("refine", STORY), ("implement", OTHER))
 
     proc = scheduled(d)
@@ -112,7 +112,7 @@ def test_ac2_a_refine_decision_starts_one_refinement_session_and_ends_the_run(d)
 
 
 def test_ac2_a_refine_decision_runs_after_the_work_in_flight(d):
-    d.add_story(20, "In merge")
+    d.add_story(20, "Mergeable")
     d.add_pr(920, 20)
     d.add_story(STORY, "In refinement")
     d.schedule(("refine", STORY))
@@ -128,7 +128,7 @@ def test_ac2_a_refine_decision_runs_after_the_work_in_flight(d):
 
 
 def test_ac3_an_implement_decision_starts_implement_with_the_board_write(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY))
 
@@ -144,7 +144,7 @@ def test_ac3_an_implement_decision_starts_implement_with_the_board_write(d):
 
 
 def test_ac4_ready_cards_the_scheduler_does_not_choose_get_no_session(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_story(OTHER, "Ready for refinement")
     d.schedule(("idle",))
 
@@ -156,7 +156,7 @@ def test_ac4_ready_cards_the_scheduler_does_not_choose_get_no_session(d):
 
 @pytest.mark.parametrize("status", ["Backlog", "In refinement", "Ready for refinement"])
 def test_ac4_the_issue_the_scheduler_chooses_gets_its_session_whatever_its_status(d, status):
-    d.add_story(OTHER, "Ready for implementation")  # a ready card that is not chosen
+    d.add_story(OTHER, "Ready to implement")  # a ready card that is not chosen
     d.add_story(STORY, status)
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY))
@@ -172,7 +172,7 @@ def test_ac4_the_issue_the_scheduler_chooses_gets_its_session_whatever_its_statu
 
 
 def test_ac5_idle_starts_no_new_work_and_is_in_the_log(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.schedule(("idle",))
 
     proc = scheduled(d)
@@ -183,9 +183,9 @@ def test_ac5_idle_starts_no_new_work_and_is_in_the_log(d):
 
 
 def test_ac5_unreadable_starts_no_new_work_and_work_in_flight_still_runs(d):
-    d.add_story(20, "In merge")
+    d.add_story(20, "Mergeable")
     d.add_pr(920, 20)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.schedule(("unreadable", None, "facts: GitHub is down"))
 
     proc = scheduled(d)
@@ -200,7 +200,7 @@ def test_ac5_an_output_that_cannot_be_read_counts_as_unreadable(d):
     (d.mock / "scheduler_1.json").write_text("not json", encoding="utf-8")
     (d.mock / "scheduler_1.err").write_text("", encoding="utf-8")
     (d.mock / "scheduler_1.rc").write_text("3")
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
 
     proc = scheduled(d)
 
@@ -213,9 +213,9 @@ def test_ac5_an_output_that_cannot_be_read_counts_as_unreadable(d):
 
 
 def test_ac6_work_in_flight_runs_before_the_scheduler_decision(d):
-    d.add_story(20, "In merge")
+    d.add_story(20, "Mergeable")
     d.add_pr(920, 20)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY))
 
@@ -227,9 +227,9 @@ def test_ac6_work_in_flight_runs_before_the_scheduler_decision(d):
 
 
 def test_ac6_the_next_story_after_a_finished_cycle_comes_from_a_new_scheduler_call(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY, opened_by_implement=True)
-    d.add_story(OTHER, "Ready for implementation")
+    d.add_story(OTHER, "Ready to implement")
     d.add_pr(PR + 1, OTHER, opened_by_implement=True)
     d.schedule(("implement", STORY), ("implement", OTHER), ("idle",))
 
@@ -243,8 +243,8 @@ def test_ac6_the_next_story_after_a_finished_cycle_comes_from_a_new_scheduler_ca
 
 
 def test_ac6_the_board_order_does_not_choose_the_next_story(d):
-    d.add_story(OTHER, "Ready for implementation")  # first on the board
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(OTHER, "Ready to implement")  # first on the board
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY), ("idle",))
 
@@ -255,7 +255,7 @@ def test_ac6_the_board_order_does_not_choose_the_next_story(d):
 
 
 def test_ac6_a_story_this_run_already_started_is_not_started_again(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY), ("implement", STORY))
 
@@ -267,8 +267,8 @@ def test_ac6_a_story_this_run_already_started_is_not_started_again(d):
 
 
 def test_ac6_a_non_executable_choice_asks_the_scheduler_again(d):
-    d.add_story(STORY, "Ready for implementation", labels=["type:epic"])
-    d.add_story(OTHER, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement", labels=["type:epic"])
+    d.add_story(OTHER, "Ready to implement")
     d.add_pr(PR, OTHER)
     d.schedule(("implement", STORY), ("implement", OTHER), ("idle",))
 
@@ -289,8 +289,8 @@ def _ready_facts(*numbers: int) -> dict:
 
 def test_review_a_skipped_story_is_unavailable_to_the_next_decision(d):
     # The real rule (#473) does not filter executors: it chooses #700 again unless the run excludes it.
-    d.add_story(STORY, "Ready for implementation", executor="codex")
-    d.add_story(OTHER, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement", executor="codex")
+    d.add_story(OTHER, "Ready to implement")
     d.add_pr(PR, OTHER, opened_by_implement=True)
     d.schedule_from_facts(_ready_facts(STORY, OTHER))
 
@@ -318,7 +318,7 @@ def test_review_an_excluded_story_does_not_count_for_the_wip_limit():
 def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
     # WIP limit 1 and a stale story hold the slot: the scheduler says wip-limit until the stale story is rolled back.
     d.add_story(STORY, "In implementation")  # no PR, no hand-off, old updatedAt: stale
-    d.add_story(OTHER, "Ready for implementation")
+    d.add_story(OTHER, "Ready to implement")
     d.add_pr(PR, OTHER, opened_by_implement=True)
     d.schedule(("idle",))
 
@@ -336,7 +336,7 @@ def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
 
 @pytest.mark.parametrize("kind", ["refine", "implement"])
 def test_ac7_below_the_reserve_no_session_starts(d, kind):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.schedule((kind, STORY))
 
     proc = scheduled(d, seq="1")
@@ -347,7 +347,7 @@ def test_ac7_below_the_reserve_no_session_starts(d, kind):
 
 @pytest.mark.parametrize("kind", ["refine", "implement"])
 def test_ac7_at_the_usage_limit_no_session_starts(d, kind):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.schedule((kind, STORY))
     (d.mock / "usage" / "sessions").write_text(f"{_today()}:1\n", encoding="utf-8", newline="\n")
 
@@ -457,7 +457,7 @@ def _target_in_implementation_on_first_read_only(d: Dispatcher, other_status: st
     d.add_pr(PR, STORY)
     d.board_read_once(1)
     board = d._read("board.json")
-    next(i for i in board["items"] if i["number"] == STORY)["status"] = "Ready for implementation"
+    next(i for i in board["items"] if i["number"] == STORY)["status"] = "Ready to implement"
     d._write("board.json", board)
     d.schedule(("implement", STORY))
 

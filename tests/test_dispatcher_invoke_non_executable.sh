@@ -2,7 +2,7 @@
 # tests/test_dispatcher_invoke_non_executable.sh
 #
 # Regression tests for issue #256: a non-executable item (Epic, Feature,
-# missing or unsupported type) in "Ready for implementation" must be skipped
+# missing or unsupported type) in "Ready to implement" must be skipped
 # with a warning instead of crashing the dispatcher.
 #
 # Runs the real scripts/dispatcher-invoke.sh end to end (no function copies)
@@ -268,8 +268,8 @@ new_env() {
     : > "$d/github_output"
     mkdir -p "$d/usage"
     jq -n '{items: [], options: {
-        "Ready for implementation": "OPT_READY", "In implementation": "OPT_IMPL",
-        "In review": "OPT_REVIEW", "In merge": "OPT_MERGE", "Done": "OPT_DONE"}}' \
+        "Ready to implement": "OPT_READY", "In implementation": "OPT_IMPL",
+        "In review": "OPT_REVIEW", "Mergeable": "OPT_MERGE", "Done": "OPT_DONE"}}' \
         > "$d/board.json"
     echo "$d"
 }
@@ -320,7 +320,7 @@ run_dispatcher() {
     RUN_ERR=$(cat "$d/stderr")
 }
 
-READY="Ready for implementation"
+READY="Ready to implement"
 
 # ─── 1. Incident: Epic first, Story second (live) ─────────────────────────────
 

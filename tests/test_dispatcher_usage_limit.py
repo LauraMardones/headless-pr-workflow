@@ -97,7 +97,7 @@ def test_ac15_marker_is_written_only_by_mark_notified(tmp_path):
 def d(tmp_path):
     """A Claude-implemented story ready for /implement."""
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(ISSUE, "Ready for implementation")
+    dispatcher.add_story(ISSUE, "Ready to implement")
     dispatcher.add_pr(PR, ISSUE)
     return dispatcher
 
@@ -108,7 +108,7 @@ def r(tmp_path):
     dispatcher = Dispatcher(tmp_path)
     dispatcher.add_story(ISSUE, "In review", executor="codex")
     dispatcher.add_pr(PR, ISSUE)
-    dispatcher.session_sets_status("review", ISSUE, "In merge")
+    dispatcher.session_sets_status("review", ISSUE, "Mergeable")
     return dispatcher
 
 
@@ -129,7 +129,7 @@ def test_ac2_every_session_kind_counts_once(d):
 
 
 def fix_round_due(d):
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(ISSUE, "In implementation")
     d.add_pr(PR, ISSUE)
@@ -154,7 +154,7 @@ def test_ac12_stop_before_a_fix_round_writes_nothing(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert f"[USAGE LIMIT SKIP] #{ISSUE}: /implement not started" in proc.stdout
     assert d.sessions == [] and d.board_writes == []
-    assert d.status(ISSUE) == "In implementation" and d.status(700) == "Ready for implementation"
+    assert d.status(ISSUE) == "In implementation" and d.status(700) == "Ready to implement"
     assert d.posted(ISSUE) == [] and d.posted(700) == []
 
 
@@ -166,7 +166,7 @@ def test_ac1_ac5_limit_stops_third_start_before_the_allowance_probe(d):
     assert d.allowance_calls == 0
     assert d.usage_count == 2
     assert f"[USAGE LIMIT SKIP] #{ISSUE}: /implement not started; 2 of 2 sessions today" in proc.stdout
-    assert d.status(ISSUE) == "Ready for implementation"
+    assert d.status(ISSUE) == "Ready to implement"
     assert d.slack_calls == []  # the workflow sends it, not the invoke step
 
 
@@ -214,7 +214,7 @@ def test_ac10_invalid_value_fails_the_job_without_slack(d, value):
     assert proc.returncode != 0
     assert "[USAGE LIMIT ERROR] USAGE_LIMIT_SESSIONS_PER_DAY" in proc.stderr
     assert d.sessions == [] and d.slack_calls == []
-    assert d.status(ISSUE) == "Ready for implementation"
+    assert d.status(ISSUE) == "Ready to implement"
 
 
 def test_ac10_missing_variable_fails_the_job(d):
@@ -362,9 +362,9 @@ def test_cache_keys_differ_per_attempt_and_the_save_uses_the_day_it_ends_on():
 
 def test_an_invalid_limit_before_cleanup_still_notifies_the_closure(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(ISSUE, "In merge", executor="codex", body="Feature group: #50 Feature: something")
+    d.add_story(ISSUE, "Mergeable", executor="codex", body="Feature group: #50 Feature: something")
     d.add_pr(PR, ISSUE, merged=True, state="closed")
-    d.add_story(700, "Ready for implementation")  # the run's own target needs a session, so the limit is read
+    d.add_story(700, "Ready to implement")  # the run's own target needs a session, so the limit is read
     proc = d.run_issue(700, seq="0,0,0,0", env={"USAGE_LIMIT_SESSIONS_PER_DAY": ""})
     assert "[USAGE LIMIT ERROR]" in proc.stderr
     assert d.sessions == []

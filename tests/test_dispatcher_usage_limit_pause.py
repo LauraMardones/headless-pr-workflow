@@ -43,7 +43,7 @@ OK = (INIT, {"type": "result", "subtype": "success", "is_error": False, "num_tur
 @pytest.fixture
 def d(tmp_path):
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(STORY, "Ready for implementation")
+    dispatcher.add_story(STORY, "Ready to implement")
     dispatcher.add_pr(PR, STORY)
     dispatcher.claude_stream(*LIMITED, exit_code=1)
     return dispatcher
@@ -123,7 +123,7 @@ def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=Ready for implementation"]
+    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=Ready to implement"]
     comments = d.posted(STORY)
     assert len(comments) == 1 and comments[0].startswith(PAUSE)
     assert "Blocked Declaration" not in comments[0]
@@ -141,7 +141,7 @@ def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
 
 
 def test_failed_rollback_is_not_reported_as_a_clean_pause(d):
-    d.fail_status_write("Ready for implementation")
+    d.fail_status_write("Ready to implement")
 
     proc = d.run_issue(STORY)
 
@@ -164,7 +164,7 @@ def test_reset_time_unknown_when_the_stream_has_none(d):
 
 def test_no_pr_yet_is_named(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.claude_stream(*LIMITED, exit_code=1)
 
     d.run_issue(STORY)
@@ -225,7 +225,7 @@ def pause_run(tmp_path, path):
     d = Dispatcher(tmp_path)
     d.fake_git(unpushed=2)
     if path == "new":
-        d.add_story(STORY, "Ready for implementation")
+        d.add_story(STORY, "Ready to implement")
         d.add_pr(PR, STORY)
         d.claude_stream(*LIMITED, exit_code=1)
         return d, lambda: d.run_issue(STORY)
@@ -278,7 +278,7 @@ def test_restart_after_the_stop_makes_no_destructive_call(tmp_path):
 def test_pause_record_counts_the_unpushed_commits_exactly(tmp_path, unpushed, dirty, expected):
     d = Dispatcher(tmp_path)
     d.fake_git(unpushed=unpushed, dirty=dirty)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.claude_stream(*LIMITED, exit_code=1)
 
@@ -516,7 +516,7 @@ def test_fix_round_pause_with_a_failed_in_review_write_leaves_a_pending_hand_off
 
 def test_fix_round_waiting_at_the_allowance_is_not_rolled_back_as_stale(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)  # updated_at is long past STALE_THRESHOLD

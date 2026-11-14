@@ -28,18 +28,18 @@ PR = 900
 def d(tmp_path):
     """A Claude-implemented story ready for /implement."""
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(ISSUE, "Ready for implementation")
+    dispatcher.add_story(ISSUE, "Ready to implement")
     dispatcher.add_pr(PR, ISSUE, owned=True)
     return dispatcher
 
 
 @pytest.fixture
 def r(tmp_path):
-    """A Codex-implemented story \"In review\": the resume pass runs /review, which moves it to \"In merge\"."""
+    """A Codex-implemented story \"In review\": the resume pass runs /review, which moves it to \"Mergeable\"."""
     dispatcher = Dispatcher(tmp_path)
     dispatcher.add_story(ISSUE, "In review", executor="codex")
     dispatcher.add_pr(PR, ISSUE, owned=True)
-    dispatcher.session_sets_status("review", ISSUE, "In merge")
+    dispatcher.session_sets_status("review", ISSUE, "Mergeable")
     return dispatcher
 
 
@@ -56,7 +56,7 @@ def test_review_start_runs_the_session_then_the_scripts(r):
 
 def test_claude_story_checks_allowance_once_then_hands_off(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(ISSUE, "Ready for implementation", executor="claude-code-sonnet")
+    d.add_story(ISSUE, "Ready to implement", executor="claude-code-sonnet")
     d.add_pr(PR, ISSUE)
     proc = d.run_issue(ISSUE, seq="0,1")  # a second check would refuse and comment
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -72,7 +72,7 @@ def test_refuse_before_implement_skips_quietly(d):
     assert d.sessions == []
     assert d.posted(ISSUE) == []
     assert "[RESERVE SKIP]" in proc.stdout
-    assert d.status(ISSUE) == "Ready for implementation"
+    assert d.status(ISSUE) == "Ready to implement"
     assert d.slack_calls == []
 
 
@@ -108,7 +108,7 @@ def test_error_before_implement_fails_without_slack(d):
     assert "[ALLOWANCE ERROR]" in proc.stderr
     assert d.slack_calls == []  # no dispatcher_error notification
     assert d.posted(ISSUE) == []
-    assert d.status(ISSUE) == "Ready for implementation"
+    assert d.status(ISSUE) == "Ready to implement"
 
 
 def test_error_before_review_comments_with_reason(r):

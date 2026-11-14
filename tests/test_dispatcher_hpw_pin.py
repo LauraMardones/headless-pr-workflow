@@ -70,7 +70,7 @@ def copy(tmp_path, monkeypatch):
 
 def run(tmp_path, copy, **env):
     d = (tmp_path / "fx").mkdir() or Dispatcher(tmp_path / "fx")
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(970, STORY)
     d.schedule(("implement", STORY), ("idle",))
     # The child PATH holds only the fake bin and the system dirs; give scripts/hpw its `python`.

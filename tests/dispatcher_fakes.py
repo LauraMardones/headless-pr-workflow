@@ -54,11 +54,19 @@ needs_tools = requires(*TOOLS)
 BOT = "hpw-bot"          # the account behind GH_TOKEN; the bookkeeping job posts with it too
 PO = "LauraMardones"     # DECISION_BLOCKER_PO_LOGIN in dispatcher-invoke.sh
 
+# The board's Status options after issue #478 (docs/DISPATCHER-CONFIG.md → Board status).
 BOARD_OPTIONS = {
-    "Ready for implementation": "OPT_READY",
+    "No spec": "OPT_NO_SPEC",
+    "In specification": "OPT_SPEC",
+    "Not refined": "OPT_NOT_REFINED",
+    "Blocked": "OPT_BLOCKED",
+    "Refinement failed": "OPT_REFINE_FAILED",
+    "Refined": "OPT_REFINED",
+    "Ready to implement": "OPT_READY",
     "In implementation": "OPT_IMPL",
     "In review": "OPT_REVIEW",
-    "In merge": "OPT_MERGE",
+    "Mergeable": "OPT_MERGE",
+    "In progress": "OPT_PROGRESS",
     "Done": "OPT_DONE",
 }
 
@@ -336,7 +344,7 @@ esac
 # Stands in for scripts/merge-gate-summary in the resume pass and the poll (issue #475). A gate
 # file ``gate_<pr>`` sets the result (``pass``, ``fail``, ``unreadable``, ``conflicting``: all gates
 # but mergeability pass); without one the gates pass only when the linked story's board status is
-# "In merge", so a test written for the old board trigger keeps its meaning.
+# "Mergeable", so a test written for the old board trigger keeps its meaning.
 FAKE_GATE = r"""#!/usr/bin/env bash
 pr=""
 while [[ $# -gt 0 ]]; do case "$1" in --pr) pr="$2"; shift 2 ;; *) shift ;; esac; done
@@ -348,7 +356,7 @@ if [[ -z "$mode" ]]; then
     issue=$(jq -r --argjson n "$pr" '[.[] | select(.number == $n)][0].body // "" | capture("[Cc]loses #(?<i>[0-9]+)").i // empty' "$MOCK_DIR/pulls.json")
     status=$(jq -r --arg i "ITEM_$issue" --slurpfile b "$MOCK_DIR/board.json" '.[$i] // ([$b[0].items[] | select(.id == $i)][0].status // "")' "$MOCK_DIR/state.json")
     mode=fail
-    [[ "$status" == "In merge" ]] && mode=pass
+    [[ "$status" == "Mergeable" ]] && mode=pass
 fi
 case "$mode" in
     pass)        echo "Merge gate: policy=pass(present_non_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=$head" ;;
@@ -607,7 +615,7 @@ class Dispatcher:
         """An open PR that closes ``issue``.
 
         ``draft=None`` (the default) follows the story's board status, as a real /implement leaves the
-        PR: for a story "Ready for implementation" the PR is a draft until its next /implement session
+        PR: for a story "Ready to implement" the PR is a draft until its next /implement session
         marks it ready; otherwise it is ready. The resume pass finds work from these PR facts (#475),
         so a ready PR on an unstarted story would put the story in review. ``opened_by_implement``
         keeps the PR away until the next /implement session opens it (ready), so the story has no
@@ -622,7 +630,7 @@ class Dispatcher:
                          **extra})
             return
         if draft is None:
-            draft = bool(board_item) and self.status(issue) == "Ready for implementation" and state == "open"
+            draft = bool(board_item) and self.status(issue) == "Ready to implement" and state == "open"
             ready_file = self.mock / f"ready_on_implement_{number}"
             ready_file.write_text("") if draft else ready_file.unlink(missing_ok=True)
         pulls = [pr for pr in self._read("pulls.json") if pr["number"] != number]
@@ -633,11 +641,11 @@ class Dispatcher:
                       "updated_at": "2026-09-27T00:00:00Z", "head": {"ref": "branch", "sha": head},
                       "mergeable": True, "mergeable_state": "clean", **extra})
         self._write("pulls.json", pulls)
-        # A story "In merge" is merged by the dispatcher only for a head it owns
+        # A story "Mergeable" is merged by the dispatcher only for a head it owns
         # (issue #406): the PR carries the owner marker unless the test says
         # ``owned=False``.
         if owned is None:
-            owned = bool(board_item) and board_item["status"] == "In merge"
+            owned = bool(board_item) and board_item["status"] == "Mergeable"
         if owned and not merged:
             self.add_comment(number, f"<!-- hpw:dispatcher action=merge-owner pr={number} head={head} -->")
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
