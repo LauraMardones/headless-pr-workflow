@@ -37,7 +37,7 @@ The statuses are listed in the order of `STATUSES` in `status.py`. Each one name
 
 **Applies to:** all.
 
-**Fact:** the latest refine Session Summary after the current spec commit reports `refine-check` fail or unreadable, with no `/unblock` after it. The scheduler skips the issue until a new spec commit or an `/unblock`, so the PO can tell a stuck issue from one that waits in the queue.
+**Fact:** the latest refine Session Summary after the current spec commit reports `refine-check` fail or unreadable, with no `/unblock` after it. The status holds until a later refinement passes. The scheduler skips the issue until a new spec commit or an `/unblock`, so the PO can tell a stuck issue from one that waits in the queue.
 
 ### Not refined
 
