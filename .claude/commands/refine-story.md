@@ -24,37 +24,15 @@ Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and
 - If something appears obsolete, move it to Notes instead of deleting it silently.
 - If you do not have permission or tooling to update GitHub, stop and say exactly what is missing.
 
-## Status Workflow
+## Outcome
 
-Use these statuses consistently:
+Refinement writes no board status and no status line in the issue body. The outcome is a fact in the Session Summary, as `Next action:`:
 
-- `Backlog`: not actively prepared.
-- `In refinement`: refinement is in progress.
-- `Refined`: the story contract is clear, but hard dependencies may still block implementation.
-- `Ready for implementation`: an implementer can pick it up immediately.
-- `Done`: delivered/closed.
+- `Next action: Ready for implementation`: the contract is clear, `refine-check` passed and no hard dependency is open.
+- `Next action: Refined; blocked by #X`: the contract is clear and `refine-check` passed, but hard dependencies are still open.
+- `Next action: Needs PO decision`: a decision blocker is declared on the issue.
 
-When starting refinement:
-
-- Move the GitHub Project/status field to `In refinement` with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`.
-- If the real GitHub Project status cannot be updated but issue-body edits are possible, update the issue body with:
-  `PO status: In refinement`
-- Report clearly if the real Project status could not be changed.
-
-When refinement is complete:
-
-- If the issue is clear but open hard dependencies still block implementation:
-  - Move GitHub status to `Refined`.
-  - Set the issue body to include:
-    `PO status: Refined; blocked by #X`
-  - List the exact hard dependencies that block implementation.
-
-- If the issue is clear and no hard dependencies block implementation:
-  - Move GitHub status to `Ready for implementation`.
-  - Set the issue body to include:
-    `PO status: Ready for implementation.`
-
-- Never move an issue to `Ready for implementation` while hard dependencies are still unresolved.
+Never report `Ready for implementation` while hard dependencies are still unresolved.
 
 ## Refinement Standard
 
@@ -147,7 +125,6 @@ Parent epic: #{EPIC_NUMBER} {EPIC_TITLE}
 Feature group: #{FEATURE_NUMBER} {FEATURE_TITLE}
 Parallel lane: {LANE}
 Critical path: yes/no
-PO status: {In refinement | Refined; blocked by #X | Ready for implementation.}
 Spec: [`specs/{EPIC_NUMBER}-{slug}/spec.md`]({blob link at the commit}) at `{commit}`
 
 ## Goal
@@ -275,22 +252,21 @@ Split decision: {split into #A, #B | keep together because ...} (required when t
 
 ## Refinement Completeness Gate (mandatory)
 
-The last step of every refinement, after the board write, is the deterministic check; the model is not the judge of its own completeness.
+The last step of every refinement, is the deterministic check; the model is not the judge of its own completeness.
 
-- Write the board status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow` and require exit `0`: that exit is the board read-back. A non-zero exit means the board was not confirmed; report it, never claim the status.
-- Then run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and the board and checks the `type:`, `executor:` and `prio:` labels, the body `PO status:` against the board Status, open hard dependencies, the required body sections, open questions and parent references.
+- Run `python3 scripts/refine-check --issue <n> --repo LauraMardones/headless-pr-workflow`. It re-reads the issue and checks the `type:`, `executor:` and `prio:` labels, open hard dependencies, the required body sections, open questions and parent references. It reads no board.
 - Run it on every refinement, including a re-refinement of an issue that is already `Ready for implementation`.
-- Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels, dependencies or board could not be read) forbids it.
-- On a non-zero exit after the board write: fix what can be fixed and re-run the check; if a failure remains, move the board back with `scripts/set-project-status --issue <n> --status "In refinement" --repo LauraMardones/headless-pr-workflow`, set `PO status: In refinement` in the issue body, and list the failing checks as blockers, so the body and the board never claim a status the check did not confirm.
+- Only exit `0` permits reporting `Refined` or `Ready for implementation`. Exit `1` (a named check failed) or exit `2` (the issue, labels or dependencies could not be read) forbids it.
+- On a non-zero exit: fix what can be fixed and re-run the check; if a failure remains, list the failing checks as blockers and do not report `Next action: Ready for implementation` or `Refined`.
 - `executor:` label rule: a `type:story`, `type:task` or `type:bug` issue carries exactly one existing `executor:` label (`docs/PROJECT-STATUS.md`); a `type:epic` or `type:feature` issue needs none. Apply it before the check, choosing among the repository's existing labels.
-- Any statement about labels or board status in the reply or the Session Summary comes from the check output, not from memory or from the issue text.
+- Any statement about labels in the reply or the Session Summary comes from the check output, not from memory or from the issue text.
 - The Session Summary `Checks run:` line carries the result: `refine-check — pass`, or `refine-check — fail: <check-ids>` / `refine-check — unreadable`. `none` is not valid for a refinement that reports a status.
 
 ## Final Reply Format
 After updating GitHub, reply only with:
 
 - Issue URL 
-- Final PO status: Refined, Ready for implementation, or blocked/not ready
+- Next action: Ready for implementation, Refined; blocked by #X, or Needs PO decision
 - Summary of what changed
 - Labels changed
 - Milestone changed

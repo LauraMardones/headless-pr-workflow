@@ -46,12 +46,14 @@ class Sandbox:
         for name, text in {
             "dispatcher-poll.sh": POLL, "dispatcher-invoke.sh": LOGGER.format(name="invoke"),
             "dispatcher-trigger-check.sh": LOGGER.format(name="trigger-check"),
+            "hpw": ('#!/usr/bin/env bash\necho "hpw $*" >> "$STEP_LOG"\n'
+                    'echo \'{"result":"synced"}\'\nexit "${HPW_EXIT:-0}"\n'),
             "dispatcher-notify-retry.sh": LOGGER.format(name="retry"), "slack-notify.sh": SLACK,
             "dispatcher-usage-limit.sh": USAGE,
         }.items():
             (self.scripts / name).write_text(text, newline="\n")
         (self.bin / "gh").write_text(GH, newline="\n")
-        for path in [*self.scripts.glob("*.sh"), self.bin / "gh"]:
+        for path in [*self.scripts.glob("*.sh"), self.scripts / "hpw", self.bin / "gh"]:
             path.chmod(0o755)
         self.log = tmp / "step.log"
         self.output = tmp / "github_output"
@@ -64,7 +66,8 @@ class Sandbox:
 
     def run(self, step_name: str, **env):
         environ = {**host_env(self.bin.as_posix()), "STEP_LOG": self.log.as_posix(), "GITHUB_OUTPUT": self.output.as_posix(),
-                   "GITHUB_ENV": self.env_file.as_posix(), "POLL_JSON_FILE": self.poll_json.as_posix(), "REPO": "o/r", **env}
+                   "GITHUB_ENV": self.env_file.as_posix(), "POLL_JSON_FILE": self.poll_json.as_posix(), "REPO": "o/r",
+                   "HPW_BIN": (self.scripts / "hpw").as_posix(), **env}
         return subprocess.run([BASH, (self.scripts / SCRIPT.name).as_posix(), step_name], env=environ,
                               capture_output=True, text=True)
 
@@ -206,7 +209,22 @@ def test_retry_step_runs_after_a_failed_scan_and_reports_either_failure(sb, fail
     assert [c.split()[1] for c in sb.calls()] == ["scan-job-blockers", "run"]
 
 
-@pytest.mark.parametrize("step_name", ["poll", "invoke", "trigger-check", "retry", "usage-limit-notify"])
+# ── status sync (issue #478) ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("writer,flag", [("true", ""), ("false", " --dry-run"), ("", " --dry-run")])
+def test_status_sync_runs_the_writer_dry_unless_the_state_writer(sb, writer, flag):
+    proc = sb.run("status-sync", STATE_WRITER=writer)
+    assert proc.returncode == 0
+    assert sb.calls() == [f"hpw dispatcher status sync --repo o/r{flag}"]
+    assert proc.stdout.strip() == '{"result":"synced"}'
+
+
+@pytest.mark.parametrize("code,expected", [(0, 0), (1, 1), (2, 2), (3, 3), (7, 1)])
+def test_status_sync_maps_the_exit_code_of_the_writer(sb, code, expected):
+    assert sb.run("status-sync", STATE_WRITER="true", HPW_EXIT=str(code)).returncode == expected
+
+
+@pytest.mark.parametrize("step_name", ["poll", "invoke", "status-sync", "trigger-check", "retry", "usage-limit-notify"])
 def test_steps_that_need_the_repository_refuse_without_it(sb, step_name):
     proc = sb.run(step_name, REPO="", STATE_WRITER="true")
     assert proc.returncode == 2 and "REPO" in proc.stderr and sb.calls() == []
@@ -268,7 +286,7 @@ def test_every_run_in_the_workflow_is_one_command():
             assert command and command not in ("|", ">", "|-"), f"{name}: a multi-line run:"
             assert SCRIPT_CALL.match(command) or NPM.match(command), f"{name}: {command}"
             assert not re.search(r"(^|\s)gh\s", command), name
-    assert seen == 11
+    assert seen == 12
     assert "run: |" not in WORKFLOW.read_text()
 
 

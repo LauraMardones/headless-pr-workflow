@@ -41,7 +41,10 @@
 #                         scripts/dispatcher-merge.sh and dispatcher-cleanup.sh;
 #                         no allowance check, no executor budget)
 #             issue #293 (hand-off to the Codex review loop after /implement, and
-#                         the two resume entries: "In merge" and fix rounds)
+#                         the two resume entries: the merge step and fix rounds)
+#             issue #478 (the dispatcher writes no board status: the workflow's
+#                         "Write the board status" step, `hpw dispatcher
+#                         status sync`, is the board's only writer)
 #             issue #314 (every Claude session runs Claude Code on the runner,
 #                         signed in with the PO's subscription token; ADR-012)
 #             issue #319 (--refine <n>: one refinement session on the
@@ -84,8 +87,7 @@
 #        (including a scheduler result of idle or unreadable, and a scheduler
 #        choice this run already skipped as non-executable, issue #256)
 #   1  — pre-flight check failed or a session failed; blocker posted on issue.
-#        Also a missing "In review" / "In merge" board option or an invalid
-#        CODEX_FIX_ROUND_MAX, with no blocker.
+#        Also an invalid CODEX_FIX_ROUND_MAX, with no blocker.
 #
 # Requirements: bash 4+, gh (GitHub CLI), jq, curl, timeout (coreutils), and
 #   Claude Code (`claude`, installed and pinned by .github/workflows/dispatcher.yml)
@@ -331,8 +333,6 @@ done
 OWNER="${REPO%%/*}"
 REPO_NAME="${REPO##*/}"
 DECLARED_BY="dispatcher"
-NOW_TS=$(date -u +%s)
-STALE_THRESHOLD=7200   # 2 hours in seconds
 
 # Most fix rounds the dispatcher starts per PR (issue #293). Set from the
 # repository variable of the same name; GitHub passes an unset variable as an
@@ -447,8 +447,6 @@ CONFLICT_ROUND_SESSION=false
 # started with, so a usage-limit pause can tell that the session pushed a head.
 FIX_ROUND_START_HEAD=""
 FIX_ROUND_BLOCKER_BEFORE=""
-SESSION_PRESTART_STATUS=""   # status written just before the session starts
-PRESTART_STATUS_FAILED=false
 
 # ─── Utility: ISO-8601 timestamp to unix seconds (Linux + macOS) ──────────────
 
@@ -473,42 +471,8 @@ extract_files() {
         | grep -v '^$' || true
 }
 
-# ─── Utility: check whether an issue or PR has a handoff note ────────────────
-
-has_handoff_note() {
-    local issue_num="$1"
-    local pr_number="${2:-}"  # optional pre-fetched PR number; avoids a redundant API call
-    # Check issue comments
-    if gh api "repos/$REPO/issues/$issue_num/comments?per_page=100" \
-            | jq -e '[.[] | select(.body | test("## Handoff Note"))] | length > 0' \
-            >/dev/null 2>&1; then
-        return 0
-    fi
-    # If caller did not supply a PR number, find the linked open PR now
-    if [[ -z "$pr_number" ]]; then
-        pr_number=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
-            | jq -r --argjson n "$issue_num" '
-                map(select(
-                    (.body // "") | ascii_downcase |
-                    test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-                )) | first | .number // empty')
-    fi
-    if [[ -n "$pr_number" ]]; then
-        if gh api "repos/$REPO/pulls/$pr_number" \
-                | jq -e '.body | test("## Handoff Note")' >/dev/null 2>&1; then
-            return 0
-        fi
-        if gh api "repos/$REPO/issues/$pr_number/comments?per_page=100" \
-                | jq -e '[.[] | select(.body | test("## Handoff Note"))] | length > 0' \
-                >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
 # ─── Utility: the verified GitHub write (ADR-014 → Block 1, issue #432) ──────
-# Every comment, board status and label the dispatcher writes goes through
+# Every comment and label the dispatcher writes goes through
 # `hpw dispatcher write`, which writes, reads back, retries and fails closed.
 # The functions below are thin shims around it; callers keep their names.
 # dispatcher_write <operation> <args...> runs the block (with --dry-run under
@@ -687,8 +651,7 @@ register_decision_blocker_event() {
 
 # The story's latest decision blocker as one JSON object (the comment plus
 # `unblocked`: a standalone `/unblock` line by the PO follows it, the rule of
-# docs/PROJECT-STATUS.md → Decision blockers and of
-# check_and_resolve_decision_blocker_comment() below). Prints nothing when the
+# docs/PROJECT-STATUS.md → Decision blockers). Prints nothing when the
 # story has no decision blocker; returns 1 when the comments cannot be read.
 latest_decision_blocker_json() {
     local issue_num="$1" comments
@@ -725,150 +688,30 @@ notify_open_decision_blocker() {
     register_decision_blocker_event "$issue_num" "$issue_title" "$blocker_json"
 }
 
-# ─── Utility: comment-triggered resume for decision blockers (issue #262) ────
-# Epic #160 Success Criterion #7: "Dispatcher resumes automatically after PO
-# posts a GitHub comment resolving a decision blocker (detected on next
-# poll)." This is additive to, not a replacement for, the time-based
-# stale-recovery loop below (Step 4) — it fires immediately once a
-# qualifying PO comment appears, without waiting for STALE_THRESHOLD, and
-# stale-recovery keeps covering stories that silently stall with no blocker
-# declared at all, or where the PO's comment is missed for any reason.
-#
-# Resolving-comment rule (docs/PROJECT-STATUS.md, Decision blockers): a
-# comment authored by the PO ($DECISION_BLOCKER_PO_LOGIN), posted strictly
-# after the most recent "## Blocked Declaration (Type: decision)" comment,
-# containing a standalone line that trims to exactly "/unblock". A substring
-# match of the word "unblock"/"unblocked" inside ordinary prose does NOT
-# qualify — only a full line equal to "/unblock" resumes the story.
-#
-# Comments are fetched with --paginate so a declaration or resolving comment
-# past the first 100 comments on a long-lived issue is not silently missed
-# (the same pagination-blind-spot class of bug fixed for board queries in
-# issues #247/#249/#250/#251) — "detected on next poll" must hold regardless
-# of thread length.
-#
-# Idempotency and retry safety: the CLAIM records the ProjectV2 item's
-# updatedAt value before the Ready mutation. If the mutation fails, that value
-# is unchanged and a later poll retries without posting another CLAIM. If the
-# mutation succeeds, the item version changes; any subsequent redispatch changes
-# it again. Thus a later In-implementation scan can tell that the old /unblock
-# was already consumed even when posting the CONFIRM comment failed. A CONFIRM
-# marker remains the normal happy-path fast check. A newly declared blocker has
-# a later declaration timestamp and starts a fresh claim cycle.
-#
-# Returns 0 when a qualifying resolving comment was found and the board
-# transition was confirmed (CONFIRM comment posted). Returns 1 with no
-# board mutation left un-retryable when there is no open decision blocker,
-# the blocker was already confirmed-resumed, no qualifying resolving
-# comment exists yet, or the board transition failed this attempt (safe to
-# retry on the next poll — no CONFIRM marker was posted).
+# ─── Decision-blocker resume (issue #262, issue #478) ─────────────────────────
+# The PO resolves a decision blocker with a standalone `/unblock` line. The
+# dispatcher writes no board status for it: the facts (`hpw dispatcher facts`)
+# and the in-flight rule read the `/unblock` line, so the scheduler may pick
+# the story again on the next run, and the board writer shows its status.
 
 DECISION_BLOCKER_PO_LOGIN="LauraMardones"
-DECISION_BLOCKER_CLAIM_MARKER="Attempting to resolve the Type: decision blocker"
-DECISION_BLOCKER_RESUME_MARKER="Detected: PO comment resolving the Type: decision blocker"
-
-# The visible CLAIM and CONFIRM comments of the resume (shims of Block 2, #433):
-# their text is read back only from the dispatcher's own comments.
-decision_blocker_claim_body() {
-    printf '## Recovery Comment\n%s (standalone `/unblock` line found); attempting the board transition to "Ready for implementation" now.\nProject item version before resume: %s' \
-        "$DECISION_BLOCKER_CLAIM_MARKER" "$1"
-}
-
-decision_blocker_resume_body() {
-    printf '## Recovery Comment\n%s (standalone `/unblock` line found).\nAction: status set to "Ready for implementation".\nNext executor: review the PO'"'"'s decision in the linked comment above before resuming.' \
-        "$DECISION_BLOCKER_RESUME_MARKER"
-}
-
-# decision_blocker_marker_since <issue> claim|resume <since> — "true" when an
-# own comment carrying the CLAIM or CONFIRM text is at or after <since>; 1 when
-# the comments cannot be read.
-decision_blocker_marker_since() {
-    local text own="$DECISION_BLOCKER_RESUME_MARKER"
-    [[ "$2" == "claim" ]] && own="$DECISION_BLOCKER_CLAIM_MARKER"
-    text=$(marker_list_json "$1" "$own") || return 1
-    jq -r --arg since "$3" 'any(.[]; .created_at >= $since)' <<< "$text"
-}
-
-# decision_blocker_claim_version <issue> <since> — the "Project item version
-# before resume" of the newest own CLAIM at or after <since>; empty when none.
-decision_blocker_claim_version() {
-    local own
-    own=$(marker_list_json "$1" "$DECISION_BLOCKER_CLAIM_MARKER") || return 1
-    jq -r --arg since "$2" '[.[] | select(.created_at >= $since)] | last | (.body // "")
-        | capture("Project item version before resume: (?<version>[^\\n]+)").version // empty' <<< "$own"
-}
-
-check_and_resolve_decision_blocker_comment() {
-    local issue_num="$1" item_id="$2" project_item_updated_at="$3"
-    local comments
-    comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add')
-
-    local blocker_created_at
-    blocker_created_at=$(echo "$comments" | jq -r '
-        [.[] | select(.body | (test("## Blocked Declaration") and test("Type: decision")))]
-        | last | .created_at // empty')
-    [[ -z "$blocker_created_at" ]] && return 1
-
-    # The CLAIM and CONFIRM comments count only from the dispatcher's own
-    # account (Block 2); a pasted copy of their text starts and stops nothing.
-    local already_resumed
-    already_resumed=$(decision_blocker_marker_since "$issue_num" resume "$blocker_created_at") || return 1
-    [[ "$already_resumed" == "true" ]] && return 1
-
-    local resolved
-    resolved=$(echo "$comments" | jq -r \
-        --arg login "$DECISION_BLOCKER_PO_LOGIN" \
-        --arg since "$blocker_created_at" \
-        '[.[] | select(
-             (.user.login // "") == $login and
-             .created_at > $since and
-             ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$")))
-           )] | length > 0')
-    [[ "$resolved" == "true" ]] || return 1
-
-    echo "RESOLVED: #$issue_num — PO posted a standalone /unblock line after the decision blocker declaration"
-
-    local claim_project_version
-    claim_project_version=$(decision_blocker_claim_version "$issue_num" "$blocker_created_at") || return 1
-
-    # The claim records the ProjectV2 item's version before the mutation. A
-    # failed mutation leaves that version unchanged and is safe to retry. A
-    # successful mutation changes it; any later redispatch changes it again.
-    # Therefore a bare CLAIM plus a different current version proves that the
-    # old /unblock was already consumed even when the CONFIRM comment failed.
-    if [[ -n "$claim_project_version" && "$project_item_updated_at" != "$claim_project_version" ]]; then
-        echo "RESOLVED: #$issue_num — prior resume claim already changed the project item; not re-consuming the old /unblock"
-        return 1
-    fi
-
-    if [[ -z "$claim_project_version" ]]; then
-        post_comment "$issue_num" "$(decision_blocker_claim_body "$project_item_updated_at")"
-    fi
-
-    # The CONFIRM comment ($DECISION_BLOCKER_RESUME_MARKER) is what the
-    # already_resumed check above relies on, so it is only posted AFTER
-    # set_project_status_ready() confirms the mutation actually happened —
-    # see the return-contract comment above.
-    if ! set_project_status_ready "$item_id" "$issue_num"; then
-        echo "Warning: #$issue_num — valid /unblock found but the board transition failed; not posting the CONFIRM marker, will retry on the next poll." >&2
-        return 1
-    fi
-
-    if ! post_comment "$issue_num" "$(decision_blocker_resume_body)"; then
-        echo "Warning: #$issue_num — board transition succeeded but the CONFIRM comment failed; the versioned CLAIM will prevent the old /unblock from being consumed again after redispatch." >&2
-        return 1
-    fi
-    return 0
-}
 
 # ─── Utility: notify Slack on feature/epic closure after a story completes ───
-# Uses the BOARD_DATA snapshot from the start of the run. Treats the
-# just-completed story as Done regardless of snapshot state. Sends
+# Uses the BOARD_DATA snapshot from the start of the run. Treats every story
+# finished in this run (FINISHED_ISSUES) as Done regardless of the snapshot:
+# the dispatcher writes no "Done" (issue #478), the board writer shows it only
+# after the invoke step. Sends
 # feature_closure_confirmation when all feature stories are Done, then sends
 # epic_closure_approval when all features in the epic are also Done.
 
+FINISHED_ISSUES="${FINISHED_ISSUES:-}"
+
 notify_closure_if_complete() {
-    local completed_story_num="$1"
+    local completed_story_num="$1" finished_json
+    [[ " ${FINISHED_ISSUES:-} " == *" $completed_story_num "* ]] \
+        || FINISHED_ISSUES="${FINISHED_ISSUES:+$FINISHED_ISSUES }$completed_story_num"
+    export FINISHED_ISSUES
+    finished_json=$(jq -cn --arg s "$FINISHED_ISSUES" '$s | split(" ") | map(select(length > 0) | tonumber)')
 
     # ── Feature closure ──────────────────────────────────────────────────────
     local feature_num
@@ -893,17 +736,17 @@ notify_closure_if_complete() {
 
     [[ -z "$feature_total" || "$feature_total" -eq 0 ]] && return 0
 
-    # Count Done stories; treat the just-completed story as Done even if board snapshot is stale
+    # Count Done stories; treat the stories finished in this run as Done even if the snapshot is stale
     feature_done=$(echo "$BOARD_DATA" | jq \
         --arg fn "$feature_num" \
-        --argjson cn "$completed_story_num" \
+        --argjson done "$finished_json" \
         '[.data.repository.projectsV2.nodes[0].items.nodes[]
           | select(
               (.content | type) == "object" and
               (.content.number != null) and
               ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
               (
-                .content.number == $cn or
+                (.content.number | IN($done[])) or
                 ([.fieldValues.nodes[]
                   | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
                 ] | length > 0)
@@ -959,14 +802,14 @@ notify_closure_if_complete() {
                 )] | length')
         fdone=$(echo "$BOARD_DATA" | jq \
             --arg fn "$fn" \
-            --argjson cn "$completed_story_num" \
+            --argjson done "$finished_json" \
             '[.data.repository.projectsV2.nodes[0].items.nodes[]
               | select(
                   (.content | type) == "object" and
                   (.content.number != null) and
                   ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
                   (
-                    .content.number == $cn or
+                    (.content.number | IN($done[])) or
                     ([.fieldValues.nodes[]
                       | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
                     ] | length > 0)
@@ -1013,52 +856,9 @@ State of in-progress work: none"
     exit 1
 }
 
-# ─── Utility: get project item ID for an issue from the board data ───────────
-
-get_project_item_id() {
-    local issue_num="$1"
-    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select(.content.number == $n)
-        | .id // empty' | head -1
-}
-
-# ─── Utility: set any project board status by name ───────────────────────────
-# set_project_status <item-id> <issue> <status> — writes the status through the
-# block, which reads the board fresh and reads the status back. Returns 1 with
-# one `[BOARD ERROR]` line when the status was not written (issue #432, AC 5):
-# the caller does not move the story on and keeps a state a later run retries.
-# <item-id> is kept for the callers; the block finds the item itself.
-# BOARD_WRITE_SENT is "true" when the block sent a status mutation: a failed
-# write may then still have changed the board (see board_status_kept).
-
-BOARD_WRITE_SENT=""
-
-set_project_status() {
-    local issue_num="$2"
-    local status_name="$3"
-    BOARD_WRITE_SENT=""
-    if $DRY_RUN; then
-        echo "[DRY RUN] Would set #$issue_num to \"$status_name\" on project board"
-    fi
-    if ! dispatcher_write board-status --issue "$issue_num" --status "$status_name"; then
-        BOARD_WRITE_SENT=$(write_field sent)
-        echo "[BOARD ERROR] #$issue_num: could not set \"$status_name\" ($(write_field error))" >&2
-        return 1
-    fi
-}
-
-# board_status_kept <item-id> <issue> <old-status> — after set_project_status
-# returned 1: 0 when the story is still in <old-status>, because the block sent
-# no mutation or it wrote <old-status> back; 1 when the board may hold the new
-# status (the mutation was sent, its read-back failed) and <old-status> could
-# not be written back either. A caller that waits for a later run to retry
-# from <old-status> does so only on 0 (issue #432).
-board_status_kept() {
-    [[ "$BOARD_WRITE_SENT" == true ]] || return 0
-    echo "${LOG_PREFIX}#$2: the status write was sent but not confirmed; writing \"$3\" back" >&2
-    set_project_status "$1" "$2" "$3"
-}
+# The dispatcher writes no board status (issue #478): the workflow step
+# "Write the board status" runs `hpw dispatcher status sync`, the board's only
+# writer, once per enabled run after this script.
 
 # ─── Utility: post a mid-cycle blocker comment (reuses Blocked Declaration format) ──
 
@@ -1567,11 +1367,10 @@ _claude_code_session() {
 # ─── Utility: subscription allowance check before a session start (#317) ────
 # Runs scripts/dispatcher-allowance.sh (ADR-012) and acts on its decision:
 #   exit 0 (start)  — return 0; the session starts as before.
-#   exit 1 (refuse) — before /implement: log [RESERVE SKIP], put the story back
-#                     to "Ready for implementation" (E1 already moved it), exit 0.
+#   exit 1 (refuse) — before /implement: log [RESERVE SKIP] and write nothing;
+#                     the scheduler may choose the story again on a later run.
 #                     Before the /implement of a fix round (issue #293): log
-#                     [RESERVE SKIP] and write nothing. The story keeps its
-#                     place in "In implementation" and the resume pass tries
+#                     [RESERVE SKIP] and write nothing. The resume pass tries
 #                     the fix round again on a later run.
 #                     Before /review: one comment on the
 #                     story naming the step, the window, the share left, the
@@ -1648,8 +1447,7 @@ check_subscription_allowance() {
         if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: $RESUMED_ROUND not started; story stays in $RESUMED_ROUND_PLACE and the $RESUMED_ROUND is tried again on a later run"
         elif [[ "$step" == "implement" ]]; then
-            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; story stays in \"Ready for implementation\" for a later poll"
-            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
+            echo "[RESERVE SKIP] #$ISSUE_NUMBER: /implement not started; the scheduler may choose the story again on a later poll"
         else
             echo "[RESERVE SKIP] #$ISSUE_NUMBER: /$step not started; commenting on the story"
             post_allowance_comment "$step" "$decision_json"
@@ -1662,7 +1460,7 @@ check_subscription_allowance() {
     if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
         echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run" >&2
     elif [[ "$step" == "implement" ]]; then
-        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
+        echo "#$ISSUE_NUMBER: /implement not started; the scheduler may choose the story again on a later poll" >&2
     else
         post_allowance_comment "$step" "$decision_json"
     fi
@@ -1730,7 +1528,7 @@ check_usage_limit() {
         if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
             echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run"
         elif [[ "$step" == "implement" ]]; then
-            set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
+            echo "#$ISSUE_NUMBER: /implement not started; the scheduler may choose the story again on a later poll"
         else
             post_usage_limit_comment "$step" "$count" "$limit"
         fi
@@ -1744,7 +1542,7 @@ check_usage_limit() {
     if [[ "$step" == "implement" ]] && $FIX_ROUND_SESSION; then
         echo "#$ISSUE_NUMBER stays in $RESUMED_ROUND_PLACE; the $RESUMED_ROUND is tried again on a later run" >&2
     elif [[ "$step" == "implement" ]]; then
-        set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Ready for implementation" || true  # no session starts either way (#432)
+        echo "#$ISSUE_NUMBER: /implement not started; the scheduler may choose the story again on a later poll" >&2
     else
         post_usage_limit_comment "$step" "" ""
     fi
@@ -1766,13 +1564,11 @@ record_session_start() {
 # A session stopped by a provider usage limit (invoke_executor_command()
 # returned CLAUDE_LIMIT_STOP_RC) ends by itself at the reset, so it is not a
 # blocker and needs no PO action. pause_at_usage_limit <step> <target> <issue>:
-#   - a new /implement goes back to "Ready for implementation"; a fix round
-#     keeps the status it has and a /review stays "In review"; a fix round
+#   - no board status is written (issue #478); a new /implement starts again
+#     when the scheduler chooses the story on a later run; a fix round
 #     that pushed a new head before the stop (issue #446) gets the merge-owner
-#     marker for that head and the usual hand-off first, in this run, also when
-#     the session already wrote "In review" (issue #447; the hand-off leaves it
-#     there); the fix-round record's Next line names the status read from the
-#     board after the session;
+#     marker for that head and the usual hand-off first, in this run (issues
+#     #446, #447); the record names no board status;
 #   - no mid-cycle blocker and no attempt marker is written, so the resume
 #     pass (or the next selection) starts the same step again once the usage
 #     limit and the allowance check let it;
@@ -1803,7 +1599,7 @@ paused_comment() {
 
 pause_at_usage_limit() {
     local step="$1" target="$2" issue="$3"
-    local pr_json pr_number pr_head branch unpushed dirty next reset_ts rollback_failed=false round=""
+    local pr_json pr_number pr_head branch unpushed dirty next reset_ts round=""
     reset_ts="$CLAUDE_LIMIT_RESET_TS"
     LAST_ACTION="pausing #$issue at a provider usage limit"
     pr_json=$(find_linked_pr_json "$issue" 2>/dev/null || true)
@@ -1844,27 +1640,14 @@ pause_at_usage_limit() {
             FIX_ROUND_SESSION=true
           fi
         fi
-        # The story's status is read from the board after the session (and the
-        # hand-off), never assumed.
-        local board_status="unreadable"
-        if BOARD_DATA=$(fetch_board_data 2>/dev/null); then
-            board_status=$(board_status_of "$issue")
-            [[ -n "$board_status" ]] || board_status="unreadable"
-        fi
+        # No board status is named: the board writer sets it after this run (issue #478).
         if $handed_off; then
-            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run, and the story is \"${board_status}\" on the board. Codex reviews it, and any findings start a new fix round."
-        else
-            next+=" The story is \"${board_status}\" on the board."
+            next="the fix round pushed head \`${pr_head}\` before the stop; it was recorded as the merge owner's head and handed off to the Codex review loop in this run. Codex reviews it, and any findings start a new fix round."
         fi
     elif [[ "$step" == "refine" ]]; then
         next="a later \`--refine $issue\` starts a fresh session from the issue as it is on GitHub then, once the usage limit and the allowance check allow it. Nothing is written to the board."
     elif [[ "$step" == "implement" ]]; then
-        next="#$issue goes back to \"Ready for implementation\"; /implement starts again on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
-        if ! set_project_status_checked "$TARGET_ITEM_ID" "$issue" "Ready for implementation"; then
-            rollback_failed=true
-            echo "Warning: Board status update failed for #$issue to 'Ready for implementation'" >&2
-            next="the board write to \"Ready for implementation\" did not take effect, so #$issue is still in \"In implementation\"; stale recovery returns it to \"Ready for implementation\" after ${STALE_THRESHOLD}s of inactivity, and /implement then starts again on the existing branch and PR."
-        fi
+        next="/implement starts again for #$issue on a later poll, once the usage limit and the allowance check allow it, and continues on the existing branch and PR."
     else
         next="the story stays in \"In review\" and /$step is tried again on a later poll, once the usage limit and the allowance check allow it."
     fi
@@ -1882,10 +1665,6 @@ pause_at_usage_limit() {
             || echo "Warning: could not post the pause record on #$issue" >&2
     fi
     DISPATCH_HANDLED=true
-    if $rollback_failed; then
-        echo "#$issue paused at a provider usage limit, but the move to \"Ready for implementation\" failed" >&2
-        exit 1
-    fi
     echo "#$issue paused at a provider usage limit; no other session is started in this run"
     exit 0
 }
@@ -1942,20 +1721,8 @@ invoke_executor_command() {
     task_prompt=$(sed "s/\$ARGUMENTS/$target_arg/g" "$command_file")
 
     if $DRY_RUN; then
-        [[ -n "$SESSION_PRESTART_STATUS" ]] \
-            && echo "[DRY RUN] Would set #$ISSUE_NUMBER to \"$SESSION_PRESTART_STATUS\" on project board"
         echo "[DRY RUN] Would start Claude Code ($model) on the subscription for /$slash_command $target_arg"
         return 0
-    fi
-
-    # Issue #409: a conflict round moves the story to its session status only
-    # after the usage limit and the allowance check let the session start, so
-    # a refused start leaves the story where the next run finds it again.
-    if [[ -n "$SESSION_PRESTART_STATUS" ]] \
-            && ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "$SESSION_PRESTART_STATUS"; then
-        echo "Warning: could not set #$ISSUE_NUMBER to \"$SESSION_PRESTART_STATUS\"; /$slash_command not started." >&2
-        PRESTART_STATUS_FAILED=true
-        return 1
     fi
 
     # Fail closed: a session that cannot be counted does not start.
@@ -2235,44 +2002,8 @@ BOARD_DATA=$(fetch_board_data) || {
 PROJECT_ID=$(echo "$BOARD_DATA" | jq -r '.data.repository.projectsV2.nodes[0].id // empty')
 [[ -n "$PROJECT_ID" ]] || { echo "Error: No GitHub Projects (v2) board found on $REPO." >&2; exit 1; }
 
-# Extract Status field ID and option IDs
-STATUS_FIELD_ID=$(echo "$BOARD_DATA" | jq -r '
-    .data.repository.projectsV2.nodes[0].fields.nodes[]
-    | select(.name? == "Status") | .id // empty' | head -1)
-
-get_status_option_id() {
-    local status_name="$1"
-    # The project board may abbreviate "Ready for implementation" as "Ready".
-    # Try the exact name first, then the short alias.
-    local result
-    result=$(echo "$BOARD_DATA" | jq -r --arg n "$status_name" '
-        .data.repository.projectsV2.nodes[0].fields.nodes[]
-        | select(.name? == "Status")
-        | .options[]
-        | select(.name == $n)
-        | .id // empty' | head -1)
-    if [[ -z "$result" && "$status_name" == "Ready for implementation" ]]; then
-        result=$(echo "$BOARD_DATA" | jq -r '
-            .data.repository.projectsV2.nodes[0].fields.nodes[]
-            | select(.name? == "Status")
-            | .options[]
-            | select(.name == "Ready")
-            | .id // empty' | head -1)
-    fi
-    echo "$result"
-}
-
-# ─── Required board options (issue #293) ──────────────────────────────────────
-# The hand-off and the resume entries depend on "In review" and "In merge".
-# A board without one of them is a configuration error that stops the run
-# before any session starts; it is not skipped with a warning.
-
-for _required_status in "In review" "In merge"; do
-    if [[ -z "$(get_status_option_id "$_required_status")" ]]; then
-        echo "Error: the project board has no \"$_required_status\" Status option; the dispatcher cannot run without it." >&2
-        exit 1
-    fi
-done
+# Issue #478: no Status option is required here. The dispatcher writes no
+# board status, and the board writer reports a missing option per item.
 
 # ─── Executable issue types (issue #256) ──────────────────────────────────────
 # Used by the resume pass below and by Step 1b.
@@ -2327,14 +2058,6 @@ classify_issue_type() {
 
 # ─── Utility: board facts from the current $BOARD_DATA snapshot ──────────────
 
-board_status_of() {
-    local issue_num="$1"
-    echo "$BOARD_DATA" | jq -r --argjson n "$issue_num" '
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select((.content | type) == "object" and .content.number == $n)
-        | [.fieldValues.nodes[] | select((.field.name? // "") == "Status") | .name][0] // empty' | head -1
-}
-
 # board_item_id_of <issue> — the board item of the issue, for the status writes
 # that stay until #461. No status is read: the item is looked up by number.
 board_item_id_of() {
@@ -2346,8 +2069,8 @@ board_item_id_of() {
 
 # ─── New work from the scheduler (issue #474, ADR-010) ───────────────────────
 # The scheduler (`hpw dispatcher scheduler next`, issue #473) decides which new
-# work starts; the dispatcher only acts on its result and reads no "Ready for
-# implementation", "Ready" or "Ready for refinement" status to choose it. It is
+# work starts; the dispatcher only acts on its result and reads no board
+# status to choose it. It is
 # asked right before new work starts, after the work in flight, so the decision
 # uses fresh facts. --in-implementation lists the stories with a draft linked
 # PR or a fix round due (they count for the WIP limit and the file overlap);
@@ -2445,8 +2168,8 @@ next_new_work() {
 
 # ─── Utility: /merge and /cleanup, shared by Steps E3/E4 and the resume pass ─
 # One merge attempt per PR head (issue #293): when /merge fails, the mid-cycle
-# blocker records the head it was tried on. The story stays "In merge", and
-# the resume pass skips it until the PR has a new head or the PO posts a
+# blocker records the head it was tried on. The story stays in the merge step,
+# and the resume pass skips it until the PR has a new head or the PO posts a
 # standalone `/unblock` line after the blocker. Without this a blocked merge
 # would start a model session on every poll.
 
@@ -2521,7 +2244,7 @@ ensure_merge_owner() {
 
 # settle_merge_confirmation <pr> — after a completed merge: posts a pending
 # confirmation once. 0: the confirmation is on the PR (or nothing is pending),
-# cleanup may follow; 1: it is still missing. The story then stays "In merge":
+# cleanup may follow; 1: it is still missing. The story then stays in the merge step:
 # the next run retries it, and after the give-up blocker it waits for the PO.
 settle_merge_confirmation() {
     local pr_number="$1" rc own gave
@@ -2621,7 +2344,7 @@ run_merge_or_block() {
             cause="PR #$pr_number changes decision documents (ADR-011): ${files:-(files not reported)}. The PO reviews and merges it personally in GitHub. This is a planned step, not a failure."
             post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker" "$cause" \
                 "The PO has reviewed and merged PR #$pr_number in GitHub, then replies with a line that is exactly /unblock." \
-                "waiting for the PO to review and merge PR #$pr_number; board stays In merge"
+                "waiting for the PO to review and merge PR #$pr_number; the story stays in the merge step"
         else
             post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
         fi
@@ -2650,24 +2373,15 @@ finish_story() {
     LAST_ACTION="invoking /cleanup for #$ISSUE_NUMBER"
     echo ""
     echo "── E4: /cleanup for #$ISSUE_NUMBER ─────────────────────────────────────"
-    # Issue #432: without "Done" on the board /cleanup does not run; the story
-    # stays "In merge", so the merged-PR resume reruns it on a later run. When
-    # "Done" may have landed and "In merge" cannot be written back, no later
-    # run resumes the story, so /cleanup runs now.
-    if ! set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "Done"; then
-        if board_status_kept "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge"; then
-            echo "${LOG_PREFIX}[RESUME SKIP] #$ISSUE_NUMBER: \"Done\" was not written; /cleanup not run, the story stays \"In merge\" for a later run" >&2
-            return 0
-        fi
-        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: \"Done\" may be on the board and \"In merge\" could not be written back; /cleanup runs now" >&2
-    fi
-    # Cleanup failure is non-fatal: story is already Done; log and continue to loop.
+    # Issue #478: no "Done" is written; the board writer shows it from the
+    # merged PR. /cleanup runs from the merged-PR fact alone.
+    # Cleanup failure is non-fatal: the PR is merged; log and continue to loop.
     if ! run_phase_script "$CLEANUP_SCRIPT" "/cleanup" --issue "$ISSUE_NUMBER"; then
-        echo "Warning: /cleanup failed for #$ISSUE_NUMBER; story is Done but cleanup did not complete." >&2
+        echo "Warning: /cleanup failed for #$ISSUE_NUMBER; the PR is merged but cleanup did not complete." >&2
         # Issue #348: when neither the closing summary nor its labelled pending
-        # text is on the story, nothing leads a later run back to it. Put the
-        # story back to "In merge" (the merged-PR resume reruns cleanup) until
-        # the give-up limit.
+        # text is on the story, nothing leads a later run back to it. While the
+        # story stays open with its merged PR, the finish step of the next run
+        # (scripts/lib/in-flight.sh) reruns cleanup, until the give-up limit.
         if ! cleanup_evidence_recorded "$ISSUE_NUMBER"; then
             local rc=0 merged_pr merged_at=""
             merged_pr=$(find_merged_linked_pr "$ISSUE_NUMBER" 2>/dev/null || true)
@@ -2676,8 +2390,7 @@ finish_story() {
                 "the cleanup closing summary on #$ISSUE_NUMBER (neither it nor a pending copy could be posted)" \
                 "$ISSUE_NUMBER" "$merged_at" cleanup-summary || rc=$?
             if [[ $rc -eq 1 ]]; then
-                echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the cleanup closing summary is not on GitHub; back to \"In merge\" so the next run reruns cleanup" >&2
-                set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In merge" || return 1
+                echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the cleanup closing summary is not on GitHub; the next run reruns cleanup" >&2
                 return 0
             fi
         fi
@@ -2692,14 +2405,11 @@ finish_story() {
 # ─── Utility: hand a story to the Codex review loop after /implement (#293) ──
 # For a story whose executor has a CODEX_REVIEW_LOOP_ROUTING row. The
 # dispatcher starts no /review session, adds nothing to a review budget and
-# posts no review request (/implement posts it, issue #292). It only makes
-# sure the story is where the bookkeeping job expects it:
-#   - no linked open PR, or a draft PR: mid-cycle blocker for /implement, the
-#     story stays "In implementation", exit 1;
-#   - "In review" is written only when the story is still "In implementation"
-#     and no fix round is due. It is never written over "In review" or
-#     "In merge": Codex may have answered, and the bookkeeping job acted,
-#     before this point;
+# posts no review request (/implement posts it, issue #292). It writes no board
+# status (issue #478): the non-draft PR is the fact the board writer shows as
+# "In review" in the same run. It only checks the session's outcome:
+#   - no linked open PR, or a draft PR: mid-cycle blocker for /implement,
+#     exit 1;
 #   - a fix round that is due on the head the PR already had before the
 #     session means the session pushed no commit. The blocker records that
 #     head, so the same findings do not start a session on every poll. This
@@ -2740,9 +2450,10 @@ fix_round_attempt_superseded() {
     [[ -n "$moves_at" && "$moves_at" > "$attempt_at" ]]
 }
 
-# A pending hand-off is matched by PR, not by head: a commit may land between
-# the failed write and the run that retries it. It is cancelled by the "done"
-# marker the retry posts, so it is completed once.
+# A pending hand-off is matched by PR, not by head. Since issue #478 no new
+# pending marker is posted (no status write can fail); one left by an earlier
+# run is cancelled by the "done" marker the resume pass posts, so it is
+# completed once.
 hand_off_pending_marker() {
     dispatcher_marker "action=hand-off-pending pr=$1 head=$2"
 }
@@ -2757,13 +2468,6 @@ hand_off_done_marker() {
     dispatcher_marker "action=hand-off-done pr=$1"
 }
 
-# set_project_status_checked — the name the hand-off and fix-round callers use;
-# set_project_status() itself now returns 1 when the write did not happen, so
-# the caller can keep a retryable state.
-set_project_status_checked() {
-    set_project_status "$@"
-}
-
 fix_round_due() {
     local pr_number="$1" head_sha="$2"
     local heads
@@ -2772,29 +2476,13 @@ fix_round_due() {
     head_in_list "$head_sha" "$heads"
 }
 
-# record_pending_hand_off <pr> <head> — the session finished but the story is
-# not "In review" and could not be put there. The bookkeeping job acts only on
-# "In review", so this must not look like a finished hand-off: one recovery
-# comment carries the pending marker, the run exits 1, and a later run
-# completes the hand-off without a new session (complete_pending_hand_off()).
-record_pending_hand_off() {
-    local pr_number="$1" pr_head="$2"
-    if ! marker_holds "$ISSUE_NUMBER" "$(hand_off_pending_prefix "$pr_number")" 0 "$(hand_off_done_marker "$pr_number")"; then
-        post_comment "$ISSUE_NUMBER" "## Recovery Comment
-Detected: /implement finished for #$ISSUE_NUMBER on PR #$pr_number, but the board status is not \"In review\" and could not be set.
-Action: none yet. A later dispatcher run sets the status without starting /implement again; the Codex review loop acts only on a story in \"In review\".
-
-$(hand_off_pending_marker "$pr_number" "$pr_head")"
-    fi
-    DISPATCH_HANDLED=true
-    exit 1
-}
-
-# complete_pending_hand_off <issue> <item-id> <pr> <draft> — writes "In review"
-# for a story whose earlier hand-off is still pending, and posts the "done"
-# marker. Does nothing when no pending marker holds or the PR is a draft. A
-# story it handled is not started as new work in this run; when the write
-# fails again the story is also kept out of the next-story search.
+# complete_pending_hand_off <issue> <item-id> <pr> <draft> — posts the "done"
+# marker for a story whose earlier hand-off is still pending (a marker left by
+# a run before issue #478, when the "In review" write failed). No board status
+# is written: the board writer shows the non-draft PR as "In review". Does
+# nothing when no pending marker holds or the PR is a draft. A story it
+# handled is not started as new work in this run; when the marker cannot be
+# posted the story is also kept out of the next-story search.
 HAND_OFF_RESUMED_ISSUES=""
 
 complete_pending_hand_off() {
@@ -2802,17 +2490,16 @@ complete_pending_hand_off() {
     [[ "$pr_draft" != "true" ]] || return 0
     marker_holds "$issue_num" "$(hand_off_pending_prefix "$pr_number")" 1 "$(hand_off_done_marker "$pr_number")" || return 0
 
-    echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number, setting \"In review\""
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: completing the hand-off on PR #$pr_number"
     HAND_OFF_RESUMED_ISSUES="${HAND_OFF_RESUMED_ISSUES:+$HAND_OFF_RESUMED_ISSUES }$issue_num"
-    if set_project_status_checked "$item_id" "$issue_num" "In review"; then
-        RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
-        post_comment "$issue_num" "## Recovery Comment
-Detected: a hand-off for #$issue_num on PR #$pr_number that could not set the board status earlier.
-Action: status set to \"In review\".
+    if post_comment "$issue_num" "## Recovery Comment
+Detected: a pending hand-off for #$issue_num on PR #$pr_number.
+Action: the hand-off is complete; PR #$pr_number is ready for review, and the board writer shows the story's status.
 
-$(hand_off_done_marker "$pr_number")" || true
+$(hand_off_done_marker "$pr_number")"; then
+        RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     else
-        echo "Warning: could not set #$issue_num to \"In review\"; the hand-off is retried on the next run." >&2
+        echo "Warning: could not post the hand-off done marker on #$issue_num; the hand-off is retried on the next run." >&2
         NON_EXECUTABLE_ISSUES="${NON_EXECUTABLE_ISSUES:+$NON_EXECUTABLE_ISSUES }$issue_num"
     fi
     return 0
@@ -2891,7 +2578,7 @@ no_push_round_is_expected() {
 hand_off_to_codex_review_loop() {
     local head_before="${1:-}" blocker_before="${2:-}"
     local reviewer="${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]}"
-    local pr_json pr_number pr_draft pr_head status
+    local pr_json pr_number pr_draft pr_head
     LAST_ACTION="hand-off to the Codex review loop for #$ISSUE_NUMBER"
     pr_json=$(find_linked_pr_json "$ISSUE_NUMBER")
     pr_number=$(jq -r '.number // empty' <<< "$pr_json")
@@ -2901,7 +2588,7 @@ hand_off_to_codex_review_loop() {
     if $DRY_RUN; then
         local pr_label="the PR /implement opens"
         [[ -n "$pr_number" ]] && pr_label="PR #$pr_number"
-        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session; \"In review\" is written only if the story is still \"In implementation\" and no fix round is due"
+        echo "[DRY RUN] Would hand #$ISSUE_NUMBER to the Codex review loop ($reviewer) on $pr_label: no /review session and no board status write"
         return 0
     fi
 
@@ -2925,16 +2612,11 @@ hand_off_to_codex_review_loop() {
         exit 1
     fi
 
-    BOARD_DATA=$(fetch_board_data) || {
-        echo "Error: Failed to re-read the project board for the hand-off of #$ISSUE_NUMBER." >&2; exit 1
-    }
-    status=$(board_status_of "$ISSUE_NUMBER")
     local due=false
     fix_round_due "$pr_number" "$pr_head" && due=true
 
-    # Checked whatever the status is: a session that pushed nothing may still
-    # have moved the story to "In review", and the bookkeeping job would then
-    # move it back for the same head and start the same round again.
+    # A session that pushed nothing would otherwise be handed off, and the
+    # bookkeeping job would act on the same head and start the same round again.
     if $due && [[ -n "$head_before" && "${head_before,,}" == "${pr_head,,}" ]] \
             && no_push_round_is_expected "$blocker_before" "$pr_number"; then
         # A round with only Out of scope findings (the session declared a
@@ -2946,7 +2628,7 @@ hand_off_to_codex_review_loop() {
 $(fix_round_attempt_marker "$pr_number" "$pr_head")" \
             || echo "Warning: could not record the fix-round attempt for PR #$pr_number head ${pr_head:0:7}; the next run may start the round again." >&2
         if [[ "$NO_PUSH_ROUND_REASON" == "waiting for the PO's decision" ]]; then
-            echo "#$ISSUE_NUMBER: the round pushed nothing and waits for the PO's decision; the story stays \"$status\"."
+            echo "#$ISSUE_NUMBER: the round pushed nothing and waits for the PO's decision."
             echo "[HANDOFF] #$ISSUE_NUMBER: waiting for the PO on PR #$pr_number; no review request, no status change"
             return 0
         fi
@@ -2969,20 +2651,10 @@ $(fix_round_attempt_marker "$pr_number" "$pr_head")" \
         exit 1
     fi
 
-    if [[ "$status" == "Ready for implementation" || "$status" == "Ready" ]]; then
-        # Neither the dispatcher's own "In implementation" write nor the
-        # session's status write took effect. Reporting a hand-off here would
-        # let the next-story search pick this story again and start another
-        # /implement session for work that is already on the PR.
-        echo "Error: #$ISSUE_NUMBER is still \"$status\" after /implement; the board status did not advance." >&2
-        record_pending_hand_off "$pr_number" "$pr_head"
-    elif [[ "$status" != "In implementation" ]]; then
-        echo "#$ISSUE_NUMBER is \"$status\" on the board; the dispatcher leaves it there."
-    elif $due; then
-        echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the story stays \"In implementation\" and the next run starts the fix round."
-    elif ! set_project_status_checked "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In review"; then
-        echo "Error: could not set #$ISSUE_NUMBER to \"In review\" after /implement." >&2
-        record_pending_hand_off "$pr_number" "$pr_head"
+    # The non-draft PR keeps the story out of new work (scripts/lib/in-flight.sh),
+    # so no status write is needed to stop a second /implement (issue #478).
+    if $due; then
+        echo "#$ISSUE_NUMBER: findings are already recorded for the new head ${pr_head:0:7}; the next run starts the fix round."
     fi
     echo "[HANDOFF] #$ISSUE_NUMBER: handed to the Codex review loop ($reviewer) on PR #$pr_number; no /review session started"
 }
@@ -3015,7 +2687,6 @@ load_story_context() {
         STORY_SKIP_REASON="the issue could not be read"; return 1
     }
     ISSUE_NUMBER="$issue_num"
-    TARGET_ITEM_ID="$item_id"
     TARGET_TITLE=$(echo "$TARGET" | jq -r '.title')
     TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
     TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
@@ -3123,7 +2794,7 @@ resume_in_merge_story() {
                     if is_review_loop_story; then
                         # No /merge for a conflicting PR; the rule decides
                         # whether a conflict round is owed (issue #449).
-                        check_review_loop_pr "$issue_num" "$item_id" "In merge" "$pr_number" || true
+                        check_review_loop_pr "$issue_num" "$item_id" "Mergeable" "$pr_number" || true
                     else
                         block_merge_conflict "$issue_num" "$pr_number" "$pr_head"
                     fi
@@ -3362,10 +3033,10 @@ check_review_loop_pr() {
         blocked)
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number conflicts with main, but the story has an open blocker; no conflict round until the PO posts /unblock" ;;
         ownerless)
-            [[ "$status" != "In merge" ]] || return 1
+            [[ "$status" != "Mergeable" ]] || return 1
             block_ownerless_head "$issue_num" "$pr_number" "$head" ;;
         ownerless-reported)
-            [[ "$status" != "In merge" ]] || return 1
+            [[ "$status" != "Mergeable" ]] || return 1
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${head:0:7} has no merge-owner evidence; the blocker is already posted" ;;
         *)
             return 1 ;;
@@ -3447,8 +3118,6 @@ reset_conflict_round_session() {
     CONFLICT_ROUND_SESSION=false
     RESUMED_ROUND="fix round"
     RESUMED_ROUND_PLACE='"In implementation"'
-    SESSION_PRESTART_STATUS=""
-    PRESTART_STATUS_FAILED=false
 }
 
 # pytest_green_on_head <head> — 0 only when the newest run of the required
@@ -3489,23 +3158,15 @@ run_conflict_round() {
     RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
     LAST_ACTION="invoking /implement for #$issue_num (conflict round)"
     # FIX_ROUND_SESSION: the allowance check and the usage limit keep the
-    # story's place instead of putting it back to "Ready for implementation".
+    # story's place; no board status is written before or after the session
+    # (issue #478).
     FIX_ROUND_SESSION=true
     CONFLICT_ROUND_SESSION=true
     RESUMED_ROUND="conflict round"
     RESUMED_ROUND_PLACE="\"$from_status\""
-    PRESTART_STATUS_FAILED=false
-    SESSION_PRESTART_STATUS=""
-    [[ "$from_status" != "In implementation" ]] && SESSION_PRESTART_STATUS="In implementation"
     blocker_before=$(decision_blocker_created_at "$issue_num")
     local session_rc=0
     invoke_executor_command "implement" "$issue_num" || session_rc=$?
-    SESSION_PRESTART_STATUS=""
-    if $PRESTART_STATUS_FAILED; then
-        reset_conflict_round_session
-        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the move to \"In implementation\" failed; the conflict round on PR #$pr_number is tried again on the next run"
-        return 0
-    fi
     # A pause posts the standard record and ends the run; the next run decides
     # from the PR (issue #449).
     [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
@@ -3746,214 +3407,17 @@ if $RESUME_ONLY; then
     exit 0
 fi
 
-# ─── Step 4: Comment-triggered resume, then stale detection and recovery ──────
-# Per docs/PROJECT-STATUS.md Recovery Protocol:
-#   Stale = In implementation + no activity >2h + no handoff note (both required)
-# Per docs/PROJECT-STATUS.md Decision blockers / Resolution (issue #262):
-#   A decision blocker resumes immediately once the PO posts a standalone
-#   `/unblock` line after the blocker declaration — see
-#   check_and_resolve_decision_blocker_comment() above, run first in the loop
-#   below so it is not gated on STALE_THRESHOLD.
-
-READY_FOR_IMPL_OPTION_ID=$(get_status_option_id "Ready for implementation")
-
-# Return contract (issue #262 review): 0 means the board transition is
-# confirmed done (or, under --dry-run, confirmed simulated) — safe for a
-# caller to treat as "the story is really moving to Ready for
-# implementation". 1 means the mutation did NOT happen (unresolved
-# field/option IDs, or a failed GraphQL call) — a caller must NOT record
-# any "this is resolved/consumed" state on a 1, or a transient/config
-# failure would be indistinguishable from success and could permanently
-# strand a story. Callers that only want best-effort board sync with no
-# such downstream state must still not report success on a 1 (issue #432): the
-# stale-recovery loop below posts its Recovery Comment only after this
-# returns 0.
-set_project_status_ready() {
-    local item_id="$1"
-    local issue_num="$2"
-    BOARD_WRITE_SENT=""
-    if [[ -z "$STATUS_FIELD_ID" || -z "$READY_FOR_IMPL_OPTION_ID" ]]; then
-        echo "Warning: Could not resolve Status field/option IDs; skipping board update for #$issue_num." >&2
-        return 1
-    fi
-    set_project_status "$item_id" "$issue_num" "Ready for implementation"
-}
-# ─── Steps 3 and 4: collect "In implementation" stories, recover stale ones ──
-# A function so the scheduled run (issue #474) recovers stale stories before it
-# asks the scheduler: a stale story that holds a WIP slot must be rolled back
-# first, or the scheduler reports `wip-limit` and the recovery never runs.
-STALE_RECOVERY_DONE=false
-
-recover_stale_stories() {
-    # ─── Step 3: Collect "In implementation" stories ─────────────────────────────
-
-    LAST_ACTION="collecting in-implementation stories"
-    IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
-        .data.repository.projectsV2.nodes[0].items.nodes[]
-        | select(
-            (.content | type) == "object" and
-            (.content.number != null) and
-            ([ .fieldValues.nodes[]
-               | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-             ] | length > 0)
-          )
-        | { id: .id, number: .content.number, title: .content.title,
-            body: (.content.body // ""), updatedAt: .content.updatedAt,
-            projectUpdatedAt: .updatedAt }
-    ]')
-
-    IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
-    echo "Stories in \"In implementation\": $IN_IMPL_COUNT"
-
-
-    LAST_ACTION="stale story detection"
-    STALE_COUNT=0
-    RESUME_COUNT=0
-    for ((i=0; i < IN_IMPL_COUNT; i++)); do
-        item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
-        item_id=$(echo "$item" | jq -r '.id')
-        issue_num=$(echo "$item" | jq -r '.number')
-        issue_title=$(echo "$item" | jq -r '.title')
-        updated_at=$(echo "$item" | jq -r '.updatedAt')
-        project_updated_at=$(echo "$item" | jq -r '.projectUpdatedAt')
-
-        # ── Comment-triggered resume for decision blockers (issue #262) ──────────
-        # Runs before the time-based staleness check below: a PO's resolving
-        # comment must resume the story immediately rather than wait out
-        # STALE_THRESHOLD. Once resumed, this story is no longer "In
-        # implementation", so the staleness check below is skipped for it.
-        if check_and_resolve_decision_blocker_comment "$issue_num" "$item_id" "$project_updated_at"; then
-            RESUME_COUNT=$(( RESUME_COUNT + 1 ))
-            continue
-        fi
-
-        # Baseline: issue updatedAt (covers issue comments, label changes, etc.)
-        last_ts=$(iso_to_ts "$updated_at")
-
-        # Fetch linked open PR once — reused for activity timestamps, handoff check, and branch name.
-        # Policy (docs/PROJECT-STATUS.md): activity includes commits, comments, AND PR updates.
-        linked_pr=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
-            | jq --argjson n "$issue_num" '
-                map(select(
-                    (.body // "") | ascii_downcase |
-                    test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-                )) | first // null')
-        pr_number=$(echo "$linked_pr" | jq -r '.number // empty')
-        pr_updated_at=$(echo "$linked_pr" | jq -r '.updated_at // empty')
-
-        # PR updated_at covers PR description edits, review comments, and CI status updates
-        if [[ -n "$pr_updated_at" ]]; then
-            pr_ts=$(iso_to_ts "$pr_updated_at")
-            [[ $pr_ts -gt $last_ts ]] && last_ts=$pr_ts
-        fi
-
-        # Latest commit pushed to the PR branch — a push updates neither issue nor PR timestamps
-        if [[ -n "$pr_number" ]]; then
-            latest_commit=$(gh api "repos/$REPO/pulls/$pr_number/commits?per_page=100" \
-                | jq -r '[.[].commit | (.committer.date // .author.date // "")] | map(select(. != "")) | sort | last // empty')
-            if [[ -n "$latest_commit" ]]; then
-                commit_ts=$(iso_to_ts "$latest_commit")
-                [[ $commit_ts -gt $last_ts ]] && last_ts=$commit_ts
-            fi
-        fi
-
-        inactivity=$(( NOW_TS - last_ts ))
-
-        if [[ $inactivity -le $STALE_THRESHOLD ]]; then
-            continue
-        fi
-
-        # Both conditions must be true for stale: >2h inactivity AND no handoff note
-        if has_handoff_note "$issue_num" "$pr_number"; then
-            continue
-        fi
-
-        # A story the dispatcher itself stopped at a fix-round bound (issue #293)
-        # is waiting for the PO, not stale. Rolling it back would start /implement
-        # again as a ready story and pass the bound.
-        if [[ -n "$pr_number" ]]; then
-            pr_head_sha=$(echo "$linked_pr" | jq -r '.head.sha // empty')
-            if marker_holds "$issue_num" "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" 1 \
-               || { [[ -n "$pr_head_sha" ]] \
-                    && marker_holds "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$pr_head_sha")" 1; }; then
-                echo "#$issue_num is held by a fix-round blocker; not treating it as stale."
-                continue
-            fi
-            # Issue #449: the conflict-round and missing-merge-owner blockers also
-            # wait for the PO; a rollback would start /implement past them.
-            if [[ -n "$pr_head_sha" ]] \
-               && { marker_holds "$issue_num" "$(conflict_round_attempt_marker "$pr_number" "$pr_head_sha")" 1 \
-                    || marker_holds "$issue_num" "$(merge_owner_missing_marker "$pr_number" "$pr_head_sha")" 1; }; then
-                echo "#$issue_num is held by a conflict-round or merge-owner blocker; not treating it as stale."
-                continue
-            fi
-        fi
-
-        hours_inactive=$(( inactivity / 3600 ))
-        echo "STALE: #$issue_num \"$issue_title\" — inactive ${hours_inactive}h, no handoff note"
-
-        # Branch name: prefer PR head ref (authoritative); fall back to naming-convention search
-        branch=""
-        [[ -n "$pr_number" ]] && branch=$(echo "$linked_pr" | jq -r '.head.ref // empty')
-        if [[ -z "$branch" ]]; then
-            branch=$(gh api "repos/$REPO/branches?per_page=100" \
-                | jq -r --argjson n "$issue_num" '
-                    map(select(.name | test("/(issue|implement)-\($n)[-_]"; "i")))
-                    | first | .name // "(unknown)"') || branch="(unknown)"
-        fi
-
-        recovery_comment="## Recovery Comment
-Detected: story in \"In implementation\" with no activity for >2h and no handoff note.
-Action: status rolled back to \"Ready for implementation\".
-Branch: $branch — existing commits intact.
-Next executor: review branch state before pulling."
-
-        # Issue #432: the status first. When it is not written, no Recovery Comment
-        # is posted and the story is not counted, so the next run tries again
-        # without a duplicate comment. When the rollback may have landed and "In
-        # implementation" cannot be written back, the next run would not see the
-        # story as stale, so the Recovery Comment is posted now.
-        if ! set_project_status_ready "$item_id" "$issue_num"; then
-            if board_status_kept "$item_id" "$issue_num" "In implementation"; then
-                echo "#$issue_num: the rollback to \"Ready for implementation\" was not written; no Recovery Comment, retried on the next run." >&2
-                continue
-            fi
-            echo "#$issue_num: the rollback to \"Ready for implementation\" may be on the board and \"In implementation\" could not be written back; Recovery Comment posted." >&2
-        fi
-        post_comment "$issue_num" "$recovery_comment"
-
-        STALE_COUNT=$(( STALE_COUNT + 1 ))
-    done
-
-    # Recalculate active (non-stale) WIP count after recovery rollbacks and
-    # comment-triggered resumes (issue #262)
-    # Re-query the board to get updated state
-    if [[ $(( STALE_COUNT + RESUME_COUNT )) -gt 0 && $DRY_RUN == false ]]; then
-        echo "Re-fetching board after stale recovery / comment-triggered resume..."
-        BOARD_DATA=$(fetch_board_data)
-
-        IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq '[
-            .data.repository.projectsV2.nodes[0].items.nodes[]
-            | select(
-                (.content | type) == "object" and
-                (.content.number != null) and
-                ([ .fieldValues.nodes[]
-                   | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-                 ] | length > 0)
-              )
-            | { id: .id, number: .content.number, title: .content.title,
-                body: (.content.body // ""), updatedAt: .content.updatedAt }
-        ]')
-        IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
-    fi
-    STALE_RECOVERY_DONE=true
-}
+# ─── Steps 3 and 4: no stale rollback (issue #478) ───────────────────────────
+# The stale recovery wrote "In implementation" back to an earlier status, and
+# the decision-blocker resume wrote the status after a PO `/unblock`. Both were
+# board writes only: since issue #475 the scheduler and the resume pass decide
+# from pull request facts and comments, never from a board status, so the
+# writes changed no session. The board writer shows each story's status from
+# the same facts.
 
 # The scheduled run (issue #474): one scheduler decision for new work, after
 # the work in flight above.
 if $SCHEDULED; then
-    LAST_ACTION="stale story detection"
-    recover_stale_stories
     next_new_work
     ISSUE_NUMBER="$NEXT_ISSUE"
 fi
@@ -4060,32 +3524,30 @@ EXECUTOR_TYPE="${ROUTING_VALUE%%:*}"
 EXECUTOR_SECRET="${ROUTING_VALUE##*:}"
 echo "Executor: $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
 
-# ─── Steps 3 and 4: stale recovery (already done by the scheduled run) ─────
-if ! $STALE_RECOVERY_DONE; then
-    recover_stale_stories
-fi
-
 # ─── Step 5: WIP limit check ──────────────────────────────────────────────────
 # Policy: at most WIP_LIMIT_IMPLEMENTATION parallel stories In implementation
 # (docs/PROJECT-STATUS.md, docs/DISPATCHER-CONFIG.md)
 
 LAST_ACTION="WIP limit check"
-# The pre-flight judges the target against the other stories (issue #496): it
-# reads the board data of the latest fetch (the scheduler call's, in a scheduled
-# run), not the earlier read of the stale recovery, and leaves the target out.
-IN_IMPL_ITEMS=$(echo "$BOARD_DATA" | jq --argjson target "$ISSUE_NUMBER" '[
-    .data.repository.projectsV2.nodes[0].items.nodes[]
-    | select(
-        (.content | type) == "object" and
-        (.content.number != null) and
-        (.content.number != $target) and
-        ([ .fieldValues.nodes[]
-           | select((.field.name? // "") == "Status" and (.name? // "") == "In implementation")
-         ] | length > 0)
-      )
-    | { id: .id, number: .content.number, title: .content.title,
-        body: (.content.body // ""), updatedAt: .content.updatedAt }
-]')
+# The pre-flight judges the target against the other stories (issue #496) and
+# leaves the target out. Issue #478: it reads the work in implementation from
+# pull request facts, read fresh now, as the scheduler's --in-implementation list
+# does (scripts/lib/in-flight.sh: a draft linked PR or a fix round due). It reads
+# no board status: the board writer sets it only after this run, so a story
+# merged, finished or handed off earlier in the run would still count there.
+if ! inflight_prepare || ! inflight_compute; then
+    echo "Error: could not read the work in flight for the WIP pre-flight of #$ISSUE_NUMBER; /implement not started." >&2
+    exit 1
+fi
+IN_IMPL_ITEMS="[]"
+for active_num in $(jq -r --argjson target "$ISSUE_NUMBER" '.in_implementation[] | select(. != $target)' <<< "$INFLIGHT_JSON"); do
+    active_issue=$(gh api "repos/$REPO/issues/$active_num") || {
+        echo "Error: could not read #$active_num for the WIP pre-flight of #$ISSUE_NUMBER; /implement not started." >&2
+        exit 1
+    }
+    IN_IMPL_ITEMS=$(jq -c --argjson i "$active_issue" \
+        '. + [{number: $i.number, title: ($i.title // ""), body: ($i.body // "")}]' <<< "$IN_IMPL_ITEMS")
+done
 IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
 echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"
 
@@ -4093,7 +3555,7 @@ if [[ $IN_IMPL_COUNT -ge $WIP_LIMIT ]]; then
     active_list=$(echo "$IN_IMPL_ITEMS" | jq -r '.[] | "  #\(.number) \(.title)"')
     echo "FAIL: WIP limit reached ($IN_IMPL_COUNT >= $WIP_LIMIT)"
     echo "$active_list"
-    unblocked_when="Fewer than $WIP_LIMIT stories are in \"In implementation\" status on the project board"
+    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a draft linked PR or a fix round due)"
     post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
 fi
 
@@ -4136,7 +3598,7 @@ else
     if $OVERLAP_FOUND; then
         echo "FAIL: File overlap detected:"
         echo "$OVERLAP_DETAILS"
-        unblocked_when="The overlapping files are no longer owned by an active \"In implementation\" story: $(echo "$OVERLAP_DETAILS" | head -1 | sed 's/^ *//')"
+        unblocked_when="The overlapping files are no longer owned by a story with work in implementation: $(echo "$OVERLAP_DETAILS" | head -1 | sed 's/^ *//')"
         post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
     fi
 fi
@@ -4147,18 +3609,12 @@ echo ""
 echo "✓ Executor routing:  $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
 echo "✓ WIP limit:         $IN_IMPL_COUNT active / $WIP_LIMIT limit"
 echo "✓ File overlap:      none"
-[[ $STALE_COUNT -gt 0 ]] && echo "✓ Stale recovery:    $STALE_COUNT story(ies) rolled back"
 echo ""
 echo "Pre-flight passed for #$ISSUE_NUMBER — proceed to executor invocation."
 
 # ─── Execution loop ───────────────────────────────────────────────────────────
-# Policy source: docs/PROJECT-STATUS.md — board status transitions are facts;
-# each status is set only after the preceding executor command succeeds.
-
-TARGET_ITEM_ID=$(get_project_item_id "$ISSUE_NUMBER")
-if [[ -z "$TARGET_ITEM_ID" ]]; then
-    echo "Warning: Could not find project item ID for #$ISSUE_NUMBER; board updates will be skipped." >&2
-fi
+# The dispatcher writes no board status (issue #478); the board writer step of
+# the workflow shows each story's status from the facts the sessions leave.
 
 # ─── Utility: go on to the scheduler's next new work (issue #474) ───────────
 # Called when this story's run ends: after the hand-off to the Codex review
@@ -4192,11 +3648,10 @@ continue_with_next_new_work() {
 LAST_ACTION="invoking /implement for #$ISSUE_NUMBER"
 echo ""
 echo "── E1: /implement #$ISSUE_NUMBER ───────────────────────────────────────"
-# Best-effort (ADR-014 -> Decision -> 7, issue #432): the session still starts
-# when this write fails, as tests/test_dispatcher_review_loop.py::
-# test_failed_first_status_write_does_not_start_the_story_twice requires; the
-# hand-off records the pending hand-off so the story is not started twice.
-set_project_status "$TARGET_ITEM_ID" "$ISSUE_NUMBER" "In implementation" || true
+# No board status is written (issue #478): the draft PR /implement opens is the
+# fact the board writer shows as "In implementation". The story is not started
+# twice in this run (DISPATCH_RUN_STARTED_ISSUES) nor in a later one (the open
+# PR puts it in the in-flight lists).
 DISPATCH_RUN_STARTED_ISSUES="${DISPATCH_RUN_STARTED_ISSUES:+$DISPATCH_RUN_STARTED_ISSUES }$ISSUE_NUMBER"
 export DISPATCH_RUN_STARTED_ISSUES
 # The PR head before the session, if the story already has an open PR: the

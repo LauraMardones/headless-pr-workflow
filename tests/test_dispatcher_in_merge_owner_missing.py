@@ -1,4 +1,4 @@
-"""A story "In merge" whose head has no dispatcher merge owner (issue #406).
+"""A story "Mergeable" whose head has no dispatcher merge owner (issue #406).
 
 Drives the real ``scripts/dispatcher-invoke.sh`` with the fakes in
 ``tests/dispatcher_fakes.py``. The merge script is a stub that logs to
@@ -46,14 +46,14 @@ def po_events(d):
 
 @pytest.mark.parametrize("executor", ["claude-code-sonnet", "codex"])
 def test_ac1_ac2_a_head_without_a_merge_owner_gets_one_blocker_and_no_merge(d, executor):
-    d.add_story(STORY, "In merge", executor=executor)
+    d.add_story(STORY, "Mergeable", executor=executor)
     d.add_pr(PR, STORY, head=NEW_HEAD, owned=False)
     d.add_comment(PR, owner_marker(HEAD))  # evidence for an older head does not count
 
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.phases == [] and d.sessions == [] and d.status(STORY) == "In merge"
+    assert d.phases == [] and d.sessions == [] and d.status(STORY) == "Mergeable"
     assert f"[RESUME SKIP] #{STORY}: PR #{PR} head {NEW_HEAD[:7]} has no merge-owner evidence; blocker posted" in proc.stdout
     [blocker] = blockers(d)
     assert "Type: resource" in blocker
@@ -78,7 +78,7 @@ def test_ac1_ac2_a_head_without_a_merge_owner_gets_one_blocker_and_no_merge(d, e
 
 
 def test_ac3_a_head_with_a_merge_owner_marker_goes_to_the_merge_script(d):
-    d.add_story(STORY, "In merge", executor="claude-code-sonnet")
+    d.add_story(STORY, "Mergeable", executor="claude-code-sonnet")
     d.add_pr(PR, STORY, head=NEW_HEAD, owned=False)
     d.add_comment(PR, owner_marker(NEW_HEAD))
 
@@ -90,7 +90,7 @@ def test_ac3_a_head_with_a_merge_owner_marker_goes_to_the_merge_script(d):
 
 
 def test_ac3_a_pending_copy_for_the_head_is_posted_and_the_merge_script_runs(d):
-    d.add_story(STORY, "In merge", executor="claude-code-sonnet")
+    d.add_story(STORY, "Mergeable", executor="claude-code-sonnet")
     d.add_pr(PR, STORY, head=NEW_HEAD, owned=False)
     payload = base64.b64encode(owner_marker(NEW_HEAD).encode()).decode()
     d.add_comment(PR, f"Dispatcher: pending.\n\n<!-- hpw:dispatcher action=evidence-pending item=merge-owner head={NEW_HEAD} payload={payload} -->")
@@ -104,7 +104,7 @@ def test_ac3_a_pending_copy_for_the_head_is_posted_and_the_merge_script_runs(d):
 
 
 def test_ac3_a_conflicting_pr_gets_no_merge_owner_blocker(d):
-    d.add_story(STORY, "In merge", executor="codex")
+    d.add_story(STORY, "Mergeable", executor="codex")
     d.add_pr(PR, STORY, head=NEW_HEAD, owned=False, **CONFLICTING)
 
     proc = d.resume()

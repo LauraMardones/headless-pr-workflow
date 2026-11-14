@@ -22,6 +22,9 @@
 #                       --refine $REFINE_ISSUE when it is set (issue #319), else
 #                       with --repo only: work in flight, then the scheduler's
 #                       new-work decision, asked again with fresh facts (issue #474)
+#   status-sync         hpw dispatcher status sync (--dry-run unless STATE_WRITER=true): the
+#                       board's only writer of Status (issue #478, #476); its exit code
+#                       0 passes, 1, 2 and 3 fail the step
 #   trigger-check       dispatcher-trigger-check.sh (--dry-run unless STATE_WRITER=true)
 #   retry               dispatcher-notify-retry.sh scan-job-blockers (issue #393: registers the
 #                       po_blocker events of the bookkeeping job's blockers), then run
@@ -130,6 +133,23 @@ step_invoke() {
     fi
 }
 
+# Issue #478: every enabled run writes the board status from GitHub facts,
+# after the invoke step, whatever the run did. The command's JSON line goes to
+# stdout and its [SYNC] lines to stderr, unchanged. Exit 0 passes; 1, 2 and 3
+# fail the step (the later !cancelled() steps still run).
+step_status_sync() {
+    require_repo
+    local args=(dispatcher status sync --repo "$REPO") flag rc=0
+    flag=$(dry_run_unless_writer)
+    [[ -z "$flag" ]] || args+=("$flag")
+    "${HPW_BIN:-$SCRIPT_DIR/hpw}" "${args[@]}" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1|2|3) return "$rc" ;;
+        *) echo "dispatcher-workflow-step: status sync exited $rc" >&2; return 1 ;;
+    esac
+}
+
 step_trigger_check() {
     require_repo
     local args=(--repo "$REPO") flag
@@ -169,7 +189,7 @@ step_usage_limit_notify() {
     bash "$SCRIPT_DIR/dispatcher-usage-limit.sh" mark-notified
 }
 
-[[ $# -eq 1 ]] || die "usage: $0 guard|scope|cache-date|cache-save-date|git-auth|poll|invoke|trigger-check|retry|usage-limit-notify"
+[[ $# -eq 1 ]] || die "usage: $0 guard|scope|cache-date|cache-save-date|git-auth|poll|invoke|status-sync|trigger-check|retry|usage-limit-notify"
 case "$1" in
     guard)              step_guard ;;
     scope)              step_scope ;;
@@ -178,6 +198,7 @@ case "$1" in
     git-auth)           step_git_auth ;;
     poll)               step_poll ;;
     invoke)             step_invoke ;;
+    status-sync)        step_status_sync ;;
     trigger-check)      step_trigger_check ;;
     retry)              step_retry ;;
     usage-limit-notify) step_usage_limit_notify ;;

@@ -217,7 +217,7 @@ def test_ac12_dispatcher_config_names_the_fact_behind_each_step():
                    "does not count them for the WIP limit"):
         assert needle in facts, needle
     # No board status starts a step any more.
-    for stale in ("### Resume at `In merge`", "the story's board status is `In review`",
+    for stale in ("### Resume at `Mergeable`", "the story's board status is `In review`",
                   "the story's board status is `In implementation`", "Neither (including a PR that is still a draft)",
                   "the board status, the linked PR and hidden markers", "/review left the story in"):
         assert stale not in flow, stale

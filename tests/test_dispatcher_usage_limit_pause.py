@@ -43,7 +43,7 @@ OK = (INIT, {"type": "result", "subtype": "success", "is_error": False, "num_tur
 @pytest.fixture
 def d(tmp_path):
     dispatcher = Dispatcher(tmp_path)
-    dispatcher.add_story(STORY, "Ready for implementation")
+    dispatcher.add_story(STORY, "Ready to implement")
     dispatcher.add_pr(PR, STORY)
     dispatcher.claude_stream(*LIMITED, exit_code=1)
     return dispatcher
@@ -118,12 +118,12 @@ echo "rc=$rc reset=$CLAUDE_LIMIT_RESET_TS"
 # ── New /implement (AC5, AC6, AC11–AC15) ────────────────────────────────────
 
 
-def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
+def test_new_implement_writes_no_status_and_leaves_a_pause_record(d):
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=Ready for implementation"]
+    assert d.board_writes == []
     comments = d.posted(STORY)
     assert len(comments) == 1 and comments[0].startswith(PAUSE)
     assert "Blocked Declaration" not in comments[0]
@@ -138,19 +138,8 @@ def test_new_implement_goes_back_to_ready_with_a_pause_record(d):
     assert f"[SESSION RATE LIMIT] /implement #{STORY} stopped at a provider usage limit; resets {RESET_TEXT}" in log
     assert "#316" not in log and TOKEN not in log + body
     assert "[HANDOFF]" not in proc.stdout
-
-
-def test_failed_rollback_is_not_reported_as_a_clean_pause(d):
-    d.fail_status_write("Ready for implementation")
-
-    proc = d.run_issue(STORY)
-
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert d.board_writes == [f"{STORY}=In implementation"]
-    body = d.posted(STORY)[0]
-    assert body.startswith(PAUSE) and "did not take effect" in body and "stale recovery" in body
-    assert "Blocked Declaration" not in body
-    assert d.sessions == [f"implement {STORY}"]
+    assert f"Next: /implement starts again for #{STORY} on a later poll" in body
+    assert "Ready to implement" not in body and "Ready for implementation" not in body
 
 
 def test_reset_time_unknown_when_the_stream_has_none(d):
@@ -164,7 +153,7 @@ def test_reset_time_unknown_when_the_stream_has_none(d):
 
 def test_no_pr_yet_is_named(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.claude_stream(*LIMITED, exit_code=1)
 
     d.run_issue(STORY)
@@ -225,7 +214,7 @@ def pause_run(tmp_path, path):
     d = Dispatcher(tmp_path)
     d.fake_git(unpushed=2)
     if path == "new":
-        d.add_story(STORY, "Ready for implementation")
+        d.add_story(STORY, "Ready to implement")
         d.add_pr(PR, STORY)
         d.claude_stream(*LIMITED, exit_code=1)
         return d, lambda: d.run_issue(STORY)
@@ -278,7 +267,7 @@ def test_restart_after_the_stop_makes_no_destructive_call(tmp_path):
 def test_pause_record_counts_the_unpushed_commits_exactly(tmp_path, unpushed, dirty, expected):
     d = Dispatcher(tmp_path)
     d.fake_git(unpushed=unpushed, dirty=dirty)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.claude_stream(*LIMITED, exit_code=1)
 
@@ -408,7 +397,7 @@ def test_fix_round_that_pushed_a_head_is_handed_off_at_the_pause(tmp_path):
     assert d.sessions == [f"implement {STORY}"]
     owner = f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={NEW_HEAD} -->"
     assert [b for b in d.posted(PR) if owner in b]
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
     assert f"[HANDOFF] #{STORY}" in first.stdout
     pauses = [c for c in d.posted(STORY) if c.startswith(PAUSE)]
     assert len(pauses) == 1 and "handed off to the Codex review loop" in pauses[0]
@@ -431,11 +420,12 @@ def test_fix_round_that_moved_to_in_review_before_the_stop_is_handed_off_and_nam
     assert d.sessions == [f"implement {STORY}"]
     owner = f"<!-- hpw:dispatcher action=merge-owner pr={PR} head={NEW_HEAD} -->"
     assert len([b for b in d.posted(PR) if owner in b]) == 1
-    assert d.board_writes == [] and d.status(STORY) == "In review"
+    assert d.board_writes == []
     assert not [b for b in d.posted(PR) if "hpw:codex-review" in b.lower() and "@codex" in b]
     pauses = [c for c in d.posted(STORY) if c.startswith(PAUSE)]
     assert len(pauses) == 1
-    assert 'the story is "In review"' in pauses[0] and "handed off to the Codex review loop" in pauses[0]
+    # Issue #478: the record names no board status (the board writer sets it after the run).
+    assert "on the board" not in pauses[0] and "handed off to the Codex review loop" in pauses[0]
     assert "In implementation" not in pauses[0]
 
     second = d.resume()
@@ -497,26 +487,9 @@ def test_fix_round_pause_exits_1_before_the_hand_off_when_the_owner_cannot_be_re
     assert "[HANDOFF]" not in proc.stdout and d.status(STORY) == "In implementation"
 
 
-def test_fix_round_pause_with_a_failed_in_review_write_leaves_a_pending_hand_off(tmp_path):
-    d = pushed_fix_round(tmp_path)
-    d.fail_status_write("In review")
-
-    proc = d.resume()
-
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert any(f"action=hand-off-pending pr={PR} head={NEW_HEAD}" in c for c in d.posted(STORY))
-    d.fail_status_write("In review", False)
-
-    later = d.resume()
-
-    assert later.returncode == 0, later.stdout + later.stderr
-    assert d.status(STORY) == "In review"
-    assert d.sessions == [f"implement {STORY}"]
-
-
 def test_fix_round_waiting_at_the_allowance_is_not_rolled_back_as_stale(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(700, "Ready for implementation")
+    d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)  # updated_at is long past STALE_THRESHOLD
@@ -544,7 +517,7 @@ def test_review_stays_in_review_and_is_tried_again_on_the_same_head(tmp_path):
 
     assert first.returncode == 0, first.stdout + first.stderr
     assert d.sessions == [f"review {PR}"]
-    assert d.board_writes == [] and d.status(STORY) == "In review"
+    assert d.board_writes == []
     comments = d.posted(STORY)
     assert len(comments) == 1 and comments[0].startswith(PAUSE)
     assert f"`/review {PR}` for #{STORY}" in comments[0]

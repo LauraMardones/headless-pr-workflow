@@ -6,6 +6,7 @@ import json
 import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -82,7 +83,6 @@ STORY = 290
 PR = 123
 CLEAN_URL = "https://github.com/owner/repo/pull/123#issuecomment-1"
 UNKNOWN_URL = "https://github.com/owner/repo/pull/123#issuecomment-77"
-BOARD_OPTIONS = {"In implementation": "opt-impl", "In review": "opt-review", "In merge": "opt-merge"}
 
 
 def request(created_at: str = TWO_HOURS_AGO, *, body: str | None = None, url: str | None = None) -> TimelineEvent:
@@ -128,17 +128,14 @@ def decision_for(context: PullRequestContext, *, status: str | None = "In review
 
 
 class FakeGitHub:
-    """In-memory GitHub: comments the job posts and moves it makes are visible to its next read."""
+    """In-memory GitHub: comments the job posts are visible to its next read. It has no status write (#478)."""
 
-    def __init__(self, context: PullRequestContext, *, status: str | None = "In review", options=None) -> None:
+    def __init__(self, context: PullRequestContext, *, status: str | None = "In review") -> None:
         self.context = context
         self.status = status
-        self.options = BOARD_OPTIONS if options is None else options
         self.story_comments: list[str] = []
         self.story_thread: list[dict] = []  # story comments with author and time, for the decision blocker
         self.pr_comments: list[str] = []
-        self.moves: list[str] = []
-        self.fail_next_move = False
         self.posted_at = "2026-10-11T12:00:00Z"
         self.threads: list[ReviewThreadFact] = []
         self.thread_reads = 0
@@ -168,7 +165,7 @@ class FakeGitHub:
         return ci_of(context)
 
     def fetch_story(self, number: int) -> StoryBoard:
-        return StoryBoard(number, "Story: scenario", self.status, "item", "project", "field", self.options)
+        return StoryBoard(number, "Story: scenario", self.status)
 
     def fetch_issue_comments(self, number: int) -> tuple[str, ...]:
         return tuple(self.story_comments)
@@ -187,14 +184,6 @@ class FakeGitHub:
             return url
         self.story_comments.append(body)
         return f"https://github.com/owner/repo/issues/{number}#issuecomment-job-{len(self.story_comments)}"
-
-    def set_story_status(self, story: StoryBoard, status: str) -> None:
-        if self.fail_next_move:
-            self.fail_next_move = False
-            raise BookkeepingError(f"move story #{story.number} to `{status}`", "GitHub did not confirm the board update")
-        self.moves.append(status)
-        self.order.append("move")
-        self.status = status
 
     def session_summary(self, arguments: tuple[str, ...]) -> str:
         return "## Session Summary\n" + " ".join(arguments) + "\n"
@@ -487,7 +476,7 @@ def test_requested_changes_block_the_move_to_in_merge_despite_a_clean_codex_resu
 
     github = FakeGitHub(pr(request(), codex_comment(), review_decision="CHANGES_REQUESTED"))
     assert run_bookkeeping(PR, github=github, now=NOW).applied == NOT_NEEDED
-    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+    assert github.pr_comments == [] and github.status == "In review"
 
 
 # --- AC5: findings ------------------------------------------------------------
@@ -633,8 +622,8 @@ def test_clean_comment_the_gate_rejects_is_an_external_blocker():
 @pytest.mark.parametrize(
     ("overrides", "status", "expected"),
     [
-        ({}, "In implementation", "Story #290 is `In implementation`, not `In review`."),
-        ({}, "In merge", "Story #290 is `In merge`, not `In review`."),
+        ({}, "In implementation", "Story #290 is `In implementation`, not `In review` or `Blocked`."),
+        ({}, "Mergeable", "Story #290 is `Mergeable`, not `In review` or `Blocked`."),
         ({}, "in review", "not `In review`"),
         ({}, None, "not set on the project board"),
         ({"is_draft": True}, "In review", "PR is a draft."),
@@ -682,7 +671,8 @@ def test_unreadable_timestamp_is_an_error():
 # --- AC12: idempotency ---------------------------------------------------------------
 
 
-def test_second_run_posts_no_second_session_summary_and_makes_no_second_move():
+def test_second_run_posts_no_second_session_summary():
+    # Issue #478: the story stays `In review` until the board writer runs; the summary's marker stops a second hand-off.
     github = FakeGitHub(pr(request(), codex_comment()))
 
     first = run_bookkeeping(PR, github=github, now=NOW)
@@ -690,24 +680,23 @@ def test_second_run_posts_no_second_session_summary_and_makes_no_second_move():
 
     assert (first.decision.action, first.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
     assert first.comment_urls == (f"https://github.com/owner/repo/pull/{PR}#issuecomment-job-0",)
-    assert (second.decision.action, second.applied) == (ACTION_NONE, NOT_NEEDED)
+    assert (second.decision.action, second.applied, second.comment_urls) == (ACTION_MOVE_IN_MERGE, ALREADY_PRESENT, ())
     assert len(github.pr_comments) == 1
-    assert github.moves == ["In merge"]
+    assert github.status == "In review"
     assert github.pr_comments[0].endswith(f"\n{first.decision.marker}\n")
 
 
-def test_retry_after_a_failed_move_posts_no_second_session_summary():
+def test_findings_post_the_summary_and_marker_once_and_write_no_status():
     github = FakeGitHub(pr(request(), codex_pr_298_findings_review(HEAD_SHA)))
-    github.fail_next_move = True
 
-    with pytest.raises(BookkeepingError) as error:
-        run_bookkeeping(PR, github=github, now=NOW)
-    retry = run_bookkeeping(PR, github=github, now=NOW)
+    first = run_bookkeeping(PR, github=github, now=NOW)
+    second = run_bookkeeping(PR, github=github, now=NOW)
 
-    assert "move story #290" in error.value.step
-    assert (retry.decision.action, retry.applied, retry.comment_urls) == (ACTION_MOVE_IN_IMPLEMENTATION, APPLIED, ())
-    assert len(github.pr_comments) == 1
-    assert github.moves == ["In implementation"]
+    assert (first.decision.action, first.applied) == (ACTION_MOVE_IN_IMPLEMENTATION, APPLIED)
+    assert (second.decision.action, second.applied, second.comment_urls) == (ACTION_MOVE_IN_IMPLEMENTATION, ALREADY_PRESENT, ())
+    (summary,) = github.pr_comments
+    assert summary.endswith(f"\n{first.decision.marker}\n") and "--next implementation" in summary
+    assert github.status == "In review"
 
 
 def test_second_run_posts_no_second_request():
@@ -720,7 +709,7 @@ def test_second_run_posts_no_second_request():
     assert (second.decision.action, second.decision.codex_result) == (ACTION_NONE, "pending")
     assert second.decision.requests_posted == 1
     assert github.pr_comments == [review_request_body(HEAD_SHA, ordinal=1)]
-    assert github.moves == [] and github.story_comments == []
+    assert github.story_comments == []
 
 
 @pytest.mark.parametrize(
@@ -739,7 +728,7 @@ def test_second_run_posts_no_second_blocker(events, action, blocker_type):
     assert (first.decision.action, first.applied) == (action, APPLIED)
     assert (second.decision.action, second.applied, second.comment_urls) == (action, ALREADY_PRESENT, ())
     assert len(github.story_comments) == 1
-    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+    assert github.pr_comments == [] and github.status == "In review"
 
     lines = github.story_comments[0].splitlines()
     assert lines[:2] == ["## Blocked Declaration", f"Type: {blocker_type}"]
@@ -775,18 +764,21 @@ def test_dry_run_reports_the_decision_and_mutates_nothing():
 
         assert outcome.applied == DRY_RUN and outcome.comment_urls == ()
         assert outcome.decision.action != ACTION_NONE
-        assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
+        assert github.pr_comments == [] and github.story_comments == []
 
 
-def test_missing_board_option_fails_before_anything_is_posted():
-    github = FakeGitHub(pr(request(), codex_comment()), options={"In review": "opt-review", "In implementation": "opt-impl"})
+def test_the_job_has_no_status_write_and_needs_no_board_option():
+    # Issue #478 (AC 4): a board without an `Mergeable` option does not stop the hand-off.
+    github = FakeGitHub(pr(request(), codex_comment()))
 
-    with pytest.raises(BookkeepingError) as error:
-        run_bookkeeping(PR, github=github, now=NOW)
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
 
-    assert error.value.step == "look up board option"
-    assert "`In merge`" in error.value.message
-    assert github.pr_comments == [] and github.moves == []
+    assert (outcome.decision.action, outcome.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
+    assert len(github.pr_comments) == 1 and github.pr_comments[0].endswith(f"\n{outcome.decision.marker}\n")
+    for gateway in (bookkeeping.GitHubGateway, GhCliGateway):
+        assert not hasattr(gateway, "set_story_status")
+    source = Path(bookkeeping.__file__).read_text(encoding="utf-8")
+    assert "updateProjectV2ItemFieldValue" not in source and "Mergeable" not in source
 
 
 def test_story_that_left_in_review_during_the_run_is_not_moved():
@@ -804,7 +796,7 @@ def test_story_that_left_in_review_during_the_run_is_not_moved():
 
     assert error.value.step == "revalidate decision"
     assert "Story #290 is `In implementation`" in error.value.message
-    assert github.pr_comments == [] and github.moves == []
+    assert github.pr_comments == []
 
 
 NEW_HEAD = "1823d34d30e18e32b8cab3519a1be75737fa873e"
@@ -842,7 +834,7 @@ def test_commit_pushed_during_the_run_stops_every_mutation(action):
     assert error.value.step == "revalidate decision"
     assert HEAD_SHA in error.value.message and NEW_HEAD in error.value.message
     assert "nothing was posted or moved" in error.value.message
-    assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
+    assert github.pr_comments == [] and github.story_comments == []
     assert github.status == "In review"
 
 
@@ -856,7 +848,7 @@ def test_pr_that_stopped_being_open_and_ready_during_the_run_is_not_touched(chan
 
     assert error.value.step == "revalidate decision"
     assert "now `none`" in error.value.message
-    assert github.pr_comments == [] and github.moves == []
+    assert github.pr_comments == []
 
 
 def test_required_check_that_fails_during_the_run_stops_the_move_to_in_merge():
@@ -869,7 +861,7 @@ def test_required_check_that_fails_during_the_run_stops_the_move_to_in_merge():
 
     assert error.value.step == "revalidate decision"
     assert "was `move-in-merge`" in error.value.message and "now `move-in-implementation`" in error.value.message
-    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+    assert github.pr_comments == [] and github.status == "In review"
 
 
 def test_codex_findings_arriving_during_the_run_stop_the_move_to_in_merge():
@@ -882,7 +874,7 @@ def test_codex_findings_arriving_during_the_run_stop_the_move_to_in_merge():
 
     assert error.value.step == "revalidate decision"
     assert "was `move-in-merge`" in error.value.message and "now `move-in-implementation`" in error.value.message
-    assert github.pr_comments == [] and github.moves == [] and github.status == "In review"
+    assert github.pr_comments == [] and github.status == "In review"
 
 
 def test_codex_answer_arriving_during_the_run_stops_a_re_request():
@@ -898,7 +890,7 @@ def test_codex_answer_arriving_during_the_run_stops_a_re_request():
 def test_everything_is_read_and_decided_again_immediately_before_the_mutation():
     github = FakeGitHub(pr(request(), codex_comment()))
     calls = []
-    for name in ("fetch_context", "fetch_story", "fetch_ci", "fetch_issue_comments", "post_comment", "set_story_status"):
+    for name in ("fetch_context", "fetch_story", "fetch_ci", "fetch_issue_comments", "post_comment"):
         original = getattr(github, name)
         setattr(github, name, lambda *args, _name=name, _original=original: (calls.append(_name), _original(*args))[1])
 
@@ -914,7 +906,6 @@ def test_everything_is_read_and_decided_again_immediately_before_the_mutation():
         "fetch_ci",
         "fetch_issue_comments",
         "post_comment",
-        "set_story_status",
     ]
 
 
@@ -987,7 +978,7 @@ def test_session_summary_failure_is_reported_and_nothing_is_moved(monkeypatch):
     with pytest.raises(BookkeepingError):
         run_bookkeeping(PR, github=github, now=NOW)
 
-    assert github.pr_comments == [] and github.moves == []
+    assert github.pr_comments == []
 
 
 # --- Configuration ------------------------------------------------------------------------
@@ -1033,17 +1024,14 @@ def board_payload(*nodes, has_next_page: bool = False) -> dict:
 
 
 def board_item(status: str | None = "In review", *, archived: bool = False) -> dict:
-    value = None
-    if status is not None:
-        options = [{"id": option_id, "name": name} for name, option_id in BOARD_OPTIONS.items()]
-        value = {"name": status, "field": {"id": "field-1", "options": options}}
-    return {"id": "item-1", "isArchived": archived, "project": {"id": "project-1"}, "fieldValueByName": value}
+    value = None if status is None else {"name": status}
+    return {"isArchived": archived, "fieldValueByName": value}
 
 
-def test_story_board_state_is_parsed_with_options_by_name():
+def test_story_board_status_is_parsed():
     story = parse_story_board(board_payload(board_item(archived=True), board_item()), number=STORY)
 
-    assert story == StoryBoard(STORY, "Story: scenario", "In review", "item-1", "project-1", "field-1", BOARD_OPTIONS)
+    assert story == StoryBoard(STORY, "Story: scenario", "In review")
     assert parse_story_board(board_payload(), number=STORY).status is None
     assert parse_story_board(board_payload(board_item(None)), number=STORY).status is None
 
@@ -1102,15 +1090,12 @@ def test_gateway_reports_the_failed_step_and_claims_no_comment(monkeypatch):
         gateway.fetch_issue_comments(STORY)
 
 
-def test_gateway_requires_confirmation_of_comment_and_board_update(monkeypatch):
+def test_gateway_requires_confirmation_of_a_comment(monkeypatch):
     monkeypatch.setattr(bookkeeping.subprocess, "run", lambda command, **kwargs: Completed("{}"))
     gateway = GhCliGateway("owner/repo")
-    story = StoryBoard(STORY, "t", "In review", "item", "project", "field", BOARD_OPTIONS)
 
     with pytest.raises(BookkeepingError):
         gateway.post_comment(PR, "body")
-    with pytest.raises(BookkeepingError):
-        gateway.set_story_status(story, "In merge")
 
 
 def test_gateway_lists_only_open_non_draft_prs_and_reads_story_comments(monkeypatch):
@@ -1167,13 +1152,13 @@ def test_cli_json_output_follows_the_output_contract(monkeypatch, capsys):
 
 
 def test_cli_human_output_is_one_line_per_pr(monkeypatch, capsys):
-    github = FakeGitHub(pr(request(), codex_comment()), status="In merge")
+    github = FakeGitHub(pr(request(), codex_comment()), status="Mergeable")
 
     exit_code, out, _ = run_cli(monkeypatch, capsys, github, "--all", "--dry-run")
 
     assert exit_code == 0
     assert out.splitlines() == [
-        "PR #123: result=clean action=none applied=not-needed - Story #290 is `In merge`, not `In review`."
+        "PR #123: result=clean action=none applied=not-needed - Story #290 is `Mergeable`, not `In review` or `Blocked`."
     ]
 
 
@@ -1184,18 +1169,22 @@ def test_cli_dry_run_mutates_nothing(monkeypatch, capsys):
 
     assert exit_code == 0
     assert json.loads(out)["applied"] == {"state": "dry-run", "comment_urls": []}
-    assert github.pr_comments == [] and github.moves == []
+    assert github.pr_comments == []
 
 
 def test_cli_exits_non_zero_and_names_the_failed_step(monkeypatch, capsys):
     github = FakeGitHub(pr(request(), codex_comment()))
-    github.fail_next_move = True
+
+    def refuse(number: int, body: str) -> str:
+        raise BookkeepingError(f"post comment on #{number}", "GitHub did not confirm the comment")
+
+    github.post_comment = refuse
 
     exit_code, out, err = run_cli(monkeypatch, capsys, github, str(PR))
 
     assert exit_code == 1
     assert out == ""
-    assert "PR #123: failed at step `move story #290 to `In merge``" in err
+    assert "PR #123: failed at step `post comment on #123`" in err
 
 
 def test_cli_all_continues_after_one_pr_fails(monkeypatch, capsys):
@@ -1214,7 +1203,7 @@ def test_cli_all_continues_after_one_pr_fails(monkeypatch, capsys):
         {"pr": 7, "step": "read PR", "error": "PR head changed while the PR timeline was being read"}
     ]
     assert [result["action"] for result in payload["results"]] == ["move-in-merge"]
-    assert good.moves == ["In merge"]
+    assert good.status == "In review"
 
 
 @pytest.mark.parametrize(
@@ -1340,12 +1329,10 @@ def test_missing_scope_is_named_for_every_gh_read_and_write(monkeypatch):
 
     monkeypatch.setattr(bookkeeping, "fetch_required_status_check_context", refuse)
     gateway = GhCliGateway("owner/repo")
-    story = StoryBoard(STORY, "t", "In review", "item", "project", "field", BOARD_OPTIONS)
     calls = {
         "read required checks": lambda: gateway.fetch_ci(pr(request(), codex_comment())),
         "read story comments": lambda: gateway.fetch_issue_comments(STORY),
         "post comment on #123": lambda: gateway.post_comment(PR, "body"),
-        "move story #290 to `In merge`": lambda: gateway.set_story_status(story, "In merge"),
         "list open pull requests": gateway.list_open_ready_prs,
     }
 
@@ -1417,13 +1404,13 @@ def blocker_of(github: FakeGitHub) -> str:
     return body
 
 
-def test_superseded_codex_threads_are_resolved_then_summarized_then_the_story_moves():
+def test_superseded_codex_threads_are_resolved_then_summarized():
     github = with_threads(thread(1, commit=OLDER_SHA), thread(2, commit=MIDDLE_SHA), thread(3, commit=OLD_SHA))
 
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
     assert (outcome.decision.action, outcome.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
-    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary", "move"]
+    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary"]
     (summary,) = github.pr_comments
     for number, commit in ((1, OLDER_SHA), (2, MIDDLE_SHA), (3, OLD_SHA)):
         assert f"{THREAD_BASE}{number} (opened in the Codex review of {commit}, superseded by the clean Codex result {CLEAN_URL})" in summary
@@ -1437,7 +1424,7 @@ def test_clean_result_without_threads_says_so_and_otherwise_behaves_as_before():
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
     assert (outcome.decision.action, outcome.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
-    assert github.order == ["summary", "move"] and github.resolve_calls == []
+    assert github.order == ["summary"] and github.resolve_calls == []
     assert "no Codex threads resolved" in github.pr_comments[0]
 
 
@@ -1459,7 +1446,7 @@ def test_human_threads_are_never_resolved_and_block_the_move():
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
     assert (outcome.decision.action, outcome.applied) == (ACTION_BLOCKER_EXTERNAL, APPLIED)
-    assert github.resolve_calls == [] and github.moves == [] and github.pr_comments == []
+    assert github.resolve_calls == [] and github.pr_comments == []
     assert [(t.id, t.reason) for t in outcome.decision.threads_remaining] == [
         ("PRRT_2", "not-codex"),
         ("PRRT_3", "not-codex"),
@@ -1483,7 +1470,7 @@ def test_codex_thread_on_the_current_head_is_not_resolved_also_after_a_clean_res
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
     assert (outcome.decision.action, outcome.applied) == (ACTION_BLOCKER_EXTERNAL, APPLIED)
-    assert github.resolve_calls == [] and github.moves == []
+    assert github.resolve_calls == []
     assert [t.reason for t in outcome.decision.threads_remaining] == ["current-head"]
     assert "current-head" in outcome.to_line()
 
@@ -1508,7 +1495,7 @@ def test_blocker_resolves_nothing_names_only_the_remaining_threads_and_follows_t
 
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
-    assert github.resolve_calls == [] and github.moves == [] and github.status == "In review"
+    assert github.resolve_calls == [] and github.status == "In review"
     lines = blocker_of(github).splitlines()
     assert lines[:2] == ["## Blocked Declaration", "Type: external"]
     assert lines[4] == f"Unblocked when: the listed threads are resolved on GitHub, or a new head is pushed to PR #{PR}"
@@ -1530,20 +1517,18 @@ def test_recovery_after_the_blocker_moves_the_story_without_a_second_blocker():
 
     assert (first.applied, again.applied) == (APPLIED, ALREADY_PRESENT)
     assert (recovered.decision.action, recovered.applied) == (ACTION_MOVE_IN_MERGE, APPLIED)
-    assert github.resolve_calls == ["PRRT_2"] and github.moves == ["In merge"]
+    assert github.resolve_calls == ["PRRT_2"] and github.status == "In review"
     assert len(github.story_comments) == 1
 
 
-def test_a_run_after_the_move_changes_nothing():
+def test_a_run_after_the_hand_off_changes_nothing():
     github = with_threads(thread(1, commit=OLDER_SHA))
 
     run_bookkeeping(PR, github=github, now=NOW)
-    reads = github.thread_reads
     second = run_bookkeeping(PR, github=github, now=NOW)
 
-    assert (second.decision.action, second.applied) == (ACTION_NONE, NOT_NEEDED)
-    assert github.resolve_calls == ["PRRT_1"] and len(github.pr_comments) == 1 and github.moves == ["In merge"]
-    assert github.thread_reads == reads
+    assert (second.decision.action, second.applied) == (ACTION_MOVE_IN_MERGE, ALREADY_PRESENT)
+    assert github.resolve_calls == ["PRRT_1"] and len(github.pr_comments) == 1 and github.status == "In review"
 
 
 def test_retry_after_a_failed_resolve_finishes_the_rest_with_one_summary_listing_every_thread():
@@ -1553,7 +1538,7 @@ def test_retry_after_a_failed_resolve_finishes_the_rest_with_one_summary_listing
     with pytest.raises(BookkeepingError) as error:
         run_bookkeeping(PR, github=github, now=NOW)
     assert error.value.step == "resolve review thread"
-    assert github.pr_comments == [] and github.moves == [] and github.resolve_calls == ["PRRT_1"]
+    assert github.pr_comments == [] and github.resolve_calls == ["PRRT_1"]
 
     retry = run_bookkeeping(PR, github=github, now=NOW)
 
@@ -1561,18 +1546,7 @@ def test_retry_after_a_failed_resolve_finishes_the_rest_with_one_summary_listing
     assert github.resolve_calls == ["PRRT_1", "PRRT_2", "PRRT_3"]
     (summary,) = github.pr_comments
     assert all(f"{THREAD_BASE}{number}" in summary for number in (1, 2, 3))
-    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary", "move"]
-
-
-def test_retry_after_a_failed_move_does_not_resolve_or_summarize_again():
-    github = with_threads(thread(1, commit=OLDER_SHA))
-    github.fail_next_move = True
-
-    with pytest.raises(BookkeepingError):
-        run_bookkeeping(PR, github=github, now=NOW)
-    run_bookkeeping(PR, github=github, now=NOW)
-
-    assert github.resolve_calls == ["PRRT_1"] and len(github.pr_comments) == 1 and github.moves == ["In merge"]
+    assert github.order == ["resolve:PRRT_1", "resolve:PRRT_2", "resolve:PRRT_3", "summary"]
 
 
 @pytest.mark.parametrize("change", ["opened", "resolved", "unresolved"])
@@ -1598,7 +1572,7 @@ def test_a_thread_that_changes_between_the_two_reads_stops_the_run_with_no_mutat
         run_bookkeeping(PR, github=github, now=NOW)
 
     assert error.value.step == "revalidate decision" and "changed during the run" in error.value.message
-    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+    assert github.resolve_calls == [] and github.pr_comments == []
 
 
 def test_failed_thread_read_is_a_named_failure_with_no_mutation():
@@ -1609,7 +1583,7 @@ def test_failed_thread_read_is_a_named_failure_with_no_mutation():
         run_bookkeeping(PR, github=github, now=NOW)
 
     assert error.value.step == "read review threads"
-    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+    assert github.resolve_calls == [] and github.pr_comments == []
 
 
 @pytest.mark.parametrize(
@@ -1649,7 +1623,7 @@ def test_dry_run_reports_the_threads_it_would_resolve_and_mutates_nothing():
 
     assert outcome.applied == DRY_RUN
     assert [t.id for t in outcome.decision.threads_resolved] == ["PRRT_1"]
-    assert github.resolve_calls == [] and github.pr_comments == [] and github.moves == []
+    assert github.resolve_calls == [] and github.pr_comments == []
 
 
 def test_json_and_human_output_report_resolved_and_remaining_threads():
@@ -1806,7 +1780,7 @@ def test_cli_exits_3_when_the_only_failure_is_the_pr_changing_during_the_run(mon
     saved = json.loads(errors_file.read_text())
     assert saved["dry_run"] is False
     assert [error["step"] for error in saved["errors"]] == ["revalidate decision"]
-    assert github.pr_comments == [] and github.moves == []
+    assert github.pr_comments == []
 
 
 def test_cli_exits_1_when_the_pr_change_comes_with_another_failure(monkeypatch, capsys):
@@ -1859,7 +1833,7 @@ def held(github: FakeGitHub, *extra: dict) -> FakeGitHub:
 
 
 def assert_untouched(github: FakeGitHub) -> None:
-    assert github.pr_comments == [] and github.story_comments == [] and github.moves == []
+    assert github.pr_comments == [] and github.story_comments == []
     assert github.resolve_calls == [] and github.status == "In review"
 
 
@@ -1916,7 +1890,7 @@ def test_po_unblock_line_restores_the_move_and_the_thread_resolution():
     outcome = run_bookkeeping(PR, github=github, now=NOW)
 
     assert outcome.decision.action == ACTION_MOVE_IN_MERGE
-    assert github.resolve_calls == ["PRRT_1"] and github.moves == ["In merge"]
+    assert github.resolve_calls == ["PRRT_1"] and github.status == "In review"
 
 
 @pytest.mark.parametrize(
@@ -2011,3 +1985,38 @@ def test_a_declaration_forged_by_an_outsider_does_not_hold_the_story(association
     assert open_decision_blocker([{**forged, "author_type": "Bot"}]) is not None
     assert open_decision_blocker([{**forged, "association": "OWNER"}]) is not None
     assert open_decision_blocker([{**forged, "author": PO, "association": "NONE"}]) is not None
+
+
+# --- Issue #478: the job acts on a story the board writer shows as Blocked -------------------------
+
+
+def test_a_story_blocked_by_the_jobs_own_blocker_still_gets_its_findings_marker():
+    """Codex finding on PR #541: the board writer shows the story "Blocked" once the job's resource blocker is
+    open; a later Codex result must still produce the findings marker the dispatcher's fix round reads."""
+    exhausted = (request(SIX_HOURS_AGO), job_request(1), job_request(2), job_request(3))
+    github = FakeGitHub(pr(*exhausted))
+
+    first = run_bookkeeping(PR, github=github, now=NOW)
+    assert (first.decision.action, first.applied) == (ACTION_BLOCKER_RESOURCE, APPLIED)
+
+    github.status = "Blocked"  # what the board writer shows for the open blocker
+    github.context = pr(*exhausted, codex_pr_298_findings_review(HEAD_SHA))
+    second = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (second.decision.action, second.applied) == (ACTION_MOVE_IN_IMPLEMENTATION, APPLIED)
+    marker = second.decision.marker
+    assert f"action={ACTION_MOVE_IN_IMPLEMENTATION} head={HEAD_SHA}" in marker
+    assert len(github.pr_comments) == 1 and github.pr_comments[0].endswith(f"\n{marker}\n")
+
+
+def test_a_blocked_story_with_an_open_decision_blocker_is_still_held():
+    github = held(FakeGitHub(pr(request(), codex_pr_298_findings_review(HEAD_SHA)), status="Blocked"))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_NONE and "open decision blocker" in outcome.decision.reason
+    assert github.pr_comments == [] and github.story_comments == []
+
+
+def test_the_entry_guard_is_in_review_or_blocked_only():
+    assert bookkeeping.ACTED_ON_STATUSES == ("In review", "Blocked")

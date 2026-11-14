@@ -24,8 +24,8 @@ Required branch pattern:
   the branch changes, so a reader can tell its purpose from the name alone.
 - No random or session-generated suffixes. If the name is already taken on the
   remote, append `-2`, `-3`, and so on.
-- The `issue-<number>-` form is what `project-status-sync` uses to detect work
-  in progress; keep it exact.
+- The `issue-<number>-` form ties the branch to its story at a glance; keep it
+  exact.
 - When an assistant session is assigned a branch name it cannot change, it
   follows the assigned name and states the intended conforming name in the PR
   body.

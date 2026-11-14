@@ -67,8 +67,12 @@
 # Step names, order, other if: conditions and cache keys are unchanged.
 #
 # 2026-10-13 (issue #293): the invoke step also runs when the poll reports a
-# story "In merge" or "In implementation", so the dispatcher can resume a story
-# after the Codex review loop answered.
+# story in the merge step or in implementation, so the dispatcher can resume a
+# story after the Codex review loop answered.
+#
+# 2026-11-13 (issue #478): the new step "Write the board status" runs the
+# board's only status writer (`hpw dispatcher status sync`) once per enabled
+# run, after the invoke step; the dispatcher scripts write no board status.
 #
 # 2026-11-08 (issue #474, ADR-010): new work comes from the scheduler
 # (`hpw dispatcher scheduler next`), never from a "Ready" board status. The poll
@@ -256,6 +260,19 @@ jobs:
             .dispatcher-usage
             .dispatcher-allowance
           key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Issue #478: the board's only status writer (`hpw dispatcher status
+      # sync`, #476) runs once per enabled run, after the invoke step, also when
+      # the poll found no work, the invoke step was skipped or it failed. It is
+      # read-only (--dry-run) off the default branch, like the poll.
+      - name: Write the board status
+        if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/dispatcher-workflow-step.sh status-sync
 
       # Issue #339 (ADR-013): queues one dispatch_trigger_stopped event when the
       # newest workflow_dispatch run on main is more than 15 minutes old, for

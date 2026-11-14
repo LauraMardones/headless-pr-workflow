@@ -263,7 +263,7 @@ for ((i=0; i<N; i++)); do
             BLOCKED_DAYS+=("$DAYS")
             ;;
 
-        "Ready for implementation")
+        "Ready to implement")
             READY_NUMS+=("$NUM")
             READY_TITLES+=("$TITLE")
             READY_EXECUTORS+=("$EXECUTOR")

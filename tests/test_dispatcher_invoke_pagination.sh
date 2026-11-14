@@ -72,11 +72,11 @@ run_fetch_board_data() {
             echo "$args" >> "'"$CALL_LOG"'"
             if [[ "$args" == *"after=cursor1"* ]]; then
                 cat <<'"'"'JSON'"'"'
-{"data":{"repository":{"projectsV2":{"nodes":[{"id":"PVT_1","fields":{"nodes":[]},"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"ITEM_240","content":{"number":240,"title":"Story: Define delivery-baseline","body":"","updatedAt":"2026-08-09T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Ready for implementation","field":{"name":"Status"}}]}}]}}]}}}}
+{"data":{"repository":{"projectsV2":{"nodes":[{"id":"PVT_1","fields":{"nodes":[]},"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"ITEM_240","content":{"number":240,"title":"Story: Define delivery-baseline","body":"","updatedAt":"2026-08-09T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Ready to implement","field":{"name":"Status"}}]}}]}}]}}}}
 JSON
             else
                 cat <<'"'"'JSON'"'"'
-{"data":{"repository":{"projectsV2":{"nodes":[{"id":"PVT_1","fields":{"nodes":[{"id":"FIELD_STATUS","name":"Status","options":[{"id":"OPT1","name":"Ready for implementation"},{"id":"OPT2","name":"In review"},{"id":"OPT3","name":"In merge"}]}]},"items":{"pageInfo":{"hasNextPage":true,"endCursor":"cursor1"},"nodes":[{"id":"ITEM_100","content":{"number":100,"title":"Old done story","body":"","updatedAt":"2026-08-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}}]}}]}}}}
+{"data":{"repository":{"projectsV2":{"nodes":[{"id":"PVT_1","fields":{"nodes":[{"id":"FIELD_STATUS","name":"Status","options":[{"id":"OPT1","name":"Ready to implement"},{"id":"OPT2","name":"In review"},{"id":"OPT3","name":"Mergeable"}]}]},"items":{"pageInfo":{"hasNextPage":true,"endCursor":"cursor1"},"nodes":[{"id":"ITEM_100","content":{"number":100,"title":"Old done story","body":"","updatedAt":"2026-08-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}}]}}]}}}}
 JSON
             fi
         }

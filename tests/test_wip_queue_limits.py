@@ -95,9 +95,10 @@ def d(tmp_path):
 
 
 def add_active_stories(d, count):
-    """Stories "In implementation" that are not stale (updated in the future), so none is rolled back."""
+    """Stories with work in implementation: each has a draft linked PR, the fact the pre-flight counts (#478)."""
     for n in range(count):
         d.add_story(600 + n, "In implementation", body="## Files affected\n- `other/file.txt`\n")
+        d.add_pr(960 + n, 600 + n, draft=True)
     board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"
@@ -106,7 +107,7 @@ def add_active_stories(d, count):
 
 def preflight(d, active, **env):
     add_active_stories(d, active)
-    d.add_story(STORY, "Ready for implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
     return d.run_issue(STORY, "--dry-run", env=env)
 
 
@@ -126,27 +127,27 @@ def test_ac1_limit_3_blocks_at_three_and_passes_at_two(tmp_path):
 def test_ac1_blocker_text_shows_the_configured_limit(tmp_path):
     d = Dispatcher(tmp_path)
     add_active_stories(d, 3)
-    d.add_story(STORY, "Ready for implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "3"})
     assert proc.returncode != 0
-    assert any('Fewer than 3 stories are in "In implementation"' in c for c in d.posted(STORY))
+    assert any("Fewer than 3 stories have work in implementation" in c for c in d.posted(STORY))
 
 
 @pytest.mark.parametrize("name", VARIABLES)
 def test_ac5_unset_variable_starts_nothing_and_writes_nothing(d, name):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={name: ""})
     assert proc.returncode == 1
     assert f"[LIMITS ERROR] {name} is not set or is empty" in proc.stderr
     assert d.sessions == [] and d.board_writes == []
     assert d.posted(STORY) == []
     assert d.slack_calls == []
-    assert d.status(STORY) == "Ready for implementation"
+    assert d.status(STORY) == "Ready to implement"
 
 
 @pytest.mark.parametrize("value", ["abc", "0", "-1", "2.5"])
 def test_ac3_invalid_wip_limit_starts_nothing(d, value):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": value})
     assert proc.returncode == 1
     assert "WIP_LIMIT_IMPLEMENTATION" in proc.stderr and f'"{value}"' in proc.stderr
@@ -154,7 +155,7 @@ def test_ac3_invalid_wip_limit_starts_nothing(d, value):
 
 
 def test_ac4_invalid_buffer_pair_starts_nothing(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={"READY_BUFFER_MIN": "9"})
     assert proc.returncode == 1
     assert "READY_BUFFER_MIN (9) is greater than READY_BUFFER_MAX (5)" in proc.stderr
@@ -170,7 +171,7 @@ def flow_review(tmp_path, in_implementation, ready=1, env=None, args=()):
                             "updatedAt": "2999-01-01T00:00:00Z", "labels": {"nodes": []}},
                 "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}}
     nodes = [node(100 + i, "In implementation") for i in range(in_implementation)]
-    nodes += [node(200 + i, "Ready for implementation") for i in range(ready)]
+    nodes += [node(200 + i, "Ready to implement") for i in range(ready)]
     projects = {"data": {"repository": {"projectsV2": {"nodes": [{"number": 3, "title": "board"}]}}}}
     items = {"data": {"repository": {"projectsV2": {"nodes": [{"items": {"nodes": nodes}}]}}}}
     bin_dir = tmp_path / "bin"
@@ -258,3 +259,38 @@ def test_workflow_passes_the_variables_to_the_poll_and_invoke_steps():
         block = text.split(f"id: {step_id}\n", 1)[1].split("\n      - name:", 1)[0]
         for name in VARIABLES:
             assert f"{name}: ${{{{ vars.{name} }}}}" in block, (step_id, name)
+
+
+def test_cards_without_work_in_implementation_do_not_fill_the_wip_limit(tmp_path):
+    """Issue #478: three cards on "In implementation" with no draft PR count nothing; the board is a display."""
+    d = Dispatcher(tmp_path)
+    for n in range(3):
+        d.add_story(600 + n, "In implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
+
+    proc = d.run_issue(STORY, "--dry-run", env={"WIP_LIMIT_IMPLEMENTATION": "1"})
+
+    assert "Active WIP count: 0 (limit: 1)" in proc.stdout
+    assert "FAIL" not in proc.stdout and d.posted(STORY) == []
+
+
+@pytest.mark.parametrize("pr_state", ["merged in this run", "in review"])
+def test_a_story_whose_card_still_says_in_implementation_does_not_block_the_next_one(tmp_path, pr_state):
+    """Codex finding on PR #541: the board writer runs only after the invoke step, so a card can still say
+    "In implementation" for a story the run merged and finished, or whose PR is ready for review. The
+    pre-flight counts PR facts read fresh, so the next story starts with WIP limit 1 and gets no blocker."""
+    d = Dispatcher(tmp_path)
+    d.add_story(600, "In implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_pr(960, 600, draft=False, owned=True)
+    d.set_gates(960, "pass" if pr_state == "merged in this run" else "fail")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_pr(970, STORY)  # the PR /implement leaves behind
+
+    proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "1"})
+
+    if pr_state == "merged in this run":
+        assert d.phases == ["merge 960", "cleanup 600"], proc.stdout + proc.stderr
+    assert "Active WIP count: 0 (limit: 1)" in proc.stdout, proc.stdout + proc.stderr
+    assert "FAIL: WIP limit" not in proc.stdout and "FAIL: File overlap" not in proc.stdout
+    assert not [c for c in d.posted(STORY) if "Type: conflict" in c]
+    assert d.sessions == [f"implement {STORY}"] and d.board_writes == []

@@ -23,7 +23,7 @@ def test_ac1_spec_check_runs_before_the_spec_is_used() -> None:
     assert "fetch `main`" in text
     assert "Exit `1`: post a `Type: decision` Blocked Declaration" in text
     assert "names each failing check id" in text
-    assert "leave the board and the body at `In refinement`" in text
+    assert "leave the issue body unchanged" in text
     assert "Exit `2`: stop, write nothing, and report the spec as unreadable" in text
 
 
@@ -31,7 +31,7 @@ def test_ac2_no_merged_spec_stops_before_any_write() -> None:
     text = rules()
     assert "specs/<epic>-*/spec.md" in text
     assert "more than one matches" in text
-    assert "Edit no issue body, label, board status or comment" in text
+    assert "Edit no issue body, label or comment" in text
     assert "Issues already refined under that Epic are not touched" in text
 
 

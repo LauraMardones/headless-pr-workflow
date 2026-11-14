@@ -14,16 +14,14 @@ Follow:
 - Never expose, print, log, persist, or commit GitHub credentials.
 - The fallback changes only the transport. It never bypasses workflow gates, and it must produce the same durable GitHub evidence as the preferred integration.
 
-Workflow status goal:
-- If merge succeeds and all remaining Definition of Done criteria are satisfied: "In merge" -> "Done"
-- Write each status with `scripts/set-project-status --issue <n> --status "<Status name>" --repo LauraMardones/headless-pr-workflow`; a non-zero exit means the status was not written.
+Workflow fact this command records (it writes no board status): the merged PR and the merge evidence in GitHub. The closed issue and the merged PR are what the board shows as done.
 
 Decision documents (ADR-011):
 - If the PR changes any Epic spec (`specs/<epic-number>-<slug>/`) or any ADR (`docs/decisions/ADR-*.md`), do not merge, even if asked to in chat and even if it also changes other files. Stop and report that the PO merges such PRs personally in GitHub.
 
-GraphQL pre-flight (before any other step and before any GitHub mutation, including status writes):
+GraphQL pre-flight (before any other step and before any GitHub mutation, including comments):
 - Run `gh api graphql -f query='{ viewer { login } }'`.
-- If `gh` is missing or the command exits non-zero, stop. Make no GitHub mutation: no merge, no status write, and no PR comment.
+- If `gh` is missing or the command exits non-zero, stop. Make no GitHub mutation: no merge and no PR comment.
 - Report that merging requires GraphQL-capable `gh` (2.50 or later) to run the merge gate, the observed failure (`gh` not found or HTTP 403), and that GitHub Actions or a local session provides it.
 - Do not fall back to the GitHub plugin/MCP integration or REST for the merge gate.
 
@@ -51,15 +49,13 @@ Required behavior:
 6. If any merge gate is stale, missing, ambiguous, or failing:
    - stop
    - report the blocker instead of merging
-   - if new implementation is required, set the story status to "In implementation"
-   - if only renewed review is required, set the story status to "In review"
+   - report whether new implementation or only renewed review is required
 7. If local state is dirty or unrelated work exists, report the safe next step instead of forcing sync or cleanup.
 8. Do not rely on local branch state unless it is required for a documented post-merge follow-up.
 9. If all merge gates pass:
    - merge the PR
    - confirm merged state in GitHub
    - confirm any remaining Definition of Done criteria
-   - set the story status to "Done"
    - report any safe post-merge follow-up needed
 
 Safe post-merge cleanup:

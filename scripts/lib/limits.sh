@@ -6,8 +6,8 @@
 # every script that reads a limit sees the same value:
 #
 #   WIP_LIMIT_IMPLEMENTATION  most stories in "In implementation" (whole number, 1 or more)
-#   READY_BUFFER_MIN          fewest stories kept in "Ready for implementation" (0 or more)
-#   READY_BUFFER_MAX          most stories kept in "Ready for implementation" (MIN or more)
+#   READY_BUFFER_MIN          fewest stories kept in "Ready to implement" (0 or more)
+#   READY_BUFFER_MAX          most stories kept in "Ready to implement" (MIN or more)
 #
 # Source this file and call load_limits. On success it sets the three variables
 # to their decimal values ("08" becomes 8). On a missing, empty or invalid value

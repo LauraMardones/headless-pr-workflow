@@ -313,7 +313,7 @@ def shell_scripts() -> list[str]:
 @pytest.mark.skipif(shutil.which("git") is None or not (REPO_ROOT / ".git").exists(), reason="requires a git checkout")
 def test_every_shell_script_is_checked_out_with_lf():
     scripts = shell_scripts()
-    assert "scripts/hpw" in scripts and "scripts/set-project-status" in scripts
+    assert "scripts/hpw" in scripts and "scripts/merge-gate-summary" in scripts
     out = subprocess.run(["git", "check-attr", "eol", "--", *scripts], cwd=REPO_ROOT, capture_output=True,
                          text=True, check=True).stdout
     not_lf = [line for line in out.splitlines() if not line.endswith(": eol: lf")]

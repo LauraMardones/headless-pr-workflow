@@ -34,7 +34,7 @@ def assert_zero_model_footprint(d, proc):
 @pytest.mark.parametrize("executor", ["claude-code-sonnet", "codex"])
 def test_resume_at_in_merge_starts_no_session(tmp_path, executor):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge", executor=executor)
+    d.add_story(STORY, "Mergeable", executor=executor)
     d.add_pr(PR, STORY)
     proc = d.resume(seq="1")  # a refusing allowance must not matter
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -44,7 +44,7 @@ def test_resume_at_in_merge_starts_no_session(tmp_path, executor):
 
 def test_resume_with_a_merged_pr_runs_only_cleanup(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY, state="closed", merged=True)
     proc = d.resume(seq="1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -56,19 +56,19 @@ def test_codex_review_session_is_followed_by_two_scripts(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "In review", executor="codex")
     d.add_pr(PR, STORY, owned=True)
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
     proc = d.resume(seq="0,1,1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"review {PR}"]
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     assert d.allowance_calls == 1
-    assert d.board_writes[-1:] == [f"{STORY}=Done"]
+    assert d.board_writes == []
     assert d.usage_count == 1  # /review only; the scripts count nothing
 
 
 def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
+    d.add_story(STORY, "Ready to implement", executor="claude-code-sonnet")
     d.add_pr(PR, STORY)
     d.on_session("implement", """jq 'map(.head.sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
 """)
@@ -80,7 +80,7 @@ def test_implement_session_is_followed_by_the_merge_owner_marker_on_the_pr(tmp_p
 
 def test_no_owner_marker_when_implement_pushed_no_new_head(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
+    d.add_story(STORY, "Ready to implement", executor="claude-code-sonnet")
     d.add_pr(PR, STORY)  # the PR already has its head; the fake session pushes nothing
     d.run_issue(STORY, seq="0,0,1,1")
     assert [b for b in d.posted(PR) if "action=merge-owner" in b] == []
@@ -88,22 +88,22 @@ def test_no_owner_marker_when_implement_pushed_no_new_head(tmp_path):
 
 def test_merge_script_failure_posts_the_marker_blocker_and_keeps_in_merge(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
     proc = d.resume()
     assert proc.returncode == 1
     blockers = d.posted(STORY)
     assert len(blockers) == 1 and f"action=merge-attempt pr={PR} head=" in blockers[0]
-    assert d.status(STORY) == "In merge"
+    assert d.status(STORY) == "Mergeable"
     assert d.phases == [f"merge {PR}"]  # cleanup does not run
     assert d.resume().returncode == 0 and d.phases == [f"merge {PR}"]  # one attempt per head
 
 
-def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
+def test_cleanup_script_failure_is_non_fatal_and_writes_no_status(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
-    d.add_story(501, "In merge")
+    d.add_story(STORY, "Mergeable")
+    d.add_story(501, "Mergeable")
     d.add_pr(PR, STORY)
     d.add_pr(PR + 1, 501)
     for story in (STORY, 501):  # the closing summary is on the story: only other steps failed
@@ -111,35 +111,36 @@ def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
     d.fail("cleanup")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"/cleanup failed for #{STORY}; story is Done" in proc.stderr
-    assert d.status(STORY) == "Done" and d.status(501) == "Done"
+    assert f"/cleanup failed for #{STORY}; the PR is merged but cleanup did not complete" in proc.stderr
+    assert d.board_writes == []
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}", f"merge {PR + 1}", f"cleanup 501"]  # the loop continued
     assert d.posted(STORY) == []
 
 
-def test_348_cleanup_that_left_no_evidence_on_the_story_goes_back_to_in_merge(tmp_path):
-    """Neither the closing summary nor its pending copy is on GitHub: nothing else would revisit the story."""
+def test_348_cleanup_that_left_no_evidence_on_the_story_is_rerun_by_the_finish_step(tmp_path):
+    """Neither the closing summary nor its pending copy is on GitHub: the open story with its merged PR is
+    the finish step of the next run (no status is written, #478)."""
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("cleanup")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "In merge"
+    assert d.status(STORY) == "Mergeable"
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     d.fail("cleanup", False)  # the next run reruns cleanup
     assert d.resume().returncode == 0
-    assert d.status(STORY) == "Done" and d.phases[-1] == f"cleanup {STORY}"
+    assert d.board_writes == [] and d.phases[-1] == f"cleanup {STORY}"
 
 
-def test_348_cleanup_without_evidence_gives_up_after_three_runs_and_stays_done(tmp_path):
+def test_348_cleanup_without_evidence_gives_up_after_three_runs(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("cleanup")
     for _ in range(3):
         assert d.resume().returncode == 0
-    assert d.status(STORY) == "Done"
+    assert d.board_writes == []
     assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
     assert len(d.slack_calls) == 1 and [e["event"] for e in d.queued_events] == ["po_blocker"]  # #359, delivered by the #349 drain
 
@@ -147,7 +148,7 @@ def test_348_cleanup_without_evidence_gives_up_after_three_runs_and_stays_done(t
 def test_348_merged_pr_without_any_confirmation_does_not_reach_cleanup(tmp_path):
     """A merge script that failed before writing the confirmation or a pending copy must not be skipped."""
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
     d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
@@ -162,7 +163,7 @@ def test_348_merged_pr_without_any_confirmation_does_not_reach_cleanup(tmp_path)
 def test_348_missing_confirmation_records_no_failure_after_the_give_up_blocker(tmp_path):
     """After the give-up blocker, later runs wait for /unblock instead of starting a new count every poll."""
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge")
     d.on_session("merge", """jq 'map(.state = "closed" | .merged_at = "2026-10-13T09:30:00Z")' "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"\n""")
@@ -182,12 +183,12 @@ def test_348_missing_confirmation_records_no_failure_after_the_give_up_blocker(t
 
     assert len(d.posted(STORY)) == posted and len(d.slack_calls) == slack
     assert len([b for b in d.posted(STORY) if failed in b]) == 3
-    assert d.status(STORY) == "In merge" and not any(p.startswith("cleanup") for p in d.phases)
+    assert d.status(STORY) == "Mergeable" and not any(p.startswith("cleanup") for p in d.phases)
 
 
 def test_dry_run_runs_no_script(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     proc = d.resume("--dry-run")
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -70,8 +70,8 @@ def test_ac1_fix_round_maximum_registers_one_po_blocker(d):
 @needs_tools
 @pytest.mark.parametrize("pr", ["none", "closed-unmerged", "draft"])
 def test_ac2_in_merge_story_without_a_pr_registers_no_po_blocker(d, pr):
-    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; a card "In merge" decides nothing."""
-    d.add_story(STORY, "In merge")
+    """Issue #475 AC 3: the in-merge-without-pr blocker is retired; a card "Mergeable" decides nothing."""
+    d.add_story(STORY, "Mergeable")
     if pr == "closed-unmerged":
         d.add_pr(PR, STORY, state="closed")
     elif pr == "draft":
@@ -85,7 +85,7 @@ def test_ac2_in_merge_story_without_a_pr_registers_no_po_blocker(d, pr):
 
 @needs_tools
 def test_ac2_failed_mid_cycle_command_registers_a_po_blocker(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.fail("implement")
 
     d.run_issue(STORY)
@@ -100,7 +100,7 @@ def test_ac2_failed_mid_cycle_command_registers_a_po_blocker(d):
 
 @needs_tools
 def test_ac2_conflict_cause_travels_in_the_context(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY, draft=True, mergeable=False, mergeable_state="dirty")
 
     d.run_issue(STORY)
@@ -113,7 +113,7 @@ def test_ac2_conflict_cause_travels_in_the_context(d):
 
 
 def in_merge_story_with_failing_merge(d: Dispatcher, exit_code: int, files: str = "") -> None:
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("merge", exit_code=exit_code)
     if files:  # the reason the real script prints on stderr
@@ -132,7 +132,7 @@ def test_decision_document_refusal_posts_the_planned_step_blocker(d):
     assert f"Cause: PR #{PR} changes decision documents (ADR-011): docs/decisions/ADR-020-x.md, specs/1-a/spec.md. " \
            "The PO reviews and merges it personally in GitHub. This is a planned step, not a failure." in body
     assert f"Unblocked when: The PO has reviewed and merged PR #{PR} in GitHub, then replies with a line that is exactly /unblock." in body
-    assert f"State of in-progress work: waiting for the PO to review and merge PR #{PR}; board stays In merge" in body
+    assert f"State of in-progress work: waiting for the PO to review and merge PR #{PR}; the story stays in the merge step" in body
     assert "Type: external" in body and "action=merge-attempt" in body
     assert "failed" not in body.split("Cause:")[0] and "completes successfully" not in body
     events = po_events(d)
@@ -168,7 +168,7 @@ def test_other_merge_failures_keep_the_generic_blocker_text(d):
 
 @needs_tools
 def test_ac2_a_failed_blocker_write_registers_nothing(d):
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.fail_comment_writes(STORY, 5)
 
     d.resume()
@@ -179,11 +179,12 @@ def test_ac2_a_failed_blocker_write_registers_nothing(d):
 @needs_tools
 def test_ac3_conflict_blockers_register_nothing(d):
     d.add_story(501, "In implementation")
-    board = d._read("board.json")  # a recently updated story is active, not stale
+    d.add_pr(901, 501, draft=True)  # its draft PR holds the WIP slot (#478)
+    board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"
     d._write("board.json", board)
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
 
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "1"})
 
@@ -195,7 +196,7 @@ def test_ac3_conflict_blockers_register_nothing(d):
 @needs_tools
 def test_ac7_evidence_give_up_registers_one_po_blocker_and_no_dispatcher_error(tmp_path):
     d = Dispatcher(tmp_path)
-    d.add_story(STORY, "In merge")
+    d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("cleanup")
 

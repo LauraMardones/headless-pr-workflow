@@ -1,10 +1,11 @@
 # Codex review bookkeeping (ADR-006, issue #292)
 #
-# Deterministic follow-up to a Codex review: move the story on the board, post
-# the Session Summary, re-request a missing review within bounds, or post a
-# blocker. On a clean result it also resolves Codex's own finding threads from
-# older heads (issue #331), before the summary and the move. No model is called
-# and no model secret is referenced.
+# Deterministic follow-up to a Codex review: post the Session Summary that hands
+# the story to merge or back to implementation, re-request a missing review
+# within bounds, or post a blocker. On a clean result it also resolves Codex's
+# own finding threads from older heads (issue #331), before the summary. It
+# writes no board status (issue #478): the dispatcher's board writer shows the
+# story's status. No model is called and no model secret is referenced.
 #
 # An event only names the PR. `hpw codex-review-bookkeeping` reads the PR fresh
 # from GitHub and decides from current facts, so a redelivered or late event is
