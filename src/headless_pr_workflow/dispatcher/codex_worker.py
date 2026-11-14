@@ -193,6 +193,7 @@ class IssueState:
     recorded: dict[str, str] | None = None
     not_before: datetime | None = None
     done_head: str | None = None
+    done_command: str | None = None
     marks: list[Mark] = field(default_factory=list)
 
     @property
@@ -275,6 +276,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
     if current.end is not None:
         if current.end.fields["result"] == "done":
             state.done_head = current.end.get("head")
+            state.done_command = current.claim.fields.get("command")
         else:
             until = _time(current.end.get("until") or "")
             ended = _time(current.end.created_at)
@@ -691,7 +693,9 @@ def claim(
             continue
         except GatewayError as exc:
             return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
-        if st.done_head and resume.head and resume.head.lower() == st.done_head.lower():
+        # A finished refinement is not an implementation handoff: only the same command's done head suppresses.
+        if (st.done_head and st.done_command == item["command"] and resume.head
+                and resume.head.lower() == st.done_head.lower()):
             skipped.append({"issue": issue, "reason": "handed-off-on-head"})
             continue
 

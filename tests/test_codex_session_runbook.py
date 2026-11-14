@@ -135,3 +135,22 @@ def test_the_api_key_refusal_still_applies_to_a_refine_claim(gh, settings):  # n
 ])  # fmt: skip
 def test_the_docs_describe_the_runbook(needle):
     assert needle in DOC
+
+
+# ── a finished refinement is not an implementation handoff ────────────────────
+
+
+def test_a_finished_refinement_does_not_suppress_the_first_implementation_claim(gh, settings):  # noqa: F811
+    gh.story(10, "Backlog", "type:story", "executor:codex")
+    first = claim(gh, REPO, owner="po", run="r1", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
+                  settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
+    assert first.fields["invocation"]["command"] == "refine"
+    branch = first.fields["invocation"]["branch_prefix"] + "refine"
+    gh.branches[branch] = H1  # the refinement session published its branch at the main SHA
+    finish(gh, REPO, 10, 1, "r1", result="done", reason="refined", head=H1, until=None, config=CONFIG,
+           settings=settings)  # fmt: skip
+    gh.cards.clear()
+    gh.story(10, "Ready to implement", "type:story", "executor:codex")
+    second = claim(gh, REPO, owner="po", run="r2", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
+                   settings=settings, env={})  # fmt: skip
+    assert second.result == "claimed" and second.fields["invocation"]["command"] == "implement"
