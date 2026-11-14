@@ -401,7 +401,8 @@ def test_a_replay_and_a_new_run_recovering_one_expired_attempt_give_one_owner(gh
     gh.before_post = lambda: seen.setdefault("b", do_claim(gh, settings, run="run-b", at=gh.at))
     replay = do_claim(gh, settings, at=gh.at)
     assert (seen["b"].result, replay.result) == ("claimed", "lost") and "invocation" not in replay.fields
-    assert [(m.fields["attempt"], m.fields["run"]) for m in claims(gh)] == [("1", "run-a"), ("2", "run-b"), ("2", "run-a")]
+    # The replay reads the other run's recovery back and posts no losing claim.
+    assert [(m.fields["attempt"], m.fields["run"]) for m in claims(gh)] == [("1", "run-a"), ("2", "run-b")]
 
 
 def leave_queue(gh: WorkerGitHub, number: int, status: str, state: str) -> None:
@@ -653,6 +654,77 @@ def test_a_record_whose_read_back_fails_is_unreadable_not_written(gh, settings, 
         result = finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H1, settings=settings, env={},
                         config=CONFIG, now=lambda: gh.at)
     assert result.result == "unreadable" and result.exit_code == 3 and len(reads) == 2
+
+
+@pytest.mark.parametrize("end, reason", [
+    (dict(result="wait", reason="usage-limit", until="2026-11-13T22:00:00Z"), "retry-later"),
+    (dict(result="done", reason="handoff", head=H1), "handed-off-on-head"),
+])
+def test_an_owner_end_that_lands_before_the_interruption_is_honoured(gh, settings, end, reason):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.branches[BRANCH] = H1
+    gh.at = T0 + timedelta(hours=5)
+    seen = {}
+    # The recovering run read attempt 1 as expired; the owner's own end reaches GitHub before its interruption.
+    gh.before_post = lambda: seen.setdefault("end", finish(gh, REPO, 5, 1, "r1", settings=settings, env={},
+                                                            config=CONFIG, now=lambda: gh.at, **end))
+    recovery = do_claim(gh, settings, run="r2", at=gh.at)
+    assert seen["end"].result == "written"
+    assert recovery.result == "waiting" and "invocation" not in recovery.fields
+    assert recovery.fields["skipped"][0]["reason"] == reason
+    assert [m.fields["run"] for m in claims(gh)] == ["r1"]
+
+
+def test_another_runs_recovery_that_lands_first_holds_the_item(gh, settings):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.at = T0 + timedelta(hours=5)
+    seen = {}
+    gh.before_post = lambda: seen.setdefault("b", do_claim(gh, settings, run="r2", at=gh.at))
+    late = do_claim(gh, settings, run="r3", at=gh.at)
+    assert seen["b"].result == "claimed" and seen["b"].fields["attempt"] == 2
+    assert late.result == "waiting" and late.fields["skipped"] == [{"issue": 5, "reason": "claimed"}]
+    assert [(m.fields["attempt"], m.fields["run"]) for m in claims(gh)] == [("1", "r1"), ("2", "r2")]
+
+
+# Every pair of writes that can race on one expired attempt: the outer operation reads first, the inner one lands
+# between that read and the outer write. Whatever the order, at most one run may believe it holds a live attempt,
+# and that run is the one GitHub shows; an owner's end that reports written is the end that counts.
+RACE_OPS = {
+    "recover-r2": lambda gh, s: do_claim(gh, s, run="r2", at=gh.at),
+    "recover-r3": lambda gh, s: do_claim(gh, s, run="r3", at=gh.at),
+    "progress": lambda gh, s: owner_progress(gh, s),
+    "finish-wait": lambda gh, s: finish(gh, REPO, 5, 1, "r1", result="wait", reason="usage-limit",
+                                        until="2026-11-14T03:00:00Z", settings=s, env={}, config=CONFIG,
+                                        now=lambda: gh.at),
+    "finish-done": lambda gh, s: finish(gh, REPO, 5, 1, "r1", result="done", reason="handoff", head=H1, settings=s,
+                                        env={}, config=CONFIG, now=lambda: gh.at),
+}
+RACES = [(outer, inner) for outer in RACE_OPS for inner in RACE_OPS
+         if outer != inner and not (outer.startswith(("progress", "finish")) and inner.startswith(("progress", "finish")))]
+
+
+@pytest.mark.parametrize("outer, inner", RACES)
+def test_every_write_order_on_an_expired_attempt_leaves_one_owner(gh, settings, outer, inner):
+    gh.story(5)
+    do_claim(gh, settings, run="r1")
+    gh.branches[BRANCH] = H1
+    gh.at = T0 + timedelta(hours=5)
+    results = {}
+    gh.before_post = lambda: results.setdefault(inner, RACE_OPS[inner](gh, settings))
+    results[outer] = RACE_OPS[outer](gh, settings)
+    final = codex_worker.derive_state(5, gh.marks(5), now=gh.at, config=CONFIG)
+    live = {"r1"} if any(results.get(op) and results[op].result == "written" for op in ("progress",)) else set()
+    live |= {r.fields["run"] for op, r in results.items() if op.startswith("recover") and r.result == "claimed"}
+    assert len(live) <= 1, results
+    if live:
+        assert final.attempt.run == live.pop() and final.attempt.end is None
+    for op in ("finish-wait", "finish-done"):
+        if op in results and results[op].result == "written":
+            ended = [a for a in [final.attempt] if a and a.number == 1]
+            counted = ended[0].end if ended else None
+            assert counted is not None and not counted.get("by"), results
 
 
 def test_a_replay_whose_own_session_renewed_the_lease_recovers_after_a_later_expiry(gh, settings):

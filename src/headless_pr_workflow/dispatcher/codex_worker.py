@@ -511,6 +511,7 @@ def claim(
     own = [(m.order, n) for n, st in states.items() for m in st.marks
            if m.action == "claim" and m.fields.get("run") == run]  # fmt: skip
     candidates = queue
+    replaying = False
     if own:
         issue_no = max(own)[1]
         st = states[issue_no]
@@ -532,7 +533,7 @@ def claim(
         if st.state == "expired":
             # The lease ran out, so a new run may already treat the attempt as interrupted: the replay takes the
             # claim rule's recovery path for this item only and starts only on a newly won attempt.
-            candidates = [item]
+            candidates, replaying = [item], True
         else:
             # A replay starts the session too, so it re-reads the remote resume facts and asks the hook again, as
             # a new claim does; a refusal keeps the claim.
@@ -556,42 +557,59 @@ def claim(
     skipped: list[dict[str, Any]] = []
     for item in candidates:
         issue, st = item["issue"], states[item["issue"]]
-        if st.state in ("held", "conflict"):
-            entry = {"issue": issue, "reason": st.reason or st.state}
-            if st.state == "conflict":
-                entry["evidence"] = _wait(gateway, issue, st.next_attempt, "conflicting-claim", settings, env, dry_run)
-            skipped.append(entry)
-            continue
-        if st.state == "expired":
-            assert st.attempt is not None
-            # Not ``once``: an interruption that an owner record voided must not block a later, valid one.
-            ended = write_marker(
-                gateway, issue, "codex-end",
-                _end_fields(issue, st.attempt.number, st.attempt.run, "wait", "interrupted", None, None, by=run),
-                body=(f"Codex worker: attempt {st.attempt.number} on #{issue} (run `{st.attempt.run}`) recorded no "
-                      f"progress for {int(config.lease.total_seconds() // 60)} minutes; run `{run}` treats it as "
-                      "interrupted."),
-                dry_run=dry_run, settings=settings, env=env,
-            )  # fmt: skip
-            if ended.result not in ("written", "dry-run"):
-                return WorkerResult("claim", "failed", error=f"record interruption: {ended.error}",
-                                    fields={**base, "issue": issue, "skipped": skipped})  # fmt: skip
-            if ended.result == "written":
-                # The owner may have recorded progress between this run's read and its write; then the interruption
-                # does not count (GitHub's timestamps decide), the owner keeps the attempt and nothing starts here.
+        entry: dict[str, Any] | None = None
+        recovered = False
+        # The rules run on what GitHub shows. After this run records an interruption they run once more on the
+        # read-back, because any other write may have landed between the first read and the interruption: the owner's
+        # progress (the interruption does not count), its own end (its until or its handed-off head applies), or
+        # another run's recovery (that run's attempt holds). Only this run's own counted interruption skips the wait.
+        for _pass in range(2):
+            if st.state in ("held", "conflict"):
+                entry = {"issue": issue, "reason": st.reason or st.state}
+                if st.state == "conflict":
+                    entry["evidence"] = _wait(gateway, issue, st.next_attempt, "conflicting-claim", settings, env,
+                                              dry_run)  # fmt: skip
+                break
+            if st.state == "expired":
+                assert st.attempt is not None
+                if recovered:
+                    entry = {"issue": issue, "reason": "claimed"}
+                    break
+                recovered = True
+                number_k = st.attempt.number
+                # Not ``once``: an interruption that an owner record voided must not block a later, valid one.
+                ended = write_marker(
+                    gateway, issue, "codex-end",
+                    _end_fields(issue, number_k, st.attempt.run, "wait", "interrupted", None, None, by=run),
+                    body=(f"Codex worker: attempt {number_k} on #{issue} (run `{st.attempt.run}`) recorded no "
+                          f"progress for {int(config.lease.total_seconds() // 60)} minutes; run `{run}` treats it as "
+                          "interrupted."),
+                    dry_run=dry_run, settings=settings, env=env,
+                )  # fmt: skip
+                if ended.result not in ("written", "dry-run"):
+                    return WorkerResult("claim", "failed", error=f"record interruption: {ended.error}",
+                                        fields={**base, "issue": issue, "skipped": skipped})  # fmt: skip
+                if ended.result == "dry-run":
+                    break
                 try:
                     after = derive_state(issue, _own_marks(gateway, issue, login), now=clock(), config=config)
                 except GatewayError as exc:
                     return WorkerResult("claim", "unreadable", error=f"read back interruption: {exc}",
                                         fields={**base, "issue": issue, "skipped": skipped})  # fmt: skip
-                if after.state == "conflict":
-                    skipped.append({"issue": issue, "reason": after.reason})
-                    continue
-                if after.attempt is not None and after.attempt.number == st.attempt.number and after.attempt.end is None:
-                    skipped.append({"issue": issue, "reason": "lease-held"})
-                    continue
-        elif st.not_before is not None and clock() < st.not_before:
-            skipped.append({"issue": issue, "reason": "retry-later", "not_before": _iso(st.not_before)})
+                current = after.attempt
+                same = after.state != "conflict" and current is not None and current.number == number_k
+                if same and current.end is None:
+                    entry = {"issue": issue, "reason": "lease-held"}
+                    break
+                st = after
+                if same and current.end.get("by") == run and current.end.get("reason") == "interrupted":
+                    break  # this run's own interruption counted: continue at once, with no retry wait
+                continue
+            if st.not_before is not None and clock() < st.not_before:
+                entry = {"issue": issue, "reason": "retry-later", "not_before": _iso(st.not_before)}
+            break
+        if entry is not None:
+            skipped.append(entry)
             continue
         try:
             resume = resolve_resume(gateway, issue, st.recorded)
@@ -640,6 +658,10 @@ def claim(
             return WorkerResult("claim", "claimed", fields={**fields_out, "invocation": call})
         return WorkerResult("claim", "lost", fields={**fields_out, "reason": after.reason or "another-run-owns-the-attempt"})
 
+    if replaying and skipped and skipped[-1]["reason"] == "claimed":
+        # Another run recovered the replay's expired attempt first and holds the next one.
+        return WorkerResult("claim", "lost", fields={**base, "issue": skipped[-1]["issue"],
+                                                     "reason": "another-run-owns-the-attempt", "skipped": skipped})
     return WorkerResult("claim", "waiting" if skipped else "idle", fields={**base, "skipped": skipped})
 
 
