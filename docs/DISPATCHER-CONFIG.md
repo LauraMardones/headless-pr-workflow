@@ -80,6 +80,8 @@ The dispatcher starts new work from the scheduler's decision, never from a board
 scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n>[,<n>...] --in-flight <n>[,<n>...] [--exclude <n>[,<n>...]] [--dry-run]
 ```
 
+**Codex-assigned stories.** The Actions scheduler never chooses story refinement for an `executor:codex` story, task or bug (`codex-assigned`, a `[SCHEDULER] skip` line): the [local Codex worker](#local-codex-worker) refines it. Feature and Epic refinement stay here.
+
 **Order of actions in a run** (#460 → Decisions "Order of actions in a run"). One model session at a time:
 
 1. work in flight, found from pull request facts (the resume pass: the merge step, fix rounds, pending hand-offs, the review step, conflict rounds; see [Work in flight from PR facts](#work-in-flight-from-pr-facts));
@@ -832,7 +834,10 @@ The queue is every open issue on the board with exactly one `executor:` label, `
 | Board status | Command | Order |
 |---|---|---|
 | `In implementation` | `implement` (continue, or the fix round of #523) | first |
+| due for story refinement (any other status) | `refine` | then |
 | `Ready to implement` | `implement` | then |
+
+An `executor:codex` story, task or bug is *due for story refinement* when the scheduler's rules for story refinement choose it (see [Scheduler: new work from GitHub facts](#scheduler-new-work-from-github-facts): parent Epic with a merged spec and a current record, refined parent Feature, ready buffer open, no open decision blocker). `claim` reads the same facts and limits as the Actions scheduler (`scheduler.codex_refine_due`; `WIP_LIMIT_IMPLEMENTATION`, `READY_BUFFER_MIN` and `READY_BUFFER_MAX` must be set, or no `refine` entry is queued and the log says why); stories with the board status `In implementation` count for the WIP limit. Facts that cannot be read make `claim` `unreadable`. Feature and Epic refinement stay with Claude on the Actions path. The Actions scheduler never chooses an `executor:codex` story, task or bug for refinement (`[SCHEDULER] skip #<n> codex-assigned`).
 
 Within a status the lowest `prio:P<n>` comes first, then the lowest issue number. One run claims at most one item.
 
@@ -857,6 +862,18 @@ The claim rule, for each item:
 7. The run posts its `codex-claim` for the next attempt number, reads the markers back, and starts only when its own claim owns the attempt (`claimed`, exit `0`). Otherwise it reports `lost` (exit `1`); its claim stays on the issue as a losing claim that the rule ignores.
 
 A replay of a run (the same `CODEX_WORKER_RUN_ID`, or `--run`) finds its newest own claim first and claims nothing new. It looks for that claim on every board issue with `executor:codex`, whatever its status or state, because its session may have moved the item out of the queue (for example to `In review`). When the claimed item is no longer queued and its attempt is still open, the replay starts nothing and claims no other item (`waiting`, reason `not-queued`). A run with no name gets a fresh one and reads only the queued items. Otherwise the replay reports `continued` with the same attempt while it owns the open attempt within the lease, the remote resume facts still check out and the eligibility hook still answers eligible (a replay starts the session too, so it resolves the branch, PR and current head again exactly as a new claim does, and so resumes a branch the session pushed before it could record progress; then it asks the hook again; a resume reason such as `pr-closed` or a hook refusal keeps the claim, posts one `codex-wait` for the claimed attempt with that reason and reports `waiting`, and an unreadable read reports `unreadable`; the lease may run out during these reads and the hook, so the replay then posts `codex-renew` for the attempt, reads the markers back and continues only when it still owns the open attempt: an interruption that landed before the renewal ends the attempt and the replay reports `lost`, and a renewal that landed first keeps the attempt, as any record within the lease does), `lost` when another run owns it, `ended` after its `codex-end`. After the lease a replay does not continue the attempt, because a new run may already treat it as interrupted: it takes steps 3 to 7 for that item only, posting `codex-end … reason=interrupted` for its own attempt and claiming the next attempt under the same run, so it starts only on a newly won attempt (`claimed`), and reports `lost` when another run recovered the item first. A claim write whose response was lost is found on the re-read before any retry (Block 1), so it is never posted twice and never becomes a new attempt; `progress` and `finish` post their marker once, so a retried call reports `already`. Both read the markers back after the write: when a run's interruption landed before their record, the attempt is no longer the session's, and they report `not-owner` so the session stops.
+
+### Session runbook
+
+What the scheduled Codex task's session does with a `claim` result (`claimed` or `continued`; issue #535). The rules of each command stay in its command file; the runbook only says how to start it and how to record progress and the end. A Codex session leaves the same evidence on GitHub as a Claude session.
+
+1. **Fail closed first.** The session needs `gh` 2.50 or later with GraphQL access (`gh auth status`, and a GraphQL read such as `gh api graphql -f query='{viewer{login}}'`). When it is missing, or the session cannot read a required check (`refine-check`, `ac-summary`, the `pytest` check of the PR head), it runs `finish --result wait --reason gh-graphql-missing` (or `required-check-unreadable`) and reports no `Refined`, `Ready for implementation` or Ready-for-review state. `refine-check`, `set-project-status`, `ac-summary` and the required `pytest` check are never skipped. No `OPENAI_API_KEY` or `CODEX_API_KEY` is read or needed; `claim` refuses while one is set.
+2. **Worktree and branch.** Work in a worktree (`docs/WORKTREE-MODEL.md`) on a branch whose name starts with `invocation.branch_prefix`. With `invocation.resume` set, continue on `resume.branch` from `resume.head` and on `resume.pr`; open no second branch or PR.
+3. **`command: refine`.** Follow `.claude/commands/refine.md` with the issue number. The refined body, the board write, the passing `refine-check` run and the `## Session Summary` comment are the evidence. When it ends done, run `finish --result done --head <sha>` with the current `main` head the refinement used; a decision blocker ends with `finish --result wait --reason decision-blocker`.
+4. **`command: implement`.** Follow `.claude/commands/implement.md`. After each push run `invocation.progress` with the branch, the full head SHA and the PR. Mark the PR Ready for review only when the required `pytest` check is green on the current head, with the implementation handoff and Session Summary. An `executor:codex` story gets no Codex review trigger comment (ADR-006); its paired Claude `/review` session reviews the head. End with `finish --result done --head <full-sha>` naming the handed-off head.
+5. **Any other stop** ends with `finish --result wait --reason <word>` (`usage-limit` with `--until`, a blocker word, or the reasons in step 1).
+
+Fix rounds after blocking findings and Claude's review of the Codex PR are issue #536.
 
 ### Recovery
 

@@ -120,7 +120,8 @@ def settings() -> Settings:
 def _env(monkeypatch):
     for name in ("CODEX_BOOKKEEPING_LOGIN", "DISPATCHER_LOGIN", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_WORKER_ID",
                  "CODEX_WORKER_RUN_ID", "CODEX_WORKER_ELIGIBILITY_COMMAND", "CODEX_WORKER_LEASE_MINUTES",
-                 "CODEX_WORKER_RETRY_MINUTES"):
+                 "CODEX_WORKER_RETRY_MINUTES", "WIP_LIMIT_IMPLEMENTATION", "READY_BUFFER_MIN",
+                 "READY_BUFFER_MAX"):
         monkeypatch.delenv(name, raising=False)
 
 

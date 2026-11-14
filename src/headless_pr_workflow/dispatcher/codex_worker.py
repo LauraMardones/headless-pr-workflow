@@ -64,6 +64,7 @@ _PRIO = re.compile(r"^prio:P(\d+)$")
 _CLOSES = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{n}\b"
 
 Eligibility = Callable[[str, int, str], "tuple[bool, str]"]
+RefineDue = Callable[[], "list[int]"]  # the executor:codex stories due for refinement (#535); raises GatewayError
 
 
 @dataclass
@@ -299,10 +300,10 @@ def _prio(labels: tuple[str, ...]) -> int:
     return min(ranks) if ranks else 1_000_000
 
 
-def read_queue(gateway: Gateway) -> list[dict[str, Any]]:
+def read_queue(gateway: Gateway, refine_due: RefineDue | None = None) -> list[dict[str, Any]]:
     """The eligible ``executor:codex`` items, in claim order; raises ``GatewayError``."""
 
-    return _queue(gateway.list_board_items().cards)
+    return _queue(gateway.list_board_items().cards, refine_due() if refine_due else None)
 
 
 def _codex_issues(cards: list[Any]) -> list[int]:
@@ -311,13 +312,22 @@ def _codex_issues(cards: list[Any]) -> list[int]:
     return sorted({card.number for card in cards if card.number is not None and CODEX_EXECUTOR_LABEL in card.labels})
 
 
-def _queue(cards: list[Any]) -> list[dict[str, Any]]:
+def _queue(cards: list[Any], refine_due: list[int] | None = None) -> list[dict[str, Any]]:
+    """Implementation items by board status, and ``refine`` items for the stories ``refine_due`` names (#535)."""
+
     queue = []
+    due = set(refine_due or [])
     for card in cards:
         executors = [label for label in card.labels if label.startswith("executor:")]
         if card.number is None or card.state != "open" or executors != [CODEX_EXECUTOR_LABEL]:
             continue
-        if card.status not in COMMAND_BY_STATUS or not any(label in TYPE_LABELS for label in card.labels):
+        if not any(label in TYPE_LABELS for label in card.labels):
+            continue
+        if card.number in due and card.status not in COMMAND_BY_STATUS:
+            queue.append({"issue": card.number, "status": card.status, "command": "refine",
+                          "rank": (0.5, _prio(card.labels), card.number)})  # fmt: skip
+            continue
+        if card.status not in COMMAND_BY_STATUS:
             continue
         queue.append({"issue": card.number, "status": card.status, "command": COMMAND_BY_STATUS[card.status],
                       "rank": (STATUS_ORDER.index(card.status), _prio(card.labels), card.number)})  # fmt: skip
@@ -403,6 +413,36 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
     return Resume(pr, branch, head)
 
 
+# ── refine queue entry (#535) ─────────────────────────────────────────────────
+
+
+def scheduler_refine_due(gateway: Gateway, repo: str, env: Mapping[str, str]) -> RefineDue:
+    """The ``refine`` queue source: the scheduler's story refinement rules, for ``executor:codex`` stories only.
+
+    It reads the facts and the scheduler limits like the Actions scheduler. Stories on the board with status
+    ``In implementation`` count for the WIP limit. Limits that cannot be used queue no refinement (fail closed);
+    the implementation queue is not affected.
+    """
+
+    from .facts import read_facts
+    from .scheduler import InvalidLimits, codex_refine_due, load_limits
+
+    def due() -> list[int]:
+        try:
+            limits = load_limits(env)
+        except InvalidLimits as exc:
+            log(f"[CODEX-WORKER] no refine entries: scheduler limits: {exc}")
+            return []
+        read = read_facts(gateway, repo, env=env)
+        if read.result != "read":
+            raise GatewayError("read refinement facts", read.error or "unreadable")
+        implementing = [c.number for c in gateway.list_board_items().cards
+                        if c.number is not None and c.state == "open" and c.status == "In implementation"]  # fmt: skip
+        return codex_refine_due(read.to_dict(), in_implementation=implementing, limits=limits)
+
+    return due
+
+
 # ── eligibility hook (#524) ───────────────────────────────────────────────────
 
 
@@ -485,7 +525,7 @@ def _end_fields(issue: int, attempt: int, run: str, result: str, reason: str, he
 def claim(
     gateway: Gateway, repo: str, *, owner: str, run: str | None = None, eligibility: Eligibility,
     now: Callable[[], datetime] | None = None, config: Config | None = None, settings: Settings | None = None,
-    env: Mapping[str, str] | None = None, dry_run: bool = False,
+    env: Mapping[str, str] | None = None, dry_run: bool = False, refine_due: RefineDue | None = None,
 ) -> WorkerResult:
     """Claim at most one queued item and return its invocation (exit 0), or start nothing."""
 
@@ -505,7 +545,7 @@ def claim(
     try:
         login = resolve_login(gateway, "dispatcher", env)
         cards = gateway.list_board_items().cards
-        queue = _queue(cards)
+        queue = _queue(cards, refine_due() if refine_due else None)
         # A named run also reads every other executor:codex issue: its claimed item may have left the queue (for
         # example to In review, or closed), and a replay must find that claim rather than claim a second item.
         numbers = _codex_issues(cards) if named else [item["issue"] for item in queue]
@@ -729,7 +769,7 @@ def _still_owned(gateway: Gateway, op: str, issue: int, attempt: int, run: str, 
 def record_progress(
     gateway: Gateway, repo: str, issue: int, attempt: int, run: str, *, branch: str, head: str, pr: int | None = None,
     now: Callable[[], datetime] | None = None, config: Config | None = None, settings: Settings | None = None,
-    env: Mapping[str, str] | None = None, dry_run: bool = False,
+    env: Mapping[str, str] | None = None, dry_run: bool = False, refine_due: RefineDue | None = None,
 ) -> WorkerResult:
     """Record the owning session's pushed branch and head; a replay of the same record writes nothing."""
 
