@@ -104,6 +104,18 @@ Use fresh GitHub data, not assistant memory or local notes.
   map delivery to the Epic goal and every Epic criterion.
 - Do not treat a closed label or narrative summary by itself as proof that an
   Epic criterion passed.
+- Read the open catch-all issues found under the Epic: search open issues whose
+  body has `Found under: #$ARGUMENTS` (for example
+  `gh search issues --repo LauraMardones/headless-pr-workflow --state open "\"Found under: #$ARGUMENTS\" in:body"`),
+  then keep only those whose body has a line `Found under: #$ARGUMENTS` with
+  exactly that number and a `Feature group:` equal to `CATCH_ALL_FEATURE` in
+  `src/headless_pr_workflow/catch_all.py` (`listed_catch_all_issues` in the
+  model). Never write that number in this file. A closed issue, another Epic
+  number (`#50` or `#5040` for `#504`) or another `Feature group:` (a Moved
+  issue) is not listed. A failed read, or a search that reports incomplete
+  results, is a blocker (`VerificationBlocked`); name the failed read and post
+  no summary. A listed issue is not a child, is not part of the inventory and
+  never blocks PASS. A Feature target reads no catch-all issues.
 
 ## 5. Construct the criterion evidence matrix
 
@@ -242,6 +254,15 @@ post exactly one issue comment in this structure:
 | Child | Type | State | Merged PR evidence |
 |---|---|---|---|
 | ... | ... | ... | ... |
+
+### Catch-all issues found under this Epic
+(Epic only; a Feature's summary has no such section. Placed here, after the
+inventory.)
+| Issue | Title | Origin | PO choice |
+|---|---|---|---|
+| #<n> | <title> | <Origin link> | new spec (/spec) or close the issue |
+
+With no listed issue the section holds the line `none` under the heading.
 
 ### Criterion evidence matrix
 | # | Criterion | Result | Evidence |
@@ -393,6 +414,7 @@ path, post:
 - PO confirmation: `<author>` at `<created timestamp>` — <immutable comment URL>
 - Checks: <checks recorded in the technical summary>
 - PO hands-on checks: E<n>, … confirmed by the PO's reply
+- Catch-all issues listed: #<a>, #<b>, or `none` (Epic only)
 - Blockers: none
 - Close result: closed
 ```
@@ -400,6 +422,11 @@ path, post:
 Include the `- PO hands-on checks:` line only when the technical summary had
 `PO CHECK` rows; it names those criteria, which the PO's `yes` confirms. The
 reply rules are unchanged.
+
+Include the `- Catch-all issues listed:` line only for an Epic. It carries the
+issue numbers from the `### Catch-all issues found under this Epic` section of
+the technical summary it consumes (`TechnicalSummary.catch_all_issues`), or
+`none`; it is never re-read from GitHub.
 
 The evidence records the PO's comment; it must not claim that the verifier made
 the product judgment. Return a concise human-readable result with target URL,
