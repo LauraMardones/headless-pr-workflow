@@ -51,7 +51,7 @@ def test_review_start_runs_the_session_then_the_scripts(r):
     assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
     # the only comment is the per-head record of the completed /review
     assert [c for c in r.posted(ISSUE) if "action=review-attempt" not in c] == []
-    assert r.status(ISSUE) == "Done"
+    assert r.board_writes == []
 
 
 def test_claude_story_checks_allowance_once_then_hands_off(tmp_path):
@@ -98,7 +98,7 @@ def test_merge_and_cleanup_never_consult_the_allowance(r):
     assert r.phases == [f"merge {PR}", f"cleanup {ISSUE}"]
     # the only comment is the per-head record of the completed /review
     assert [c for c in r.posted(ISSUE) if "action=review-attempt" not in c] == []
-    assert r.status(ISSUE) == "Done"
+    assert r.board_writes == []
 
 
 def test_error_before_implement_fails_without_slack(d):

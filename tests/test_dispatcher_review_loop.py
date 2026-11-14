@@ -89,8 +89,8 @@ def test_ac1_claude_story_is_handed_to_the_review_loop(d, tier):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
+    assert d.board_writes == []
     assert d.posted(STORY) == [] and [b for b in d.posted(PR) if "action=merge-owner" not in b] == []
     assert f"[HANDOFF] #{STORY}: handed to the Codex review loop (Codex Cloud) on PR #{PR};" in proc.stdout
     assert d.usage_count == 1  # only the /implement session counts
@@ -122,7 +122,7 @@ def test_ac2_no_write_when_the_story_already_moved_on(d, status_after_implement)
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.board_writes == [f"{STORY}=In implementation"]  # E1's own write only
+    assert d.board_writes == []  # the dispatcher writes no status (#478)
     assert d.status(STORY) == status_after_implement
     assert d.sessions == [f"implement {STORY}"]
 
@@ -141,8 +141,7 @@ def test_ac2_no_write_while_a_fix_round_is_still_due(d):
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 1
-    assert d.board_writes == [f"{STORY}=In implementation"]
-    assert d.status(STORY) == "In implementation"
+    assert d.board_writes == []
     assert len(d.posted(STORY)) == 1 and f"head={HEAD}" in d.posted(STORY)[0]
 
 
@@ -175,8 +174,7 @@ fi
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation"]
-    assert d.status(STORY) == "In implementation"
+    assert d.board_writes == []
     assert d.posted(STORY) == []
     assert "the next run starts the fix round" in proc.stdout
 
@@ -185,107 +183,66 @@ fi
     assert again.returncode == 0, again.stdout + again.stderr
     assert f"[RESUME] #{STORY}: fix round 1 of 3, /implement on PR #{PR}" in again.stdout
     assert d.sessions == [f"implement {STORY}"] * 2
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.board_writes == []
     assert d.posted(STORY) == []
 
 
 @needs_tools
 @pytest.mark.parametrize("head_changes", [False, True])
-def test_ac2_failed_in_review_write_is_retried_on_a_later_run(d, head_changes):
-    """The bookkeeping job acts only on "In review": a failed write must not end the hand-off for good."""
-    d.add_story(STORY, "Ready to implement")
-    d.add_pr(PR, STORY)
-    d.fail_status_write("In review")
+def test_ac2_pending_hand_off_from_an_earlier_run_is_completed_once_without_a_write(d, head_changes):
+    """A hand-off-pending marker left before #478 (a failed "In review" write) gets its done marker once."""
+    d.add_story(STORY, "In implementation")
+    d.add_pr(PR, STORY, head=NEW_HEAD if head_changes else HEAD)
+    owned(d, NEW_HEAD if head_changes else HEAD)
+    d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->")
 
-    first = d.run_issue(STORY)
+    first = d.resume()
 
-    assert first.returncode == 1
-    assert "[HANDOFF]" not in first.stdout
-    assert d.sessions == [f"implement {STORY}"]
-    assert d.status(STORY) == "In implementation"
-    comments = d.posted(STORY)
-    assert len(comments) == 1 and f"action=hand-off-pending pr={PR} head={HEAD}" in comments[0]
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in first.stdout
+    assert d.sessions == [] and d.board_writes == []
+    posted = d.posted(STORY)
+    assert len(posted) == 1 and f"action=hand-off-done pr={PR}" in posted[0]
 
-    # Still failing: no session, no second comment.
+    # Completed once: a later run posts nothing more.
     second = d.resume()
     assert second.returncode == 0, second.stdout + second.stderr
-    assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
-    assert d.status(STORY) == "In implementation"
-
-    # The write works again, and a commit landed meanwhile: a later run still completes the hand-off.
-    d.fail_status_write("In review", False)
-    if head_changes:
-        d.add_pr(PR, STORY, head=NEW_HEAD)
-    third = d.resume()
-    assert third.returncode == 0, third.stdout + third.stderr
-    assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in third.stdout
-    assert d.status(STORY) == "In review"
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
-    assert d.sessions == [f"implement {STORY}"]
-    assert len(d.posted(STORY)) == 2 and f"action=hand-off-done pr={PR}" in d.posted(STORY)[1]
-
-    # Completed once: a story that comes back to "In implementation" is not moved again.
-    owned(d, NEW_HEAD if head_changes else HEAD)  # so only the hand-off rule is checked here
-    d.set_status(STORY, "In implementation")
-    fourth = d.resume()
-    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
-    assert d.status(STORY) == "In implementation"
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
-    assert len(d.posted(STORY)) == 2
+    assert "completing the hand-off" not in second.stdout
+    assert d.sessions == [] and d.board_writes == [] and len(d.posted(STORY)) == 1
 
 
 @needs_tools
-@pytest.mark.parametrize("failure", ["transient", "persistent"])
-def test_failed_first_status_write_does_not_start_the_story_twice(d, failure):
-    """The dispatcher's "In implementation" write fails and the session sets no status."""
+def test_a_handed_off_story_is_not_started_twice(d):
+    """No status write keeps the story from a second /implement: its non-draft PR does (#475, #478)."""
     d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
-    d.fail_status_write("In implementation")
 
     first = d.run_issue(STORY)
 
-    assert first.returncode == 1
-    assert "[HANDOFF]" not in first.stdout
-    assert d.sessions == [f"implement {STORY}"]  # not selected again as the next ready story
-    assert d.status(STORY) == "Ready to implement"
-    comments = d.posted(STORY)
-    assert len(comments) == 1 and f"action=hand-off-pending pr={PR} head={HEAD}" in comments[0]
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert f"[HANDOFF] #{STORY}" in first.stdout
+    assert d.sessions == [f"implement {STORY}"] and d.board_writes == []
+    assert d.posted(STORY) == []  # no hand-off-pending marker
 
-    if failure == "persistent":
-        d.fail_status_write("In review")
-        second = d.run_issue(STORY)
-        assert second.returncode == 0, second.stdout + second.stderr
-        assert d.sessions == [f"implement {STORY}"] and len(d.posted(STORY)) == 1
-        assert d.status(STORY) == "Ready to implement"
-        d.fail_status_write("In review", False)
-
-    # The board works again. The poll still reports the story as ready: no second session.
-    d.fail_status_write("In implementation", False)
-    later = d.run_issue(STORY)
+    later = d.resume()
     assert later.returncode == 0, later.stdout + later.stderr
-    assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in later.stdout
-    assert d.sessions == [f"implement {STORY}"]
-    assert d.status(STORY) == "In review"
-    assert d.board_writes == [f"{STORY}=In review"]
-    assert len(d.posted(STORY)) == 2 and f"action=hand-off-done pr={PR}" in d.posted(STORY)[1]
+    assert d.sessions == [f"implement {STORY}"] and d.board_writes == []
 
 
 @needs_tools
-def test_pending_hand_off_that_still_fails_does_not_block_other_ready_stories(d):
-    """The pending story is kept out of the next-story search; another ready story still runs."""
+def test_a_pending_hand_off_does_not_block_other_ready_stories(d):
+    """The pending story's hand-off is completed; another ready story still runs."""
     d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.add_comment(STORY, f"<!-- hpw:dispatcher action=hand-off-pending pr={PR} head={HEAD} -->")
-    d.fail_status_write("In review")
-    d.session_sets_status("implement", 700, "In review")  # 700's own session sets its status
 
     proc = d.run_issue(700)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == ["implement 700"]
-    assert d.status(STORY) == "Ready to implement"
+    assert d.board_writes == []
 
 
 @needs_tools
@@ -388,8 +345,8 @@ def test_ac3_no_open_pr_or_draft_pr_blocks_after_implement(d, draft):
 
     assert proc.returncode != 0
     assert d.sessions == [f"implement {STORY}"]
-    assert d.status(STORY) == "In implementation"
-    assert d.board_writes == [f"{STORY}=In implementation"]
+    assert d.board_writes == []
+    assert d.board_writes == []
     blockers = d.posted(STORY)
     assert len(blockers) == 1
     assert "## Blocked Declaration" in blockers[0] and "/implement completes successfully" in blockers[0]
@@ -420,7 +377,7 @@ def test_381_conflicting_draft_pr_gets_the_conflict_blocker(d, extra):
     assert CONFLICT_PHRASE in blockers[0] and f"PR #{PR}" in blockers[0]
     assert "no CI run" in blockers[0] and UNBLOCK_PHRASE in blockers[0]
     assert "/implement completes successfully" not in blockers[0]
-    assert d.status(STORY) == "In implementation"
+    assert d.board_writes == []
 
 
 @needs_tools
@@ -468,7 +425,7 @@ def test_ac4_codex_story_in_review_is_reviewed_on_opus_then_merged(d):
     assert d.sessions == [f"review {PR}"]  # /merge and /cleanup start no session (#264)
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     assert d.session_providers == ["review claude-code"]
-    assert d.board_writes == [f"{STORY}=Done"]
+    assert d.board_writes == []
     assert f"[RESUME] #{STORY}: /review on PR #{PR} under claude-code-opus" in proc.stdout
     assert d.usage_count == 1  # the model session; /merge and /cleanup are scripts (#264)
 
@@ -545,7 +502,7 @@ def test_ac6_in_merge_story_with_open_pr_is_merged_and_cleaned_up(d, executor):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [] and d.claude_calls == []
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
-    assert d.board_writes == [f"{STORY}=Done"]
+    assert d.board_writes == []
     assert d.posted(STORY) == []
     assert f"[RESUME] #{STORY}: /merge PR #{PR}" in proc.stdout
 
@@ -560,7 +517,7 @@ def test_ac7_in_merge_story_with_merged_pr_is_finished_without_merge(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == []
     assert d.phases == [f"cleanup {STORY}"]
-    assert d.board_writes == [f"{STORY}=Done"]
+    assert d.board_writes == []
     assert d.posted(STORY) == []
 
 
@@ -628,7 +585,7 @@ def test_ac9_one_merge_attempt_per_head(d):
     fourth = d.resume()
     assert fourth.returncode == 0, fourth.stdout + fourth.stderr
     assert d.phases == [f"merge {PR}"] * 3 + [f"cleanup {STORY}"]
-    assert d.status(STORY) == "Done"
+    assert d.board_writes == []
     assert len(d.posted(STORY)) == 2
 
 
@@ -649,7 +606,7 @@ def test_ac10_fix_round_runs_implement_without_wip_or_overlap_checks(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
     assert f"[RESUME] #{STORY}: fix round 1 of 3, /implement on PR #{PR}" in proc.stdout
-    assert d.board_writes == [f"{STORY}=In review"]  # AC2: still "In implementation", no round due
+    assert d.board_writes == []  # AC2: still "In implementation", no round due
     assert d.posted(STORY) == [] and d.posted(501) == []
     assert "WIP limit" not in proc.stdout and "File overlap" not in proc.stdout
 
@@ -670,7 +627,7 @@ def test_ac10_fix_round_leaves_in_review_written_by_the_session(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
     assert d.board_writes == []
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
 
 
 @needs_tools
@@ -765,7 +722,7 @@ def test_fix_round_keeps_its_place_when_the_allowance_check_stops_it(d, seq, ret
     third = d.run_issue(700)
     assert third.returncode == 0, third.stdout + third.stderr
     assert d.sessions == [f"implement {STORY}", "implement 700"]
-    assert d.board_writes == ["700=In implementation", "700=In review"]
+    assert d.board_writes == []
 
 
 @needs_tools
@@ -815,33 +772,24 @@ def test_fix_round_that_fails_is_not_repeated_on_the_same_head(d):
 
 
 @needs_tools
-@pytest.mark.parametrize("held", [True, False])
-def test_story_held_by_the_fix_round_maximum_is_not_rolled_back_as_stale(d, held):
-    """Stale recovery would restart /implement as a ready story and pass the maximum."""
+def test_story_held_by_the_fix_round_maximum_gets_no_session_and_no_write(d):
+    """The fix-round maximum blocker holds the story; no stale rollback restarts it (issue #478)."""
     d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation")
     d.add_pr(PR, STORY)
     owned(d)
-    if held:
-        for head in ("1" * 40, HEAD):
-            d.add_findings(PR, head)
-    else:
-        d.schedule(("implement", STORY))  # the scheduler chooses the rolled-back story next (#474)
+    for head in ("1" * 40, HEAD):
+        d.add_findings(PR, head)
 
     proc = d.run_issue(700, env={"CODEX_FIX_ROUND_MAX": "1"})
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     comments = d.posted(STORY)
-    if held:
-        assert d.sessions == ["implement 700"]
-        assert d.status(STORY) == "In implementation"
-        assert len(comments) == 1 and "Type: resource" in comments[0]
-        assert f"#{STORY} is held by a fix-round blocker" in proc.stdout
-    else:
-        # Without the blocker the story is rolled back and started again when the scheduler chooses it.
-        assert len(comments) == 1 and "## Recovery Comment" in comments[0]
-        assert d.sessions == ["implement 700", f"implement {STORY}"]
+    assert d.sessions == ["implement 700"]
+    assert d.board_writes == []
+    assert len(comments) == 1 and "Type: resource" in comments[0]
+    assert "STALE:" not in proc.stdout
 
 
 def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_implementation():
@@ -855,9 +803,9 @@ def test_ac10_implement_command_skips_the_wip_preflight_for_a_story_already_in_i
     assert "steps 10 and 17" in skip
     assert any(b.startswith("stop if 2 or more stories") for b in bullets[1:])
     assert any(b.startswith("stop if any active story declares overlapping files") for b in bullets[1:])
-    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull from "Ready to implement".
+    # The canonical rule in docs/PROJECT-STATUS.md covers only the pull of a ready story (#479 renames it there).
     policy = (REPO_ROOT / "docs" / "PROJECT-STATUS.md").read_text(encoding="utf-8")
-    assert "Before pulling a story from **Ready to implement** into **In implementation**" in policy
+    assert "Before pulling a story from **Ready for implementation** into **In implementation**" in policy
 
 
 # ── Order and entry ─────────────────────────────────────────────────────────
@@ -879,7 +827,7 @@ def test_ac13_in_merge_then_fix_round_then_ready_story(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.phases == ["merge 960", "cleanup 600"]
     assert d.sessions == [f"implement {STORY}", "implement 700"]
-    assert d.board_writes == ["600=Done", "700=In implementation", "700=In review"]
+    assert d.board_writes == []
 
 
 @needs_tools
@@ -1209,20 +1157,18 @@ def test_ac14_poll_lists_are_empty_arrays_when_nothing_matches(tmp_path):
 
 @needs_tools
 @pytest.mark.parametrize("missing", ["In review", "Mergeable"])
-@pytest.mark.parametrize("mode", ["issue", "resume", "dry-run"])
-def test_ac15_missing_board_option_stops_the_run_before_any_session(tmp_path, missing, mode):
+def test_ac15_a_missing_board_option_does_not_stop_the_run(tmp_path, missing):
+    """Issue #478: the startup option check is gone; the dispatcher writes no status and needs no option."""
     options = {name: value for name, value in BOARD_OPTIONS.items() if name != missing}
     d = Dispatcher(tmp_path, options=options)
     d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
 
-    proc = {"issue": lambda: d.run_issue(STORY), "resume": d.resume,
-            "dry-run": lambda: d.run_issue(STORY, "--dry-run")}[mode]()
+    proc = d.run_issue(STORY)
 
-    assert proc.returncode != 0
-    assert f'the project board has no "{missing}" Status option' in proc.stderr
-    assert d.sessions == [] and d.board_writes == [] and d.posted(STORY) == []
-    assert d.allowance_calls == 0
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Status option" not in proc.stderr
+    assert d.sessions == [f"implement {STORY}"] and d.board_writes == []
 
 
 @needs_tools
@@ -1235,7 +1181,7 @@ def test_ac15_allowance_never_holds_the_script_only_merge_at_a_resume_entry(d):
     assert proc.returncode == 0, proc.stderr
     assert d.allowance_calls == 0 and d.sessions == []
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
-    assert d.status(STORY) == "Done" and d.posted(STORY) == []
+    assert d.board_writes == [] and d.posted(STORY) == []
 
 
 # ── Contracts with the bookkeeping job and the workflow ─────────────────────
@@ -1411,7 +1357,7 @@ def test_348_ac1_failed_owner_marker_write_is_left_pending_for_the_head_the_sess
     proc = d.run_issue(STORY)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
     comments = d.posted(PR)
     assert len(comments) == 1 and f"action=evidence-pending item=merge-owner head={NEW_HEAD} " in comments[0]
     assert OWNER_MARKER.replace(HEAD, NEW_HEAD) not in comments[0]  # the marker itself is not posted yet
@@ -1470,7 +1416,7 @@ def test_348_ac2_pending_merge_confirmation_is_posted_once_before_cleanup(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.posted(PR) == [CONFIRMATION]
     assert d.phases == [f"cleanup {STORY}"]
-    assert d.status(STORY) == "Done"
+    assert d.board_writes == []
 
     # A second retry finds the confirmation and posts nothing.
     d.set_status(STORY, "Mergeable")
@@ -1516,7 +1462,7 @@ def test_348_ac2_merge_script_failing_after_a_completed_merge_is_not_a_merge_blo
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not any("Blocked Declaration" in b for b in d.posted(STORY))
     assert d.posted(PR) == [CONFIRMATION]
-    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.status(STORY) == "Done"
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.board_writes == []
     assert "its confirmation comment was not posted; retried on a later run" in proc.stdout
 
 
@@ -1604,7 +1550,7 @@ def test_348_ac3_cleanup_that_left_the_pending_copy_labels_the_done_story_for_a_
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "Done" and "evidence:pending" in labels_of(d, STORY)
+    assert d.board_writes == [] and "evidence:pending" in labels_of(d, STORY)
     assert (d.mock / "repo_labels").read_text(encoding="utf-8").splitlines() == ["evidence:pending"]
     assert d.posted(STORY) == []
 
@@ -1819,37 +1765,11 @@ def test_357_post_waiver_round_that_pushes_nothing_reaches_review(d):
     assert d.sessions == [f"implement {STORY}"]
     assert not any("Type: external" in body for body in d.posted(STORY))
     assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
-    assert d.board_writes == [f"{STORY}=In review"]
+    assert d.board_writes == []
     assert d.posted(PR) == []  # the one review request is the session's; the dispatcher posts none
 
     again = d.resume()
     assert again.returncode == 0 and d.sessions == [f"implement {STORY}"]
-
-
-@needs_tools
-def test_357_post_waiver_round_whose_in_review_write_fails_is_finished_by_the_next_run(d):
-    d.add_story(STORY, "In implementation")
-    d.add_pr(PR, STORY)
-    d.add_findings(PR, HEAD)
-    d.add_comment(STORY, DECLARATION)
-    d.add_comment(STORY, "Waived F1 (#400).\n/unblock\n", login=PO)
-    session_requests_review(d)
-    d.fail_status_write("In review")
-
-    first = d.resume()
-
-    assert first.returncode == 1, first.stdout + first.stderr
-    assert any(f"action=fix-round-attempt pr={PR} head={HEAD}" in body for body in d.posted(STORY))
-    assert any(f"action=hand-off-pending pr={PR} head={HEAD}" in body for body in d.posted(STORY))
-    assert d.status(STORY) == "In implementation"
-
-    d.fail_status_write("In review", failing=False)
-    second = d.resume()
-
-    assert second.returncode == 0, second.stdout + second.stderr
-    assert d.sessions == [f"implement {STORY}"]  # finished without a second /implement
-    assert d.status(STORY) == "In review"
-    assert any(f"action=hand-off-done pr={PR}" in body for body in d.posted(STORY))
 
 
 @needs_tools

@@ -97,7 +97,7 @@ def test_ac2_gates_passing_on_the_head_give_the_merge_step_whatever_the_card(d, 
 
     assert proc.returncode == 0, output(proc)
     assert f"[RESUME] #{STORY}: /merge PR #{PR}" in proc.stdout
-    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.status(STORY) == "Done"
+    assert d.phases == [f"merge {PR}", f"cleanup {STORY}"] and d.board_writes == []
 
 
 def test_ac2_passing_gates_merge_even_with_a_pending_hand_off(d):
@@ -196,7 +196,7 @@ def test_ac3_a_merged_linked_pr_is_finished_whatever_the_card(d, status):
     proc = d.resume()
 
     assert proc.returncode == 0, output(proc)
-    assert d.phases == [f"cleanup {STORY}"] and d.status(STORY) == "Done" and d.sessions == []
+    assert d.phases == [f"cleanup {STORY}"] and d.board_writes == [] and d.sessions == []
 
 
 # ── AC 4: the review step ────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ def test_ac5_a_pending_hand_off_is_completed_whatever_the_card(d, status):
 
     assert proc.returncode == 0, output(proc)
     assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in proc.stdout
-    assert d.status(STORY) == "In review" and d.sessions == []
+    assert d.board_writes == [] and d.sessions == []
     assert any(f"action=hand-off-done pr={PR}" in b for b in d.posted(STORY))
 
 
@@ -389,7 +389,7 @@ def test_ac10_finishing_a_merged_pr_is_not_held_back(d):
     proc = d.resume()
 
     assert proc.returncode == 0, output(proc)
-    assert d.phases == [f"cleanup {STORY}"] and d.status(STORY) == "Done"
+    assert d.phases == [f"cleanup {STORY}"] and d.board_writes == []
     assert STALE_LINE not in proc.stdout
 
 

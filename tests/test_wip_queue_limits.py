@@ -106,7 +106,7 @@ def add_active_stories(d, count):
 
 def preflight(d, active, **env):
     add_active_stories(d, active)
-    d.add_story(STORY, "Ready for implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
     return d.run_issue(STORY, "--dry-run", env=env)
 
 
@@ -126,7 +126,7 @@ def test_ac1_limit_3_blocks_at_three_and_passes_at_two(tmp_path):
 def test_ac1_blocker_text_shows_the_configured_limit(tmp_path):
     d = Dispatcher(tmp_path)
     add_active_stories(d, 3)
-    d.add_story(STORY, "Ready for implementation", body="## Files affected\n- `scripts/x.sh`\n")
+    d.add_story(STORY, "Ready to implement", body="## Files affected\n- `scripts/x.sh`\n")
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": "3"})
     assert proc.returncode != 0
     assert any('Fewer than 3 stories are in "In implementation"' in c for c in d.posted(STORY))
@@ -134,19 +134,19 @@ def test_ac1_blocker_text_shows_the_configured_limit(tmp_path):
 
 @pytest.mark.parametrize("name", VARIABLES)
 def test_ac5_unset_variable_starts_nothing_and_writes_nothing(d, name):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={name: ""})
     assert proc.returncode == 1
     assert f"[LIMITS ERROR] {name} is not set or is empty" in proc.stderr
     assert d.sessions == [] and d.board_writes == []
     assert d.posted(STORY) == []
     assert d.slack_calls == []
-    assert d.status(STORY) == "Ready for implementation"
+    assert d.status(STORY) == "Ready to implement"
 
 
 @pytest.mark.parametrize("value", ["abc", "0", "-1", "2.5"])
 def test_ac3_invalid_wip_limit_starts_nothing(d, value):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={"WIP_LIMIT_IMPLEMENTATION": value})
     assert proc.returncode == 1
     assert "WIP_LIMIT_IMPLEMENTATION" in proc.stderr and f'"{value}"' in proc.stderr
@@ -154,7 +154,7 @@ def test_ac3_invalid_wip_limit_starts_nothing(d, value):
 
 
 def test_ac4_invalid_buffer_pair_starts_nothing(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     proc = d.run_issue(STORY, env={"READY_BUFFER_MIN": "9"})
     assert proc.returncode == 1
     assert "READY_BUFFER_MIN (9) is greater than READY_BUFFER_MAX (5)" in proc.stderr
@@ -170,7 +170,7 @@ def flow_review(tmp_path, in_implementation, ready=1, env=None, args=()):
                             "updatedAt": "2999-01-01T00:00:00Z", "labels": {"nodes": []}},
                 "fieldValues": {"nodes": [{"name": status, "field": {"name": "Status"}}]}}
     nodes = [node(100 + i, "In implementation") for i in range(in_implementation)]
-    nodes += [node(200 + i, "Ready for implementation") for i in range(ready)]
+    nodes += [node(200 + i, "Ready to implement") for i in range(ready)]
     projects = {"data": {"repository": {"projectsV2": {"nodes": [{"number": 3, "title": "board"}]}}}}
     items = {"data": {"repository": {"projectsV2": {"nodes": [{"items": {"nodes": nodes}}]}}}}
     bin_dir = tmp_path / "bin"

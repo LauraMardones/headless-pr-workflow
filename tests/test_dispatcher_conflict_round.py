@@ -52,11 +52,15 @@ def conflicting_story(d: Dispatcher, status: str, story: int = STORY, pr: int = 
     d.add_pr(pr, story, head=HEAD, **{**CONFLICTING, **pr_fields})
 
 
-def session_merges_main(d: Dispatcher, pr: int = PR) -> None:
-    """The /implement session merges main, resolves the conflict and pushes a new head."""
+def session_merges_main(d: Dispatcher, pr: int = PR, story: int = STORY) -> None:
+    """The /implement session merges main, resolves the conflict and pushes a new head.
+
+    The new head has no approval yet, so its merge gates do not pass. The fake gate follows the card, so
+    the card shows "In review", as the board writer would show it (#478); the dispatcher writes nothing."""
     d.on_session("implement", f"""
 jq 'map(if .number == {pr} then .head.sha = "{NEW_HEAD}" | .mergeable = true | .mergeable_state = "clean" else . end)' \\
     "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+jq '. + {{"ITEM_{story}": "In review"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"
 """)
 
 
@@ -67,7 +71,7 @@ def append_to_session(d: Dispatcher, line: str) -> None:
 
 def session_merges_main_and_hands_off(d: Dispatcher, story: int = STORY) -> None:
     """The session pushes the merge with main and moves the story to "In review" (step 16)."""
-    session_merges_main(d)
+    session_merges_main(d, story=story)
     append_to_session(d, f"jq '. + {{\"ITEM_{story}\": \"In review\"}}' \"$MOCK_DIR/state.json\" > \"$MOCK_DIR/s.tmp\""
                          f" && mv \"$MOCK_DIR/s.tmp\" \"$MOCK_DIR/state.json\"")
 
@@ -140,7 +144,7 @@ def test_ac1_ac3_in_merge_conflict_starts_a_conflict_round_and_hands_the_new_hea
     assert ROUND_LOG in proc.stdout
     assert d.phases == []  # no /merge for the conflicting head
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.board_writes == []
     assert blockers(d) == [] and d.queued_events == [] and d.slack_calls == []
     assert not any("action=merge-attempt" in body for body in d.posted(STORY))
     # AC 3: the new head carries the merge-owner marker; the old head does not
@@ -152,7 +156,7 @@ def test_ac3_the_new_head_reaches_merge_only_through_the_bookkeeping_job(d):
     conflicting_story(d, "Mergeable")
     session_merges_main(d)
     d.resume()
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
 
     # Nothing merges while the story waits for the Codex review in "In review".
     d.on_session("implement", "")
@@ -181,7 +185,7 @@ def test_ac2_in_review_conflict_starts_a_conflict_round(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert ROUND_LOG in proc.stdout
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.board_writes == []
     assert owner_marker(NEW_HEAD) in d.posted(PR)
     assert blockers(d) == [] and d.queued_events == []
 
@@ -290,7 +294,7 @@ def test_449_ac2_a_story_in_implementation_with_a_conflicting_pr_gets_a_fresh_ro
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert ROUND_LOG in proc.stdout and d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In review"]  # no pre-start write: it is already there
+    assert d.board_writes == []  # no pre-start write: it is already there
     assert owner_marker(NEW_HEAD) in d.posted(PR) and blockers(d) == []
 
 
@@ -603,7 +607,7 @@ jq 'map(if .number == {PR} then .mergeable = true | .mergeable_state = "clean" e
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert owner_marker(HEAD) in d.posted(PR)
-    assert d.status(STORY) == "In review" and blockers(d) == [] and d.queued_events == []
+    assert d.board_writes == [] and blockers(d) == [] and d.queued_events == []
 
 
 def test_449_ac3_a_new_head_that_still_conflicts_gets_one_blocker(d):
@@ -637,7 +641,7 @@ def test_449_ac3_a_clean_head_without_a_green_pytest_check_gets_one_blocker(d, r
     assert_one_conflict_blocker(d, head=NEW_HEAD)
     assert f"the required pytest check is not green on head {NEW_HEAD[:7]}" in blockers(d)[0]
     assert owner_marker(NEW_HEAD) not in d.posted(PR)
-    assert d.board_writes == [f"{STORY}=In implementation"]  # no hand-off to "In review"
+    assert d.board_writes == []  # no hand-off to "In review"
 
     # Later runs on the head: no second round and no second (missing-owner) blocker.
     proc = d.resume()
@@ -671,7 +675,7 @@ def test_ac6_po_unblock_allows_one_new_attempt(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
     assert owner_marker(NEW_HEAD) in d.posted(PR)
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
 
 
 def test_ac6_a_new_head_allows_one_new_attempt(d):
@@ -723,19 +727,7 @@ def test_ac7_refused_round_changes_nothing_and_runs_on_a_later_run(d, status, re
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.status(STORY) == "In review"
-
-
-def test_ac7_failed_status_write_starts_no_session_and_writes_nothing(d):
-    conflicting_story(d, "Mergeable")
-    d.fail_status_write("In implementation")
-
-    proc = d.resume()
-
-    assert proc.returncode == 0, proc.stderr
-    assert d.sessions == [] and d.status(STORY) == "Mergeable"
-    assert d.posted(STORY) == [] and d.queued_events == []
-    assert "the conflict round on PR #900 is tried again on the next run" in proc.stdout
+    assert d.board_writes == []
 
 
 # ── #449 AC 4: a head left without an owner gets one blocker ────────────────
@@ -800,7 +792,7 @@ def test_449_ac4_a_pending_hand_off_posts_no_blocker(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert f"[RESUME] #{STORY}: completing the hand-off on PR #{PR}" in proc.stdout
-    assert blockers(d) == [] and d.queued_events == [] and d.status(STORY) == "In review"
+    assert blockers(d) == [] and d.queued_events == [] and d.board_writes == []
 
 
 @pytest.mark.parametrize("status", ["In implementation", "In review"])
@@ -826,8 +818,8 @@ def test_449_ac4_a_draft_or_undecided_pr_posts_no_blocker(d, pr_fields):
     assert d.posted(STORY) == [] and d.queued_events == [] and d.sessions == []
 
 
-def test_449_ac4_the_blocker_holds_the_story_against_stale_recovery(d):
-    """Stale recovery would restart /implement as a ready story past the blocker."""
+def test_449_ac4_the_blocker_holds_the_story_and_nothing_rolls_it_back(d):
+    """No stale rollback restarts /implement past the blocker (issue #478)."""
     d.add_story(700, "Ready to implement")
     d.add_pr(970, 700)
     d.add_story(STORY, "In implementation", executor="claude-code-opus")
@@ -836,8 +828,8 @@ def test_449_ac4_the_blocker_holds_the_story_against_stale_recovery(d):
     proc = d.run_issue(700)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.sessions == ["implement 700"] and d.status(STORY) == "In implementation"
-    assert f"#{STORY} is held by a conflict-round or merge-owner blocker" in proc.stdout
+    assert d.sessions == ["implement 700"] and d.board_writes == []
+    assert "STALE:" not in proc.stdout
     assert_one_ownerless_blocker(d)
 
 
@@ -852,8 +844,8 @@ def test_449_ac5_pause_before_the_push_gets_a_fresh_round(d, from_status):
     proc = d.resume()
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.status(STORY) == "In implementation"
-    assert d.board_writes == [f"{STORY}=In implementation"]  # the pause writes no status
+    assert d.status(STORY) == from_status
+    assert d.board_writes == []  # neither the round nor the pause writes a status (#478)
     assert len(pause_records(d)) == 1 and blockers(d) == [] and d.queued_events == []
 
     let_sessions_finish(d)
@@ -864,7 +856,7 @@ def test_449_ac5_pause_before_the_push_gets_a_fresh_round(d, from_status):
     assert ROUND_LOG in proc.stdout
     assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
     assert owner_marker(NEW_HEAD) in d.posted(PR)
-    assert d.status(STORY) == "In review" and blockers(d) == []
+    assert d.board_writes == [] and blockers(d) == []
 
 
 @pytest.mark.parametrize("session, left_in", [
@@ -932,7 +924,7 @@ def test_449_ac5_failed_write_of_the_pause_record_gets_a_fresh_round(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert ROUND_LOG in proc.stdout
     assert d.sessions == [f"implement {STORY}", f"implement {STORY}"]
-    assert owner_marker(NEW_HEAD) in d.posted(PR) and blockers(d) == [] and d.status(STORY) == "In review"
+    assert owner_marker(NEW_HEAD) in d.posted(PR) and blockers(d) == [] and d.board_writes == []
 
 
 @pytest.mark.parametrize("status", ["In implementation", "In review"])
@@ -948,7 +940,7 @@ def test_449_ac5_round_on_a_head_with_a_completed_fix_round_is_not_hidden(d, sta
     assert ROUND_LOG in proc.stdout
     assert d.sessions == [f"implement {STORY}"]
     assert owner_marker(NEW_HEAD) in d.posted(PR)
-    assert blockers(d) == [] and d.queued_events == [] and d.status(STORY) == "In review"
+    assert blockers(d) == [] and d.queued_events == [] and d.board_writes == []
 
 
 # ── #409 AC 8: stories without a conflict round ─────────────────────────────

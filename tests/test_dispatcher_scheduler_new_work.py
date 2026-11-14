@@ -127,7 +127,7 @@ def test_ac2_a_refine_decision_runs_after_the_work_in_flight(d):
 # ── AC3: implement ────────────────────────────────────────────────────────────
 
 
-def test_ac3_an_implement_decision_starts_implement_with_the_board_write(d):
+def test_ac3_an_implement_decision_starts_implement_without_a_board_write(d):
     d.add_story(STORY, "Ready to implement")
     d.add_pr(PR, STORY)
     d.schedule(("implement", STORY))
@@ -136,7 +136,7 @@ def test_ac3_an_implement_decision_starts_implement_with_the_board_write(d):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes[0] == f"{STORY}=In implementation"
+    assert d.board_writes == []
     assert f"[HANDOFF] #{STORY}: handed to the Codex review loop" in proc.stdout
 
 
@@ -315,9 +315,10 @@ def test_review_an_excluded_story_does_not_count_for_the_wip_limit():
     assert skips  # imported helper stays used by sibling tests
 
 
-def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
-    # WIP limit 1 and a stale story hold the slot: the scheduler says wip-limit until the stale story is rolled back.
-    d.add_story(STORY, "In implementation")  # no PR, no hand-off, old updatedAt: stale
+def test_a_quiet_card_in_implementation_holds_no_slot_and_is_not_rolled_back(d):
+    # Issue #478: no stale rollback. A card "In implementation" with no PR is in neither list (#475),
+    # so it holds no WIP slot; nothing is written and no Recovery Comment is posted.
+    d.add_story(STORY, "In implementation")  # no PR, no hand-off, old updatedAt
     d.add_story(OTHER, "Ready to implement")
     d.add_pr(PR, OTHER, opened_by_implement=True)
     d.schedule(("idle",))
@@ -325,9 +326,8 @@ def test_review_stale_recovery_runs_before_the_scheduler_is_asked(d):
     proc = scheduled(d)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f'STALE: #{STORY}' in proc.stdout
-    assert [c for c in d.posted(STORY) if "## Recovery Comment" in c]
-    # The rolled-back story has no PR, so it is in neither list when the scheduler is asked (#475).
+    assert "STALE:" not in proc.stdout
+    assert d.posted(STORY) == [] and d.board_writes == []
     assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation  --in-flight "]
 
 

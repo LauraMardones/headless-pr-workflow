@@ -57,7 +57,7 @@ def assert_failed_closed(d: Dispatcher, proc) -> None:
     """A failed /implement: blocker posted, no hand-off, no board write after E1's own."""
     assert proc.returncode != 0
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes == [f"{STORY}=In implementation"]
+    assert d.board_writes == []
     blockers = d.posted(STORY)
     assert len(blockers) == 1 and "## Blocked Declaration" in blockers[0]
     assert "[HANDOFF]" not in proc.stdout
@@ -195,7 +195,7 @@ def test_success_returns_zero_with_the_result_text(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "IMPLEMENTED-AND-HANDED-OFF" in proc.stdout
     assert f"✓ /implement completed for #{STORY}" in proc.stdout
-    assert d.board_writes == [f"{STORY}=In implementation", f"{STORY}=In review"]
+    assert d.board_writes == []
 
 
 @pytest.mark.parametrize("events,exit_code,reason", [

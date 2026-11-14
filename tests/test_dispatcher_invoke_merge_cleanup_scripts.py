@@ -62,7 +62,7 @@ def test_codex_review_session_is_followed_by_two_scripts(tmp_path):
     assert d.sessions == [f"review {PR}"]
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     assert d.allowance_calls == 1
-    assert d.board_writes[-1:] == [f"{STORY}=Done"]
+    assert d.board_writes == []
     assert d.usage_count == 1  # /review only; the scripts count nothing
 
 
@@ -100,7 +100,7 @@ def test_merge_script_failure_posts_the_marker_blocker_and_keeps_in_merge(tmp_pa
     assert d.resume().returncode == 0 and d.phases == [f"merge {PR}"]  # one attempt per head
 
 
-def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
+def test_cleanup_script_failure_is_non_fatal_and_writes_no_status(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "Mergeable")
     d.add_story(501, "Mergeable")
@@ -111,14 +111,15 @@ def test_cleanup_script_failure_is_non_fatal_and_the_story_stays_done(tmp_path):
     d.fail("cleanup")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"/cleanup failed for #{STORY}; story is Done" in proc.stderr
-    assert d.status(STORY) == "Done" and d.status(501) == "Done"
+    assert f"/cleanup failed for #{STORY}; the PR is merged but cleanup did not complete" in proc.stderr
+    assert d.board_writes == []
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}", f"merge {PR + 1}", f"cleanup 501"]  # the loop continued
     assert d.posted(STORY) == []
 
 
-def test_348_cleanup_that_left_no_evidence_on_the_story_goes_back_to_in_merge(tmp_path):
-    """Neither the closing summary nor its pending copy is on GitHub: nothing else would revisit the story."""
+def test_348_cleanup_that_left_no_evidence_on_the_story_is_rerun_by_the_finish_step(tmp_path):
+    """Neither the closing summary nor its pending copy is on GitHub: the open story with its merged PR is
+    the finish step of the next run (no status is written, #478)."""
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
@@ -129,17 +130,17 @@ def test_348_cleanup_that_left_no_evidence_on_the_story_goes_back_to_in_merge(tm
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
     d.fail("cleanup", False)  # the next run reruns cleanup
     assert d.resume().returncode == 0
-    assert d.status(STORY) == "Done" and d.phases[-1] == f"cleanup {STORY}"
+    assert d.board_writes == [] and d.phases[-1] == f"cleanup {STORY}"
 
 
-def test_348_cleanup_without_evidence_gives_up_after_three_runs_and_stays_done(tmp_path):
+def test_348_cleanup_without_evidence_gives_up_after_three_runs(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "Mergeable")
     d.add_pr(PR, STORY)
     d.fail("cleanup")
     for _ in range(3):
         assert d.resume().returncode == 0
-    assert d.status(STORY) == "Done"
+    assert d.board_writes == []
     assert len([b for b in d.posted(STORY) if "## Blocked Declaration" in b]) == 1
     assert len(d.slack_calls) == 1 and [e["event"] for e in d.queued_events] == ["po_blocker"]  # #359, delivered by the #349 drain
 

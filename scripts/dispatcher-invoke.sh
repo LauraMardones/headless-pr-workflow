@@ -697,13 +697,21 @@ notify_open_decision_blocker() {
 DECISION_BLOCKER_PO_LOGIN="LauraMardones"
 
 # ─── Utility: notify Slack on feature/epic closure after a story completes ───
-# Uses the BOARD_DATA snapshot from the start of the run. Treats the
-# just-completed story as Done regardless of snapshot state. Sends
+# Uses the BOARD_DATA snapshot from the start of the run. Treats every story
+# finished in this run (FINISHED_ISSUES) as Done regardless of the snapshot:
+# the dispatcher writes no "Done" (issue #478), the board writer shows it only
+# after the invoke step. Sends
 # feature_closure_confirmation when all feature stories are Done, then sends
 # epic_closure_approval when all features in the epic are also Done.
 
+FINISHED_ISSUES="${FINISHED_ISSUES:-}"
+
 notify_closure_if_complete() {
-    local completed_story_num="$1"
+    local completed_story_num="$1" finished_json
+    [[ " $FINISHED_ISSUES " == *" $completed_story_num "* ]] \
+        || FINISHED_ISSUES="${FINISHED_ISSUES:+$FINISHED_ISSUES }$completed_story_num"
+    export FINISHED_ISSUES
+    finished_json=$(tr ' ' '\n' <<< "$FINISHED_ISSUES" | jq -R 'select(length > 0) | tonumber' | jq -cs '.')
 
     # ── Feature closure ──────────────────────────────────────────────────────
     local feature_num
@@ -728,17 +736,17 @@ notify_closure_if_complete() {
 
     [[ -z "$feature_total" || "$feature_total" -eq 0 ]] && return 0
 
-    # Count Done stories; treat the just-completed story as Done even if board snapshot is stale
+    # Count Done stories; treat the stories finished in this run as Done even if the snapshot is stale
     feature_done=$(echo "$BOARD_DATA" | jq \
         --arg fn "$feature_num" \
-        --argjson cn "$completed_story_num" \
+        --argjson done "$finished_json" \
         '[.data.repository.projectsV2.nodes[0].items.nodes[]
           | select(
               (.content | type) == "object" and
               (.content.number != null) and
               ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
               (
-                .content.number == $cn or
+                (.content.number | IN($done[])) or
                 ([.fieldValues.nodes[]
                   | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
                 ] | length > 0)
@@ -794,14 +802,14 @@ notify_closure_if_complete() {
                 )] | length')
         fdone=$(echo "$BOARD_DATA" | jq \
             --arg fn "$fn" \
-            --argjson cn "$completed_story_num" \
+            --argjson done "$finished_json" \
             '[.data.repository.projectsV2.nodes[0].items.nodes[]
               | select(
                   (.content | type) == "object" and
                   (.content.number != null) and
                   ((.content.body // "") | test("Feature group: #" + $fn + "([^0-9]|$)")) and
                   (
-                    .content.number == $cn or
+                    (.content.number | IN($done[])) or
                     ([.fieldValues.nodes[]
                       | select((.field.name? // "") == "Status" and (.name? // "") == "Done")
                     ] | length > 0)

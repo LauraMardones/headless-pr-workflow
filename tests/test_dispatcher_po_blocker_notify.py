@@ -132,7 +132,7 @@ def test_decision_document_refusal_posts_the_planned_step_blocker(d):
     assert f"Cause: PR #{PR} changes decision documents (ADR-011): docs/decisions/ADR-020-x.md, specs/1-a/spec.md. " \
            "The PO reviews and merges it personally in GitHub. This is a planned step, not a failure." in body
     assert f"Unblocked when: The PO has reviewed and merged PR #{PR} in GitHub, then replies with a line that is exactly /unblock." in body
-    assert f"State of in-progress work: waiting for the PO to review and merge PR #{PR}; board stays Mergeable" in body
+    assert f"State of in-progress work: waiting for the PO to review and merge PR #{PR}; the story stays in the merge step" in body
     assert "Type: external" in body and "action=merge-attempt" in body
     assert "failed" not in body.split("Cause:")[0] and "completes successfully" not in body
     events = po_events(d)
