@@ -242,17 +242,32 @@ test_decision_blocker_silent_for_conflict_type() {
 # The function is extracted from scripts/dispatcher-invoke.sh and run with a
 # mocked gh and register_actionable_event (#427). Requires jq.
 
-# run_real_closure_check <target_body> <board_data> <completed_story>
-# Prints one "SLACK_CALLED: <event> <number>" line per registered event.
+# run_real_closure_check <target_body> <board_data> <completed_story> [catch_all_output [catch_all_exit]]
+# Prints one "SLACK_CALLED: <event> <number>" line per registered event, then
+# the function's own output lines prefixed "OUT: " (issue #550). The catch-all
+# numbers it reads come from an HPW_BIN fake that prints <catch_all_output>
+# (default: a catch-all Feature and Epic that no test story uses) and exits
+# <catch_all_exit> (default 0). No catch-all number is written in this file.
+DEFAULT_CATCH_ALL='{"epic": 9001, "feature": 9002}'
 run_real_closure_check() {
-    local target_body="$1" board_data="$2" completed="$3" tmpdir call_log fn
+    local target_body="$1" board_data="$2" completed="$3"
+    local catch_all_output="${4-$DEFAULT_CATCH_ALL}" catch_all_exit="${5:-0}" tmpdir call_log fn
     tmpdir=$(mktemp -d "$GLOBAL_TMP/XXXXXX")
     call_log="$tmpdir/calls.log"
+    cat > "$tmpdir/hpw" <<'FAKE'
+#!/usr/bin/env bash
+[[ "$*" == "dispatcher catch-all numbers" ]] || exit 9
+printf '%s\n' "$FAKE_CATCH_ALL_OUTPUT"
+exit "$FAKE_CATCH_ALL_EXIT"
+FAKE
+    chmod +x "$tmpdir/hpw"
     fn=$(sed -n '/^notify_closure_if_complete() {/,/^}/p' "$INVOKE_SCRIPT")
+    FAKE_CATCH_ALL_OUTPUT="$catch_all_output" FAKE_CATCH_ALL_EXIT="$catch_all_exit" \
     TARGET_BODY="$target_body" BOARD_DATA="$board_data" bash -c "
         set -euo pipefail
         DRY_RUN=false
         REPO='owner/repo'
+        HPW_BIN='$tmpdir/hpw'
         # Smart mock: passes the --jq filter through real jq
         gh() {
             local url=\"\${2:-}\" jq_filter=\"\" result
@@ -273,8 +288,9 @@ run_real_closure_check() {
         register_actionable_event() { echo \"SLACK_CALLED: \$1 \$2\" >> '$call_log'; }
         $fn
         notify_closure_if_complete $completed
-    " >/dev/null 2>&1 || true
+    " > "$tmpdir/out.log" 2>&1 || true
     cat "$call_log" 2>/dev/null || true
+    sed 's/^/OUT: /' "$tmpdir/out.log"
 }
 
 CLOSURE_STORY_A='{"id":"I1","content":{"number":4,"title":"Story A","body":"Feature group: #10\n","updatedAt":"2026-01-01T00:00:00Z"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}}'
@@ -360,6 +376,59 @@ test_epic_closure_fires_when_all_done() {
         "$(run_real_closure_check 'Feature group: #10' \
             "$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B" "$CLOSURE_FEATURE")" 5)" \
         "SLACK_CALLED: epic_closure_approval 30"
+}
+
+# ─── Tests for issue #550: the standing catch-all Feature and Epic ─────────────
+# The fake prints the numbers the test chooses: Feature 10 is the catch-all
+# Feature here, and Epic 30 the catch-all Epic.
+
+test_catch_all_feature_registers_no_closure() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "catch-all Feature registers no closure notification"
+        return
+    fi
+    local out
+    out=$(run_real_closure_check 'Feature group: #10' \
+        "$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B" "$CLOSURE_FEATURE")" 5 \
+        '{"epic": 30, "feature": 10}')
+    assert_not_contains "catch-all Feature: no SLACK_CALLED at all" "$out" "SLACK_CALLED"
+    assert_contains "catch-all Feature: feature skip line" "$out" \
+        "Feature #10 is the standing catch-all Feature: no feature_closure_confirmation."
+    assert_contains "catch-all Epic: epic skip line" "$out" \
+        "Epic #30 is the standing catch-all Epic: no epic_closure_approval."
+}
+
+test_closure_feature_notifies_without_epic_notification() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "closure Feature notifies, catch-all Epic does not"
+        return
+    fi
+    local out
+    out=$(run_real_closure_check 'Feature group: #10' \
+        "$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B" "$CLOSURE_FEATURE")" 5 \
+        '{"epic": 30, "feature": 77}')
+    assert_contains "closure Feature still gets feature_closure_confirmation" "$out" \
+        "SLACK_CALLED: feature_closure_confirmation 10"
+    assert_not_contains "catch-all Epic gets no epic_closure_approval" "$out" \
+        "SLACK_CALLED: epic_closure_approval"
+    assert_contains "catch-all Epic skip is logged" "$out" \
+        "Epic #30 is the standing catch-all Epic: no epic_closure_approval."
+}
+
+test_unreadable_catch_all_numbers_register_nothing() {
+    if ! $JQ_AVAILABLE; then
+        skip_test "unreadable catch-all numbers register no closure notification"
+        return
+    fi
+    local board case_name out
+    board=$(closure_board "$CLOSURE_STORY_A" "$CLOSURE_STORY_B" "$CLOSURE_FEATURE")
+    for case_name in 'exit-2|{"epic": 1, "feature": 2}|2' 'bad-json|not json|0' 'missing-key|{"epic": 1}|0' \
+        'string-number|{"epic": "1", "feature": "2"}|0' 'empty||0'; do
+        IFS='|' read -r label output code <<< "$case_name"
+        out=$(run_real_closure_check 'Feature group: #10' "$board" 5 "$output" "$code")
+        assert_not_contains "$label: no closure notification" "$out" "SLACK_CALLED"
+        assert_contains "$label: one Error: line" "$out" "OUT: Error: cannot read the catch-all numbers"
+    done
 }
 
 # ─── Test 9: EXIT trap fires dispatcher_error on unexpected non-zero exit ──────
@@ -578,6 +647,9 @@ run_all_tests() {
     test_feature_number_parsing
     test_dispatcher_has_no_grep_perl_regex
     test_epic_closure_fires_when_all_done
+    test_catch_all_feature_registers_no_closure
+    test_closure_feature_notifies_without_epic_notification
+    test_unreadable_catch_all_numbers_register_nothing
     test_dispatcher_error_trap_fires_on_unexpected_exit
     test_dispatcher_error_suppressed_when_handled
     test_dispatcher_error_suppressed_on_clean_exit

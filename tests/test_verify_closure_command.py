@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from headless_pr_workflow.catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
 from headless_pr_workflow.closure_verification import (
     CheckResult,
     CiRun,
@@ -1092,3 +1093,37 @@ def test_command_file_reads_ci_before_local_criterion_checks() -> None:
     )
     assert "valid only when the CI row in `### Checks` is `PASS`" in section
     assert "passed in the CI `pytest` run on the verified SHA (Checks) |" in text
+
+
+# ─── The standing catch-all Epic and Feature never close (issue #550) ──────────
+
+CATCH_ALL_NUMBERS = [
+    pytest.param(CATCH_ALL_EPIC, "Epic", id="epic"),
+    pytest.param(CATCH_ALL_FEATURE, "Feature", id="feature"),
+]
+
+
+@pytest.mark.parametrize(("number", "kind"), CATCH_ALL_NUMBERS)
+def test_verify_closure_refuses_catch_all_before_any_call(number: int, kind: str, github: Mock, local: Mock) -> None:
+    with pytest.raises(VerificationBlocked) as refusal:
+        verify_closure(str(number), github, local)
+
+    assert refusal.value.blockers == (
+        f"#{number} is the standing catch-all {kind}: it never closes, "
+        "so /verify-closure does not verify or close it.",
+    )
+    assert github.mock_calls == []
+    assert local.mock_calls == []
+
+
+@pytest.mark.parametrize(("number", "kind"), CATCH_ALL_NUMBERS)
+def test_continue_closure_refuses_catch_all_before_any_call(number: int, kind: str, closure_github: Mock) -> None:
+    with pytest.raises(VerificationBlocked) as refusal:
+        continue_closure(str(number), closure_github)
+
+    assert f"#{number} is the standing catch-all {kind}: it never closes" in str(refusal.value)
+    assert closure_github.mock_calls == []
+
+
+def test_ordinary_feature_is_still_verified(github: Mock, local: Mock) -> None:
+    assert verify_closure("10", github, local).target.number == 10

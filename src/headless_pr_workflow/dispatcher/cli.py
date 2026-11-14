@@ -9,6 +9,7 @@ stopped until the PO's ``/unblock``.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -44,7 +45,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker", "catch-all")
 
 
 class InvalidArguments(Exception):
@@ -218,7 +219,25 @@ def build_parser() -> argparse.ArgumentParser:
     w_status = worker_ops.add_parser("status", add_help=False)
     w_status.add_argument("--repo", required=True)
     w_status.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+    catch_all = blocks.add_parser("catch-all", add_help=False)
+    catch_all_ops = catch_all.add_subparsers(dest="operation", parser_class=_Parser)
+    catch_all_ops.add_parser("numbers", add_help=False)
     return parser
+
+
+def _run_catch_all_numbers() -> int:
+    """Print the standing catch-all Epic and Feature numbers; exit 2 when they cannot be read."""
+
+    try:
+        catch_all = importlib.import_module("headless_pr_workflow.catch_all")
+        epic, feature = catch_all.CATCH_ALL_EPIC, catch_all.CATCH_ALL_FEATURE
+        if not all(type(n) is int and n > 0 for n in (epic, feature)):
+            raise ValueError("a constant is not a positive integer")
+    except (ImportError, AttributeError, ValueError) as exc:
+        print(f"Error: cannot read the catch-all numbers from catch_all.py: {mask_tokens(str(exc))}", file=sys.stderr)
+        return EXIT_INVALID
+    print(json.dumps({"epic": epic, "feature": feature}, separators=(", ", ": ")))
+    return 0
 
 
 def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
@@ -241,7 +260,10 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
             "| hpw dispatcher in-flight plan ... "
-            "| hpw dispatcher codex-worker claim|progress|finish|status ...")
+            "| hpw dispatcher codex-worker claim|progress|finish|status ..."
+            "| hpw dispatcher catch-all numbers")
+    if args.block == "catch-all":
+        return  # reads a constant: no repository
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -420,6 +442,9 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         print(json.dumps({"ok": False, "block": _block_of(argv), "operation": _operation_of(argv), "result": "invalid",
                           "error": mask_tokens(f"arguments: {exc}")}))  # fmt: skip
         return EXIT_INVALID
+
+    if args.block == "catch-all":
+        return _run_catch_all_numbers()
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")

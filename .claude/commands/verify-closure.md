@@ -24,6 +24,12 @@ the Project status of an issue.
 - Missing, extra, zero, negative, flag-like, or non-numeric input is invalid.
 - On invalid input, stop before any GitHub comment and report the validation
   error in the session response.
+- Refuse the standing catch-all Epic and its catch-all Feature, whose numbers are
+  the constants in `src/headless_pr_workflow/catch_all.py`, in both phases. Stop
+  before any GitHub read or comment, post nothing, and report
+  `#<n> is the standing catch-all Epic: it never closes, so /verify-closure does not verify or close it.`
+  (`Feature` for the catch-all Feature). In the model this is a
+  `VerificationBlocked` raised right after `parse_issue_number`.
 
 After validation, fetch the target and all comments from GitHub. If at least
 one comment contains `<!-- verify-closure:issue=$ARGUMENTS;main=` then do not

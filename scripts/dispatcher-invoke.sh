@@ -702,12 +702,17 @@ DECISION_BLOCKER_PO_LOGIN="LauraMardones"
 # the dispatcher writes no "Done" (issue #478), the board writer shows it only
 # after the invoke step. Sends
 # feature_closure_confirmation when all feature stories are Done, then sends
-# epic_closure_approval when all features in the epic are also Done.
+# epic_closure_approval when all features in the epic are also Done. The standing
+# catch-all Feature and Epic never close (issue #550): neither notification is
+# registered for them. Their numbers come from `hpw dispatcher catch-all numbers`
+# (src/headless_pr_workflow/catch_all.py), never from a literal here. When that
+# call fails or prints something else, no closure notification is registered
+# for the story, one `Error:` line names the failure and the run continues.
 
 FINISHED_ISSUES="${FINISHED_ISSUES:-}"
 
 notify_closure_if_complete() {
-    local completed_story_num="$1" finished_json
+    local completed_story_num="$1" finished_json catch_all_json catch_all_epic catch_all_feature
     [[ " ${FINISHED_ISSUES:-} " == *" $completed_story_num "* ]] \
         || FINISHED_ISSUES="${FINISHED_ISSUES:+$FINISHED_ISSUES }$completed_story_num"
     export FINISHED_ISSUES
@@ -721,6 +726,13 @@ notify_closure_if_complete() {
 
     if $DRY_RUN; then
         echo "[DRY RUN] Would check feature #$feature_num closure after #$completed_story_num Done"
+        return 0
+    fi
+
+    if ! catch_all_json=$("$HPW_BIN" dispatcher catch-all numbers 2>/dev/null) \
+        || ! catch_all_epic=$(jq -er 'select(type == "object" and (keys | sort) == ["epic", "feature"] and (.epic | type) == "number" and (.feature | type) == "number") | .epic' <<< "$catch_all_json" 2>/dev/null) \
+        || ! catch_all_feature=$(jq -er '.feature' <<< "$catch_all_json" 2>/dev/null); then
+        echo "Error: cannot read the catch-all numbers (hpw dispatcher catch-all numbers failed or printed no {epic, feature} JSON): no closure notification for #$completed_story_num." >&2
         return 0
     fi
 
@@ -756,16 +768,20 @@ notify_closure_if_complete() {
     [[ -z "$feature_done" || "$feature_done" -lt "$feature_total" ]] && return 0
 
     # All stories in the feature are Done — notify feature closure confirmation
-    local feature_title feature_url
-    feature_title=$(gh api "repos/$REPO/issues/$feature_num" --jq '.title' 2>/dev/null \
-                    || echo "Feature #$feature_num")
-    feature_url="https://github.com/$REPO/issues/$feature_num"
-    echo "Feature #$feature_num: all $feature_total stories Done. Queuing Slack notification (feature_closure_confirmation)."
-    register_actionable_event "feature_closure_confirmation" "$feature_num" "" \
-        "$(jq -n \
-               --arg ft "$feature_title" \
-               --arg su "$feature_url" \
-               '{feature_title: $ft, summary_url: $su}')"
+    if [[ "$feature_num" == "$catch_all_feature" ]]; then
+        echo "Feature #$feature_num is the standing catch-all Feature: no feature_closure_confirmation."
+    else
+        local feature_title feature_url
+        feature_title=$(gh api "repos/$REPO/issues/$feature_num" --jq '.title' 2>/dev/null \
+                        || echo "Feature #$feature_num")
+        feature_url="https://github.com/$REPO/issues/$feature_num"
+        echo "Feature #$feature_num: all $feature_total stories Done. Queuing Slack notification (feature_closure_confirmation)."
+        register_actionable_event "feature_closure_confirmation" "$feature_num" "" \
+            "$(jq -n \
+                   --arg ft "$feature_title" \
+                   --arg su "$feature_url" \
+                   '{feature_title: $ft, summary_url: $su}')"
+    fi
 
     # ── Epic closure ─────────────────────────────────────────────────────────
     local feature_body epic_num
@@ -774,6 +790,10 @@ notify_closure_if_complete() {
     epic_num=$(echo "$feature_body" \
         | sed -n 's/.*Parent epic: #\([0-9][0-9]*\).*/\1/p' | head -1)
     [[ -z "$epic_num" ]] && return 0
+    if [[ "$epic_num" == "$catch_all_epic" ]]; then
+        echo "Epic #$epic_num is the standing catch-all Epic: no epic_closure_approval."
+        return 0
+    fi
 
     # Collect all features in the epic from the board (features reference epic via body)
     local epic_feature_nums

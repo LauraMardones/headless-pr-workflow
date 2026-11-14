@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
+from .catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
+
 
 SUPPORTED_TYPES = frozenset({"type:feature", "type:epic"})
 REQUIRED_CHECK_COMMANDS = frozenset(
@@ -463,6 +465,17 @@ def _validate_evidence(
         raise VerificationBlocked(*blockers)
 
 
+def refuse_catch_all(number: int) -> None:
+    """Refuse the standing catch-all Epic and Feature before any GitHub access."""
+
+    for constant, kind in ((CATCH_ALL_EPIC, "Epic"), (CATCH_ALL_FEATURE, "Feature")):
+        if number == constant:
+            raise VerificationBlocked(
+                f"#{number} is the standing catch-all {kind}: it never closes, "
+                "so /verify-closure does not verify or close it."
+            )
+
+
 def verify_closure(
     argument_text: str, github: GitHubEvidence, local: LocalEvidence
 ) -> VerificationResult:
@@ -473,6 +486,7 @@ def verify_closure(
     """
 
     number = parse_issue_number(argument_text)
+    refuse_catch_all(number)
     if github.repository_name() != REPOSITORY:
         raise VerificationBlocked("repository identity does not match")
 
@@ -605,6 +619,7 @@ def continue_closure(argument_text: str, github: GitHubClosure) -> ClosureResult
     """
 
     number = parse_issue_number(argument_text)
+    refuse_catch_all(number)
     if github.repository_name() != "LauraMardones/headless-pr-workflow":
         raise VerificationBlocked("repository identity does not match")
 
