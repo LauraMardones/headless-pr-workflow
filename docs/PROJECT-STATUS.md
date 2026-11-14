@@ -1,160 +1,161 @@
 # Project Status Model
 
-This document is the canonical reference for the project status model used in this repository. It covers all statuses, their semantics, the fact vs intent distinction, and all allowed transitions.
+This document is the canonical reference for the project status model used in this repository. It states what each board status shows, the GitHub fact behind it, and the order in which the facts are checked.
 
 Downstream stories (#117, #119, #120) depend on this document. Do not add executor routing, handoff templates, blocked-status protocol detail, feature/epic closure protocol, or OSS invariant content here — those belong in their respective stories.
 
 ---
 
+## The Board Is a Display
+
+The board's Status field shows a fact about each issue. It never authorizes or triggers work.
+
+- **One writer.** The scheduler's writer, `hpw dispatcher status sync` (issue #476), is the only writer of the Status field. The dispatcher runs it once per run, in the "Write the board status" step (`docs/DISPATCHER-CONFIG.md` → Board status — the only writer). It derives each item's status from GitHub facts and writes the items that differ.
+- **No manual moves.** No command, executor or person moves a card. A card moved by hand is corrected on the next dispatcher run.
+- **No status authorizes work.** The scheduler chooses new work from GitHub facts (ADR-010), not from a status. `derive_status` in `src/headless_pr_workflow/dispatcher/status.py` derives the statuses, and this document states the same rules.
+- **Epics and Features.** They never show a story-only status. A refined, open Epic or Feature shows In progress. An Epic with no merged spec shows No spec.
+
+---
+
 ## Statuses
 
-### Backlog
+The statuses are listed in the order of `STATUSES` in `status.py`. Each one names the issue types it applies to and the GitHub fact behind it. Each status is a fact; none authorizes work.
 
-The item has been created but has not entered refinement. It is not yet well-defined and is not available for implementation.
+### No spec
 
-### In refinement
+**Applies to:** all.
 
-The item is actively being refined. Acceptance criteria, scope, dependencies, and files affected are being clarified by the PO. The item is not yet ready for an executor to pull.
+**Fact:** the issue is not refined and has no open linked PR, and either it has no open parent Epic, or its Epic has no merged spec and no open PR that adds one.
 
-### Refined
+### In specification
 
-The item is well-defined and meets the definition of ready, but has at least one unresolved hard dependency. **Refined is a waiting room, not a terminal state.** Executors must not pull items in Refined; they pull from Ready for implementation only.
+**Applies to:** Epic. A story, task or bug that is not refined under an Epic whose spec is not merged also shows it while a spec PR is open.
 
-### Ready for implementation
+**Fact:** an open PR adds or changes the Epic's `specs/<epic>-*/spec.md`.
 
-The item is refined and all hard dependencies are resolved. This is the executor-pull trigger: an executor may pick up this item and begin implementation. When an item moves into this status, the appropriate `executor:` label is applied.
+### Refinement failed
 
-### In implementation
+**Applies to:** all.
 
-An executor has pulled the item and implementation is actively underway. A branch and (draft) PR exist or are being created. This is a fact: work is in progress.
+**Fact:** the latest refine Session Summary after the current spec commit reports `refine-check` fail or unreadable, with no `/unblock` after it. The scheduler skips the issue until a new spec commit or an `/unblock`, so the PO can tell a stuck issue from one that waits in the queue.
 
-### Needs rework
+### Not refined
 
-A reviewer has requested changes. The PR has been returned to the implementer. The item remains associated with the open PR. Once the implementer addresses the feedback and pushes a new commit, the story moves back to In review.
+**Applies to:** all.
+
+**Fact:** the issue has no refinement for the current spec commit: it was never refined, it is a Feature not yet broken down, or it is stale after a scope change. This is the refinement queue, the issues the scheduler may refine next. A stale issue shows Not refined even with an open linked PR (see Precedence).
 
 ### Blocked
 
-Progress on the item has stopped due to an external dependency, a decision that has not been made, a resource constraint, a conflict, or another blocking condition. The blocker must be declared and owned. This status can apply to an item at any point from Refined onward.
+**Applies to:** all.
+
+**Fact:** the issue has an open Blocked Declaration with no resolution (see [Blocked Status Protocol](#blocked-status-protocol)). An issue waiting for the PO's answer to a decision blocker shows Blocked.
+
+### Refined
+
+**Applies to:** Story, Task, Bug.
+
+**Fact:** the issue is refined for the current spec, and at least one hard dependency is open, unresolved or unreadable. Refined is a waiting room, not an executor trigger.
+
+### Ready to implement
+
+**Applies to:** Story, Task, Bug.
+
+**Fact:** the issue is refined for the current spec, every hard dependency is closed, and it has no open linked PR. The fact says the work could start; it authorizes nothing.
+
+### In implementation
+
+**Applies to:** Story, Task, Bug.
+
+**Fact:** an open linked PR in draft. The draft PR is the record that the story is in implementation.
 
 ### In review
 
-The implementation is complete and the PR is open and ready for review. A reviewer (not the implementer) is expected to assess the PR. This is a fact: the implementation is submitted and awaiting review.
+**Applies to:** Story, Task, Bug.
 
-### Ready to merge
+**Fact:** an open linked PR that is not draft, whose merge gates (`docs/MERGE-POLICY.md` and ADR-007) do not all pass on the current head. Fix rounds stay In review.
 
-The PR has been reviewed and approved. All required checks have passed. The item is waiting only for the merge action. This is an intent signal: it declares that all review conditions are satisfied and a merge is authorized.
+### Mergeable
+
+**Applies to:** Story, Task, Bug.
+
+**Fact:** the merge gates in `docs/MERGE-POLICY.md` and ADR-007 pass on the current head of an open, non-draft linked PR. The status reports the gates; it does not merge.
+
+### In progress
+
+**Applies to:** Epic, Feature.
+
+**Fact:** the issue is refined and not closed.
 
 ### Done
 
-The PR has been merged. The item is complete. This is a fact.
+**Applies to:** all.
+
+**Fact:** the issue is closed.
+
+### Removed statuses
+
+These names are no longer statuses. Each one is replaced as follows: "Backlog" and "In refinement" by No spec or Not refined; "Ready for refinement" by none (it was an intent signal; the refinement queue is Not refined); "Ready for implementation" by Ready to implement; "Ready to merge" and "In merge" by Mergeable; "Needs rework" by In review.
 
 ---
 
-## Fact vs Intent Distinction
+## Precedence
 
-The status model is a **hybrid model**: some statuses are facts and some are intent signals.
+The status of an issue is the first match in this order. A later step is not reached once an earlier one matches.
 
-| Type | Meaning |
-|---|---|
-| **Fact** | The status reflects the current real-world state of the work. Executors set fact statuses when an event occurs (implementation starts, PR opens, PR merges). |
-| **Intent signal** | The status declares that a condition has been met and authorizes the next action. It is a signal to the next actor, not a description of what is happening right now. |
+1. **Done**: the issue is closed.
+2. **Blocked**: the issue has an open Blocked Declaration with no resolution.
+3. **In specification**: an open PR adds or changes the Epic's spec (see the status above for which issues it applies to).
+4. **No spec**: the issue is not refined and has no open linked PR, and it has no open parent Epic, or its Epic has no merged spec and no open spec PR.
+5. **Refinement failed**: the latest refinement for the current spec failed, with no `/unblock` after it.
+6. **Not refined**: the issue is not refined for the current spec and has no open linked PR.
+7. For an Epic or Feature that is refined: **In progress**.
+8. For a story, task or bug with an open linked PR: **Mergeable** if a non-draft PR passes its merge gates on the current head; otherwise **In review** if a PR is not draft; otherwise **In implementation** (an open draft PR).
+9. **Ready to implement**: refined for the current spec, every hard dependency closed, no open linked PR.
+10. **Refined**: a story, task or bug that is refined and has a hard dependency still open, unresolved or unreadable.
 
-**Intent signal statuses** — "Ready for X" pattern:
+Notes on the order:
 
-| Status | Intent declared |
-|---|---|
-| Ready for implementation | Dependencies are resolved; an executor may pull this item |
-| Ready to merge | Review is approved and checks pass; a merge is authorized |
+- An issue outside any open Epic that has an open linked PR shows the PR's status, not No spec.
+- A refined story under an Epic with no merged spec keeps its implementation statuses, because it can still be implemented.
+- An issue with a stale spec record shows Not refined even with an open PR, because no further implementation session starts for it (#460).
 
-**Fact statuses** — all others:
+### Hand-off to review
 
-| Status | Fact described |
-|---|---|
-| Backlog | Item exists, not yet refined |
-| In refinement | Refinement is actively underway |
-| Refined | Item is well-defined; at least one hard dependency is unresolved |
-| In implementation | An executor is actively working on this item |
-| Needs rework | Reviewer has requested changes; item is back with the implementer |
-| Blocked | Progress has stopped due to a declared blocker |
-| In review | PR is open and submitted for review |
-| Done | PR has been merged; work is complete |
-
-### Example
-
-- **"Ready for implementation"** — intent signal. It does not mean someone is implementing; it means all prerequisites are met and an executor is authorized to start.
-- **"In implementation"** — fact. An executor has started; a branch exists.
-- **"Ready to merge"** — intent signal. It does not mean the PR is being merged; it means a merge is authorized.
-- **"In review"** — fact. The PR is open and submitted; a reviewer is expected to act.
+Hand-off to review is the implementing session's rule, not a board rule. The `/implement` session marks its PR ready for review only after the required `pytest` check is green for the current PR head SHA; a failed, pending, absent, unreadable, or older-head result keeps the PR a draft, which keeps the item In implementation. This binds the implementing session only: the board derives In review from the draft flag and the merge gates in `docs/MERGE-POLICY.md`, and `/review` does not gate on the check. Merge stays gated by the required checks in `docs/MERGE-POLICY.md`, unchanged.
 
 ---
 
-## Refined vs Ready for Implementation
+## Refined vs Ready to Implement
 
-These two statuses are frequently confused. The distinction is critical for correct executor routing.
+These two statuses are both derived facts. They differ only in whether every hard dependency listed in the issue's `## Dependencies` section is closed.
 
-| | Refined | Ready for implementation |
+| | Refined | Ready to implement |
 |---|---|---|
-| Item is well-defined | Yes | Yes |
-| Acceptance criteria are clear | Yes | Yes |
-| All hard dependencies resolved | **No** | **Yes** |
-| Executor may pull | **No** | **Yes** |
-| Role | Dependency waiting room | Executor-pull trigger |
+| Refined for the current spec | Yes | Yes |
+| Every hard dependency closed | **No** | **Yes** |
+| Shows on the board | Dependency waiting room | Refined and unblocked |
 
-An item moves from Refined to Ready for implementation only when every hard dependency listed in its `## Dependencies` section is closed or confirmed resolved. The PO or a dependency-tracking process makes this transition; executors do not self-promote items from Refined.
-
----
-
-## Allowed Transitions
-
-All transitions and their triggering events are listed below. Transitions not listed here are not permitted.
-
-| From | To | Triggering action or event |
-|---|---|---|
-| Backlog | In refinement | PO begins refining the item |
-| In refinement | Refined | Item meets definition of ready; at least one hard dependency remains unresolved |
-| In refinement | Backlog | Refinement is abandoned or deferred |
-| Refined | Ready for implementation | All hard dependencies are resolved |
-| Refined | Blocked | A blocking condition is declared on this item |
-| Ready for implementation | In implementation | An executor pulls the item and begins work (branch created, draft PR opened) |
-| In implementation | In review | Executor submits PR for review (PR marked ready for review) after the required `pytest` check is green for the current PR head SHA; a failed, pending, absent, unreadable, or older-head result keeps the item In implementation |
-| In implementation | Blocked | A blocking condition is declared while implementation is underway |
-| In review | Ready to merge | The approval gate is satisfied (ADR-007) and all required checks pass |
-| In review | Needs rework | Reviewer requests changes; PR is returned to the implementer |
-| In review | Blocked | A blocking condition surfaces during review |
-| Needs rework | In implementation | Executor picks up the rework on the existing branch |
-| Ready to merge | Done | PR is merged |
-| Ready to merge | In review | Approval becomes stale (new commit pushed after approval); item returns to In review |
-| Blocked | Refined | Blocker resolved; item has unresolved hard dependencies remaining |
-| Blocked | Ready for implementation | Blocker resolved; all hard dependencies are now resolved |
-| Blocked | In implementation | Blocker resolved; implementation resumes on an active branch |
-| Any | Blocked | A blocking condition is declared at any point from Refined onward |
-
-### Notes on specific transitions
-
-**In implementation → In review**: The green current-head `pytest` condition is the `/implement` handoff rule. It binds the implementing session only; `scripts/project-status-sync.sh` reconciles `In review` from PR state (an open non-draft PR) and does not read checks, and `/review` does not gate on it. Merge stays gated by the required checks in `docs/MERGE-POLICY.md`, unchanged.
-
-**In review → Ready to merge**: Both conditions must be true simultaneously — the approval gate is satisfied (ADR-007) for the current PR head SHA, and all required CI checks are passing. `docs/MERGE-POLICY.md` → Approval Gate: Independent Review lists the evidence that satisfies the gate.
-
-**Ready to merge → In review**: If a new commit is pushed to the PR after approval (for example, to address a last-minute issue), the approval is stale. The item returns to In review and must be re-reviewed.
-
-**Blocked resolution**: When a blocker is resolved, the item returns to the status it held before Blocked, or to Ready for implementation if the blocker was also the last unresolved dependency.
+Neither status authorizes work. The scheduler chooses new work from GitHub facts (`docs/DISPATCHER-CONFIG.md`), and no executor pulls from a status.
 
 ---
 
 ## Status Summary Table
 
-| Status | Type | Executor may pull? | Notes |
-|---|---|---|---|
-| Backlog | Fact | No | Not yet refined |
-| In refinement | Fact | No | Refinement in progress |
-| Refined | Fact | No | Dependency waiting room |
-| Ready for implementation | Intent | Yes | Executor-pull trigger |
-| In implementation | Fact | — | Work in progress |
-| Needs rework | Fact | — | Back with implementer |
-| Blocked | Fact | No | Blocker must be declared |
-| In review | Fact | — | Awaiting reviewer |
-| Ready to merge | Intent | — | Merge authorized |
-| Done | Fact | — | Merged and complete |
+| Status | Issue types | Fact |
+|---|---|---|
+| No spec | all | Not refined, no open linked PR, and no open Epic with a merged spec (or no open parent Epic) |
+| In specification | Epic (and unrefined issues under an Epic whose spec PR is open) | An open PR adds or changes the Epic's spec |
+| Refinement failed | all | Latest refinement for the current spec failed, with no `/unblock` after it |
+| Not refined | all | No refinement for the current spec: the refinement queue |
+| Blocked | all | An open Blocked Declaration with no resolution |
+| Refined | Story, Task, Bug | Refined, and a hard dependency is open, unresolved or unreadable |
+| Ready to implement | Story, Task, Bug | Refined, every hard dependency closed, no open linked PR |
+| In implementation | Story, Task, Bug | An open linked PR in draft |
+| In review | Story, Task, Bug | An open non-draft linked PR whose merge gates do not all pass |
+| Mergeable | Story, Task, Bug | The merge gates pass on the current head of the open non-draft linked PR |
+| In progress | Epic, Feature | Refined and not closed |
+| Done | all | The issue is closed |
 
 ---
 
@@ -196,22 +197,22 @@ Token budget consumed: <estimated tokens used, or "unknown">
 Write a handoff note whenever:
 
 - An executor stops mid-story for any reason (token limit, session end, external interrupt).
-- The story moves to Blocked and the executor is disengaging.
+- The story shows Blocked and the executor is disengaging.
 - The story is being deliberately handed off to a different executor type (e.g., Claude Code → Codex).
 
-A handoff note is not required when the story completes in a single session and moves to In review.
+A handoff note is not required when the story completes in a single session and its PR is marked ready for review.
 
 ---
 
 ## Recovery Protocol
 
-The recovery protocol applies when a story is found in **In implementation** status but shows signs of abandonment: no recent activity and no handoff note.
+The recovery protocol applies when a story shows **In implementation** (an open draft linked PR) but shows signs of abandonment: no recent activity and no handoff note.
 
 See also: [Lifecycle](HEADLESS-PR-WORKFLOW.md#lifecycle) — takeover between assistants, machines, and sessions must be recoverable from GitHub state plus explicit handoff notes.
 
 ### Stale detection
 
-A story in **In implementation** is considered stale when **both** of the following are true:
+A story that shows **In implementation** is considered stale when **both** of the following are true:
 
 1. No activity (commits, comments, PR updates) has occurred in **more than 2 hours**.
 2. No handoff note is present on the PR or issue.
@@ -222,8 +223,8 @@ Both conditions must be present. Inactivity alone does not trigger recovery — 
 
 When a stale story is detected on executor pre-flight:
 
-1. The executor posts a **recovery comment** on the issue or PR explaining the stale detection.
-2. The story status is rolled back to **Ready for implementation**.
+1. The executor posts a **recovery comment** on the issue or PR explaining the stale detection. The comment is the record that an abandoned branch exists.
+2. No status is changed by hand. The next dispatcher run derives the status from the facts; an open draft PR keeps the story In implementation.
 3. No in-progress work is discarded — the branch and any commits remain intact.
 4. The next executor may resume from the existing branch or start fresh, based on the state of the branch.
 
@@ -232,13 +233,14 @@ When a stale story is detected on executor pre-flight:
 ```
 ## Recovery Comment
 Detected: story in "In implementation" with no activity for >2h and no handoff note.
-Action: status rolled back to "Ready for implementation".
+Action: no status change; the board shows the status derived from the GitHub facts.
 Branch: <branch-name> — existing commits intact.
 Next executor: review branch state before pulling.
 ```
 
 ### What recovery does not do
 
+- Recovery does not change or roll back any board status.
 - Recovery does not delete commits or branches.
 - Recovery does not reassign the executor label.
 - Recovery does not trigger automatic re-implementation.
@@ -247,7 +249,7 @@ Next executor: review branch state before pulling.
 
 ## Blocked Status Protocol
 
-A story or task is moved to **Blocked** when progress has stopped due to a condition that cannot be resolved by the current executor alone.
+A story, task or bug shows **Blocked** while it has an open Blocked Declaration with no resolution. Progress has stopped due to a condition that cannot be resolved by the current executor alone.
 
 See also: [Lifecycle](HEADLESS-PR-WORKFLOW.md#lifecycle) — blockers are recorded in GitHub review threads, comments, checks, or issue/PR metadata.
 
@@ -308,14 +310,14 @@ Decision blockers require immediate PO involvement:
 
 When a blocker is resolved:
 
-1. **Decision blockers:** the PO replies with their decision in a comment that includes a standalone line — trimmed of surrounding whitespace — that is exactly `/unblock`. The word "unblock"/"unblocked" appearing in ordinary prose does not count; only a full line equal to `/unblock` qualifies. The dispatcher detects this automatically on its next poll and returns the story to **Ready for implementation** — no manual board-status change is required.
-   A decision blocker raised by a refinement (a story in "In refinement") is not resumed this way: a new refinement session (`dispatcher-invoke.sh --refine <n>`, `docs/DISPATCHER-CONFIG.md` → Refinement sessions) reads the answer, and the issue is never moved to **Ready for implementation** by the resume.
-2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration, and the story status is moved back manually to **Refined** (if hard dependencies remain) or **Ready for implementation** (if all dependencies are resolved).
-3. The executor label is reapplied as appropriate.
+1. **Decision blockers:** the PO replies with their decision in a comment that includes a standalone line — trimmed of surrounding whitespace — that is exactly `/unblock`. The word "unblock"/"unblocked" appearing in ordinary prose does not count; only a full line equal to `/unblock` qualifies. The dispatcher detects this automatically on its next poll. The resolution ends the Blocked fact, and the next dispatcher run derives the status from the facts: **Ready to implement** when the story is refined and every hard dependency is closed, **Refined** otherwise. No manual board-status change is required.
+   A decision blocker raised by a refinement is not resumed this way: a new refinement session (`dispatcher-invoke.sh --refine <n>`, `docs/DISPATCHER-CONFIG.md` → Refinement sessions) reads the answer, and the refinement's result decides the next status. The resume alone never makes the issue Ready to implement.
+2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration. The next dispatcher run derives the status again: **Refined** while hard dependencies remain, **Ready to implement** once all of them are closed. Nobody moves the status by hand.
+3. The `executor:` label is set in refinement and is not changed by a resolution.
 
 ### Cascading blocked rules
 
-Downstream stories in **Refined** status are not relabeled Blocked solely because an upstream story is blocked, unless the routing system would incorrectly pick them up as Ready for implementation. Relabel only when necessary to prevent incorrect executor routing.
+The Blocked fact belongs to the issue that declares it. A downstream story is not shown Blocked solely because an upstream story is blocked; its own status is derived from its own facts, for example Refined while its hard dependency is open. Routing reads those facts, so no label is changed to route work around an upstream blocker.
 
 ---
 
@@ -437,17 +439,17 @@ posts only the missing evidence comment, and never repeats the close request.
 
 ---
 
-## Rolling Refinement
+## Ready Buffer
 
-Rolling refinement is the practice of refining the next story while the current story is being implemented, so that the implementation queue never runs dry.
+Refinement is Tech Lead work (`docs/ROLES.md`), done just in time against the ready buffer of ADR-009 item 6: the buffer of 3–5 "ready" stories in `docs/REFINEMENT-PIPELINE.md`. The scheduler, not a person, decides which issue is refined next, from the **Not refined** queue.
 
-See also: [Lifecycle](HEADLESS-PR-WORKFLOW.md#lifecycle) — the workflow loops continuously; rolling refinement keeps the loop fed.
+See also: [Lifecycle](HEADLESS-PR-WORKFLOW.md#lifecycle) — the workflow loops continuously; the ready buffer keeps the loop fed.
 
 ### Rule
 
-Refine story N+1 while implementing story N.
+Refine an issue when the ready buffer needs one, and in the order the scheduler gives.
 
-**Never refine more than one sprint ahead.** Refining too far ahead wastes refinement work when decisions change during implementation.
+**Never refine more than the buffer needs.** Refining too far ahead wastes refinement work when decisions change during implementation.
 
 ### Gate for sequential dependencies
 
@@ -467,7 +469,7 @@ Refinement of stories in parallel lanes (no sequential dependency between them) 
 
 ## File Ownership Tagging
 
-Every story body must include a `## Files affected` section before it can move to **Ready for implementation**. The PO adds this section during refinement so executors can detect file ownership conflicts before pulling new work.
+Every story body must include a `## Files affected` section before it can show **Ready to implement**. The Tech Lead adds this section during refinement so the WIP pre-flight check can detect file ownership conflicts before new work starts.
 
 The section is a plain markdown list of repository-relative file paths:
 
@@ -480,18 +482,18 @@ The section is a plain markdown list of repository-relative file paths:
 
 The list declares expected ownership for the story. It does not have to predict every incidental test or documentation file, but it must include every known primary file, command file, workflow contract, and shared surface the story is expected to modify.
 
-If the affected files are unknown during refinement, keep the story in **In refinement** or **Refined** and record the uncertainty in Open Questions. Do not move it to **Ready for implementation** until the file list is actionable.
+If the affected files are unknown during refinement, record the uncertainty in Open Questions and do not finish the refinement until the file list is actionable. The story must not show **Ready to implement** before then.
 
 ---
 
 ## WIP Pre-Flight Check
 
-Before pulling a story from **Ready for implementation** into **In implementation**, an executor must run a WIP pre-flight check using GitHub as the source of truth.
+Before a story that shows **Ready to implement** starts (its first draft PR), the WIP pre-flight check runs using GitHub as the source of truth.
 
 The pre-flight check is:
 
 1. Read the candidate story's `## Files affected` section.
-2. Scan open stories currently in **In implementation**.
+2. Scan open stories that show **In implementation** (an open draft linked PR).
 3. Read each active story's `## Files affected` section.
 4. Count active **In implementation** stories.
 5. Compare file lists for overlap with the candidate story.
@@ -503,7 +505,7 @@ The WIP limit is the repository variable `WIP_LIMIT_IMPLEMENTATION` (see [WIP an
 
 If `WIP_LIMIT_IMPLEMENTATION` or more stories are already **In implementation**, do not proceed. If file overlap is detected, do not proceed. Stop and report the conflict as a **conflict** blocker using the Blocked Status Protocol.
 
-If no overlap exists and the WIP count is below `WIP_LIMIT_IMPLEMENTATION`, the executor may pull the story, create or check out the implementation branch, and move the story to **In implementation**.
+If no overlap exists and the WIP count is below `WIP_LIMIT_IMPLEMENTATION`, the story may start. Its implementation branch and draft PR show **In implementation**; no status is written by hand.
 
 This pre-flight logic is part of the workflow contract. Model-specific commands, prompts, and adapter files must reference this contract instead of redefining incompatible rules.
 
