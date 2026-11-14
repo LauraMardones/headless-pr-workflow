@@ -63,6 +63,13 @@ _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PRIO = re.compile(r"^prio:P(\d+)$")
 _CLOSES = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{n}\b"
 
+
+class Reason(str):
+    """A refusal's reason word, with the hook's optional one-line ``detail`` for the ``codex-wait`` text."""
+
+    detail: str = ""
+
+
 Eligibility = Callable[[str, int, str], "tuple[bool, str]"]
 
 
@@ -429,10 +436,14 @@ def command_gate(command: str | None, *, timeout: float = ELIGIBILITY_TIMEOUT) -
         if proc.returncode != 1:
             return False, "eligibility-unreadable"
         try:
-            reason = str((json.loads((proc.stdout or "").strip().splitlines()[0]) or {}).get("reason") or "")
+            answer = json.loads((proc.stdout or "").strip().splitlines()[0]) or {}
+            reason, detail = str(answer.get("reason") or ""), str(answer.get("detail") or "")
         except (ValueError, IndexError, AttributeError):
-            reason = ""
-        return False, reason if _WORD.match(reason) else "ineligible"
+            reason, detail = "", ""
+        refusal = Reason(reason if _WORD.match(reason) else "ineligible")
+        # One plain line: the text lands in an issue comment next to the marker.
+        refusal.detail = " ".join(re.sub(r"[<>`]", "", detail).split())[:300]
+        return False, refusal
 
     return gate
 
@@ -461,8 +472,9 @@ def _wait(gateway: Gateway, issue: int, attempt: int, reason: str, settings: Set
     """Post the item's waiting evidence once per attempt and reason; returns Block 1's result word."""
 
     where = f"to start its claimed attempt {attempt}" if claimed else f"before attempt {attempt}"
-    text = (f"Codex worker: #{issue} waits {where} ({reason}). A later scheduled run retries it; "
-            "the item is not moved to Claude.")  # fmt: skip
+    detail = getattr(reason, "detail", "")
+    text = (f"Codex worker: #{issue} waits {where} ({reason}{': ' + detail if detail else ''}). "
+            "A later scheduled run retries it; the item is not moved to Claude.")  # fmt: skip
     outcome = write_marker(gateway, issue, "codex-wait", [("issue", str(issue)), ("attempt", str(attempt)),
                                                           ("reason", reason)],
                            body=text, once=True, dry_run=dry_run, settings=settings, env=env)  # fmt: skip
