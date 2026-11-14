@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -58,6 +59,13 @@ REQUIRED_SECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
 }
 
 TITLE_PREFIX = re.compile(r"^\s*(?:\[(epic|feature|story|task|bug)\]|(epic|feature|story|task|bug)\s*:)", re.I)
+
+
+CATCH_ALL_MODULE = Path(__file__).resolve().parent.parent / "src" / "headless_pr_workflow" / "catch_all.py"
+# Allowed maintenance classes of spec #530 (the general line).
+MAINTENANCE_CLASSES = ("M1", "M2", "M3", "M4", "M6", "M8")
+CLASS_TOKEN = re.compile(r"\bM\d+\b")
+SORT_HEADING = re.compile(r"^###\s+Catch-all sort\b.*$", re.M)
 
 
 class ReadError(Exception):
@@ -225,6 +233,38 @@ def type_labels(issue: Issue) -> list[str]:
     return [label.split(":", 1)[1] for label in issue.labels if label.startswith("type:")]
 
 
+def catch_all_feature() -> int:
+    """The catch-all Feature number, parsed from catch_all.py (the script is stdlib-only, so no import)."""
+    try:
+        text = CATCH_ALL_MODULE.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReadError(f"catch_all.py: {error}") from error
+    match = re.search(r"^CATCH_ALL_FEATURE\s*=\s*(\d+)\s*$", text, re.M)
+    if not match:
+        raise ReadError("catch_all.py: no CATCH_ALL_FEATURE constant")
+    return int(match.group(1))
+
+
+def catch_all_sort_check(issue: Issue) -> Check:
+    feature = re.search(r"^[ \t]*Feature group:\s*#(\d+)\b", issue.body.replace("\r\n", "\n"), re.I | re.M)
+    if not feature or int(feature.group(1)) != catch_all_feature():
+        return Check("catch_all_sort", "skip", "not under the catch-all Feature")
+    decisions = parse_sections(issue.body).get("Decisions", "")
+    starts = [m.start() for m in SORT_HEADING.finditer(decisions)]
+    if not starts:
+        return Check("catch_all_sort", "fail", "no sort entry")
+    rest = decisions[starts[-1]:].split("\n", 1)[1] if "\n" in decisions[starts[-1]:] else ""
+    entry = re.split(r"^###\s", rest, maxsplit=1, flags=re.M)[0]
+    classes = sorted(set(CLASS_TOKEN.findall(entry)))
+    if len(classes) > 1:
+        return Check("catch_all_sort", "fail", "entry names more than one class")
+    if not classes:
+        return Check("catch_all_sort", "fail", "class <none> is not allowed maintenance")
+    if classes[0] not in MAINTENANCE_CLASSES:
+        return Check("catch_all_sort", "fail", f"class {classes[0]} is not allowed maintenance")
+    return Check("catch_all_sort", "pass", f"maintenance {classes[0]}")
+
+
 # --- checks --------------------------------------------------------------------------
 
 def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None) -> tuple[str | None, list[Check]]:
@@ -318,6 +358,7 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
 
     checks.append(spec_record_check(issue, repo, effective, spec_reader))
     checks.append(feature_criteria_check(issue, effective))
+    checks.append(catch_all_sort_check(issue))
     return effective, checks
 
 

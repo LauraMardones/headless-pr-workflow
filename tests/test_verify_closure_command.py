@@ -1,11 +1,19 @@
+import re
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
+from headless_pr_workflow import catch_all
 from headless_pr_workflow.catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
 from headless_pr_workflow.closure_verification import (
+    CATCH_ALL_CHOICE,
+    CATCH_ALL_HEADING,
+    CatchAllCandidate,
+    CatchAllIssue,
+    CatchAllRead,
+    listed_catch_all_issues,
     CheckResult,
     CiRun,
     REQUIRED_CHECK_COMMANDS,
@@ -55,6 +63,7 @@ def github() -> Mock:
     client.main_sha.return_value = SHA
     client.summary_urls.return_value = []
     client.ci_pytest_runs.return_value = [CiRun(SHA, "completed", "success", RUN_URL)]
+    client.catch_all_issues.return_value = CatchAllRead((), True)
     return client
 
 
@@ -1127,3 +1136,167 @@ def test_continue_closure_refuses_catch_all_before_any_call(number: int, kind: s
 
 def test_ordinary_feature_is_still_verified(github: Mock, local: Mock) -> None:
     assert verify_closure("10", github, local).target.number == 10
+
+
+# --- catch-all issues found under an Epic (#553) ---------------------------
+
+EPIC_NO = 504
+FEATURE_NO = catch_all.CATCH_ALL_FEATURE
+
+
+def _candidate(
+    number: int,
+    *,
+    found: str | None = f"#{EPIC_NO}",
+    feature: int | None = FEATURE_NO,
+    state: str = "OPEN",
+    origin: str = "https://example.test/origin",
+) -> CatchAllCandidate:
+    lines = [f"Parent epic: #{catch_all.CATCH_ALL_EPIC}"]
+    if feature is not None:
+        lines.append(f"Feature group: #{feature}")
+    if found is not None:
+        lines.append(f"Found under: {found}")
+    lines.append(f"Origin: {origin}")
+    return CatchAllCandidate(number, f"Title {number}", state, "\n".join(lines))
+
+
+def _epic_target(github: Mock, local: Mock, number: int = 10) -> None:
+    github.issue.return_value = Issue(
+        number, "Epic", "OPEN", frozenset({"type:epic"}),
+        declared_criteria=("Criterion one",),
+    )
+    github.native_children.return_value = []
+    github.metadata_children.return_value = []
+
+
+def test_epic_lists_catch_all_issues_in_number_order(github: Mock, local: Mock) -> None:
+    _epic_target(github, local)
+    github.catch_all_issues.return_value = CatchAllRead(
+        (_candidate(30, found="#10"), _candidate(20, found="#10")), True
+    )
+
+    result = verify_closure("10", github, local)
+
+    assert [i.number for i in result.catch_all_issues] == [20, 30]
+    section = result.catch_all_section
+    assert section.startswith(CATCH_ALL_HEADING)
+    assert section.index("#20") < section.index("#30")
+    assert section.count(CATCH_ALL_CHOICE) == 2
+    assert "| #20 | Title 20 | https://example.test/origin |" in section
+    github.catch_all_issues.assert_called_once_with(10)
+
+
+def test_epic_with_no_catch_all_issue_reads_none(github: Mock, local: Mock) -> None:
+    _epic_target(github, local)
+    result = verify_closure("10", github, local)
+    assert result.catch_all_section == f"{CATCH_ALL_HEADING}\nnone"
+
+
+def test_feature_has_no_catch_all_section_and_no_read(github: Mock, local: Mock) -> None:
+    result = verify_closure("10", github, local)
+    assert result.catch_all_issues is None
+    assert result.catch_all_section is None
+    github.catch_all_issues.assert_not_called()
+
+
+def test_catch_all_filter_excludes_everything_but_exact_open_matches() -> None:
+    candidates = [
+        _candidate(1),
+        _candidate(2, state="CLOSED"),
+        _candidate(3, found="#50"),
+        _candidate(4, found="#5040"),
+        _candidate(5, feature=999),
+        _candidate(6, feature=None),
+        _candidate(7, found=None),
+        _candidate(8, found="#504 and more"),
+    ]
+    assert [i.number for i in listed_catch_all_issues(EPIC_NO, candidates)] == [1]
+
+
+def test_catch_all_issue_does_not_change_the_verdict_or_inventory(
+    github: Mock, local: Mock
+) -> None:
+    _epic_target(github, local)
+    without = verify_closure("10", github, local)
+    github.catch_all_issues.return_value = CatchAllRead((_candidate(20, found="#10"),), True)
+    with_issue = verify_closure("10", github, local)
+    assert with_issue.inventory == without.inventory == ()
+    assert with_issue.checks == without.checks
+    assert with_issue.should_post_summary is True
+
+
+def test_unreadable_catch_all_read_blocks_naming_the_read(
+    github: Mock, local: Mock
+) -> None:
+    _epic_target(github, local)
+    github.catch_all_issues.side_effect = RuntimeError("HTTP 502 search")
+    with pytest.raises(VerificationBlocked, match="catch-all issues cannot be read: HTTP 502"):
+        verify_closure("10", github, local)
+    github.summary_urls.assert_not_called()
+
+
+def test_incomplete_catch_all_search_blocks(github: Mock, local: Mock) -> None:
+    _epic_target(github, local)
+    github.catch_all_issues.return_value = CatchAllRead((_candidate(20, found="#10"),), False)
+    with pytest.raises(VerificationBlocked, match="cannot be read completely"):
+        verify_closure("10", github, local)
+    github.summary_urls.assert_not_called()
+
+
+def _epic_closure(closure_github: Mock, numbers: tuple[int, ...]) -> None:
+    closure_github.issue.return_value = Issue(10, "Epic", "OPEN", frozenset({"type:epic"}))
+    closure_github.technical_summaries.return_value = [
+        TechnicalSummary(10, "type:epic", SHA, SUMMARY_TIME, "summary", (), (), numbers)
+    ]
+
+
+def test_epic_closing_evidence_lists_catch_all_issues(closure_github: Mock) -> None:
+    _epic_closure(closure_github, (20, 30))
+    continue_closure("10", closure_github)
+    body = closure_github.post_closing_evidence.call_args.args[1]
+    assert "- Catch-all issues listed: #20, #30" in body
+
+
+def test_epic_closing_evidence_says_none_without_catch_all_issues(
+    closure_github: Mock,
+) -> None:
+    _epic_closure(closure_github, ())
+    continue_closure("10", closure_github)
+    body = closure_github.post_closing_evidence.call_args.args[1]
+    assert "- Catch-all issues listed: none" in body
+
+
+def test_feature_closing_evidence_has_no_catch_all_line(closure_github: Mock) -> None:
+    continue_closure("10", closure_github)
+    body = closure_github.post_closing_evidence.call_args.args[1]
+    assert "Catch-all issues listed" not in body
+
+
+def test_catch_all_feature_number_is_not_a_literal_outside_catch_all_py() -> None:
+    root = Path(__file__).resolve().parent.parent
+    number = str(catch_all.CATCH_ALL_FEATURE)
+    for relative in (
+        "src/headless_pr_workflow/closure_verification.py",
+        ".claude/commands/verify-closure.md",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert not re.search(rf"(?<!\d){number}(?!\d)", text), relative
+    assert "catch_all" in (
+        root / "src/headless_pr_workflow/closure_verification.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_command_file_describes_catch_all_list() -> None:
+    text = (
+        Path(__file__).resolve().parent.parent / ".claude/commands/verify-closure.md"
+    ).read_text(encoding="utf-8")
+    for needle in (
+        CATCH_ALL_HEADING,
+        CATCH_ALL_CHOICE,
+        "- Catch-all issues listed:",
+        "`src/headless_pr_workflow/catch_all.py`",
+    ):
+        assert needle in text, needle
+    assert text.index("### Child and merged PR inventory") < text.index(CATCH_ALL_HEADING)
+    assert text.index(CATCH_ALL_HEADING) < text.index("### Criterion evidence matrix")

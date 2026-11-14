@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from .catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
+from headless_pr_workflow.catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
 
 
 SUPPORTED_TYPES = frozenset({"type:feature", "type:epic"})
@@ -26,6 +26,12 @@ NO_SPEC_LINE = "Spec: none found — criteria taken from the issue body"
 _EPIC_CRITERION = re.compile(r"^- \*\*(E\d+):\*\*[ \t]*(.*)$")
 _VERIFIED_BY = re.compile(r"^\s+- \*\*Verified by:\*\*[ \t]*(.*)$")
 _THE_PO = re.compile(r"\bthe po\b", re.IGNORECASE)
+CATCH_ALL_CHOICE = "new spec (/spec) or close the issue"
+CATCH_ALL_HEADING = "### Catch-all issues found under this Epic"
+CATCH_ALL_EVIDENCE_PREFIX = "- Catch-all issues listed:"
+_FOUND_UNDER = re.compile(r"^Found under: #(\d+)[ \t]*$", re.MULTILINE)
+_FEATURE_GROUP = re.compile(r"^Feature group: #(\d+)[ \t]*$", re.MULTILINE)
+_ORIGIN = re.compile(r"^Origin:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
 
 class VerificationBlocked(ValueError):
@@ -58,6 +64,31 @@ class Issue:
     labels: frozenset[str]
     parent_number: int | None = None
     declared_criteria: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CatchAllCandidate:
+    """One issue a catch-all search returned; the body lines are read by the filter."""
+
+    number: int
+    title: str
+    state: str
+    body: str
+
+
+@dataclass(frozen=True)
+class CatchAllRead:
+    """The search result and whether it is complete (not truncated or partial)."""
+
+    issues: tuple[CatchAllCandidate, ...]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class CatchAllIssue:
+    number: int
+    title: str
+    origin: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +171,7 @@ class TechnicalSummary:
     url: str
     checks: tuple[str, ...] = ()
     po_check_criteria: tuple[str, ...] = ()
+    catch_all_issues: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -168,6 +200,28 @@ class VerificationResult:
     checks: tuple[CheckResult, ...]
     existing_summary_url: str | None = None
     spec: Spec | None = None
+    catch_all_issues: tuple[CatchAllIssue, ...] | None = None  # Epic targets only
+
+    @property
+    def catch_all_section(self) -> str | None:
+        """The summary section listing catch-all issues (Epic only)."""
+
+        if self.catch_all_issues is None:
+            return None
+        if not self.catch_all_issues:
+            return f"{CATCH_ALL_HEADING}\nnone"
+        rows = (
+            f"| #{issue.number} | {issue.title} | {issue.origin} | {CATCH_ALL_CHOICE} |"
+            for issue in self.catch_all_issues
+        )
+        return "\n".join(
+            (
+                CATCH_ALL_HEADING,
+                "| Issue | Title | Origin | PO choice |",
+                "|---|---|---|---|",
+                *rows,
+            )
+        )
 
     @property
     def should_post_summary(self) -> bool:
@@ -200,6 +254,13 @@ class GitHubEvidence(Protocol):
     def linked_pull_requests(self, issue_number: int) -> Sequence[PullRequest]: ...
 
     def main_sha(self) -> str: ...
+
+    def catch_all_issues(self, epic: int) -> CatchAllRead:
+        """Return the open issues that may be catch-all issues found under ``epic``.
+
+        Raise if the read fails; report ``complete=False`` for a partial search.
+        """
+        ...
 
     def summary_urls(self, marker: str) -> Sequence[str]: ...
 
@@ -385,6 +446,46 @@ def _inventory(github: GitHubEvidence, target: Issue) -> tuple[InventoryItem, ..
     return tuple(items)
 
 
+def listed_catch_all_issues(
+    epic: int, candidates: Sequence[CatchAllCandidate]
+) -> tuple[CatchAllIssue, ...]:
+    """Keep open issues found under exactly ``epic`` in the catch-all Feature.
+
+    Search is fuzzy, so every candidate is checked line by line: ``Found under:``
+    must name the Epic number exactly and ``Feature group:`` must be the
+    catch-all Feature (a Moved issue has left it).
+    """
+
+    listed = []
+    for issue in sorted(candidates, key=lambda value: value.number):
+        if issue.state != "OPEN":
+            continue
+        found = {int(n) for n in _FOUND_UNDER.findall(issue.body)}
+        groups = {int(n) for n in _FEATURE_GROUP.findall(issue.body)}
+        if found != {epic} or groups != {CATCH_ALL_FEATURE}:
+            continue
+        origin = _ORIGIN.search(issue.body)
+        listed.append(
+            CatchAllIssue(issue.number, issue.title, origin.group(1) if origin else "")
+        )
+    return tuple(listed)
+
+
+def _catch_all_issues(github: GitHubEvidence, epic: int) -> tuple[CatchAllIssue, ...]:
+    try:
+        read = github.catch_all_issues(epic)
+    except Exception as error:
+        raise VerificationBlocked(
+            f"catch-all issues cannot be read: {error}"
+        ) from error
+    if not read.complete:
+        raise VerificationBlocked(
+            "catch-all issues cannot be read completely: the search reported "
+            "incomplete results"
+        )
+    return listed_catch_all_issues(epic, read.issues)
+
+
 def ci_check_command(sha: str) -> str:
     return f"CI {CI_CHECK_NAME} on {sha}"
 
@@ -530,6 +631,10 @@ def verify_closure(
         else frozenset()
     )
 
+    catch_all = (
+        _catch_all_issues(github, number) if target_type == "type:epic" else None
+    )
+
     evidence = tuple(local.evidence_rows(target))
     checks = (*local.check_results(), ci_check_result(github, main_sha))
     _validate_evidence(declared, evidence, checks, main_sha, required, po_checkable)
@@ -558,6 +663,7 @@ def verify_closure(
         checks=checks,
         existing_summary_url=urls[0] if urls else None,
         spec=spec,
+        catch_all_issues=catch_all,
     )
 
 
@@ -591,6 +697,18 @@ def _closing_body(
         if summary.po_check_criteria
         else ()
     )
+    catch_all_line = (
+        (
+            f"{CATCH_ALL_EVIDENCE_PREFIX} "
+            + (
+                ", ".join(f"#{n}" for n in summary.catch_all_issues)
+                if summary.catch_all_issues
+                else "none"
+            ),
+        )
+        if target_type == "type:epic"
+        else ()
+    )
     return "\n".join(
         (
             "## Closure Evidence",
@@ -605,6 +723,7 @@ def _closing_body(
             f"`{confirmation.created_at}` — {confirmation.url}",
             f"- Checks: {checks}",
             *po_line,
+            *catch_all_line,
             "- Blockers: none",
             "- Close result: closed",
         )

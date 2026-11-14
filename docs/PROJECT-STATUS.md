@@ -397,6 +397,12 @@ section gives the PO numbered steps, the exact text to post, the expected
 result and how to tell pass from fail. The PO does these checks, then replies
 `yes` only if every one gave the expected result.
 
+An Epic's summary also has a `### Catch-all issues found under this Epic`
+section: the open catch-all issues whose `Found under:` line names the Epic,
+each with the PO's two choices (a new spec, or close the issue). They are not
+children and never block closure; a list that cannot be read completely blocks
+the summary. The closing evidence repeats their numbers.
+
 A successful comment records the target and type, full verified SHA, child and
 merged-PR inventory, criterion evidence matrix, exact checks and outcomes,
 blockers, residual risk, and next action. It also includes a stable marker made

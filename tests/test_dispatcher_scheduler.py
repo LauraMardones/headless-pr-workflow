@@ -703,3 +703,37 @@ def test_command_in_flight(gw, capsys):
     assert rc == 1 and out["action"] is None and out["counts"]["in_implementation"] == 0
     rc, out, _ = run(capsys, gw, "--in-flight", "")
     assert rc == 0 and out["action"]["issue"] == 30
+
+
+# ── catch-all issues are ordinary step-6 refinement candidates (#551) ─────────
+
+
+def catch_all_facts(*, blocker=None):
+    from headless_pr_workflow.catch_all import CATCH_ALL_EPIC, CATCH_ALL_FEATURE
+
+    items = [
+        feature(CATCH_ALL_FEATURE, parent=CATCH_ALL_EPIC),
+        feature(21, parent=CATCH_ALL_EPIC, refined=False),
+        issue(60, parent=CATCH_ALL_EPIC, feature=CATCH_ALL_FEATURE, refined=False, blocker=blocker),
+    ]
+    return [epic(CATCH_ALL_EPIC)], items
+
+
+def test_catch_all_issue_is_a_step_6_refine_candidate_with_no_skip():
+    epics, items = catch_all_facts()
+    d = decide(epics, items)
+    assert chosen(d) == ("refine", 60, 6, "not-refined")
+    assert not any(r in ("no-feature", "no-parent", "feature-not-refined") or r.startswith("feature-not-refined")
+                   for n, r in skips(d).items() if n == 60)
+
+
+def test_catch_all_issue_holds_a_feature_breakdown_back_until_sorted():
+    epics, items = catch_all_facts()
+    assert skips(decide(epics, items))[21] == "stories-left-to-refine #60"
+
+
+def test_catch_all_issue_with_an_open_decision_blocker_releases_the_breakdown():
+    epics, items = catch_all_facts(blocker=OPEN)
+    d = decide(epics, items)
+    assert skips(d)[60] == "open-decision-blocker"
+    assert chosen(d) == ("refine", 21, 4, "not-refined")

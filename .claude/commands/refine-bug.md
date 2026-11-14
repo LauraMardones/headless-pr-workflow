@@ -12,6 +12,20 @@ Do not implement code.
 
 Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and check, no refinement without a merged spec, the spec record, decision blockers instead of questions to the PO, resume after `/unblock`, lens questions and usage findings. Follow them before any issue write. Ask the PO nothing in the session.
 
+## Catch-all sort
+
+Run this step only when the issue's `Feature group:` number equals `CATCH_ALL_FEATURE` in `src/headless_pr_workflow/catch_all.py` (read the constant from that file, never from a literal here). Otherwise skip it. It runs after the Tech Lead rules' spec lookup and check for the issue's current Epic and before any issue body write. Sort the issue into exactly one outcome, checked in this order:
+
+1. **Moved:** the finding fits an existing criterion `F<k>.<m>` of an open Feature that has written `F<k>.<m>` criteria and is refined, under an open Epic with a merged spec. A closed Feature or Epic is never a target. Rewrite `Parent epic:`, `Feature group:` and the spec record to that Feature and its Epic (the spec lookup and check run again for the target Epic). Keep `Found under:` and `Origin:`. Moved adds no criterion (ADR-008 item 5, ADR-009). Refinement continues as a story or bug of that Feature.
+2. **Maintenance:** allowed maintenance by the general line of spec #530 → Decisions: class M1, M2, M3, M4, M6 or M8 as part of an allowed fix (M1 is a bug that breaks a criterion of a closed Epic's merged spec). Refine the issue where it is, without the PO, with exactly one `prio:` and one `executor:` label.
+3. **Decision:** anything else (M5, M7, M8 on its own, M9, M10, or any change to described behaviour). Post a `Type: decision` Blocked Declaration that names the M class, or the part of the general line the finding fails. The issue body and its criteria stay unchanged.
+
+Record the outcome where code can read it:
+
+- For Moved and Maintenance, add a `### Catch-all sort — YYYY-MM-DD` entry under `## Decisions` (never for Decision: the body stays unchanged and the Blocked Declaration is the mark). A Maintenance entry names exactly one class token among `M1`, `M2`, `M3`, `M4`, `M6`, `M8` and says how the fix meets the general line; an M8 refactoring needed by another allowed fix is named in prose as "refactoring" without a second class token. A Moved entry names the target Feature and its criterion `F<k>.<m>`. A re-refinement adds a new entry; old entries are not edited.
+- The Session Summary carries one line: `Catch-all sort: moved to #<feature> (F<k>.<m>)`, `Catch-all sort: maintenance M<n>` or `Catch-all sort: decision M<n>` (`decision general-line` when the failed part is the general line and not an M class).
+- `scripts/refine-check` reports `catch_all_sort` for an issue under the catch-all Feature: it fails without a sort entry, or when the latest entry names no class token, a class outside the allowed six, or more than one class.
+
 ## Core Instructions
 
 - Fetch the current GitHub issue title, body, labels, milestone, linked epic, task lists, dependencies, and relevant comments.
