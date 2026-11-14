@@ -52,13 +52,13 @@ jq -n --rawfile body "$BIG_BODY_FILE" '
 {
   "data": {"repository": {"projectsV2": {"nodes": [{
     "id": "PVT_1",
-    "fields": {"nodes": [{"id": "FIELD_STATUS", "name": "Status", "options": [{"id": "OPT1", "name": "Ready for implementation"}, {"id": "OPT2", "name": "In review"}, {"id": "OPT3", "name": "In merge"}]}]},
+    "fields": {"nodes": [{"id": "FIELD_STATUS", "name": "Status", "options": [{"id": "OPT1", "name": "Ready to implement"}, {"id": "OPT2", "name": "In review"}, {"id": "OPT3", "name": "Mergeable"}]}]},
     "items": {
       "pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
       "nodes": [{
         "id": "ITEM_100",
         "content": {"number": 100, "title": "Large story", "body": $body, "updatedAt": "2026-08-01T00:00:00Z"},
-        "fieldValues": {"nodes": [{"name": "Ready for implementation", "field": {"name": "Status"}}]}
+        "fieldValues": {"nodes": [{"name": "Ready to implement", "field": {"name": "Status"}}]}
       }]
     }
   }]}}}
@@ -75,7 +75,7 @@ jq -n '
       "nodes": [{
         "id": "ITEM_240",
         "content": {"number": 240, "title": "Story: Define delivery-baseline", "body": "", "updatedAt": "2026-08-09T00:00:00Z"},
-        "fieldValues": {"nodes": [{"name": "Ready for implementation", "field": {"name": "Status"}}]}
+        "fieldValues": {"nodes": [{"name": "Ready to implement", "field": {"name": "Status"}}]}
       }]
     }
   }]}}}

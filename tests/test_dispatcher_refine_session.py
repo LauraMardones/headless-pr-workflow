@@ -193,8 +193,8 @@ def test_the_limit_refuses_the_start_and_sets_the_output_once(d):
 
 def test_refine_starts_one_session_and_nothing_else(tmp_path):
     d = story(tmp_path, ["type:story", "executor:claude-code-sonnet"])
-    d.add_story(OTHER, "Ready for implementation")
-    d.add_story(OTHER + 1, "In merge")
+    d.add_story(OTHER, "Ready to implement")
+    d.add_story(OTHER + 1, "Mergeable")
     d.add_pr(901, OTHER + 1)
     d.add_story(OTHER + 2, "In implementation")
 

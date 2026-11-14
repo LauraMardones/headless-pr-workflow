@@ -1,8 +1,10 @@
 """Deterministic follow-up to a Codex review of a Claude-implemented PR (ADR-006).
 
-The job reads the current state of one PR and decides what to do next: move the
-story on the board and post the Session Summary, post a bounded review
-re-request, or post a blocker. No model is involved. The decision is a pure
+The job reads the current state of one PR and decides what to do next: post the
+Session Summary that hands the story to merge or back to implementation, post a
+bounded review re-request, or post a blocker. It writes no board status (issue
+#478): the board writer (`hpw dispatcher status sync`) shows the story's status
+from the same facts. No model is involved. The decision is a pure
 function of GitHub facts and the current time; every mutation is idempotent
 through a hidden marker in the comment it posts, so all state lives on GitHub.
 """
@@ -13,7 +15,7 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
@@ -46,8 +48,12 @@ COMMAND_NAME = "codex-review-bookkeeping"
 # The only failure that exits 3: two readings of the PR disagreed (issue #330).
 CHANGED_DURING_RUN_STEP = "revalidate decision"
 STATUS_IN_REVIEW = "In review"
-STATUS_IN_MERGE = "In merge"
-STATUS_IN_IMPLEMENTATION = "In implementation"
+STATUS_BLOCKED = "Blocked"
+# The statuses the job acts on (its entry guard). Issue #478: the board writer shows a story whose PR is in
+# review as "Blocked" once a blocker is open on it, for example the job's own resource or external blocker;
+# the job must still act on the next Codex result there, as it did when the card stayed "In review". An open
+# decision blocker still holds the job (`decision_blocker` below).
+ACTED_ON_STATUSES = (STATUS_IN_REVIEW, STATUS_BLOCKED)
 
 ACTION_MOVE_IN_MERGE = "move-in-merge"
 ACTION_MOVE_IN_IMPLEMENTATION = "move-in-implementation"
@@ -55,10 +61,9 @@ ACTION_REQUEST_REVIEW = "request-review"
 ACTION_BLOCKER_RESOURCE = "blocker-resource"
 ACTION_BLOCKER_EXTERNAL = "blocker-external"
 ACTION_NONE = "none"
-MOVE_TARGETS = {
-    ACTION_MOVE_IN_MERGE: STATUS_IN_MERGE,
-    ACTION_MOVE_IN_IMPLEMENTATION: STATUS_IN_IMPLEMENTATION,
-}
+# The two hand-off actions. Their names are kept for the markers already on
+# GitHub; neither writes a board status (issue #478).
+MOVE_ACTIONS = frozenset({ACTION_MOVE_IN_MERGE, ACTION_MOVE_IN_IMPLEMENTATION})
 
 APPLIED = "applied"
 ALREADY_PRESENT = "already-present"
@@ -97,29 +102,14 @@ query($owner: String!, $name: String!, $number: Int!) {
       projectItems(first: 20) {
         pageInfo { hasNextPage }
         nodes {
-          id
           isArchived
-          project { id }
           fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue {
-              name
-              field { ... on ProjectV2SingleSelectField { id options { id name } } }
-            }
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
         }
       }
     }
   }
-}
-"""
-SET_STATUS_MUTATION = """
-mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-  updateProjectV2ItemFieldValue(input: {
-    projectId: $projectId
-    itemId: $itemId
-    fieldId: $fieldId
-    value: { singleSelectOptionId: $optionId }
-  }) { projectV2Item { id } }
 }
 """
 RESOLVE_THREAD_MUTATION = """
@@ -140,7 +130,7 @@ THREAD_REASON_TEXT = {
 
 
 class BookkeepingError(RuntimeError):
-    """A read was incomplete, a board option is missing or a mutation failed."""
+    """A read was incomplete or a mutation failed."""
 
     def __init__(self, step: str, message: str) -> None:
         self.step = step
@@ -220,15 +210,11 @@ class BookkeepingConfig:
 
 @dataclass(frozen=True)
 class StoryBoard:
-    """A story's title and its position on the project board."""
+    """A story's title and its status on the project board (read only, as the job's entry guard)."""
 
     number: int
     title: str
     status: str | None
-    item_id: str | None = None
-    project_id: str | None = None
-    field_id: str | None = None
-    options: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -374,8 +360,6 @@ class GitHubGateway(Protocol):
 
     def post_comment(self, number: int, body: str) -> str: ...
 
-    def set_story_status(self, story: StoryBoard, status: str) -> None: ...
-
     def session_summary(self, arguments: tuple[str, ...]) -> str: ...
 
     def list_open_ready_prs(self) -> tuple[int, ...]: ...
@@ -476,8 +460,10 @@ def decide(
     yields the preliminary `move-in-merge` that `_read` completes with the
     threads before anything is applied.
 
+    `story_status` must be one of `ACTED_ON_STATUSES` (`In review` or `Blocked`).
+
     `decision_blocker` names the story's open `Type: decision` blocker (a PO
-    waiver decision is pending). While it is set, an `In review` story is held:
+    waiver decision is pending). While it is set, the story is held:
     the action is `none`, so no review request, thread resolution or move
     happens until the PO's `/unblock`.
     """
@@ -513,13 +499,13 @@ def decide(
 
     if story is None:
         return result(ACTION_NONE, codex_result, codex_url, reason or "PR has no linked story.")
-    if story_status != STATUS_IN_REVIEW:
+    if story_status not in ACTED_ON_STATUSES:
         shown = f"`{story_status}`" if story_status else "not set on the project board"
         return result(
             ACTION_NONE,
             codex_result,
             codex_url,
-            f"Story #{story.number} is {shown}, not `{STATUS_IN_REVIEW}`.",
+            f"Story #{story.number} is {shown}, not `{STATUS_IN_REVIEW}` or `{STATUS_BLOCKED}`.",
         )
     if not head_sha:
         raise BookkeepingError("read PR", "current PR head SHA is unknown")
@@ -666,7 +652,7 @@ def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingC
     blocker: str | None = None
     if linked is not None:
         story = github.fetch_story(linked.number)
-        if story.status == STATUS_IN_REVIEW:
+        if story.status in ACTED_ON_STATUSES:
             # The hold comes first: while a decision blocker is open the
             # decision is `none` whatever CI says, so a failing CI read must
             # not turn the hold into a failed run (issue #357).
@@ -694,23 +680,24 @@ def _apply(reading: _Reading, *, confirm: Any, github: GitHubGateway, dry_run: b
     if story is None or (decision.marker is None and decision.action != ACTION_REQUEST_REVIEW):
         raise BookkeepingError("apply decision", f"decision `{decision.action}` is incomplete")
 
-    if decision.action in MOVE_TARGETS:
-        target = MOVE_TARGETS[decision.action]
-        # Checked before any mutation, so a missing option never leaves a summary without its move.
-        if not story.item_id or not story.project_id or not story.field_id or target not in story.options:
-            raise BookkeepingError("look up board option", f"the project board has no `{target}` status option")
+    if decision.action in MOVE_ACTIONS:
         summary_present = any(decision.marker in (event.body or "") for event in context.conversation_comments)
+        # The summary's marker is the record of the hand-off: with it on the PR and no thread
+        # left to resolve, a later run (the story is still `In review` until the board writer
+        # runs) has nothing to do.
+        if summary_present and not decision.threads_resolved:
+            return Outcome(decision, ALREADY_PRESENT)
         if dry_run:
             return Outcome(decision, DRY_RUN)
         confirm()
-        # Order of mutations: resolve the threads, post the summary that lists them, move the story.
+        # Order of mutations: resolve the threads, then post the summary that lists them. No board
+        # status is written (issue #478); the board writer shows it from the same facts.
         for thread in decision.threads_resolved:
             github.resolve_review_thread(thread.id)
         urls: tuple[str, ...] = ()
         if not summary_present:
             summary = github.session_summary(_session_summary_arguments(decision))
             urls = (github.post_comment(decision.pr, f"{summary}\n{decision.marker}\n"),)
-        github.set_story_status(story, target)
         return Outcome(decision, APPLIED, urls)
 
     if decision.action == ACTION_REQUEST_REVIEW:
@@ -740,7 +727,7 @@ def blocker_body(decision: Decision, story: StoryBoard) -> str:
         f"Unblocked when: {decision.blocker_unblocked_when}\n"
         f"Owner: {BLOCKER_OWNER}\n"
         f"State of in-progress work: PR #{decision.pr} at head {decision.head_sha}; "
-        f"the story stays in `{STATUS_IN_REVIEW}`. {decision.blocker_detail or decision.reason}\n"
+        f"the job acts on the next Codex result for the story. {decision.blocker_detail or decision.reason}\n"
         "Resume instruction: n/a\n"
         f"{decision.marker}\n"
     )
@@ -1088,18 +1075,6 @@ class GhCliGateway:
             raise BookkeepingError(step, "GitHub did not confirm the comment")
         return url
 
-    def set_story_status(self, story: StoryBoard, status: str) -> None:
-        step = f"move story #{story.number} to `{status}`"
-        payload = self._json(
-            step,
-            ["api", "graphql", "-f", f"query={SET_STATUS_MUTATION}", "-f", f"projectId={story.project_id}",
-             "-f", f"itemId={story.item_id}", "-f", f"fieldId={story.field_id}",
-             "-f", f"optionId={story.options[status]}"],
-        )  # fmt: skip
-        item = (((payload.get("data") or {}).get("updateProjectV2ItemFieldValue") or {}).get("projectV2Item") or {})
-        if payload.get("errors") or not item.get("id"):
-            raise BookkeepingError(step, "GitHub did not confirm the board update")
-
     def session_summary(self, arguments: tuple[str, ...]) -> str:
         return run_session_summary(arguments)
 
@@ -1153,19 +1128,8 @@ def parse_story_board(payload: dict[str, Any], *, number: int, step: str = "read
     if len(active) != 1:
         raise BookkeepingError(step, f"story #{number} is on {len(active)} project boards; expected one")
 
-    item = active[0]
-    value = item.get("fieldValueByName") or {}
-    status_field = value.get("field") or {}
-    options = status_field.get("options") or []
-    return StoryBoard(
-        number=number,
-        title=title,
-        status=value.get("name"),
-        item_id=item.get("id"),
-        project_id=(item.get("project") or {}).get("id"),
-        field_id=status_field.get("id"),
-        options={option["name"]: option["id"] for option in options if isinstance(option, dict) and option.get("name")},
-    )
+    value = active[0].get("fieldValueByName") or {}
+    return StoryBoard(number=number, title=title, status=value.get("name"))
 
 
 def run_session_summary(arguments: tuple[str, ...]) -> str:

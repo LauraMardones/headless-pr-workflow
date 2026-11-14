@@ -60,8 +60,7 @@ die() { printf 'dispatcher-change-check: %s\n' "$*" >&2; exit 2; }
 CHECKS=(executable slack-guard dry-run stdout-json dispatch-handled verified-write own-marker saved-state)
 
 # The shims of Block 1 in scripts/dispatcher-invoke.sh: they call the block.
-VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment set_project_status
-    set_project_status_checked set_project_status_ready evidence_retry label_pending_cleanup)
+VERIFIED_WRITE_SHIMS=(dispatcher_write write_field post_comment evidence_retry label_pending_cleanup)
 # Exceptions: one "<function> <check-id>" per "stays" row of ADR-014 -> Decision
 # -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
 VERIFIED_WRITE_ALLOW=(
@@ -70,13 +69,11 @@ VERIFIED_WRITE_ALLOW=(
 # The shims of Block 2 in scripts/dispatcher-invoke.sh and the other scripts: they call the block.
 OWN_MARKER_SHIMS=(dispatcher_marker marker_block resolve_dispatcher_login marker_holds bot_comments_json
     marker_list_json bookkeeping_fix_marker_init bookkeeping_login newest_own_comment_body
-    decision_blocker_claim_body decision_blocker_resume_body decision_blocker_marker_since
-    decision_blocker_claim_version own_comments_json load_token_login)
+    own_comments_json load_token_login)
 # Exceptions: one "<function> own-marker" per "stays" row of ADR-014 -> Decision
 # -> 7 that the rule would otherwise flag. Adding one means amending the ADR.
 OWN_MARKER_ALLOW=(
     "latest_decision_blocker_json own-marker"  # reads Blocked Declarations and the PO's /unblock, not dispatcher markers
-    "check_and_resolve_decision_blocker_comment own-marker"  # the PO's /unblock line; its CLAIM/CONFIRM text goes through Block 2
     "conflict_round_rule own-marker"  # pure decision rule over the three logins it is given
     "evidence_pending_comment own-marker"  # builds the evidence-pending text of #348; read back through Block 2
     "scan_job_blockers own-marker"  # dispatcher-notify-retry.sh (issue #393): the bookkeeping job's declarations, posted under the PO account

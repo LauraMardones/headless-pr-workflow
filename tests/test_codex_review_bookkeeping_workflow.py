@@ -192,7 +192,7 @@ def test_workflow_doc_and_known_limits_describe_the_same_rule():
     loop = (REPO_ROOT / "docs" / "HEADLESS-PR-WORKFLOW.md").read_text(encoding="utf-8")
     config = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
 
-    assert "resolve the threads, post the Session Summary, move the story" in loop
+    assert "resolve the threads, then post the Session Summary" in loop
     assert "`Type: external` blocker on the story naming each remaining thread" in loop
     assert "can move a story to `In merge` while Codex review threads" not in config
     assert "`resolveReviewThread`" in config

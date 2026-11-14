@@ -94,7 +94,7 @@ Required behavior:
    - if the story carries an `executor:claude-code-*` label, request the Codex review (ADR-006): once the PR is Ready for review, post exactly one PR conversation comment whose first line is the Codex review trigger phrase (read it from ADR-006 → Decision or the constant `CODEX_REVIEW_TRIGGER_PHRASE` in `src/headless_pr_workflow/review_policy.py`)
    - post no review request on intermediate pushes, never post one on an issue, and post none for an `executor:codex` story
    - write the trigger phrase only as that PR conversation comment, never in an issue, a PR description, a committed file or any other comment, because it starts a Codex task wherever it appears
-   - do not run `/review` for a Claude-implemented story: the `codex-review-bookkeeping` workflow moves the story and posts the review Session Summary after Codex answers
+   - do not run `/review` for a Claude-implemented story: the `codex-review-bookkeeping` workflow posts the review Session Summary after Codex answers
    - generate the handoff with `scripts/session-summary.sh --command implement --issue $ARGUMENTS --pr <pr-number> --head <current-head-sha> --checks <checks> --blockers <blockers> --next review` and post its exact stdout
    - use repeatable `--deviation <text>` flags when deviations, residual risks, or decisions must be recorded; the step 15 `pre-mortem:` line is always required, and each residual risk gets its own `residual risk:` line
    - do not add any section after the generated Session Summary block; the PR body is the implementation document, so do not append “What was implemented”, “AC coverage”, or equivalent recap prose

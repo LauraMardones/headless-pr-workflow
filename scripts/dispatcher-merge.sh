@@ -14,8 +14,9 @@
 # stderr ends with "Files: <file> <file> ..." (issue #502).
 #
 # Anything this script cannot judge blocks the merge (fail closed). It never
-# writes the board: a blocked story stays "In merge" (one attempt per head,
-# #293) and the dispatcher's finish_story writes "Done" after a merge.
+# writes the board: a blocked story stays in the merge step (one attempt per
+# head, #293), and the board writer (`hpw dispatcher status sync`, #478) shows
+# "Done" after a merge.
 #
 # Overridable for tests: HPW_BIN, MERGE_GATE_SCRIPT, SESSION_SUMMARY_SCRIPT,
 # COMMENT_RETRY_DELAY (read by `hpw dispatcher write`).

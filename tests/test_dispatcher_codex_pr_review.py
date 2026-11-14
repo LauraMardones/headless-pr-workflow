@@ -37,39 +37,39 @@ def codex_in_review(d, story=STORY, pr=PR, draft=False):
 
 
 def test_ac6_ac7_target_codex_story_is_skipped_with_nothing_changed(d):
-    d.add_story(STORY, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "Ready to implement", executor="codex")
     proc = d.run_issue(STORY, seq="1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert WARNING in proc.stderr
     assert "Unrecognised executor label" not in proc.stderr + proc.stdout
     assert d.sessions == [] and d.board_writes == [] and d.posted(STORY) == []
     assert d.slack_calls == [] and d.allowance_calls == 0 and d.usage_count == 0
-    assert d.status(STORY) == "Ready for implementation"
+    assert d.status(STORY) == "Ready to implement"
 
 
 def test_ac6_ac8_next_ready_story_continues_past_a_codex_story(d):
-    d.add_story(STORY, "Ready for implementation", executor="codex")
-    d.add_story(501, "Ready for implementation", executor="claude-code-sonnet")
+    d.add_story(STORY, "Ready to implement", executor="codex")
+    d.add_story(501, "Ready to implement", executor="claude-code-sonnet")
     d.add_pr(PR, 501)
     d.schedule(("implement", 501))  # the next story comes from the scheduler (#474)
     proc = d.run_issue(STORY)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stderr.count(WARNING) == 1  # not returned again across the recursive exec
     assert d.sessions == ["implement 501"]
-    assert d.board_writes[0] == "501=In implementation"
-    assert d.posted(STORY) == [] and d.status(STORY) == "Ready for implementation"
+    assert d.board_writes == []
+    assert d.posted(STORY) == [] and d.status(STORY) == "Ready to implement"
 
 
 def test_ac6_codex_story_picked_as_next_ready_story_is_skipped_too(d):
-    d.add_story(STORY, "Ready for implementation", executor="claude-code-sonnet")
-    d.add_story(501, "Ready for implementation", executor="codex")
+    d.add_story(STORY, "Ready to implement", executor="claude-code-sonnet")
+    d.add_story(501, "Ready to implement", executor="codex")
     d.add_pr(PR, STORY)
     proc = d.run_issue(STORY)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.sessions == [f"implement {STORY}"]
-    assert d.board_writes[0] == f"{STORY}=In implementation"
+    assert d.board_writes == []
     assert not any(write.startswith("501=") for write in d.board_writes)
-    assert d.status(501) == "Ready for implementation" and d.posted(501) == []
+    assert d.status(501) == "Ready to implement" and d.posted(501) == []
 
 
 def test_ac9_the_skip_is_a_table_lookup_not_a_branch_on_the_label():
@@ -117,11 +117,11 @@ def test_ac11_cases_that_do_nothing(d, case):
 
 def test_ac12_review_leaving_in_merge_runs_merge_and_cleanup(d):
     codex_in_review(d)
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
     proc = d.resume()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
-    assert d.status(STORY) == "Done"
+    assert d.board_writes == []
 
 
 def test_ac12_review_leaving_in_implementation_runs_no_merge(d):
@@ -189,12 +189,12 @@ def test_ac14_reserve_stops_the_entry(d):
 
 def test_ac17_dry_run_starts_nothing(d):
     codex_in_review(d)
-    d.session_sets_status("review", STORY, "In merge")
+    d.session_sets_status("review", STORY, "Mergeable")
     proc = d.resume("--dry-run")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert f"[DRY RUN] Would start Claude Code (opus) on the subscription for /review {PR}" in proc.stdout
     assert d.sessions == [] and d.phases == [] and d.board_writes == [] and d.posted(STORY) == []
-    assert d.status(STORY) == "In review"
+    assert d.board_writes == []
 
 
 # ── One provider (AC2) ──────────────────────────────────────────────────────

@@ -47,7 +47,7 @@ def d(tmp_path, monkeypatch):
 
 @needs_tools
 def test_post_session_steps_run_when_the_session_rewrites_the_script(d):
-    d.add_story(STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
     d.add_pr(900, STORY)
     d.on_session("implement", REWRITE)
 
@@ -62,8 +62,8 @@ def test_post_session_steps_run_when_the_session_rewrites_the_script(d):
 
 @needs_tools
 def test_tail_call_starts_the_rewritten_script(d):
-    d.add_story(STORY, "Ready for implementation")
-    d.add_story(NEXT_STORY, "Ready for implementation")
+    d.add_story(STORY, "Ready to implement")
+    d.add_story(NEXT_STORY, "Ready to implement")
     d.add_pr(900, STORY)
     d.add_pr(901, NEXT_STORY)
     d.on_session("implement", REWRITE)
