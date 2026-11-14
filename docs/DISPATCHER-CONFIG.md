@@ -540,7 +540,7 @@ Two gaps have no pending comment to retry, so they are closed separately. (1) A 
 
 ### Review of a Codex-implemented PR
 
-`executor:codex` stories are not started for `/implement`: when the scheduler chooses one, it is skipped with `Warning: #<n> has executor:codex, which the dispatcher does not start for /implement (no subscription mechanism, ADR-012); skipping it for this run and continuing selection.` The skip changes and spends nothing (no board write, comment, blocker, notification, counted session or allowance probe), and the story is not returned again in the same run. It is a lookup, not a branch on the label: an executor with no `EXECUTOR_PROVIDER` row is not started for `/implement`.
+`executor:codex` stories are not started for `/implement` by the dispatcher; the [local Codex worker](#local-codex-worker) on the PO's computer starts them. When the scheduler chooses one, it is skipped with `Warning: #<n> has executor:codex, which the dispatcher does not start for /implement (no subscription mechanism, ADR-012); skipping it for this run and continuing selection.` The skip changes and spends nothing (no board write, comment, blocker, notification, counted session or allowance probe), and the story is not returned again in the same run. It is a lookup, not a branch on the label: an executor with no `EXECUTOR_PROVIDER` row is not started for `/implement`.
 
 A PR that Codex implemented outside the dispatcher is still reviewed by it. The resume pass has a fourth entry, the review step. A review is due when all of these hold, whatever the story's board status (issue #475):
 
@@ -793,6 +793,106 @@ No `## Blocked Declaration` is posted, no Slack message is sent and no actionabl
 **Restart.** There is no timer. The usage limit check and the allowance check with its hold refuse every start until the window has reset, and a restart is counted by the usage limit like any session, which bounds a loop of limit stops. `/implement` continues on an existing branch for the story, with or without a PR (`.claude/commands/implement.md` steps 9 and 10).
 
 **What is lost.** Only commits the session pushed survive: the next runner is fresh. The dispatcher does not commit or push leftover work, so half-done changes never reach the PR; the record counts what was not pushed.
+
+## Local Codex worker
+
+`executor:codex` work runs on the PO's computer, not on the Actions runner (ADR-012 → Codex Plus amendment, issue #528). A scheduled task in the signed-in Codex app runs `scripts/codex-worker.sh`, which is `hpw dispatcher codex-worker` (code in `src/headless_pr_workflow/dispatcher/codex_worker.py`). The worker selects one queued item, claims it on GitHub and prints the invocation that the task's session follows. It never writes a board status or a label, never starts Claude, and keeps no local state: every fact it decides from is on GitHub, so any later run on any computer reads the same answer. The Actions dispatcher still skips `executor:codex` stories at `/implement` and reviews a Codex PR in `In review` as described under [Review of a Codex-implemented PR](#review-of-a-codex-implemented-pr).
+
+### Setup
+
+Prerequisites on the computer:
+
+- The Codex app, signed in with the PO's ChatGPT Plus account, running while tasks are due. The computer must be on and awake; when it is not, no task runs and the work waits (see [Recovery](#recovery)).
+- A clone of the repository on disk, opened as the task's project, with `bash` (Git Bash on Windows), Python 3.11 or later and `git` able to push to the repository.
+- `gh` 2.50 or later, signed in as the PO (`gh auth login`), with the `repo` scope (issues, comments, pull requests, branches, compare) and the `project` scope (the board read; the `/implement` contract of #523 also writes board statuses with it). The worker reads the board, issues, comments, branches (`git/matching-refs`), pull requests and comparisons, and writes only issue comments.
+- No `OPENAI_API_KEY` or `CODEX_API_KEY` in the task's environment. `claim` refuses to start while either is set (`refused`, reason `api-key-set`), so no session can fall back to metered API billing.
+
+Environment of the task:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `CODEX_WORKER_ID` | Name of this computer in the claim (`owner=`); a word such as `po-laptop`. Required for `claim` (or `--owner`). | none |
+| `CODEX_WORKER_RUN_ID` | Name of one task run (`run=`). A retry of the same run passes the same name; a new run leaves it unset and gets a fresh one. | a random word |
+| `CODEX_WORKER_ELIGIBILITY_COMMAND` | The fail-closed eligibility hook (#524): called as `<command> --repo <r> --issue <n> --command <c>`. Exit `0` is eligible; exit `1` is not, with an optional `{"reason": "<word>"}` on stdout; any other exit, a timeout of 60 seconds or a command that cannot start is `eligibility-unreadable`. Unset is `eligibility-unconfigured`. Every answer but exit `0` starts nothing. | unset: nothing starts |
+| `CODEX_WORKER_LEASE_MINUTES` | How long a claim holds without a new record before a later run treats the session as interrupted. | `240` |
+| `CODEX_WORKER_RETRY_MINUTES` | How long an attempt that ended with `wait` and no `--until` waits before the next attempt. | `60` |
+
+Until #524 supplies the reserve check, the hook stays unset and the worker starts nothing, as ADR-012 requires when the allowance cannot be confirmed.
+
+The task: create one automation in the Codex app for the repository's project, running every 30 minutes, with this prompt:
+
+> Run `scripts/codex-worker.sh claim --repo LauraMardones/headless-pr-workflow`. If it exits non-zero, stop. Otherwise read `invocation` from its JSON line and follow `invocation.command_file` for `invocation.issue`. When `invocation.resume` is set, continue on that branch and PR from that head; never open a new branch or PR. After each push run the `invocation.progress` command with the branch, the full head SHA and the PR. At the end run the `invocation.finish` command: `--result done --head <full-sha>` (the full 40-character SHA, as `git rev-parse HEAD` prints it) after the hand-off, or `--result wait --reason <word>` (for example `usage-limit` with `--until <reset time>`) when the session cannot finish.
+
+Thirty minutes keeps at most one idle read of the board per half hour; the lease, not the interval, bounds how long a stopped session blocks its item.
+
+### Queue and claim
+
+The queue is every open issue on the board with exactly one `executor:` label, `executor:codex`, a `type:story`, `type:task` or `type:bug` label, and one of these statuses. The status names the HPW command of the invocation (the boundary for #523):
+
+| Board status | Command | Order |
+|---|---|---|
+| `In implementation` | `implement` (continue, or the fix round of #523) | first |
+| `Ready to implement` | `implement` | then |
+
+Within a status the lowest `prio:P<n>` comes first, then the lowest issue number. One run claims at most one item.
+
+Every fact is a hidden marker on the issue, written through [GitHub writes](#github-writes--hpw-dispatcher-write) and read through [Markers](#markers--hpw-dispatcher-marker): only comments of the login behind `gh` (`DISPATCHER_LOGIN` when set) count.
+
+| Marker | Written by | Fields |
+|---|---|---|
+| `codex-claim` | `claim` | `issue`, `attempt`, `owner`, `run`, `command`, and the `pr`, `branch` and `head` the attempt resumes (`-` for none) |
+| `codex-progress` | `progress`, after each push | `issue`, `attempt`, `run`, `pr`, `branch` (`codex/issue-<n>-<slug>`), `head` |
+| `codex-renew` | `claim`, when a replay continues its claimed attempt | `issue`, `attempt`, `run` |
+| `codex-end` | `finish`, or a later run for an interrupted attempt | `issue`, `attempt`, `run`, `result` (`done` or `wait`), `reason`, `head`, `until` when given, and `by` (the recovering run) on an interruption |
+| `codex-wait` | `claim`, when an item cannot be claimed, or a replayed run cannot start its claimed attempt | `issue`, the `attempt` it waits before (or the claimed attempt it waits to start), `reason` |
+
+The claim rule, for each item:
+
+1. Read the item's markers. A marker that cannot be parsed, or a `codex-progress` or `codex-end` of a run that does not own its attempt, is a conflict: nothing starts, and one `codex-wait` with reason `conflicting-claim` is posted.
+2. The owner of an attempt is the claim with the **lowest comment id** for that attempt number. Comment ids grow with time, so every reader agrees, whatever order the runs read in.
+3. The newest attempt is *held* while it has no `codex-end` and its newest claim, progress or renew record is younger than the lease; the run skips the item (reason `claimed`) and writes nothing. After the lease it is *interrupted*: the run posts `codex-end result=wait reason=interrupted by=<run>` for it, reads the markers back and continues with step 5, with no retry wait. An interruption counts only when, by GitHub's own timestamps, the attempt's newest claim, progress or renew record before it (lower comment id) is older than the lease. So an owner record that lands between the run's read and its interruption keeps the attempt with its owner, and so does a computer clock ahead of GitHub's: the run then skips the item (reason `lease-held`) and starts nothing. Any other write that landed first is judged by the same rules on the read-back: after the owner's own `codex-end` its `until` (`retry-later`) or its handed-off head (`handed-off-on-head`) applies, and after another run's recovery that run's new attempt holds the item (`claimed`; a replay reports `lost`). Only the run's own counted interruption lets it continue at once.
+4. After a `codex-end result=wait`, the next attempt waits until its `until`, or for the retry interval (reason `retry-later`, nothing written). After `codex-end result=done`, no new attempt starts while the branch head is still the handed-off head (reason `handed-off-on-head`); #523 decides when a fix round on that head is due.
+5. The resume facts are checked against GitHub (see [Recovery](#recovery)).
+6. The eligibility hook is asked. A refusal posts one `codex-wait` with the hook's reason and ends the run: the reserve is shared, so no other item is tried.
+7. The run posts its `codex-claim` for the next attempt number, reads the markers back, and starts only when its own claim owns the attempt (`claimed`, exit `0`). Otherwise it reports `lost` (exit `1`); its claim stays on the issue as a losing claim that the rule ignores.
+
+A replay of a run (the same `CODEX_WORKER_RUN_ID`, or `--run`) finds its newest own claim first and claims nothing new. It looks for that claim on every board issue with `executor:codex`, whatever its status or state, because its session may have moved the item out of the queue (for example to `In review`). When the claimed item is no longer queued and its attempt is still open, the replay starts nothing and claims no other item (`waiting`, reason `not-queued`). A run with no name gets a fresh one and reads only the queued items. Otherwise the replay reports `continued` with the same attempt while it owns the open attempt within the lease, the remote resume facts still check out and the eligibility hook still answers eligible (a replay starts the session too, so it resolves the branch, PR and current head again exactly as a new claim does, and so resumes a branch the session pushed before it could record progress; then it asks the hook again; a resume reason such as `pr-closed` or a hook refusal keeps the claim, posts one `codex-wait` for the claimed attempt with that reason and reports `waiting`, and an unreadable read reports `unreadable`; the lease may run out during these reads and the hook, so the replay then posts `codex-renew` for the attempt, reads the markers back and continues only when it still owns the open attempt: an interruption that landed before the renewal ends the attempt and the replay reports `lost`, and a renewal that landed first keeps the attempt, as any record within the lease does), `lost` when another run owns it, `ended` after its `codex-end`. After the lease a replay does not continue the attempt, because a new run may already treat it as interrupted: it takes steps 3 to 7 for that item only, posting `codex-end … reason=interrupted` for its own attempt and claiming the next attempt under the same run, so it starts only on a newly won attempt (`claimed`), and reports `lost` when another run recovered the item first. A claim write whose response was lost is found on the re-read before any retry (Block 1), so it is never posted twice and never becomes a new attempt; `progress` and `finish` post their marker once, so a retried call reports `already`. Both read the markers back after the write: when a run's interruption landed before their record, the attempt is no longer the session's, and they report `not-owner` so the session stops.
+
+### Recovery
+
+`claim` resumes from the newest `codex-progress` (or the newest claim that named a branch) and checks it against GitHub before it starts:
+
+| Check | When it fails | Reason |
+|---|---|---|
+| The recorded branch still exists | the branch was deleted | `branch-missing` |
+| The branch head is the recorded head, or contains it (compare `ahead`) | the branch was rewritten | `head-diverged` |
+| The recorded PR is open and its head branch is the recorded branch | closed or merged, gone, or another branch | `pr-closed`, `pr-missing`, `pr-branch-mismatch` |
+| With no record: at most one `codex/issue-<n>-*` branch and at most one open PR on it | two candidates | `ambiguous-branch`, `ambiguous-pr` |
+| No open PR from another branch closes the issue | someone else holds the work | `foreign-pr` |
+
+A failed check posts one `codex-wait` with the reason and starts nothing; the PO resolves it. A passing check puts the current remote head in the claim and in `invocation.resume`, so the session continues on the existing branch and PR with every pushed commit, including commits pushed after the last progress record. With no branch and no record, the session starts fresh under `invocation.branch_prefix`.
+
+The recovery sequence after each kind of stop:
+
+1. **Session interrupted** (app closed, computer asleep or off, crash): nothing is written until the next run after the lease. That run posts `codex-end … reason=interrupted by=<run>` for the old attempt, reads it back, and claims the next attempt from the recorded branch and the current remote head. The interrupted session can no longer record progress or an end (`not-owner`). A session that was only slow and records progress before the interruption lands keeps its attempt (`lease-held` for the other run).
+2. **Usage limit:** the session runs `finish --result wait --reason usage-limit --until <reset>`. Runs before the reset skip the item (`retry-later`); the first run after it claims the next attempt and resumes.
+3. **GitHub unreadable** (the board, the comments, the login, a branch or a PR): `unreadable`, exit `3`, nothing written and nothing started. The item keeps the state GitHub shows, and the next run decides again.
+4. **Not eligible** (the reserve, or no hook): one `codex-wait` per attempt and reason; the next run asks again.
+
+No path moves an item to Claude, changes its `executor:` label or writes a board status.
+
+### Commands and output
+
+```
+scripts/codex-worker.sh claim    --repo <owner/repo> [--owner <id>] [--run <id>] [--dry-run]
+scripts/codex-worker.sh progress --repo <owner/repo> --issue <n> --attempt <k> --run <id> --branch codex/issue-<n>-<slug> --head <full-sha> [--pr <n>] [--dry-run]
+scripts/codex-worker.sh finish   --repo <owner/repo> --issue <n> --attempt <k> --run <id> (--result done --head <full-sha> | --result wait --reason <word> [--until <iso>]) [--dry-run]
+scripts/codex-worker.sh status   --repo <owner/repo>
+```
+
+- **stdout:** one JSON line (`ok`, `block: "codex-worker"`, `operation`, `result`, `error`). `claim` adds `owner`, `run`, `issue`, `attempt`, `skipped` (each item it passed over, with `reason` and, where it posted one, the `evidence` result of its `codex-wait`) and, for `claimed` and `continued`, `invocation`: `repo`, `issue`, `attempt`, `owner`, `run`, `command`, `command_file`, `branch_prefix`, `resume` (`pr`, `branch`, `head`, or `null`), and the `progress` and `finish` command lines. `status` lists each queued item with its state (`free`, `held`, `expired`, `conflict`), attempt, owner, run, end and recorded facts: the operator's view, read from GitHub only.
+- **Heads:** `--head` takes the full 40-character SHA, the form GitHub reports, and the worker stores it in lower case; an abbreviated SHA is an invalid argument (exit `2`), because the worker compares recorded heads with the remote head.
+- **Exit codes:** `0` `claimed`, `continued`, `written`, `already`, `read`, `dry-run`; `1` `idle`, `waiting`, `lost`, `ended`, `refused`, `not-owner`, `failed`; `2` invalid arguments or an invalid `CODEX_WORKER_*_MINUTES`; `3` `unreadable`.
 
 ## The dispatcher script is read completely before any session starts
 
