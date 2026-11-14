@@ -2613,6 +2613,19 @@ hand_off_to_codex_review_loop() {
     fi
 
     if [[ -z "$pr_number" ]]; then
+        # Issue #533: a session that ended without a PR because the story has an
+        # open Blocked Declaration from a session or a person keeps that
+        # declaration as the record: no second blocker, no po_blocker event, no
+        # failed run. An unreadable answer keeps the blocker below (fail closed).
+        local session_blocker="" session_blocker_rc=0
+        session_blocker=$(DECISION_BLOCKER_PO_LOGIN="${DECISION_BLOCKER_PO_LOGIN:-}" \
+            "$HPW_BIN" dispatcher session-blocker read --repo "$REPO" --issue "$ISSUE_NUMBER" 2>/dev/null) \
+            || session_blocker_rc=$?
+        if [[ $session_blocker_rc -eq 0 ]] \
+                && [[ "$(jq -r '.outcome // empty' <<< "$session_blocker" 2>/dev/null)" == "open_blocker" ]]; then
+            echo "[HANDOFF] #$ISSUE_NUMBER: /implement ended without a PR; open Blocked Declaration (Type: $(jq -r '.type' <<< "$session_blocker")) from $(jq -r '.declared_by' <<< "$session_blocker"): $(jq -r '.url' <<< "$session_blocker"); no dispatcher blocker"
+            return 0
+        fi
         echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
         post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
         DISPATCH_HANDLED=true
