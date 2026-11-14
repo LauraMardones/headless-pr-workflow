@@ -65,7 +65,7 @@ class WorkerGitHub(FakeGateway):
             if hook:
                 hook()
 
-    def story(self, number: int, status: str = "Ready for implementation", *labels: str, state: str = "open") -> None:
+    def story(self, number: int, status: str = "Ready to implement", *labels: str, state: str = "open") -> None:
         self.cards.append(BoardCard(item_id=f"I{number}", number=number, state=state, status=status,
                                     labels=labels or ("type:story", "executor:codex")))
 
@@ -149,13 +149,13 @@ def claims(gh, number=5):
 
 
 def test_a_run_claims_the_first_eligible_codex_item_and_prints_its_invocation(gh, settings):
-    gh.story(3, "Ready for implementation", "type:story", "executor:claude-code-opus")
+    gh.story(3, "Ready to implement", "type:story", "executor:claude-code-opus")
     gh.story(4, "In review")
-    gh.story(6, "Ready for implementation", "type:epic", "executor:codex")
-    gh.story(7, "Ready for implementation", "type:story", "executor:codex", "executor:claude-code-opus")
-    gh.story(8, "Ready for implementation", state="closed")
-    gh.story(9, "Ready for implementation", "type:story", "executor:codex", "prio:P2")
-    gh.story(5, "Ready for implementation", "type:story", "executor:codex", "prio:P1")
+    gh.story(6, "Ready to implement", "type:epic", "executor:codex")
+    gh.story(7, "Ready to implement", "type:story", "executor:codex", "executor:claude-code-opus")
+    gh.story(8, "Ready to implement", state="closed")
+    gh.story(9, "Ready to implement", "type:story", "executor:codex", "prio:P2")
+    gh.story(5, "Ready to implement", "type:story", "executor:codex", "prio:P1")
     gate = Gate()
     result = do_claim(gh, settings, gate=gate)
     assert result.result == "claimed" and result.exit_code == 0
@@ -171,7 +171,7 @@ def test_a_run_claims_the_first_eligible_codex_item_and_prints_its_invocation(gh
 
 
 def test_work_in_implementation_is_resumed_before_new_work(gh, settings):
-    gh.story(2, "Ready for implementation", "type:story", "executor:codex", "prio:P0")
+    gh.story(2, "Ready to implement", "type:story", "executor:codex", "prio:P0")
     gh.story(5, "In implementation")
     assert do_claim(gh, settings).fields["issue"] == 5
 

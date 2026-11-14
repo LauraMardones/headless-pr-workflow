@@ -42,8 +42,8 @@ from .write import EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, Settings, _author,
 BLOCK = "codex-worker"
 
 # The #523 invocation boundary: the board status of a queued item names the HPW command its session runs.
-COMMAND_BY_STATUS = {"In implementation": "implement", "Ready for implementation": "implement"}
-STATUS_ORDER = ("In implementation", "Ready for implementation")
+COMMAND_BY_STATUS = {"In implementation": "implement", "Ready to implement": "implement"}
+STATUS_ORDER = ("In implementation", "Ready to implement")
 COMMANDS = ("refine", "implement")
 COMMAND_FILES = {"refine": ".claude/commands/refine.md", "implement": ".claude/commands/implement.md"}
 TYPE_LABELS = ("type:story", "type:task", "type:bug")

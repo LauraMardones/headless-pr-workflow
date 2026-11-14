@@ -832,7 +832,7 @@ The queue is every open issue on the board with exactly one `executor:` label, `
 | Board status | Command | Order |
 |---|---|---|
 | `In implementation` | `implement` (continue, or the fix round of #523) | first |
-| `Ready for implementation` | `implement` | then |
+| `Ready to implement` | `implement` | then |
 
 Within a status the lowest `prio:P<n>` comes first, then the lowest issue number. One run claims at most one item.
 
