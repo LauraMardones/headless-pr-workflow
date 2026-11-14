@@ -171,6 +171,12 @@ class Gateway(Protocol):
 
     def edit_issue_body(self, number: int, body: str) -> None: ...
 
+    # Local Codex worker (``codex_worker.py``, issue #528).
+
+    def pull_request(self, number: int) -> dict[str, Any]: ...
+
+    def matching_branches(self, prefix: str) -> dict[str, str]: ...
+
 
 def parse_json_stream(text: str) -> list[Any]:
     """The JSON values in ``text``, one after another (``gh api --paginate`` prints one per page)."""
@@ -443,6 +449,29 @@ class GhGateway:
         if not isinstance(payload, dict):
             raise GatewayError(step, "GitHub returned an issue that could not be parsed")
         return str(payload.get("body") or "")
+
+    def pull_request(self, number: int) -> dict[str, Any]:
+        """The pulls API object of PR ``number``; raises with ``not_found`` for an unknown PR."""
+
+        step = f"read PR #{number}"
+        payload = self._json(step, ["api", f"repos/{self.repo}/pulls/{number}"])
+        if not isinstance(payload, dict) or not isinstance(payload.get("head"), dict):
+            raise GatewayError(step, "GitHub returned a pull request that could not be parsed")
+        return payload
+
+    def matching_branches(self, prefix: str) -> dict[str, str]:
+        """``{branch: head sha}`` of every branch whose name starts with ``prefix``."""
+
+        step = f"read branches {prefix}*"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/git/matching-refs/heads/{prefix}"])
+        branches: dict[str, str] = {}
+        for ref in self._pages(step, output, what="branches"):
+            name = str(ref.get("ref") or "").removeprefix("refs/heads/")
+            sha = (ref.get("object") or {}).get("sha")
+            if not name or not sha:
+                raise GatewayError(step, "GitHub returned a branch that could not be parsed")
+            branches[name] = str(sha)
+        return branches
 
     def issue_labels(self, number: int) -> list[str]:
         payload = self._json(f"read labels of #{number}", ["api", f"repos/{self.repo}/issues/{number}"])

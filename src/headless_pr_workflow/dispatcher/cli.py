@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler``, ``status`` and ``in-flight``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -39,6 +40,11 @@ GatewayFactory = Callable[[str], Gateway]
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA_OR_DASH = re.compile(r"^(-|[0-9a-fA-F]{7,40})$")
 _ITEM = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
+# The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
+_FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker")
 
 
 class InvalidArguments(Exception):
@@ -184,6 +190,34 @@ def build_parser() -> argparse.ArgumentParser:
     s_pending.add_argument("--item", required=True)
     s_pending.add_argument("--expected-head")
     common(s_pending, attempts=False)
+
+    worker = blocks.add_parser("codex-worker", add_help=False)
+    worker_ops = worker.add_subparsers(dest="operation", parser_class=_Parser)
+    w_claim = worker_ops.add_parser("claim", add_help=False)
+    w_claim.add_argument("--owner", default=None)
+    w_claim.add_argument("--run", default=None)
+    common(w_claim, attempts=False)
+
+    def attempt_args(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--issue", type=_positive, required=True)
+        sub.add_argument("--attempt", type=_positive, required=True)
+        sub.add_argument("--run", required=True)
+        common(sub, attempts=False)
+
+    w_progress = worker_ops.add_parser("progress", add_help=False)
+    w_progress.add_argument("--branch", required=True)
+    w_progress.add_argument("--head", required=True)
+    w_progress.add_argument("--pr", type=_positive)
+    attempt_args(w_progress)
+    w_finish = worker_ops.add_parser("finish", add_help=False)
+    w_finish.add_argument("--result", choices=("done", "wait"), required=True)
+    w_finish.add_argument("--reason")
+    w_finish.add_argument("--head")
+    w_finish.add_argument("--until")
+    attempt_args(w_finish)
+    w_status = worker_ops.add_parser("status", add_help=False)
+    w_status.add_argument("--repo", required=True)
+    w_status.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
     return parser
 
 
@@ -198,7 +232,7 @@ def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    if args.block not in ("write", "marker", "state", "facts", "scheduler", "status", "in-flight") or not args.operation:
+    if args.block not in _BLOCKS or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
             "| hpw dispatcher marker write|holds|list|whoami ... "
@@ -206,7 +240,8 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
-            "| hpw dispatcher in-flight plan ...")
+            "| hpw dispatcher in-flight plan ... "
+            "| hpw dispatcher codex-worker claim|progress|finish|status ...")
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -220,6 +255,9 @@ def _validate(args: argparse.Namespace) -> None:
                 raise InvalidArguments("--item must be a word such as merge-confirmation")
             if args.expected_head is not None and not _SHA_OR_DASH.match(args.expected_head):
                 raise InvalidArguments("--expected-head must be a commit SHA")
+        return
+    if args.block == "codex-worker":
+        _validate_worker(args)
         return
     if args.block == "marker":
         if args.operation == "write":
@@ -248,13 +286,51 @@ def _validate(args: argparse.Namespace) -> None:
             raise InvalidArguments("--expected-head must be a commit SHA")
 
 
+def _validate_worker(args: argparse.Namespace) -> None:
+    from . import codex_worker  # imported only for this block: it loads review_policy
+
+    if args.operation == "claim":
+        args.owner = args.owner or os.environ.get("CODEX_WORKER_ID") or ""
+        args.run = args.run or os.environ.get("CODEX_WORKER_RUN_ID") or None
+        if not _ITEM.match(args.owner):
+            raise InvalidArguments("--owner (or CODEX_WORKER_ID) must be a word that names this computer")
+    if args.operation != "status" and args.run is not None and not _ITEM.match(args.run):
+        raise InvalidArguments("--run (or CODEX_WORKER_RUN_ID) must be a word")
+    if args.operation == "progress":
+        prefix = codex_worker.branch_prefix(args.issue)
+        if not _BRANCH.match(args.branch) or not args.branch.startswith(prefix) or len(args.branch) == len(prefix):
+            raise InvalidArguments(f"--branch must be {prefix}<short-slug> (docs/WORKTREE-MODEL.md)")
+        if not _FULL_SHA.match(args.head):
+            raise InvalidArguments("--head must be the full 40-character commit SHA")
+        args.head = args.head.lower()
+    if args.operation == "finish":
+        if args.result == "done" and not (args.head and _FULL_SHA.match(args.head)):
+            raise InvalidArguments("--result done needs --head <sha>, the full SHA of the head that was handed off")
+        if args.result == "wait" and not args.reason:
+            raise InvalidArguments("--result wait needs --reason, for example usage-limit")
+        if args.head is not None and not _FULL_SHA.match(args.head):
+            raise InvalidArguments("--head must be the full 40-character commit SHA")
+        if args.head is not None:
+            args.head = args.head.lower()
+        if args.reason is not None and not _ITEM.match(args.reason):
+            raise InvalidArguments("--reason must be a word such as usage-limit")
+        if args.until is not None:
+            moment = codex_worker._time(args.until) if re.fullmatch(r"\S+", args.until) else None
+            if moment is None or "T" not in args.until:
+                raise InvalidArguments("--until must be an ISO 8601 time such as 2026-11-13T18:00:00Z")
+            args.until = codex_worker._iso(moment)
+    try:
+        args.worker_config = codex_worker.Config.from_env()
+    except codex_worker.InvalidConfig as exc:
+        raise InvalidArguments(str(exc)) from None
+
+
 def _operation_of(argv: Sequence[str]) -> str:
-    return argv[1] if len(argv) > 1 and argv[0] in ("write", "marker", "state", "facts", "scheduler", "status",
-                                                    "in-flight") else ""
+    return argv[1] if len(argv) > 1 and argv[0] in _BLOCKS else ""
 
 
 def _block_of(argv: Sequence[str]) -> str:
-    return argv[0] if argv and argv[0] in ("marker", "state", "facts", "scheduler", "status", "in-flight") else "write"
+    return argv[0] if argv and argv[0] in _BLOCKS[1:] else "write"
 
 
 def _emit(result: Result) -> int:
@@ -313,6 +389,26 @@ def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
                                 po=settings.po_login))  # fmt: skip
 
 
+def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
+    from . import codex_worker
+
+    config = args.worker_config
+    if args.operation == "claim":
+        gate = codex_worker.command_gate(os.environ.get("CODEX_WORKER_ELIGIBILITY_COMMAND"))
+        return _emit(codex_worker.claim(gateway, args.repo, owner=args.owner, run=args.run, eligibility=gate,
+                                        config=config, settings=settings, dry_run=args.dry_run))  # fmt: skip
+    if args.operation == "progress":
+        return _emit(codex_worker.record_progress(gateway, args.repo, args.issue, args.attempt, args.run,
+                                                  branch=args.branch, head=args.head, pr=args.pr, config=config,
+                                                  settings=settings, dry_run=args.dry_run))  # fmt: skip
+    if args.operation == "finish":
+        reason = args.reason or "handoff"
+        return _emit(codex_worker.finish(gateway, args.repo, args.issue, args.attempt, args.run, result=args.result,
+                                         reason=reason, head=args.head, until=args.until, config=config,
+                                         settings=settings, dry_run=args.dry_run))  # fmt: skip
+    return _emit(codex_worker.status(gateway, args.repo, config=config))
+
+
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
     """Run ``hpw dispatcher <argv...>``; returns the exit code."""
 
@@ -339,6 +435,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_scheduler(args, gateway)
     if args.block == "in-flight":
         return _run_in_flight(args, settings)
+    if args.block == "codex-worker":
+        return _run_worker(args, gateway, settings)
     if args.block == "status":
         if args.operation == "sync":
             return _emit(sync_board(gateway, args.repo, epic=args.epic, attempts=args.attempts, dry_run=args.dry_run,
