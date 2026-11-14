@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,3 +80,40 @@ def test_refine_story_sources_epic_scope_from_spec_and_traces_every_ac() -> None
     assert "adds scope and is not allowed" in command
     assert "only as a legacy fallback when no spec exists" in documentation
     assert "names the Feature criterion it serves (ADR-009)" in documentation
+
+
+# --- catch-all sort (#551) ---------------------------------------------------------
+
+def _command(name: str) -> str:
+    return (Path(__file__).resolve().parents[1] / ".claude" / "commands" / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["refine-story.md", "refine-bug.md"])
+def test_refine_commands_carry_the_catch_all_sort_step(name: str) -> None:
+    text = _command(name)
+    assert "## Catch-all sort" in text
+    step = text.split("## Catch-all sort", 1)[1].split("\n## ", 1)[0]
+    assert "CATCH_ALL_FEATURE" in step and "src/headless_pr_workflow/catch_all.py" in step
+    assert step.index("**Moved:**") < step.index("**Maintenance:**") < step.index("**Decision:**")
+    assert "Moved adds no criterion" in step and "Keep `Found under:` and `Origin:`" in step
+    assert "open Feature" in step and "open Epic with a merged spec" in step
+    assert "Rewrite `Parent epic:`, `Feature group:` and the spec record" in step
+    assert "without the PO" in step and "exactly one `prio:` and one `executor:` label" in step
+    assert "`Type: decision` Blocked Declaration" in step and "body and its criteria stay unchanged" in step
+    assert "### Catch-all sort — YYYY-MM-DD" in step
+    for line in ("Catch-all sort: moved to #<feature> (F<k>.<m>)", "Catch-all sort: maintenance M<n>",
+                 "Catch-all sort: decision M<n>", "decision general-line"):
+        assert line in step
+    before_body_write = text.index("## Catch-all sort") < text.index("## Core Instructions")
+    assert before_body_write
+
+
+def test_refine_task_has_no_catch_all_sort_step() -> None:
+    assert "Catch-all sort" not in _command("refine-task.md")
+
+
+def test_pipeline_doc_names_the_catch_all_sort_and_check() -> None:
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "REFINEMENT-PIPELINE.md").read_text(encoding="utf-8")
+    sched = (Path(__file__).resolve().parents[1] / "docs" / "commands" / "dispatcher-scheduler.md").read_text(encoding="utf-8")
+    assert "### Catch-all sort" in doc and "`catch_all_sort`" in doc
+    assert "Catch-all issues" in sched and "catch_all_sort" in sched

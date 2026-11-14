@@ -92,7 +92,7 @@ def test_all_pass(mod):
     assert failing(checks) == []
     assert set(checks) >= {"type_label", "executor_label", "prio_label",
                            "hard_dependencies", "required_sections", "open_questions", "parent_refs",
-                           "spec_record", "feature_criteria"}
+                           "spec_record", "feature_criteria", "catch_all_sort"}
 
 
 @pytest.mark.parametrize(
@@ -270,7 +270,7 @@ def test_main_exit_1_json(mod, monkeypatch, capsys):
     assert [c["id"] for c in data["checks"]] == [
         "type_label", "executor_label", "prio_label",
         "hard_dependencies", "required_sections", "open_questions", "parent_refs",
-        "spec_record", "feature_criteria"]
+        "spec_record", "feature_criteria", "catch_all_sort"]
     assert {c["id"]: c["status"] for c in data["checks"]}["executor_label"] == "fail"
 
 
@@ -473,3 +473,67 @@ def test_task_and_bug_with_an_empty_mapping_fail(mod, kind):
     issue = typed_issue(mod, kind, with_mapping=True)
     emptied = mod.Issue(5, issue.title, issue.body.replace(f"## {MAPPING}\n\ntext", f"## {MAPPING}\n\n"), issue.labels, "OPEN")
     assert failing(Env(mod, emptied).run()) == ["required_sections"]
+
+
+# --- catch_all_sort (#551) ---------------------------------------------------------
+
+def catch_all_issue(mod, decisions, feature=538):
+    text = body().replace("Feature group: #11 Feature", f"Feature group: #{feature} Feature")
+    text += "\n## Decisions\n\n" + decisions + "\n"
+    return mod.Issue(number=5, title="Story: x", body=text, labels=("type:story",), state="OPEN")
+
+
+def sort_check(mod, issue):
+    return mod.catch_all_sort_check(issue)
+
+
+def test_catch_all_sort_fails_without_an_entry(mod):
+    c = sort_check(mod, catch_all_issue(mod, "### Other - 2026-11-14\n**Chosen:** x"))
+    assert (c.status, c.detail) == ("fail", "no sort entry")
+
+
+def test_catch_all_sort_fails_for_a_disallowed_class(mod):
+    c = sort_check(mod, catch_all_issue(mod, "### Catch-all sort \u2014 2026-11-14\nClass M5."))
+    assert (c.status, c.detail) == ("fail", "class M5 is not allowed maintenance")
+
+
+def test_catch_all_sort_fails_for_two_classes(mod):
+    c = sort_check(mod, catch_all_issue(mod, "### Catch-all sort \u2014 2026-11-14\nM1 and M4."))
+    assert (c.status, c.detail) == ("fail", "entry names more than one class")
+
+
+def test_catch_all_sort_fails_for_no_class(mod):
+    assert sort_check(mod, catch_all_issue(mod, "### Catch-all sort \u2014 2026-11-14\nFine.")).status == "fail"
+
+
+def test_catch_all_sort_passes_for_a_valid_entry(mod):
+    c = sort_check(mod, catch_all_issue(mod, "### Catch-all sort \u2014 2026-11-14\nM4 test fix."))
+    assert c.status == "pass"
+
+
+def test_catch_all_sort_latest_entry_wins(mod):
+    old_bad = "### Catch-all sort \u2014 2026-11-13\nM5.\n\n### Catch-all sort \u2014 2026-11-14\nM4."
+    assert sort_check(mod, catch_all_issue(mod, old_bad)).status == "pass"
+    old_good = "### Catch-all sort \u2014 2026-11-13\nM4.\n\n### Catch-all sort \u2014 2026-11-14\nM5."
+    assert sort_check(mod, catch_all_issue(mod, old_good)).status == "fail"
+
+
+def test_catch_all_sort_entry_ends_at_the_next_heading(mod):
+    text = "### Catch-all sort \u2014 2026-11-14\nM4.\n\n### Executor \u2014 2026-11-14\nM5 mentioned elsewhere."
+    assert sort_check(mod, catch_all_issue(mod, text)).status == "pass"
+
+
+def test_catch_all_sort_skips_other_features(mod):
+    c = sort_check(mod, catch_all_issue(mod, "", feature=11))
+    assert (c.status, c.detail) == ("skip", "not under the catch-all Feature")
+
+
+def test_catch_all_sort_is_in_the_verdict_and_fails_the_exit_code(mod, monkeypatch, capsys):
+    issue = catch_all_issue(mod, "### Catch-all sort \u2014 2026-11-14\nM5.")
+    issue = mod.Issue(number=5, title=issue.title, body=issue.body, labels=("type:story", "prio:P2", "executor:x"), state="OPEN")
+    monkeypatch.setattr(mod, "read_issue", lambda repo, n: issue)
+    monkeypatch.setattr(mod, "read_repo_labels", lambda repo: {"executor:x"})
+    monkeypatch.setattr(mod, "spec_exists", lambda repo, path, ref: True)
+    assert mod.main(["--issue", "5", "--repo", REPO]) == 1
+    out = capsys.readouterr().out
+    assert "catch_all_sort: fail" in out and "catch_all_sort" in out.splitlines()[0]
