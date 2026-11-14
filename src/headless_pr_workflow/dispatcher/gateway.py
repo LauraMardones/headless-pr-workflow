@@ -177,6 +177,8 @@ class Gateway(Protocol):
 
     def matching_branches(self, prefix: str) -> dict[str, str]: ...
 
+    def pr_reviews(self, number: int) -> list[dict[str, Any]]: ...
+
 
 def parse_json_stream(text: str) -> list[Any]:
     """The JSON values in ``text``, one after another (``gh api --paginate`` prints one per page)."""
@@ -458,6 +460,13 @@ class GhGateway:
         if not isinstance(payload, dict) or not isinstance(payload.get("head"), dict):
             raise GatewayError(step, "GitHub returned a pull request that could not be parsed")
         return payload
+
+    def pr_reviews(self, number: int) -> list[dict[str, Any]]:
+        """Every submitted review of PR ``number`` (all pages), as the reviews API returns it."""
+
+        step = f"read reviews of PR #{number}"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/pulls/{number}/reviews?per_page=100"])
+        return self._pages(step, output, what="reviews")
 
     def matching_branches(self, prefix: str) -> dict[str, str]:
         """``{branch: head sha}`` of every branch whose name starts with ``prefix``."""

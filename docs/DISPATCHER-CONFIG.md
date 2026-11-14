@@ -813,11 +813,43 @@ Environment of the task:
 |---|---|---|
 | `CODEX_WORKER_ID` | Name of this computer in the claim (`owner=`); a word such as `po-laptop`. Required for `claim` (or `--owner`). | none |
 | `CODEX_WORKER_RUN_ID` | Name of one task run (`run=`). A retry of the same run passes the same name; a new run leaves it unset and gets a fresh one. | a random word |
-| `CODEX_WORKER_ELIGIBILITY_COMMAND` | The fail-closed eligibility hook (#524): called as `<command> --repo <r> --issue <n> --command <c>`. Exit `0` is eligible; exit `1` is not, with an optional `{"reason": "<word>"}` on stdout; any other exit, a timeout of 60 seconds or a command that cannot start is `eligibility-unreadable`. Unset is `eligibility-unconfigured`. Every answer but exit `0` starts nothing. | unset: nothing starts |
+| `CODEX_WORKER_ELIGIBILITY_COMMAND` | The fail-closed eligibility hook (#524): called as `<command> --repo <r> --issue <n> --command <c>`. Exit `0` is eligible; exit `1` is not, with an optional `{"reason": "<word>", "detail": "<one line>"}` on stdout; any other exit, a timeout of 60 seconds or a command that cannot start is `eligibility-unreadable`. Unset is `eligibility-unconfigured`. Every answer but exit `0` starts nothing. | unset: nothing starts |
 | `CODEX_WORKER_LEASE_MINUTES` | How long a claim holds without a new record before a later run treats the session as interrupted. | `240` |
 | `CODEX_WORKER_RETRY_MINUTES` | How long an attempt that ended with `wait` and no `--until` waits before the next attempt. | `60` |
 
-Until #524 supplies the reserve check, the hook stays unset and the worker starts nothing, as ADR-012 requires when the allowance cannot be confirmed.
+Leave the hook unset and the worker starts nothing, as ADR-012 requires when the allowance cannot be confirmed. Set it to `scripts/codex-eligibility.sh` (see [Eligibility command](#eligibility-command)) so the worker starts only above the subscription reserves.
+
+#### Eligibility command
+
+`scripts/codex-eligibility.sh --repo <r> --issue <n> --command refine|implement` (issue #542, `src/headless_pr_workflow/dispatcher/codex_reserve.py`) answers the worker's hook contract: exit `0` is eligible, exit `1` is not and prints `{"reason": "<word>", "detail": "<one line>"}`, exit `2` (bad arguments or an unexpected error) reads as `eligibility-unreadable`. The worker's `codex-wait` text carries the reason and the detail (window, share left, reserve, reset time), once per attempt and reason, so a replay posts no second one and the next run after the reset asks again.
+
+Every session start (new attempt, resume, fix round) needs the Codex Plus five-hour and weekly shares at or above the reserve; equality starts. Only **new** Codex work, a story with no `codex/issue-<n>-*` branch yet, also needs Claude review capacity: the Claude allowance at or above the existing Claude reserve, and fewer Codex PRs waiting for a Claude review than the limit. A resume or a fix round skips these two checks, because it shrinks the review queue. A Codex PR waits for a Claude review when it is open, ready for review, on a `codex/issue-<n>-*` branch and has no submitted review (other than the Codex connector's) of its current head.
+
+Checks run cheapest first, and a refusal stops the rest: variables, the Codex reading, the review queue, the Claude probe. The command starts no model session other than the Claude allowance probe, starts no Claude work for the item, and never reads an OpenAI API key (`OPENAI_API_KEY` and `CODEX_API_KEY` are removed from the probes' environment).
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `CODEX_RESERVE_FIVE_HOUR_PERCENT` | Share of the Codex five-hour allowance that must be left. Whole number 0–100; empty is the default. | `10` |
+| `CODEX_RESERVE_WEEKLY_PERCENT` | The same for the weekly allowance. | `20` |
+| `CODEX_REVIEW_QUEUE_MAX` | New Codex work starts only when fewer Codex PRs than this wait for a Claude review. Whole number of 1 or more. | `1` |
+| `CODEX_ALLOWANCE_COMMAND` | Required. A command on the PO's computer that prints one JSON object, `{"five_hour": {"remaining_percent": <0-100>, "resets_at": "<iso>"}, "weekly": {...}}`, from the signed-in Codex app or CLI, with exit `0`. It must not make a metered API call. Unset or any other result is `allowance-unreadable`. | unset: nothing starts |
+| `CODEX_ALLOWANCE_TIMEOUT` | Seconds the Codex reading may take. | `20` |
+| `CLAUDE_ALLOWANCE_COMMAND` | Test hook: replaces `scripts/dispatcher-allowance.sh`, which runs unchanged (exit `0` start, `1` refuse, anything else unreadable) with `RESERVE_FIVE_HOUR_PERCENT` and `RESERVE_WEEKLY_PERCENT`, so no second Claude reserve exists. | the allowance script |
+| `CODEX_CLAUDE_PROBE_TIMEOUT` | Seconds the Claude probe may take (it also gets `ALLOWANCE_PROBE_TIMEOUT` `25` unless set). | `35` |
+
+The worker gives the hook 60 seconds, so keep the two probe timeouts together below that. The Claude probe needs `CLAUDE_CODE_OAUTH_TOKEN` in the task's environment, as `scripts/dispatcher-allowance.sh` does. Setup on the PO's computer: set `CODEX_WORKER_ELIGIBILITY_COMMAND` to the full path of `scripts/codex-eligibility.sh` and `CODEX_ALLOWANCE_COMMAND` to the reading command. The Plus allowance reading may be undocumented; when its shape changes the command answers `allowance-unreadable`, never eligible, and ADR-012 requires a new PO decision if no readable form exists.
+
+Reasons (the `reason` word, also in the `codex-wait` marker):
+
+| Reason | Meaning |
+|---|---|
+| `codex-reserve` | A Codex window is below its reserve; the detail names the window, the share left, the reserve and the reset time. |
+| `reserve-config` | A `CODEX_RESERVE_*` or `CODEX_REVIEW_QUEUE_MAX` value is invalid; no probe ran. |
+| `claude-reserve` | New work only: the Claude allowance is below the Claude reserve. |
+| `review-queue` | New work only: the number of Codex PRs waiting for a Claude review is at the limit. |
+| `allowance-unreadable` | A Codex or Claude allowance could not be read (no command, failed, timed out, changed shape). |
+| `review-queue-unreadable` | The review queue or the story's branches could not be read from GitHub. |
+| `eligibility-unreadable` | The worker got an exit other than `0` or `1`, a timeout or a command that could not start. |
 
 The task: create one automation in the Codex app for the repository's project, running every 30 minutes, with this prompt:
 
