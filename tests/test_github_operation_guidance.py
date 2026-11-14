@@ -226,7 +226,7 @@ def test_workflow_docs_describe_the_codex_review_loop() -> None:
     assert "`.github/workflows/codex-review-bookkeeping.yml` runs `hpw codex-review-bookkeeping`" in loop
     assert "It calls no model" in loop
     assert "decides from current facts, so a redelivered event is a no-op" in loop
-    assert "that story's board status is exactly `In review`" in loop
+    assert "that story's board status is exactly `In review` or `Blocked`" in loop
     # Issue #478: the job writes no board status.
     assert "the board writer shows `Mergeable` once the merge gates pass" in loop
     assert loop.count("(`Next: implementation`); no board status is written") == 2
@@ -235,7 +235,7 @@ def test_workflow_docs_describe_the_codex_review_loop() -> None:
     assert "Usage-limit reply, or a request with no answer" in loop
     assert "one `Type: external` blocker on the story" in loop
     assert "One `Type: resource` blocker on the story; no further request for that head" in loop
-    assert "the story stays in `In review`" in loop
+    assert "the board writer then shows it as `Blocked`, and the job still acts on the next Codex result" in loop
     # The two repository variables, with the defaults the code uses.
     assert f"`{RETRY_HOURS_ENV}` (back-off, default `{DEFAULT_RETRY_HOURS:g}`" in loop
     assert f"`{MAX_REQUESTS_ENV}` (requests the job posts per head, default `{DEFAULT_MAX_REQUESTS}`" in loop

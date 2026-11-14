@@ -463,7 +463,7 @@ Under `--dry-run` the check is logged and nothing is counted or sent:
 
 A Claude-implemented story is reviewed by Codex Cloud, not by a dispatcher session (ADR-006, issue #293). Codex answers asynchronously, so the dispatcher ends the story's run after `/implement` and picks the story up again on a later run. Everything is decided from GitHub facts read at the start of that run: the linked PR, its merge gates and hidden markers in comments. No board status chooses a step: moving a card starts nothing (issue #475, ADR-010). Nothing is remembered on the runner. The dispatcher honours its own markers only on comments written by its own account (the login behind `GH_TOKEN`), and the bookkeeping job's marker only on comments by that job's account, so a marker pasted into a comment by anyone else has no effect. Both rules live in `hpw dispatcher marker` (see [Markers](#markers--hpw-dispatcher-marker)).
 
-The `codex-review-bookkeeping` workflow does the part in between. It acts only on a story in `In review`, and posts the review Session Summary with its marker: `Next: merge` after a clean review with green required checks and a passed approval gate, `Next: implementation` after findings. It writes no board status (issue #478). `/implement` posts the review request; the dispatcher posts none.
+The `codex-review-bookkeeping` workflow does the part in between. It acts only on a story in `In review` or `Blocked`, and posts the review Session Summary with its marker: `Next: merge` after a clean review with green required checks and a passed approval gate, `Next: implementation` after findings. It writes no board status (issue #478). `/implement` posts the review request; the dispatcher posts none.
 
 ### Work in flight from PR facts
 
@@ -651,7 +651,7 @@ Under `--dry-run` each of the lines above is logged with a `[DRY RUN]` prefix, t
 - A story paused at a provider usage limit waits at its step (fix round, `/review`, new `/implement`) until the usage limit and the allowance check allow a start; the run ends at that refused start. Only pushed commits survive a pause.
 - The merged-PR lookup of the finish step reads the 100 most recently updated closed PRs, and the work in flight reads open issues only: GitHub closes the story when its PR merges, so a closed story whose cleanup failed comes back only through the `evidence:pending` label (issue #348).
 - The merge gates cost one `scripts/merge-gate-summary` evaluation per open non-draft linked PR, in each poll and each time the invoke step reads the work in flight.
-- The `codex-review-bookkeeping` job still acts only on a story in `In review`. The board writer sets that status from the non-draft PR on each dispatcher run, so the job can see a status up to one run old; a card moved out of `In review` by hand is corrected on the next run. The dispatcher itself does not depend on the column.
+- The `codex-review-bookkeeping` job still reads its entry guard from the board: it acts only on a story in `In review` or `Blocked` (issue #478; `Blocked` because the writer shows the job's own blockers that way). The board writer sets that status from the non-draft PR on each dispatcher run, so the job can see a status up to one run old; a card moved out of `In review` by hand is corrected on the next run. The dispatcher itself does not depend on the column.
 
 ---
 

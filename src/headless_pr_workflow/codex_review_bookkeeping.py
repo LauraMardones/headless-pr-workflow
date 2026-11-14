@@ -48,6 +48,12 @@ COMMAND_NAME = "codex-review-bookkeeping"
 # The only failure that exits 3: two readings of the PR disagreed (issue #330).
 CHANGED_DURING_RUN_STEP = "revalidate decision"
 STATUS_IN_REVIEW = "In review"
+STATUS_BLOCKED = "Blocked"
+# The statuses the job acts on (its entry guard). Issue #478: the board writer shows a story whose PR is in
+# review as "Blocked" once a blocker is open on it, for example the job's own resource or external blocker;
+# the job must still act on the next Codex result there, as it did when the card stayed "In review". An open
+# decision blocker still holds the job (`decision_blocker` below).
+ACTED_ON_STATUSES = (STATUS_IN_REVIEW, STATUS_BLOCKED)
 
 ACTION_MOVE_IN_MERGE = "move-in-merge"
 ACTION_MOVE_IN_IMPLEMENTATION = "move-in-implementation"
@@ -454,8 +460,10 @@ def decide(
     yields the preliminary `move-in-merge` that `_read` completes with the
     threads before anything is applied.
 
+    `story_status` must be one of `ACTED_ON_STATUSES` (`In review` or `Blocked`).
+
     `decision_blocker` names the story's open `Type: decision` blocker (a PO
-    waiver decision is pending). While it is set, an `In review` story is held:
+    waiver decision is pending). While it is set, the story is held:
     the action is `none`, so no review request, thread resolution or move
     happens until the PO's `/unblock`.
     """
@@ -491,13 +499,13 @@ def decide(
 
     if story is None:
         return result(ACTION_NONE, codex_result, codex_url, reason or "PR has no linked story.")
-    if story_status != STATUS_IN_REVIEW:
+    if story_status not in ACTED_ON_STATUSES:
         shown = f"`{story_status}`" if story_status else "not set on the project board"
         return result(
             ACTION_NONE,
             codex_result,
             codex_url,
-            f"Story #{story.number} is {shown}, not `{STATUS_IN_REVIEW}`.",
+            f"Story #{story.number} is {shown}, not `{STATUS_IN_REVIEW}` or `{STATUS_BLOCKED}`.",
         )
     if not head_sha:
         raise BookkeepingError("read PR", "current PR head SHA is unknown")
@@ -644,7 +652,7 @@ def _read(pr: int, *, github: GitHubGateway, now: datetime, config: BookkeepingC
     blocker: str | None = None
     if linked is not None:
         story = github.fetch_story(linked.number)
-        if story.status == STATUS_IN_REVIEW:
+        if story.status in ACTED_ON_STATUSES:
             # The hold comes first: while a decision blocker is open the
             # decision is `none` whatever CI says, so a failing CI read must
             # not turn the hold into a failed run (issue #357).
@@ -719,7 +727,7 @@ def blocker_body(decision: Decision, story: StoryBoard) -> str:
         f"Unblocked when: {decision.blocker_unblocked_when}\n"
         f"Owner: {BLOCKER_OWNER}\n"
         f"State of in-progress work: PR #{decision.pr} at head {decision.head_sha}; "
-        f"the story stays in `{STATUS_IN_REVIEW}`. {decision.blocker_detail or decision.reason}\n"
+        f"the job acts on the next Codex result for the story. {decision.blocker_detail or decision.reason}\n"
         "Resume instruction: n/a\n"
         f"{decision.marker}\n"
     )

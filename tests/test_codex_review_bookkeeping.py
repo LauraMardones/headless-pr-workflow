@@ -622,8 +622,8 @@ def test_clean_comment_the_gate_rejects_is_an_external_blocker():
 @pytest.mark.parametrize(
     ("overrides", "status", "expected"),
     [
-        ({}, "In implementation", "Story #290 is `In implementation`, not `In review`."),
-        ({}, "In merge", "Story #290 is `In merge`, not `In review`."),
+        ({}, "In implementation", "Story #290 is `In implementation`, not `In review` or `Blocked`."),
+        ({}, "Mergeable", "Story #290 is `Mergeable`, not `In review` or `Blocked`."),
         ({}, "in review", "not `In review`"),
         ({}, None, "not set on the project board"),
         ({"is_draft": True}, "In review", "PR is a draft."),
@@ -768,7 +768,7 @@ def test_dry_run_reports_the_decision_and_mutates_nothing():
 
 
 def test_the_job_has_no_status_write_and_needs_no_board_option():
-    # Issue #478 (AC 4): a board without an `In merge` option does not stop the hand-off.
+    # Issue #478 (AC 4): a board without an `Mergeable` option does not stop the hand-off.
     github = FakeGitHub(pr(request(), codex_comment()))
 
     outcome = run_bookkeeping(PR, github=github, now=NOW)
@@ -778,7 +778,7 @@ def test_the_job_has_no_status_write_and_needs_no_board_option():
     for gateway in (bookkeeping.GitHubGateway, GhCliGateway):
         assert not hasattr(gateway, "set_story_status")
     source = Path(bookkeeping.__file__).read_text(encoding="utf-8")
-    assert "updateProjectV2ItemFieldValue" not in source and "In merge" not in source
+    assert "updateProjectV2ItemFieldValue" not in source and "Mergeable" not in source
 
 
 def test_story_that_left_in_review_during_the_run_is_not_moved():
@@ -1152,13 +1152,13 @@ def test_cli_json_output_follows_the_output_contract(monkeypatch, capsys):
 
 
 def test_cli_human_output_is_one_line_per_pr(monkeypatch, capsys):
-    github = FakeGitHub(pr(request(), codex_comment()), status="In merge")
+    github = FakeGitHub(pr(request(), codex_comment()), status="Mergeable")
 
     exit_code, out, _ = run_cli(monkeypatch, capsys, github, "--all", "--dry-run")
 
     assert exit_code == 0
     assert out.splitlines() == [
-        "PR #123: result=clean action=none applied=not-needed - Story #290 is `In merge`, not `In review`."
+        "PR #123: result=clean action=none applied=not-needed - Story #290 is `Mergeable`, not `In review` or `Blocked`."
     ]
 
 
@@ -1985,3 +1985,38 @@ def test_a_declaration_forged_by_an_outsider_does_not_hold_the_story(association
     assert open_decision_blocker([{**forged, "author_type": "Bot"}]) is not None
     assert open_decision_blocker([{**forged, "association": "OWNER"}]) is not None
     assert open_decision_blocker([{**forged, "author": PO, "association": "NONE"}]) is not None
+
+
+# --- Issue #478: the job acts on a story the board writer shows as Blocked -------------------------
+
+
+def test_a_story_blocked_by_the_jobs_own_blocker_still_gets_its_findings_marker():
+    """Codex finding on PR #541: the board writer shows the story "Blocked" once the job's resource blocker is
+    open; a later Codex result must still produce the findings marker the dispatcher's fix round reads."""
+    exhausted = (request(SIX_HOURS_AGO), job_request(1), job_request(2), job_request(3))
+    github = FakeGitHub(pr(*exhausted))
+
+    first = run_bookkeeping(PR, github=github, now=NOW)
+    assert (first.decision.action, first.applied) == (ACTION_BLOCKER_RESOURCE, APPLIED)
+
+    github.status = "Blocked"  # what the board writer shows for the open blocker
+    github.context = pr(*exhausted, codex_pr_298_findings_review(HEAD_SHA))
+    second = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert (second.decision.action, second.applied) == (ACTION_MOVE_IN_IMPLEMENTATION, APPLIED)
+    marker = second.decision.marker
+    assert f"action={ACTION_MOVE_IN_IMPLEMENTATION} head={HEAD_SHA}" in marker
+    assert len(github.pr_comments) == 1 and github.pr_comments[0].endswith(f"\n{marker}\n")
+
+
+def test_a_blocked_story_with_an_open_decision_blocker_is_still_held():
+    github = held(FakeGitHub(pr(request(), codex_pr_298_findings_review(HEAD_SHA)), status="Blocked"))
+
+    outcome = run_bookkeeping(PR, github=github, now=NOW)
+
+    assert outcome.decision.action == ACTION_NONE and "open decision blocker" in outcome.decision.reason
+    assert github.pr_comments == [] and github.story_comments == []
+
+
+def test_the_entry_guard_is_in_review_or_blocked_only():
+    assert bookkeeping.ACTED_ON_STATUSES == ("In review", "Blocked")
