@@ -7,6 +7,7 @@ runs. Variables and reasons named here are the ones docs/DISPATCHER-CONFIG.md �
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -353,6 +354,20 @@ def test_the_shell_entry_point_runs_the_module_and_exits_2_on_bad_arguments():
     bash = find_bash()
     proc = subprocess.run([bash, script.as_posix()], capture_output=True, encoding="utf-8", env=host_env(), timeout=60)
     assert proc.returncode == 2 and proc.stdout == ""
+
+
+@requires("bash")
+def test_the_hook_runs_through_an_explicit_bash_command_as_the_docs_set_it_up():
+    """The worker runs the hook without a shell, so the documented setup names bash and a forward-slash path."""
+    script = REPO_ROOT / "scripts" / "codex-eligibility.sh"
+    command = f'"{find_bash()}" "{script.as_posix()}"'
+    argv = shlex.split(command)  # the worker's own split: no shell, so no backslashes survive
+    proc = subprocess.run(argv, capture_output=True, encoding="utf-8", env=host_env(), timeout=60)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert codex_worker.command_gate(command)("o/r", 1, "bogus") == (False, "eligibility-unreadable")
+    docs = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
+    assert 'bash "C:/work/headless-pr-workflow/scripts/codex-eligibility.sh"' in docs
+    assert "bash <repo>/scripts/codex-eligibility.sh" in docs
 
 
 # ── the worker: the wait record carries the reason and the reset time; replays post it once ──

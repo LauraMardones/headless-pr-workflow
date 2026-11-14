@@ -817,7 +817,7 @@ Environment of the task:
 | `CODEX_WORKER_LEASE_MINUTES` | How long a claim holds without a new record before a later run treats the session as interrupted. | `240` |
 | `CODEX_WORKER_RETRY_MINUTES` | How long an attempt that ended with `wait` and no `--until` waits before the next attempt. | `60` |
 
-Leave the hook unset and the worker starts nothing, as ADR-012 requires when the allowance cannot be confirmed. Set it to `scripts/codex-eligibility.sh` (see [Eligibility command](#eligibility-command)) so the worker starts only above the subscription reserves.
+Leave the hook unset and the worker starts nothing, as ADR-012 requires when the allowance cannot be confirmed. Set it to `bash <repo>/scripts/codex-eligibility.sh` (see [Eligibility command](#eligibility-command)) so the worker starts only above the subscription reserves.
 
 #### Eligibility command
 
@@ -837,7 +837,7 @@ Checks run cheapest first, and a refusal stops the rest: variables, the Codex re
 | `CLAUDE_ALLOWANCE_COMMAND` | Test hook: replaces `scripts/dispatcher-allowance.sh`, which runs unchanged (exit `0` start, `1` refuse, anything else unreadable) with `RESERVE_FIVE_HOUR_PERCENT` and `RESERVE_WEEKLY_PERCENT`, so no second Claude reserve exists. | the allowance script |
 | `CODEX_CLAUDE_PROBE_TIMEOUT` | Seconds the Claude probe may take (it also gets `ALLOWANCE_PROBE_TIMEOUT` `25` unless set). | `35` |
 
-The worker gives the hook 60 seconds, so keep the two probe timeouts together below that. The Claude probe needs `CLAUDE_CODE_OAUTH_TOKEN` in the task's environment, as `scripts/dispatcher-allowance.sh` does. Setup on the PO's computer: set `CODEX_WORKER_ELIGIBILITY_COMMAND` to the full path of `scripts/codex-eligibility.sh` and `CODEX_ALLOWANCE_COMMAND` to the reading command. The Plus allowance reading may be undocumented; when its shape changes the command answers `allowance-unreadable`, never eligible, and ADR-012 requires a new PO decision if no readable form exists.
+The worker gives the hook 60 seconds, so keep the two probe timeouts together below that. The Claude probe needs `CLAUDE_CODE_OAUTH_TOKEN` in the task's environment, as `scripts/dispatcher-allowance.sh` does. Setup on the PO's computer: set `CODEX_WORKER_ELIGIBILITY_COMMAND` to an explicit Bash command with the script's quoted, forward-slash full path, for example `bash "C:/work/headless-pr-workflow/scripts/codex-eligibility.sh"` (or `bash /home/po/headless-pr-workflow/scripts/codex-eligibility.sh`), and `CODEX_ALLOWANCE_COMMAND` to the reading command. The worker runs the hook without a shell, so native Windows Python cannot execute a bare `.sh` path: always name `bash` (Git Bash on Windows, never WSL's `C:\Windows\System32\bash.exe`) and use forward slashes, because the command is split like a POSIX shell line and a backslash would be dropped. The Plus allowance reading may be undocumented; when its shape changes the command answers `allowance-unreadable`, never eligible, and ADR-012 requires a new PO decision if no readable form exists.
 
 Reasons (the `reason` word, also in the `codex-wait` marker):
 
