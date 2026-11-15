@@ -52,6 +52,16 @@ def test_guard_recognises_python_and_assignment_definitions(tmp_path: Path) -> N
     assert sorted(p.split(": new copy: ")[1].split(" ")[0] for p in problems) == ["scripts/b.sh", "src/a.py"]
 
 
+def test_guard_ignores_zero_argument_calls_and_finds_brace_next_line(tmp_path: Path) -> None:
+    root = tree(tmp_path)
+    write(root, "src/caller.py", "from owner import linked_pr_match\nlinked_pr_match()\nx = linked_pr_match()\n")
+    write(root, "scripts/caller.sh", "if linked_pr_match(); then :; fi\n")
+    write(root, "scripts/brace.sh", "linked_pr_match()\n{\n  :\n}\n")
+    write(root, "scripts/fn.sh", "function linked_pr_match {\n  :\n}\n")
+    problems = rule_guard.find_violations(root, [fixture_rule()])
+    assert sorted(p.split(": new copy: ")[1].split(" ")[0] for p in problems) == ["scripts/brace.sh", "scripts/fn.sh"]
+
+
 def test_guard_fails_when_an_allowlisted_location_lost_its_rule(tmp_path: Path) -> None:
     root = tree(tmp_path)
     write(root, COPY, "echo nothing\n")

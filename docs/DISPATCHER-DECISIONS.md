@@ -53,9 +53,39 @@ Source: `main` at `be4afc3`.
 
 ## How the duplicate-rule guard recognises a rule
 
-`src/headless_pr_workflow/dispatcher/rule_guard.py` (tests: `tests/test_dispatcher_rule_guard.py`, issue #570) reads the registry. For each marker of a rule it looks in every file under `scripts/` and `src/` for a definition of that name: `def <marker>`, a shell function `<marker>()`, or an assignment `<marker>=` or `<marker> =`. It fails when:
+`src/headless_pr_workflow/dispatcher/rule_guard.py` (tests: `tests/test_dispatcher_rule_guard.py`, issue #570) reads the registry. For each marker of a rule it looks in every file under `scripts/` and `src/` for a definition of that name: `def <marker>`, a shell function definition (`<marker>() {`, or `<marker>()` with the brace on the next line, or `function <marker>`), or an assignment `<marker>=` or `<marker> =`. It fails when:
 
 - a file the registry does not list for the rule defines one of its markers (a new copy outside the owner that is not on the allowlist), or
 - an allowlisted duplicate no longer contains its marker (the copy is gone, so the registry entry must be removed and the allowlist shrinks).
 
-Limits of the match: it is by name, so a renamed copy, an inline copy with no named definition (for example a jq filter written in a pipeline) and a call to a marker are not found; a generic marker can match an unrelated definition, so a rule needs a distinctive marker (`decide` was dropped from `codex_eligibility_reserve` for this reason); tests and docs are not scanned. When a consolidation story removes a copy, it removes the entry from `rules.py` and the inventory row in the same PR.
+Limits of the match: it is by name, so a renamed copy, an inline copy with no named definition (for example a jq filter written in a pipeline) and a call to a marker (including a zero-argument Python call such as `<marker>()`) are not found; a generic marker can match an unrelated definition, so a rule needs a distinctive marker (`decide` was dropped from `codex_eligibility_reserve` for this reason); tests and docs are not scanned. When a consolidation story removes a copy, it removes the entry from `rules.py` and the inventory row in the same PR.
+
+## Parity baseline
+
+`tests/test_dispatcher_parity_in_flight.py` (issue #571) records, for the in-flight PR-fact rules below, what each copy decides for the same GitHub facts: open and closed PRs, the story and its comments, and the merge-gate line. Shell copies run in bash against a fake `gh` that returns only the first 100 items of a list read without `--paginate`; Python copies get a fake gateway whose failing reads raise. The cases include unreadable facts, a failed comment (marker) read, unknown mergeability and more than 100 open PRs. The test fails when a copy's decision changes, or when a case is listed below and its copies agree, or the other way round. The review-loop, fix-round and marker rules (#582) and the new-work admission and Codex rules (#583) are not in it yet.
+
+Fixtures per rule: `linked_pr_lookup`, `merged_pr_finish`, `merge_gates_pass`, `in_flight_step`, `draft_ready_signal`, `open_blocker`, `po_unblock`: each is a key of `CASES` in `tests/test_dispatcher_parity_in_flight.py`.
+
+Resolution classes follow Feature #525 → Decisions → Divergent copies of one rule: **contract** keeps the behavior a documented contract requires; **read defect** follows the complete, fail-closed read; **PO decision** needs the PO's answer, and the rule stays on the guard allowlist until then. The consolidating story (#556, #557) declares that `Type: decision` blocker.
+
+| Rule | Case | Failing input | Decisions | Class | Proposed resolution |
+|---|---|---|---|---|---|
+| `linked_pr_lookup` | `closed-past-tense` | PR body `Closed #500` | `_CLOSES`: #900; the others: none | PO decision | No contract names the closing keywords; the PO chooses Closes/Fixes/Resolves or GitHub's full list. |
+| `linked_pr_lookup` | `two-linked-prs` | two open PRs close #500 | jq copies: the first; `_linked`, `_CLOSES`: both | PO decision | No contract says which of two open PRs for one story counts. |
+| `linked_pr_lookup` | `more-than-100-open-prs` | the linked PR is the 101st open PR | `find_linked_pr_json`, `find_linked_pr`: none; the others: #900 | read defect | Read every page, as `INFLIGHT_JQ_LINKED` does. |
+| `merged_pr_finish` | `more-than-100-open-prs` | open linked PR past page 1 and a merged linked PR | `find_merged_linked_pr` path: finish; `inflight_compute`: no finish | read defect | Follow the paged open-PR read: a story with an open PR is not finished. |
+| `merge_gates_pass` | `not-mergeable` | gate line `mergeable=no`, all else passing | `inflight_gates_pass`: pass; `GateResult`, `merge_gates_pass`: fail | PO decision | `in-flight.sh` leaves mergeability to the merge step, `MERGE-POLICY.md` needs it for Mergeable; the PO decides whether the board follows the routing. |
+| `merge_gates_pass` | `mergeability-unknown` | gate line `mergeable=unknown` | as `not-mergeable` | PO decision | As `not-mergeable`. |
+| `in_flight_step` | `draft-pr` | one draft linked PR | `work_in_flight`: in flight; the others: implementing | contract | `PROJECT-STATUS.md` counts a draft linked PR as In implementation for the WIP limit. |
+| `in_flight_step` | `draft-first-then-gated-pr` | a draft linked PR before a ready one whose gates pass | `plan_in_flight`: implementing; the others: in flight | PO decision | Follows `linked_pr_lookup` `two-linked-prs`. |
+| `in_flight_step` | `comments-unreadable` | no PR, a dependency blocker, the comments cannot be read | `inflight_compute`, `work_in_flight`: none (startable); `derive_status`: unreadable | read defect | Fail closed: unreadable comments keep the story out of new work. |
+| `draft_ready_signal` | `ready-pr-on-claude-branch` | ready linked PR on `claude/issue-500-x` | `waiting_codex_prs`: not counted; the others: ready | contract | `WORKTREE-MODEL.md` names the branch by agent, so the reserve counts only `codex/` PRs and keeps its copy. |
+| `open_blocker` | `po-dependency` | a PO `Type: dependency` declaration | `latest_decision_blocker_json`: not open; the others: open | contract | `PROJECT-STATUS.md` gives each type its own rule; the consolidated rule takes the type as input. |
+| `open_blocker` | `po-decision` | a PO `Type: decision` declaration | `other_blocker_open`, `dependency_blocker`: not open; the others: open | contract | As `po-dependency`. |
+| `open_blocker` | `dependency-then-po-unblock` | a dependency declaration, then the PO's `/unblock` | `other_blocker_open` (board status): open; the others: not open | contract | `PROJECT-STATUS.md` lets the PO's `/unblock` lift a dependency blocker; the board call uses `po_unblock=True`. |
+| `open_blocker` | `dependency-then-member-unblocked` | a dependency declaration, then a member's `Unblocked` comment | conflict-round `open_blocker`: open; the others: not open | contract | `PROJECT-STATUS.md` resolves a non-decision blocker with an `Unblocked` comment. |
+| `open_blocker` | `automation-dependency` | a dependency declaration by the dispatcher (`Declared by: dispatcher`) | `open_session_blocker`, `latest_decision_blocker_json`: not open; the others: open | PO decision | No documented contract says whether an automation declaration blocks a session. |
+| `open_blocker` | `comments-unreadable` | a dependency declaration, the comments cannot be read | in-flight plan: not open; the others: unreadable | read defect | Fail closed, as the other copies do. |
+| `po_unblock` | `default-po-login` | the PO's `/unblock` with each entry point's default login | `_Facts` with no `DECISION_BLOCKER_PO_LOGIN` (Codex worker): not lifted; the others: lifted | contract | `PROJECT-STATUS.md` lifts a blocker with the PO's `/unblock`; every entry point gets the configured PO login. |
+
+Cases where the copies agree are recorded in the same file without a row here; among them, a merged PR past the first 100 closed PRs is missed by both `merged_pr_finish` copies alike. The `merged_pr_finish` row above says Agree, but its `more-than-100-open-prs` case diverges; this section, not the Copies column, is the baseline.

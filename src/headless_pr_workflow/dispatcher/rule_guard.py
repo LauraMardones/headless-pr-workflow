@@ -1,7 +1,7 @@
 """Guard against a second implementation of a registered dispatcher rule (issue #570).
 
 For each rule in ``rules.RULES`` the guard looks for a *definition* of one of the
-rule's markers (``def marker``, shell ``marker()``, or an assignment
+rule's markers (``def marker``, shell ``marker() {``, or an assignment
 ``marker=`` / ``marker =``) in the code under ``scripts/`` and ``src/``. A
 definition in a file the registry does not list for that rule is a new copy. A
 registered location whose file no longer contains its marker is stale: the copy
@@ -29,7 +29,8 @@ def definition_pattern(marker: str) -> re.Pattern[str]:
     name = re.escape(marker)
     return re.compile(
         rf"\bdef\s+{name}\b"
-        rf"|(?<![\w$]){name}\s*\(\)"
+        rf"|^[ \t]*(?:function\s+)?{name}[ \t]*\(\)\s*\{{"
+        rf"|^[ \t]*function\s+{name}\b"
         rf"|^\s*(?:export\s+|readonly\s+|declare\s+-\w+\s+)?{name}\+?="
         rf"|^{name}\s*(?::[^=\n]+)?=(?!=)",
         re.MULTILINE,

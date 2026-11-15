@@ -1,7 +1,6 @@
 # Epic #<number>: <title>
 
 **Epic issue:** #<number>
-**Milestone:** <milestone>
 
 ## Goal
 
@@ -46,3 +45,4 @@ Out:
 ## Open Questions
 
 None.
+

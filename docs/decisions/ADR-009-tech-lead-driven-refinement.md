@@ -1,6 +1,6 @@
 # ADR-009: Refinement Is Tech Lead Work and Makes No Product Decisions
 
-**Status:** Accepted
+**Status:** Accepted; amended by ADR-015 (milestone assignment removed from refinement)
 **Date:** 2026-09-28
 **Related:** ADR-008, ADR-010, Epic #160, `docs/REFINEMENT-PIPELINE.md`
 **Amends:** Epic #160 decision "Refinement execution model" (2026-06-03), its non-goal "Headless automatic Epic or Feature refinement", and the Epic/Feature refinement touchpoint
