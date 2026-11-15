@@ -375,8 +375,8 @@ The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for t
 | `decision_blocker` | a session left a `Type: decision` blocker, whether it failed or exited 0 (a first or fix-round `/implement`, or a `/review` of a Codex-implemented story, that leaves an Out of scope finding waiting for the PO's waiver) | yes |
 | `po_blocker` | the dispatcher posted a blocker only the PO can resolve (issue #359): fix-round maximum, evidence retry given up, a failed or no-progress `/implement`, `/review` or `/merge`, or a PR that changes decision documents and waits for the PO's personal merge (issue #502, below); also every `Type: external` or `Type: resource` blocker the Codex review bookkeeping job posts (issue #393, found by the scan below) | yes |
 | `evidence_unwritable` | required merge or cleanup evidence has been missing for 15 minutes and the story's comments cannot be written, so #348's blocker cannot be posted (issue #372) | yes |
-| `feature_closure_confirmation` | all stories of a Feature are Done | yes |
-| `epic_closure_approval` | all Features of an Epic are Done | yes |
+| `feature_closure_confirmation` | all stories of a Feature are Done, except the standing catch-all Feature (`catch_all.py`) | yes |
+| `epic_closure_approval` | all Features of an Epic are Done, except the standing catch-all Epic (`catch_all.py`) | yes |
 | `red_flow_health` | the board health is Red | re-sent on every poll while Red |
 | `budget_cap_reached` | every ready story is budget-blocked | no |
 | `dispatcher_error` | the invoke run exited unexpectedly | no: the failing run is itself red |
