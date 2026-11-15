@@ -29,7 +29,7 @@ from pathlib import Path
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
-# Source of the values: EXECUTABLE_ISSUE_TYPES in scripts/dispatcher-invoke.sh.
+# Source of the values: STORY_TYPES in src/headless_pr_workflow/dispatcher/facts.py.
 ISSUE_TYPES = ("epic", "feature", "story", "task", "bug")
 EXECUTABLE_TYPES = ("story", "task", "bug")
 

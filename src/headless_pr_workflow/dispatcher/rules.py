@@ -35,6 +35,7 @@ BOOKKEEPING = "src/headless_pr_workflow/codex_review_bookkeeping.py"
 REVIEW_POLICY = "src/headless_pr_workflow/review_policy.py"
 IN_FLIGHT = _PY + "in_flight.py"
 SCHEDULER = _PY + "scheduler.py"
+ADMISSION = _PY + "admission.py"
 FACTS = _PY + "facts.py"
 STATUS = _PY + "status.py"
 GATEWAY = _PY + "gateway.py"
@@ -109,20 +110,20 @@ RULES: tuple[Rule, ...] = (
           "`work_in_flight` counts any open closing PR and does not separate drafts; `derive_status` picks a "
           "gated PR among all linked PRs, `plan_in_flight` uses only the first."),
     _rule("wip_limit", "No new /implement once the in-implementation count reaches `WIP_LIMIT_IMPLEMENTATION`.",
-          SCHEDULER,
-          [(SCHEDULER, "choose_next"), (INVOKE, "IN_IMPL_COUNT"), (CODEX_WORKER, "scheduler_refine_due")],
+          ADMISSION, [(ADMISSION, "wip_reached")],
           "poll invoke codex-worker",
-          "test_wip_queue_limits.py test_dispatcher_scheduler.py test_dispatcher_scheduler_new_work.py",
-          "`scheduler_refine_due` builds its in-implementation list from the board status, the others from PR "
-          "facts; the invoke Step 5 count leaves the target out."),
+          "test_wip_queue_limits.py test_dispatcher_scheduler.py test_dispatcher_scheduler_new_work.py "
+          "test_dispatcher_admission.py",
+          ""),
     _rule("limits_valid", "Whether the three limit variables are valid; invalid values fail closed.", SCHEDULER,
-          [(SCHEDULER, "load_limits"), (LIMITS_SH, "load_limits")],
+          [(SCHEDULER, "load_limits")],
           "poll invoke codex-worker",
-          "test_wip_queue_limits.py test_dispatcher_scheduler.py"),
-    _rule("file_overlap", "No start for a story whose files affected overlap a story in implementation.", FACTS,
-          [(FACTS, "files_affected"), (SCHEDULER, "choose_next"), (INVOKE, "extract_files")],
+          "test_wip_queue_limits.py test_dispatcher_scheduler.py test_dispatcher_admission.py"),
+    _rule("file_overlap", "No start for a story whose files affected overlap a story in implementation.", ADMISSION,
+          [(ADMISSION, "overlapping_paths")],
           "poll invoke",
-          "test_dispatcher_facts_block.py test_dispatcher_scheduler.py test_wip_queue_limits.py"),
+          "test_dispatcher_facts_block.py test_dispatcher_scheduler.py test_wip_queue_limits.py "
+          "test_dispatcher_admission.py"),
     _rule("next_new_work_selection", "Which issue to refine or implement next, and in what order.", SCHEDULER,
           [(SCHEDULER, "choose_next"), (SCHEDULER_SH, "scheduler_next"), (INVOKE, "ask_scheduler"),
            (INVOKE, "next_new_work"), (CODEX_WORKER, "_queue")],
@@ -136,22 +137,19 @@ RULES: tuple[Rule, ...] = (
           "test_codex_session_runbook.py test_dispatcher_scheduler.py",
           "the facts take the first `executor:` label, `_queue` needs exactly `executor:codex`: a story with "
           "`executor:codex` first and a second executor label is skipped by both."),
-    _rule("executable_issue_type", "Whether an issue counts as a Story, Task or Bug.", FACTS,
-          [(FACTS, "STORY_TYPES"), (INVOKE, "classify_issue_type"), (IN_FLIGHT_SH, "inflight_compute"),
-           (STATUS, "_kind"), (CODEX_WORKER, "TYPE_LABELS")],
+    _rule("executable_issue_type", "Whether an issue counts as a Story, Task or Bug.", ADMISSION,
+          [(ADMISSION, "classify_executable_type"), (IN_FLIGHT_SH, "inflight_compute"),
+           (CODEX_WORKER, "TYPE_LABELS")],
           "poll invoke resume codex-worker",
-          "test_dispatcher_invoke_non_executable.sh test_dispatcher_facts_block.py",
-          "`classify_issue_type` rejects more than one `type:` label, the in-flight filter accepts any of "
-          "several, `_kind` takes the first known type; `TYPE_LABELS` ignores the native issue type."),
+          "test_dispatcher_invoke_non_executable.sh test_dispatcher_facts_block.py test_dispatcher_admission.py",
+          "the in-flight jq filter accepts any of several `type:` labels (in-flight rules: #556); `TYPE_LABELS` "
+          "ignores the native issue type (Codex worker queue: Epic #518)."),
     _rule("executor_label_routing", "Which executor label decides a story and whether the dispatcher starts it.",
-          INVOKE,
-          [(INVOKE, "load_story_context"), (INVOKE, "ROUTING_ENTRY"), (INVOKE, "EXECUTOR_ROUTING"),
-           (INVOKE, "skip_story_and_continue"), (IN_FLIGHT_SH, "inflight_compute")],
+          ADMISSION, [(ADMISSION, "executor_labels"), (IN_FLIGHT_SH, "inflight_compute")],
           "poll invoke resume",
-          "test_dispatcher_invoke_non_executable.sh test_dispatcher_codex_pr_review.py",
-          "Step 2 takes the first `executor:` label without counting, the in-flight rule and "
-          "`is_review_loop_story` need exactly one: a story with two labels gets /implement and a hand-off but "
-          "never a fix round."),
+          "test_dispatcher_invoke_non_executable.sh test_dispatcher_codex_pr_review.py test_dispatcher_admission.py",
+          "the in-flight jq counts the `executor:` labels itself (in-flight rules: #556); a story with two labels "
+          "gets /implement and a hand-off but never a fix round."),
     _rule("review_path_routing", "A dispatcher /review session or the Codex review loop for a PR.", REVIEW_ROUTING_SH,
           [(REVIEW_ROUTING_SH, "REVIEW_EXECUTOR_ROUTING"), (REVIEW_ROUTING_SH, "CODEX_REVIEW_LOOP_ROUTING"),
            (REVIEW_ROUTING_SH, "review_by_dispatcher_session"), (INVOKE, "is_review_loop_story")],

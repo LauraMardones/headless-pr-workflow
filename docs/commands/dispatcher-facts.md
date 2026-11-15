@@ -56,7 +56,7 @@ Each Feature or story (Story, Task, Bug): `number`, `title`, `type`, `prio`, `ep
 
 **`dependencies`** lists each issue under `Hard depends on:` as `closed`, `open` or `unresolvable` (not found, or its read failed); `None.` means none. `dependencies.state` is `unreadable` when the `## Dependencies` section or the line is missing. A close reason is not used: closed is closed.
 
-**`files_affected`** (Feature or story) lists the paths under `## Files affected`, parsed as `extract_files` in `scripts/dispatcher-invoke.sh` does: the section runs from the first line starting with `## Files affected` to the next line starting with `##`, each `- ` item loses its backticks and a `(note)`. It is `null` when the section is missing and `[]` when it has no items. `hpw dispatcher scheduler next` uses it for the file-overlap check ([dispatcher-scheduler.md](dispatcher-scheduler.md)).
+**`files_affected`** (Feature or story) lists the paths under `## Files affected`, parsed by the one parser the new-work pre-flight of `scripts/dispatcher-invoke.sh` also uses (`hpw dispatcher admission start`): the section runs from the first line starting with `## Files affected` to the next line starting with `##`, each `- ` item loses its backticks and a `(note)`. It is `null` when the section is missing and `[]` when it has no items. `hpw dispatcher scheduler next` uses it for the file-overlap check ([dispatcher-scheduler.md](dispatcher-scheduler.md)).
 
 **`refined`** (Feature or story) is true only when all hold:
 

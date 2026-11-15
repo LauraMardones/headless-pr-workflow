@@ -423,7 +423,7 @@ AGENT_MAX_WALLCLOCK_SECONDS="${AGENT_MAX_WALLCLOCK_SECONDS:-10800}"  # 3h total 
 # A missing or invalid limit variable stops the run before anything is read or
 # written: no board status, no comment, no Slack dispatcher_error (issue #358).
 # The EXIT trap below is not installed yet, so this exit sends no notification.
-load_limits || exit 1
+read_limits || exit 1
 WIP_LIMIT="$WIP_LIMIT_IMPLEMENTATION"
 
 # Dispatcher error tracking — used by the EXIT trap and notification wiring (issue #179)
@@ -455,20 +455,6 @@ iso_to_ts() {
     date -u -d "$iso" +%s 2>/dev/null \
         || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null \
         || echo 0
-}
-
-# ─── Utility: extract "## Files affected" list from a markdown body ───────────
-
-extract_files() {
-    local body="$1"
-    echo "$body" \
-        | awk '/^## Files affected/{found=1; next} found && /^##/{exit} found{print}' \
-        | grep -E '^\s*-\s' \
-        | sed 's/^\s*-\s*//' \
-        | sed 's/`//g' \
-        | sed 's/\s*(.*)//' \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-        | grep -v '^$' || true
 }
 
 # ─── Utility: the verified GitHub write (ADR-014 → Block 1, issue #432) ──────
@@ -2028,52 +2014,39 @@ PROJECT_ID=$(echo "$BOARD_DATA" | jq -r '.data.repository.projectsV2.nodes[0].id
 # ─── Executable issue types (issue #256) ──────────────────────────────────────
 # Used by the resume pass below and by Step 1b.
 
-EXECUTABLE_ISSUE_TYPES="story task bug"
-
-# classify_issue_type <space-separated labels> <native issue type name>
+# The rule is `classify_executable_type` in
+# src/headless_pr_workflow/dispatcher/admission.py (issue #557); this shim only
+# calls `hpw dispatcher admission type`.
+#
+# admission_issue_type <space-separated labels> <native issue type name>
 # Prints the detected type ("type:story", or "native issue type 'Bug'") and
-# returns 0 when executable. Otherwise prints why it is not and returns 1.
-# The type: label wins; the native GitHub issue type is only a fallback when
-# no type: label is present. Never infers type from the title or labels
-# such as executor:.
-classify_issue_type() {
-    local labels="$1" native="$2"
-    local lbl t
-    local -a type_labels=()
-    for lbl in $labels; do
-        [[ "$lbl" == type:* ]] && type_labels+=("$lbl")
-    done
-
-    if [[ ${#type_labels[@]} -gt 1 ]]; then
-        echo "unsupported type: conflicting type labels ${type_labels[*]}"
-        return 1
+# returns 0 when executable. Otherwise prints why it is not and returns 1. When
+# the rule cannot be read it prints "unsupported type: unreadable" and returns
+# 1 (fail closed: the story is not started).
+admission_issue_type() {
+    local out detail
+    out=$("$HPW_BIN" dispatcher admission type --labels "$1" --native "$2" 2>/dev/null) || true
+    detail=$(jq -r 'if type == "object" then (.detail // "") else "" end' <<< "$out" 2>/dev/null) || detail=""
+    if [[ -n "$detail" ]] && jq -e '.ok == true and .result == "executable"' <<< "$out" >/dev/null 2>&1; then
+        echo "$detail"
+        return 0
     fi
-
-    if [[ ${#type_labels[@]} -eq 1 ]]; then
-        t="${type_labels[0]#type:}"
-        if [[ " $EXECUTABLE_ISSUE_TYPES " == *" $t "* ]]; then
-            echo "${type_labels[0]}"
-            return 0
-        fi
-        case "$t" in
-            epic|feature) echo "detected type: ${type_labels[0]}" ;;
-            *)            echo "unsupported type: ${type_labels[0]}" ;;
-        esac
-        return 1
-    fi
-
-    if [[ -n "$native" ]]; then
-        t=$(echo "$native" | tr '[:upper:]' '[:lower:]')
-        if [[ " $EXECUTABLE_ISSUE_TYPES " == *" $t "* ]]; then
-            echo "native issue type '$native'"
-            return 0
-        fi
-        echo "unsupported type: native issue type '$native'"
-        return 1
-    fi
-
-    echo "type missing: no type: label or native issue type"
+    echo "${detail:-unsupported type: unreadable}"
     return 1
+}
+
+# admission_executor <space-separated labels> sets EXECUTOR_LABEL to the first
+# executor: label (the routing one) and STORY_EXECUTOR_LABEL_COUNT to how many
+# there are; the rule is `executor_labels` in admission.py. Returns 1, with
+# both empty/0, when there is none or the rule cannot be read.
+admission_executor() {
+    local out
+    EXECUTOR_LABEL=""
+    STORY_EXECUTOR_LABEL_COUNT=0
+    out=$("$HPW_BIN" dispatcher admission executor --labels "$1" 2>/dev/null) || true
+    jq -e '.ok == true and (.count | type == "number")' <<< "$out" >/dev/null 2>&1 || return 1
+    EXECUTOR_LABEL=$(jq -r '.first' <<< "$out")
+    STORY_EXECUTOR_LABEL_COUNT=$(jq -r '.count' <<< "$out")
 }
 
 # ─── Utility: board facts from the current $BOARD_DATA snapshot ──────────────
@@ -2724,18 +2697,11 @@ load_story_context() {
     TARGET_BODY=$(echo "$TARGET" | jq -r '.body // ""')
     TARGET_LABELS=$(echo "$TARGET" | jq -r '[.labels[].name] | join(" ")')
     TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
-    if ! detail=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
+    if ! detail=$(admission_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
         STORY_SKIP_REASON="not an executable Story, Task, or Bug ($detail)"
         return 1
     fi
-    EXECUTOR_LABEL=""
-    STORY_EXECUTOR_LABEL_COUNT=0
-    for lbl in $TARGET_LABELS; do
-        if [[ "$lbl" == executor:* ]]; then
-            [[ -z "$EXECUTOR_LABEL" ]] && EXECUTOR_LABEL="${lbl#executor:}"
-            STORY_EXECUTOR_LABEL_COUNT=$(( STORY_EXECUTOR_LABEL_COUNT + 1 ))
-        fi
-    done
+    admission_executor "$TARGET_LABELS" || true
     if [[ -z "$EXECUTOR_LABEL" || -z "${EXECUTOR_ROUTING[$EXECUTOR_LABEL]+x}" ]]; then
         STORY_SKIP_REASON="no known executor: label"
         return 1
@@ -3507,7 +3473,7 @@ TARGET_NATIVE_TYPE=$(echo "$TARGET" | jq -r '.type.name? // ""')
 # which stays fatal for executable items.
 
 LAST_ACTION="issue-type check for #$ISSUE_NUMBER"
-if ! ISSUE_TYPE_DETAIL=$(classify_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
+if ! ISSUE_TYPE_DETAIL=$(admission_issue_type "$TARGET_LABELS" "$TARGET_NATIVE_TYPE"); then
     echo "Warning: #$ISSUE_NUMBER is not an executable Story, Task, or Bug ($ISSUE_TYPE_DETAIL); skipping it for this run and continuing selection." >&2
     skip_story_and_continue "$ISSUE_NUMBER" "non-executable skip"
 fi
@@ -3523,13 +3489,7 @@ format_executor_hint() {
 }
 
 LAST_ACTION="executor label routing for #$ISSUE_NUMBER"
-EXECUTOR_LABEL=""
-for lbl in $TARGET_LABELS; do
-    if [[ "$lbl" == executor:* ]]; then
-        EXECUTOR_LABEL="${lbl#executor:}"
-        break
-    fi
-done
+admission_executor "$TARGET_LABELS" || true
 
 if [[ -z "$EXECUTOR_LABEL" ]]; then
     echo "Error: No executor: label found on #$ISSUE_NUMBER." >&2
@@ -3581,12 +3541,22 @@ for active_num in $(jq -r --argjson target "$ISSUE_NUMBER" '.in_implementation[]
     IN_IMPL_ITEMS=$(jq -c --argjson i "$active_issue" \
         '. + [{number: $i.number, title: ($i.title // ""), body: ($i.body // "")}]' <<< "$IN_IMPL_ITEMS")
 done
-IN_IMPL_COUNT=$(echo "$IN_IMPL_ITEMS" | jq 'length')
-echo "Active WIP count: $IN_IMPL_COUNT (limit: $WIP_LIMIT)"
+# The WIP limit and the file overlap are decided by `check_start` in
+# src/headless_pr_workflow/dispatcher/admission.py (issue #557), the code the
+# scheduler uses; this step passes the facts and prints the result.
+LAST_ACTION="WIP limit and file overlap check"
+if ! START_JSON=$(jq -cn --arg body "$TARGET_BODY" --argjson active "$IN_IMPL_ITEMS" --argjson limit "$WIP_LIMIT" \
+        '{target_body: $body, active: $active, limit: $limit}' | "$HPW_BIN" dispatcher admission start) \
+        && ! jq -e '.result == "wip-limit" or .result == "file-overlap"' <<< "$START_JSON" >/dev/null 2>&1; then
+    echo "Error: could not decide the WIP limit and file overlap of #$ISSUE_NUMBER; /implement not started." >&2
+    exit 1
+fi
+ACTIVE_WIP_COUNT=$(jq -r '.count' <<< "$START_JSON")
+echo "Active WIP count: $ACTIVE_WIP_COUNT (limit: $WIP_LIMIT)"
 
-if [[ $IN_IMPL_COUNT -ge $WIP_LIMIT ]]; then
+if [[ "$(jq -r '.result' <<< "$START_JSON")" == "wip-limit" ]]; then
     active_list=$(echo "$IN_IMPL_ITEMS" | jq -r '.[] | "  #\(.number) \(.title)"')
-    echo "FAIL: WIP limit reached ($IN_IMPL_COUNT >= $WIP_LIMIT)"
+    echo "FAIL: WIP limit reached ($ACTIVE_WIP_COUNT >= $WIP_LIMIT)"
     echo "$active_list"
     unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a draft linked PR or a fix round due)"
     post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
@@ -3595,7 +3565,7 @@ fi
 # ─── Step 6: File overlap check ───────────────────────────────────────────────
 
 LAST_ACTION="file overlap check"
-TARGET_FILE_LIST=$(extract_files "$TARGET_BODY")
+TARGET_FILE_LIST=$(jq -r '.target_files // [] | .[]' <<< "$START_JSON")
 
 if [[ -z "$TARGET_FILE_LIST" ]]; then
     echo "Warning: No '## Files affected' section found on #$ISSUE_NUMBER; skipping file overlap check."
@@ -3603,32 +3573,8 @@ else
     echo "Target files:"
     echo "$TARGET_FILE_LIST" | sed 's/^/  /'
 
-    OVERLAP_FOUND=false
-    OVERLAP_DETAILS=""
-
-    for ((i=0; i < IN_IMPL_COUNT; i++)); do
-        item=$(echo "$IN_IMPL_ITEMS" | jq ".[$i]")
-        active_num=$(echo "$item" | jq -r '.number')
-        active_title=$(echo "$item" | jq -r '.title')
-        active_body=$(echo "$item" | jq -r '.body')
-        active_files=$(extract_files "$active_body")
-
-        if [[ -z "$active_files" ]]; then
-            continue
-        fi
-
-        # Find intersection
-        while IFS= read -r tfile; do
-            while IFS= read -r afile; do
-                if [[ "$tfile" == "$afile" ]]; then
-                    OVERLAP_FOUND=true
-                    OVERLAP_DETAILS+="  $tfile (owned by #$active_num \"$active_title\")"$'\n'
-                fi
-            done <<< "$active_files"
-        done <<< "$TARGET_FILE_LIST"
-    done
-
-    if $OVERLAP_FOUND; then
+    if [[ "$(jq -r '.result' <<< "$START_JSON")" == "file-overlap" ]]; then
+        OVERLAP_DETAILS=$(jq -r '.overlaps[] | "  \(.path) (owned by #\(.number) \"\(.title)\")"' <<< "$START_JSON")$'\n'
         echo "FAIL: File overlap detected:"
         echo "$OVERLAP_DETAILS"
         unblocked_when="The overlapping files are no longer owned by a story with work in implementation: $(echo "$OVERLAP_DETAILS" | head -1 | sed 's/^ *//')"
@@ -3640,7 +3586,7 @@ fi
 
 echo ""
 echo "✓ Executor routing:  $EXECUTOR_TYPE (secret: $EXECUTOR_SECRET)"
-echo "✓ WIP limit:         $IN_IMPL_COUNT active / $WIP_LIMIT limit"
+echo "✓ WIP limit:         $ACTIVE_WIP_COUNT active / $WIP_LIMIT limit"
 echo "✓ File overlap:      none"
 echo ""
 echo "Pre-flight passed for #$ISSUE_NUMBER — proceed to executor invocation."

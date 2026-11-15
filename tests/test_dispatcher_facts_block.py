@@ -780,16 +780,12 @@ FILES_BODIES = [
 ]
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
 @pytest.mark.parametrize("body", FILES_BODIES)
-def test_files_affected_agrees_with_extract_files(body):
-    script = (ROOT / "scripts" / "dispatcher-invoke.sh").read_text(encoding="utf-8")
-    function = script[script.index("extract_files() {"):]
-    function = function[:function.index("\n}\n") + 3]
-    run_ = subprocess.run(["bash", "-c", function + 'extract_files "$1"', "bash", body], capture_output=True,
-                          text=True, check=True)  # fmt: skip
-    expected = [line for line in run_.stdout.split("\n") if line]
-    assert (files_affected(body) or []) == expected
+def test_files_affected_is_the_list_the_new_work_pre_flight_reads(body):
+    """The one parser (issue #557): ``hpw dispatcher admission start`` reports the facts' own list."""
+    from headless_pr_workflow.dispatcher.admission import check_start
+
+    assert check_start(body, [], 1)["target_files"] == files_affected(body)
 
 
 # ── parity with scripts/refine-check ──────────────────────────────────────────
