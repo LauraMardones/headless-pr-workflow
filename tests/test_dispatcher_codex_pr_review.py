@@ -219,3 +219,77 @@ def test_ac2_executor_without_a_provider_row_starts_nothing(d, tmp_path, monkeyp
     assert proc.returncode != 0
     assert "Error: No provider/model entry for executor 'codex' in EXECUTOR_PROVIDER/EXECUTOR_MODEL." in proc.stderr
     assert d.sessions == [] and d.claude_calls == []
+
+
+# ── Codex worker hand-off and re-review (issue #574) ────────────────────────
+
+NEW_HEAD = "b" * 40
+
+
+def codex_attempt_done(d, story=STORY, pr=PR, head="a" * 40, attempt=1):
+    """The local Codex worker's claim and its ``done`` end on the story (#528): the attempt is over."""
+    d.add_comment(story, f"<!-- hpw:dispatcher action=codex-claim issue={story} attempt={attempt} owner=codex "
+                         f"run=r{attempt} command=implement pr={pr} branch=codex/issue-{story}-x head={head} -->")
+    d.add_comment(story, f"<!-- hpw:dispatcher action=codex-end issue={story} attempt={attempt} run=r{attempt} "
+                         f"result=done reason= head={head} until= by= -->")
+
+
+def test_574_ac1_codex_attempt_done_in_review_starts_one_review_on_the_current_head(d):
+    codex_in_review(d)
+    codex_attempt_done(d)
+    first = d.resume()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert d.sessions == [f"review {PR}"]
+    recorded = d.posted(STORY)
+    assert len(recorded) == 1 and f"action=review-attempt pr={PR} head={'a' * 40}" in recorded[0]
+    second = d.resume()  # a later run on the same head starts nothing
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert d.sessions == [f"review {PR}"]
+    assert not any(s.startswith("implement") for s in d.sessions)
+
+
+def test_574_ac2_fix_round_head_gets_one_new_review_on_that_head(d):
+    codex_in_review(d)
+    codex_attempt_done(d)
+    assert d.resume().returncode == 0
+    # /review found blockers; the Codex worker's fix round makes the PR a draft while it works
+    d.set_status(STORY, "In implementation")
+    d.add_pr(PR, STORY, draft=True)
+    during = d.resume()
+    assert during.returncode == 0, during.stdout + during.stderr
+    assert d.sessions == [f"review {PR}"]
+    # the fix round pushes a new head and hands off again
+    d.set_status(STORY, "In review")
+    d.add_pr(PR, STORY, head=NEW_HEAD, draft=False)
+    codex_attempt_done(d, head=NEW_HEAD, attempt=2)
+    after = d.resume()
+    assert after.returncode == 0, after.stdout + after.stderr
+    assert d.sessions == [f"review {PR}", f"review {PR}"]
+    assert f"action=review-attempt pr={PR} head={NEW_HEAD}" in d.posted(STORY)[-1]
+    assert d.resume().returncode == 0
+    assert d.sessions == [f"review {PR}", f"review {PR}"]  # one review per head
+
+
+@pytest.mark.parametrize("case", ["ready", "in-implementation-draft", "in-review-findings", "in-review-conflict",
+                                  "mergeable-conflict", "blocked"])
+def test_574_ac3_no_claude_implement_for_a_codex_story_in_any_status(d, case):
+    status = {"ready": "Ready to implement", "in-implementation-draft": "In implementation",
+              "mergeable-conflict": "Mergeable", "blocked": "Blocked"}.get(case, "In review")
+    d.add_story(STORY, status, executor="codex")
+    conflict = {"mergeable": False, "mergeable_state": "dirty"} if case.endswith("conflict") else {}
+    if case != "ready":
+        d.add_pr(PR, STORY, draft=(case == "in-implementation-draft"), owned=True, **conflict)
+    if case == "in-review-findings":
+        d.add_findings(PR, "a" * 40)
+    if case == "mergeable-conflict":
+        d.set_gates(PR, "conflicting")
+    codex_attempt_done(d)
+    d.schedule(("implement", STORY))
+    for proc in (d.resume(), d.run_issue(STORY)):
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        # no start is even attempted: the provider check inside invoke_executor_command is a second guard
+        assert f"/implement #{STORY} " not in output and f"/implement on PR #{PR}" not in output, output
+        assert "MID-CYCLE FAILURE" not in output and "No provider/model entry" not in output, output
+    assert not any(s.startswith("implement") for s in d.sessions)
+    assert d.claude_calls == [] or all(call["stdin"].startswith(f"Review PR #{PR}") for call in d.claude_calls)

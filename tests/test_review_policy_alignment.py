@@ -563,6 +563,47 @@ def test_separate_session_review_recorded_on_an_earlier_head_is_stale():
     assert approval.blocking_reasons == ("separate-session review was recorded on a previous PR head SHA",)
 
 
+@pytest.mark.parametrize(
+    "old_head_review",
+    [
+        pytest.param("separate-session", id="claude-path-2-on-old-head"),
+        pytest.param("formal", id="formal-approval-on-old-head"),
+    ],
+)
+def test_codex_pr_review_of_an_older_head_fails_even_with_a_clean_codex_review_on_the_new_head(old_head_review):
+    """Issue #574 AC 2 and AC 4: a Codex PR needs a Claude review of its current head; Codex never counts."""
+    old_review = (
+        build_review(state="COMMENTED", commit_oid=OLD_SHA,
+                     body=separate_session_review_body(head_sha=OLD_SHA, reviewer_provider="claude"))
+        if old_head_review == "separate-session"
+        else build_review(commit_oid=OLD_SHA)
+    )
+    context = build_pr_context(
+        head_ref_oid=HEAD_SHA,
+        latest_reviews=(old_review,),
+        timeline=(commit_event(OLD_SHA), commit_event(HEAD_SHA), codex_comment()),
+        linked_issues=(linked_story("executor:codex"),),
+    )
+
+    approval = _assert_gate_fails_everywhere(context)
+
+    assert approval.codex_review.status == "not-applicable"
+    assert approval.approval_status == ("stale" if old_head_review == "formal" else "missing")
+    if old_head_review == "separate-session":
+        assert approval.separate_session_review.status == "stale"
+
+    current = with_context(
+        context,
+        latest_reviews=(
+            old_review,
+            build_review(state="COMMENTED", commit_oid=HEAD_SHA,
+                         body=separate_session_review_body(head_sha=HEAD_SHA, reviewer_provider="claude")),
+        ),
+    )
+    _assert_gate_passes_everywhere(current, approval_source="separate-session-review",
+                                   satisfied_by="separate-session-review")
+
+
 def test_separate_session_review_fails_closed_when_linked_stories_cannot_be_read():
     approval = _assert_gate_fails_everywhere(
         _path_2_context(review_evidence_error="linked issues could not be read completely")
