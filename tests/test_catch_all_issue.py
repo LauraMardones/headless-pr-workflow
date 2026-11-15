@@ -1,10 +1,9 @@
-"""Tests for `hpw catch-all-issue` (issue #516), against a fake `gh` on PATH."""
+"""Tests for `hpw catch-all-issue` (issue #516), against a fake `gh` subprocess boundary."""
 
 from __future__ import annotations
 
 import json
 import re
-import stat
 import subprocess
 from pathlib import Path
 
@@ -18,37 +17,40 @@ REPO = "owner/repo"
 ORIGIN = f"https://github.com/{REPO}/pull/7#discussion_r1"
 OTHER_EPIC = 504
 
-FAKE_GH = """#!/usr/bin/env bash
-printf '%s %s\\n' "$1" "$2" >> "$FAKE_GH_DIR/calls.log"
-if [ "$1 $2" = "issue create" ]; then
-  # keep the argument vector for inspection
-  i=0; for a in "$@"; do printf '%s\\0' "$a" >> "$FAKE_GH_DIR/create-args.bin"; done
-  [ -f "$FAKE_GH_DIR/create-fails" ] && { echo "boom" >&2; exit 1; }
-  [ -f "$FAKE_GH_DIR/create-nourl" ] && { echo "created"; exit 0; }
-  echo "https://github.com/owner/repo/issues/901"
-  exit 0
-fi
-if [ "$1 $2" = "issue view" ]; then
-  [ -f "$FAKE_GH_DIR/view-fails" ] && { echo "nope" >&2; exit 1; }
-  cat "$FAKE_GH_DIR/view.json"
-  exit 0
-fi
-echo "unexpected gh call: $*" >&2
-exit 9
-"""
+class FakeGh:
+    """Stands in for the `gh` subprocess boundary, so the tests run on every platform."""
+
+    def __init__(self, state: Path) -> None:
+        self.state = state
+
+    def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "gh"
+        args = argv[1:]
+        with (self.state / "calls.log").open("a", encoding="utf-8") as log:
+            log.write(f"{args[0]} {args[1]}\n")
+
+        def done(code: int, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, code, out, err)
+
+        if args[:2] == ["issue", "create"]:
+            (self.state / "create-args.bin").write_bytes("".join(f"{a}\0" for a in args).encode("utf-8"))
+            if (self.state / "create-fails").exists():
+                return done(1, err="boom\n")
+            if (self.state / "create-nourl").exists():
+                return done(0, "created\n")
+            return done(0, "https://github.com/owner/repo/issues/901\n")
+        if args[:2] == ["issue", "view"]:
+            if (self.state / "view-fails").exists():
+                return done(1, err="nope\n")
+            return done(0, (self.state / "view.json").read_text(encoding="utf-8"))
+        return done(9, err=f"unexpected gh call: {' '.join(args)}\n")
 
 
 @pytest.fixture
 def gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
     state = tmp_path / "state"
     state.mkdir()
-    script = bin_dir / "gh"
-    script.write_text(FAKE_GH, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
-    monkeypatch.setenv("FAKE_GH_DIR", str(state))
+    monkeypatch.setattr(catch_all_issue.subprocess, "run", FakeGh(state))
     return state
 
 
