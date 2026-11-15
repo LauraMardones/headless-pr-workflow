@@ -30,7 +30,7 @@ from .github import (
     fetch_required_status_check_context,
 )
 from .github.pr_context import _gh_env
-from .github.review_threads import fetch_review_threads_for_context, summarize_review_threads
+from .github.review_threads import RESOLVE_THREAD_MUTATION, fetch_review_threads_for_context, summarize_review_threads
 from .review_policy import (
     CLAUDE_EXECUTOR_LABEL_PREFIX,
     CODEX_REVIEW_TRIGGER_PHRASE,
@@ -110,11 +110,6 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
     }
   }
-}
-"""
-RESOLVE_THREAD_MUTATION = """
-mutation($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
 }
 """
 
