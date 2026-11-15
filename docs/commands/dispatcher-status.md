@@ -87,7 +87,7 @@ The command does not read `DISPATCHER_ENABLED`; the dispatcher decides whether t
 
 ### What it does
 
-1. Reads the statuses with the rule above (`read_status`), the board (every item of the repository's first Projects v2 board, all pages), and the open and closed issues.
+1. Reads the statuses with the rule above (`read_status`), the board (every item of the repository's first Projects v2 board, all pages), and the open and closed issues. Each issue list is read once per invocation and reused by the status rule and the row builder (issue #565); a later invocation reads afresh.
 2. For each board item that is an issue with a known `type:` label, compares the derived status with the board's Status. A closed issue is `Done` from its state alone. A difference includes a card moved by hand. Each is written through `write_board_status` (write, read back, up to `--attempts`); an item that already matches is not written. One item that fails does not stop the others.
 3. An item whose status is `unknown` is left alone and listed in `skipped` with the reason (`unknown: <reason>`). An open typed issue that is not on the board is listed as `not_on_board` and never added. Items that are not issues, and issues without a known type, are not touched or listed.
 4. For each open Epic, builds the progress section and writes the Epic body only when it differs.
