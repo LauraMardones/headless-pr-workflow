@@ -910,7 +910,19 @@ What the scheduled Codex task's session does with a `claim` result (`claimed` or
 4. **`command: implement`.** Follow `.claude/commands/implement.md`. After each push run `invocation.progress` with the branch, the full head SHA and the PR. Mark the PR Ready for review only when the required `pytest` check is green on the current head, with the implementation handoff and Session Summary. An `executor:codex` story gets no Codex review trigger comment (ADR-006); its paired Claude `/review` session reviews the head. End with `finish --result done --head <full-sha>` naming the handed-off head.
 5. **Any other stop** ends with `finish --result wait --reason <word>` (`usage-limit` with `--until`, a blocker word, or the reasons in step 1).
 
-Fix rounds after blocking findings and Claude's review of the Codex PR are issue #536.
+### Codex review and fix-round cycle
+
+One `executor:codex` story goes through this cycle, and `tests/test_codex_review_fix_cycle.py` runs it end to end with fakes (issue #575; no model session runs):
+
+1. The worker's `implement` attempt pushes a head, marks the PR Ready for review and ends with `finish --result done --head <sha>`.
+2. The review step ([Review of a Codex-implemented PR](#review-of-a-codex-implemented-pr)) starts one Claude `/review` on that PR head, once per head. Claude is the only reviewer of an `executor:codex` PR: no Codex review request is posted for it (ADR-006).
+3. A review with blockers on the head returns the story to `In implementation`. `claim` then starts a fix round: an `implement` attempt on the same PR and branch (`invocation.resume`, plus `invocation.fix_round` with `round`, `max`, `pr` and `reviewed_head`). The round needs a review of the handed-off head from a trusted account other than the Codex bot, with blockers or `CHANGES_REQUESTED`; one round runs per reviewed head, and the worker never opens a second PR or branch.
+4. The fix round pushes a new head to the same PR and ends with `done` on it. The new head gets its own Claude `/review`, once; the first review's result is never reused for it.
+5. A review of the new head with no blockers leaves the PR in the merge step; the script-only `/merge` and `/cleanup` run as for any story. A review with blockers starts the next fix round at step 3.
+
+**Fix-round maximum.** `CODEX_FIX_ROUND_MAX` (a whole number of `1` or more, default `3`, set in the worker's environment) bounds the rounds per PR: the round number is the count of reviewed heads of that PR with blockers. When the next round would be above the maximum, `claim` starts no session, posts one `Type: resource` blocker on the story naming the PR (marker `action=fix-round-max pr=<pr>`, posted once) and returns `waiting`; the story stays with Codex and the PO decides. Raising the variable lets the next round start. The dispatcher's own `CODEX_FIX_ROUND_MAX` for Claude-tier stories ([Fix round](#fix-round)) counts different facts and is separate.
+
+**No failover.** The dispatcher starts no Claude `/implement`, and no Claude fix round, for an `executor:codex` story in any status or on any code path (ADR-012): a Codex story whose fix round cannot start waits for Codex or the PO.
 
 ### Recovery
 
