@@ -10,6 +10,13 @@ from typing import Any
 from .pr_context import GHCommandError, PullRequestContext, _gh_env, fetch_pr_context
 
 
+# The one review-thread write: codex-review-bookkeeping and resolve-catch-all-thread both use it.
+RESOLVE_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
+}
+"""
+
 REVIEW_THREADS_QUERY = """
 query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
   repository(owner:$owner, name:$name) {

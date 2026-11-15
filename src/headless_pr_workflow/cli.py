@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 
 from .approval_check import summarize_approval_check
 from .branch_cleanup import summarize_branch_cleanup
+from .catch_all_issue import CatchAllIssueError, create_catch_all_issue, link_catch_all_issue
+from .catch_all_thread import resolve_catch_all_thread
 from .catalog import COMMANDS, find_command
 from .ci_summary import summarize_ci
 from .codex_review_bookkeeping import CHANGED_DURING_RUN_STEP, BookkeepingConfig, BookkeepingError, GhCliGateway, run_bookkeeping
@@ -132,6 +134,17 @@ def build_parser() -> argparse.ArgumentParser:
                     "Without this flag the command is dry-run/report-only."
                 ),
             )
+        if command.name == "catch-all-issue":
+            command_parser.add_argument("number", nargs="?", type=int, help="Issue number for the `link` action.")
+            command_parser.add_argument("--found-under", type=int, help="Epic number the work was found under (create).")
+            command_parser.add_argument("--origin", help="https link to the finding in this repository (create).")
+            command_parser.add_argument("--title", help="Issue title (create).")
+            command_parser.add_argument("--reason", help="Short reason text for the issue body (create).")
+            command_parser.add_argument("--kind", choices=("story", "bug"), default="story", help="`bug` for a defect (create).")
+        if command.name == "resolve-catch-all-thread":
+            command_parser.add_argument("--thread", help="Review thread node id.")
+            command_parser.add_argument("--issue", type=int, help="Catch-all issue number named in the thread reply.")
+            command_parser.add_argument("--head", help="PR head SHA the session classified; refused when the PR head differs.")
         if command.name == "workflow-status":
             command_parser.add_argument(
                 "--path",
@@ -1379,7 +1392,72 @@ def main(argv: list[str] | None = None) -> int:
             as_json=args.json,
         )
 
+    if args.command == "catch-all-issue":
+        return _print_catch_all_issue(args, parser)
+
+    if args.command == "resolve-catch-all-thread":
+        return _print_resolve_catch_all_thread(args)
+
     return _print_scaffold(args.command, args.target, args.json)
+
+
+def _print_catch_all_issue(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    def fail(message: str, code: int) -> int:
+        if args.json:
+            print(json.dumps({"ok": False, "error": message}, indent=2))
+        else:
+            print(f"catch-all-issue: {message}", file=sys.stderr)
+        return code
+
+    if not args.repo:
+        return fail("--repo is required", 1)
+    try:
+        if args.target == "create":
+            result = create_catch_all_issue(
+                repo=args.repo,
+                found_under=args.found_under,
+                origin=args.origin or "",
+                title=args.title or "",
+                reason=args.reason or "",
+                kind=args.kind,
+            )
+        elif args.target == "link":
+            if args.number is None:
+                return fail("link needs an issue number", 1)
+            result = link_catch_all_issue(repo=args.repo, issue=args.number)
+        else:
+            return fail("the action must be `create` or `link`", 1)
+    except CatchAllIssueError as exc:
+        return fail(str(exc), exc.exit_code)
+
+    print(json.dumps(result.as_dict(), indent=2) if args.json else result.human())
+    return 0
+
+
+def _print_resolve_catch_all_thread(args: argparse.Namespace) -> int:
+    def fail(message: str) -> int:
+        if args.json:
+            print(json.dumps({"action": "resolve-catch-all-thread", "resolved": False, "error": message}, indent=2))
+        else:
+            print(f"resolve-catch-all-thread: {message}", file=sys.stderr)
+        return 1
+
+    if not args.repo:
+        return fail("--repo is required")
+    try:
+        pr = int(args.target or "")
+    except ValueError:
+        return fail("the PR number is required")
+    if not args.thread or args.issue is None or not args.head:
+        return fail("--thread, --issue and --head are required")
+    result = resolve_catch_all_thread(repo=args.repo, pr=pr, thread=args.thread, issue=args.issue, head=args.head)
+    if args.json:
+        print(json.dumps(result.as_dict(), indent=2))
+    elif result.resolved:
+        print(result.human())
+    else:
+        print(f"resolve-catch-all-thread: {result.error}", file=sys.stderr)
+    return result.exit_code
 
 
 def _thread_label(thread: object) -> str:
