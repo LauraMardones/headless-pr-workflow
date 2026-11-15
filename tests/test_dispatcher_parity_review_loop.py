@@ -186,7 +186,8 @@ def bash(tmp: Path, f: dict[str, Any], body: str) -> tuple[int, str]:
     script = "\n".join([
         "set -uo pipefail", f'export FACTS="{tmp.as_posix()}"', f'export PATH="{bin_dir.as_posix()}:$PATH"',
         f'REPO="{REPO}"', f'HPW_BIN="{hpw.as_posix()}"', f'DISPATCHER_LOGIN="{BOT}"',
-        f'CODEX_BOOKKEEPING_LOGIN="{BK}"', f'DECISION_BLOCKER_PO_LOGIN="{PO}"', 'LOG_PREFIX=""',
+        f'CODEX_BOOKKEEPING_LOGIN="{BK}"', 'LOG_PREFIX=""',
+        f'export DECISION_BLOCKER_PO_LOGIN="{PO}"',  # set for every dispatcher job by .github/workflows/dispatcher.yml
         f'REVIEW_POLICY_FILE="{(REPO_ROOT / "src" / "headless_pr_workflow" / "review_policy.py").as_posix()}"',
         "RESUME_SESSIONS=0", 'NON_EXECUTABLE_ISSUES=""', 'post_comment() { echo "posted"; }',
         f"LABELS=({labels})", 'STORY_EXECUTOR_LABEL_COUNT=${#LABELS[@]}', 'EXECUTOR_LABEL="${LABELS[0]:-}"',
@@ -235,7 +236,7 @@ def poll_rule(tmp: Path, f: dict[str, Any]) -> str:
 
 
 def holds(f: dict[str, Any], number: int, text: str, cancel: str = "") -> str:
-    return marker_holds(FakeGateway(f), number, text, cancel=cancel, env=ENV).state
+    return marker_holds(FakeGateway(f), number, text, cancel=cancel, env=ENV).result
 
 
 # ── Rule decisions ───────────────────────────────────────────────────────────
