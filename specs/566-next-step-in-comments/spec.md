@@ -1,7 +1,7 @@
 # Epic #566: Every comment that needs the PO names the next command
 
 **Epic issue:** #566
-**Milestone:** <milestone>
+**Milestone:** M6 Autonomous Execution
 
 ## Goal
 
@@ -25,10 +25,16 @@ Out:
 
 ## Acceptance Criteria
 
-- **E1:** <An outcome the PO can verify at Epic closure.>
-  - **Verified by:** <How the PO checks it at closure, e.g. a usage scenario, a measurement, or a named test.>
-- **E2:** <…>
-  - **Verified by:** <…>
+- **E1:** Every kind of comment in Scope names the PO's command with its issue or PR number, where to run it (Claude Code, Codex, or a reply on GitHub), and what happens afterwards.
+  - **Verified by:** a list of every such comment kind with one real or test example of each, and a test per kind that fails when one of the three parts is missing.
+- **E2:** A decision blocker names the next step for each of its options.
+  - **Verified by:** the #545 case: option a) names `/spec 418` and where to run it.
+- **E3:** When the PO has answered and the next step is still the PO's, the next Session Summary names that step instead of "Needs PO decision".
+  - **Verified by:** the #545 case replayed: after `Decision a` and `/unblock`, the summary names `/spec 418`.
+- **E4:** A new comment kind that asks the PO to act cannot be added without the three parts.
+  - **Verified by:** a check in the test suite that fails on a new kind that lacks a part.
+- **E5:** The PO handles manual stops from the comment alone, without asking an agent to read the issue.
+  - **Verified by:** the PO's own check of the first 3 manual stops after the last Feature merges.
 
 ## Decisions
 
