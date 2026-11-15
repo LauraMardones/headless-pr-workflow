@@ -36,7 +36,7 @@ STORY_SECTIONS = [
 SPEC_LINE = "Spec: [`specs/10-epic/spec.md`](https://github.com/owner/repo/blob/abc1234/specs/10-epic/spec.md) at `abc1234`"
 
 
-def body(*, po_line=None, skip=(), hard="- None.", questions="None.", header=True, spec=SPEC_LINE):
+def body(*, po_line=None, skip=(), hard="- None.", questions="None.", header=True, spec=SPEC_LINE, files=("scripts/a",), decision=None):
     lines = []
     if header:
         lines += ["Parent epic: #10 Epic", "Feature group: #11 Feature"]
@@ -50,6 +50,10 @@ def body(*, po_line=None, skip=(), hard="- None.", questions="None.", header=Tru
             continue
         text = f"Hard depends on:\n\n{hard}\n\nSoft depends on:\n\n- #99" if name == "Dependencies" else "text"
         lines += [f"## {name}", "", text, ""]
+    if files is not None:
+        lines += ["## Files affected", ""] + [f"- {f}" if f.startswith("-") is False else f for f in files] + [""]
+    if decision:
+        lines += ["## Decisions", "", decision, ""]
     lines += ["## Open Questions", "", questions, ""]
     return "\n".join(lines)
 
@@ -59,8 +63,9 @@ def make_issue(mod, *, labels=("type:story", "prio:P2", "executor:claude-code-so
 
 
 class Env:
-    def __init__(self, mod, issue, states=None, repo_labels=None, spec=True):
+    def __init__(self, mod, issue, states=None, repo_labels=None, spec=True, test_sources=None):
         self.mod, self.issue, self.spec = mod, issue, spec
+        self.test_sources = test_sources or {}
         self.states = states or {}
         self.repo_labels = repo_labels if repo_labels is not None else {"executor:claude-code-sonnet"}
 
@@ -79,6 +84,7 @@ class Env:
             self.issue, REPO, issue_reader=self.issue_reader,
             labels_reader=lambda repo: self.repo_labels,
             spec_reader=self.spec_reader,
+            test_reader=lambda: self.test_sources,
         )
         return {c.id: c for c in checks}
 
@@ -242,7 +248,7 @@ def test_issue_264_replay(mod):
     checks = Env(mod, issue).run()
     assert failing(checks) == ["executor_label"]
     assert mod.verdict_line(5, list(checks.values())).startswith(
-        "Refine check: #5 fail (1 of 8): executor_label")
+        "Refine check: #5 fail (1 of 10): executor_label")
 
 
 def patch_reads(mod, monkeypatch, issue, *, fail=None):
@@ -270,7 +276,8 @@ def test_main_exit_1_json(mod, monkeypatch, capsys):
     assert [c["id"] for c in data["checks"]] == [
         "type_label", "executor_label", "prio_label",
         "hard_dependencies", "required_sections", "open_questions", "parent_refs",
-        "spec_record", "feature_criteria", "catch_all_sort"]
+        "spec_record", "feature_criteria", "catch_all_sort",
+        "files_affected", "size_split", "haiku_limit"]
     assert {c["id"]: c["status"] for c in data["checks"]}["executor_label"] == "fail"
 
 
@@ -451,7 +458,7 @@ def typed_issue(mod, kind, *, with_mapping):
             continue
         text = "Hard depends on:\n\n- None.\n\nSoft depends on:\n\n- #99" if name == "Dependencies" else "text"
         lines += [f"## {name}", "", text, ""]
-    lines += ["## Open Questions", "", "None.", ""]
+    lines += ["## Files affected", "", "- scripts/a", "", "## Open Questions", "", "None.", ""]
     return mod.Issue(5, f"{kind.title()}: x", "\n".join(lines),
                      (f"type:{kind}", "prio:P2", "executor:claude-code-sonnet"), "OPEN")
 
@@ -537,3 +544,133 @@ def test_catch_all_sort_is_in_the_verdict_and_fails_the_exit_code(mod, monkeypat
     assert mod.main(["--issue", "5", "--repo", REPO]) == 1
     out = capsys.readouterr().out
     assert "catch_all_sort: fail" in out and "catch_all_sort" in out.splitlines()[0]
+
+
+# --- size gate and Haiku limit (#545, Epic #418 E7) ---------------------------------
+
+HAIKU = ("type:story", "prio:P2", "executor:claude-code-haiku")
+KEEP = "Split decision: keep together because one policy needs one atomic change"
+
+
+def many(n, prefix="scripts/f"):
+    return tuple(f"`{prefix}{i}`" for i in range(n))
+
+
+def size_run(mod, files, labels=("type:story", "prio:P2", "executor:claude-code-sonnet"), decision=None, sources=None):
+    issue = make_issue(mod, labels=labels, files=files, decision=decision)
+    env = Env(mod, issue, repo_labels={l for l in labels if l.startswith("executor:")}, test_sources=sources)
+    return env.run()
+
+
+def test_ten_files_pass(mod):
+    assert failing(size_run(mod, many(10))) == []
+
+
+def test_eleven_files_fail_size_split_naming_the_count(mod):
+    checks = size_run(mod, many(11))
+    assert failing(checks) == ["size_split"]
+    assert "11 files exceed 10" in checks["size_split"].detail
+
+
+def test_six_test_files_fail_size_split(mod):
+    checks = size_run(mod, many(6, "tests/test_"))
+    assert failing(checks) == ["size_split"]
+    assert "6 test files exceed 5" in checks["size_split"].detail
+
+
+def test_duplicate_paths_count_once(mod):
+    assert failing(size_run(mod, many(10) + ("`scripts/f0`",))) == []
+
+
+def test_keep_together_with_reason_and_sonnet_passes(mod):
+    checks = size_run(mod, many(11), decision=KEEP)
+    assert failing(checks) == []
+    assert "kept together" in checks["size_split"].detail
+
+
+def test_keep_together_without_a_reason_fails(mod):
+    assert failing(size_run(mod, many(11), decision="Split decision: keep together because")) == ["size_split"]
+    assert failing(size_run(mod, many(11), decision="Split decision: keep together")) == ["size_split"]
+
+
+def test_keep_together_on_haiku_fails(mod):
+    checks = size_run(mod, many(11), labels=HAIKU, decision=KEEP)
+    assert "size_split" in failing(checks)
+    assert "at least executor:claude-code-sonnet" in checks["size_split"].detail
+
+
+def test_haiku_with_three_files_passes(mod):
+    assert failing(size_run(mod, many(3), labels=HAIKU)) == []
+
+
+def test_haiku_over_three_files_fails_with_the_count(mod):
+    checks = size_run(mod, many(4), labels=HAIKU)
+    assert failing(checks) == ["haiku_limit"]
+    assert "4 files exceed the Haiku limit of 3" in checks["haiku_limit"].detail
+
+
+def test_haiku_on_a_file_a_test_reads_exactly_fails(mod):
+    sources = {"tests/test_doc.py": 'text = Path("docs/GUIDE.md").read_text()\nassert "required literal" in text'}
+    checks = size_run(mod, ("`docs/GUIDE.md`",), labels=HAIKU, sources=sources)
+    assert failing(checks) == ["haiku_limit"]
+    assert "docs/GUIDE.md is referenced by a test" in checks["haiku_limit"].detail
+
+
+def test_haiku_matches_a_basename_reference_conservatively(mod):
+    sources = {"tests/test_doc.py": "GUIDE.md"}
+    assert failing(size_run(mod, ("`docs/GUIDE.md`",), labels=HAIKU, sources=sources)) == ["haiku_limit"]
+
+
+def test_haiku_declared_verbatim_read_fails_without_a_test_match(mod):
+    checks = size_run(mod, ("`docs/GUIDE.md` (read verbatim by a shell test)",), labels=HAIKU)
+    assert failing(checks) == ["haiku_limit"]
+    assert "declared as read verbatim" in checks["haiku_limit"].detail
+
+
+def test_haiku_on_an_unreferenced_file_passes(mod):
+    sources = {"tests/test_other.py": "nothing here"}
+    assert failing(size_run(mod, ("`docs/GUIDE.md`",), labels=HAIKU, sources=sources)) == []
+
+
+def test_files_affected_missing_or_not_individual_paths_fails(mod):
+    assert failing(size_run(mod, None)) == ["files_affected"]
+    checks = size_run(mod, ("`scripts/`", "`docs/*.md`"))
+    assert failing(checks) == ["files_affected"]
+    assert "'scripts/'" in checks["files_affected"].detail
+
+
+def test_dot_slash_test_paths_count_as_test_files(mod):
+    checks = size_run(mod, tuple(f"`./tests/test_a{i}.py`" for i in range(6)))
+    assert failing(checks) == ["size_split"]
+    assert "6 test files exceed 5" in checks["size_split"].detail
+
+
+def test_dot_slash_and_plain_path_count_once(mod):
+    assert failing(size_run(mod, ("`./scripts/f0`", "`scripts/f0`"))) == []
+
+
+def test_existing_directory_without_trailing_slash_fails(mod):
+    checks = size_run(mod, ("`tests`", "`scripts`"))
+    assert failing(checks) == ["files_affected"]
+    assert "'tests'" in checks["files_affected"].detail
+
+
+def test_parent_relative_path_fails(mod):
+    assert failing(size_run(mod, ("`../outside.py`",))) == ["files_affected"]
+
+
+def test_size_checks_skip_for_an_epic(mod):
+    issue = make_issue(mod, labels=("type:epic",), title="Epic: x", files=None)
+    checks = {c.id: c for c in mod.run_checks(issue, REPO, issue_reader=lambda r, n: issue, labels_reader=lambda r: set(),
+                                               spec_reader=lambda *a: True, test_reader=dict)[1]}
+    assert {checks[i].status for i in ("files_affected", "size_split", "haiku_limit")} == {"skip"}
+
+
+def test_size_failure_reaches_the_exit_code_and_output(mod, monkeypatch, capsys):
+    issue = make_issue(mod, files=many(11))
+    monkeypatch.setattr(mod, "read_issue", lambda repo, number: issue)
+    monkeypatch.setattr(mod, "read_repo_labels", lambda repo: {"executor:claude-code-sonnet"})
+    monkeypatch.setattr(mod, "spec_exists", lambda *a: True)
+    assert mod.main(["--issue", "5", "--repo", REPO]) == 1
+    out = capsys.readouterr().out
+    assert "size_split: fail - 11 files exceed 10" in out

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -66,6 +67,17 @@ CATCH_ALL_MODULE = Path(__file__).resolve().parent.parent / "src" / "headless_pr
 MAINTENANCE_CLASSES = ("M1", "M2", "M3", "M4", "M6", "M8")
 CLASS_TOKEN = re.compile(r"\bM\d+\b")
 SORT_HEADING = re.compile(r"^###\s+Catch-all sort\b.*$", re.M)
+
+
+# Size gate and executor-by-size rule (Epic #418 spec, E7; issue #545).
+MAX_FILES = 10
+MAX_TEST_FILES = 5
+HAIKU_MAX_FILES = 3
+HAIKU_LABEL = "executor:claude-code-haiku"
+KEEP_TOGETHER = re.compile(r"^[ \t]*(?:[-*]\s+)?Split decision:\s*keep together because[ \t]+\S", re.I | re.M)
+VERBATIM_DECLARATION = re.compile(r"verbatim|word[- ]for[- ]word|read exactly", re.I)
+TESTS_DIR = Path(__file__).resolve().parent.parent / "tests"
+TEST_SOURCE_SUFFIXES = (".py", ".sh")
 
 
 class ReadError(Exception):
@@ -265,12 +277,88 @@ def catch_all_sort_check(issue: Issue) -> Check:
     return Check("catch_all_sort", "pass", f"maintenance {classes[0]}")
 
 
+def inventory_paths(sections: dict[str, str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Distinct (path, item text) pairs of `## Files affected`, and the entries that are not file paths."""
+    paths: dict[str, str] = {}
+    bad: list[str] = []
+    for item in list_items(sections.get("Files affected", "")):
+        ticked = re.match(r"^`([^`]+)`", item)
+        token = ticked.group(1) if ticked else item.split()[0] if item.split() else ""
+        token = token.strip()
+        if token and not token.startswith("/") and not token.endswith("/"):
+            token = posixpath.normpath(token)
+        if token == "." or token.startswith("../") or (TESTS_DIR.parent / token).is_dir() or not token or token.endswith("/") or token.startswith("/") or re.search(r"[*?\[\]{}]|\s", token):
+            bad.append(token or item)
+        else:
+            paths.setdefault(token, item)
+    return list(paths.items()), bad
+
+
+def read_test_sources() -> dict[str, str]:
+    """Text of the tracked test sources, keyed by repository-relative path."""
+    try:
+        files = sorted(f for f in TESTS_DIR.rglob("*") if f.is_file() and f.suffix in TEST_SOURCE_SUFFIXES)
+        return {f.relative_to(TESTS_DIR.parent).as_posix(): f.read_text(encoding="utf-8", errors="replace") for f in files}
+    except OSError as error:
+        raise ReadError(f"test sources: {error}") from error
+
+
+def size_checks(issue: Issue, effective: str | None, test_reader) -> list[Check]:
+    ids = ("files_affected", "size_split", "haiku_limit")
+    if effective not in EXECUTABLE_TYPES:
+        return [Check(i, "skip", "issue type unknown" if effective is None else f"not applicable to type:{effective}") for i in ids]
+    sections = parse_sections(issue.body)
+    entries, bad = inventory_paths(sections)
+    if bad or not entries:
+        reason = ("entries that are not individual repository-relative file paths: " + ", ".join(f"'{b}'" for b in bad)
+                  if bad else "no '## Files affected' list of individual file paths")
+        return [Check("files_affected", "fail", reason),
+                Check("size_split", "skip", "no usable file inventory"), Check("haiku_limit", "skip", "no usable file inventory")]
+    paths = [path for path, _ in entries]
+    tests = [path for path in paths if path.startswith("tests/")]
+    checks = [Check("files_affected", "pass", f"{len(paths)} files, {len(tests)} test files")]
+    haiku = HAIKU_LABEL in issue.labels
+    sonnet_plus = not haiku
+    over = []
+    if len(paths) > MAX_FILES:
+        over.append(f"{len(paths)} files exceed {MAX_FILES}")
+    if len(tests) > MAX_TEST_FILES:
+        over.append(f"{len(tests)} test files exceed {MAX_TEST_FILES}")
+    keep = KEEP_TOGETHER.search(issue.body.replace("\r\n", "\n"))
+    if not over:
+        checks.append(Check("size_split", "pass", "within the size limits"))
+    elif not keep:
+        checks.append(Check("size_split", "fail", "; ".join(over) + "; split the issue or record 'Split decision: keep together because <reason>'"))
+    elif not sonnet_plus:
+        checks.append(Check("size_split", "fail", "; ".join(over) + f"; keep-together needs at least executor:claude-code-sonnet, found {HAIKU_LABEL}"))
+    else:
+        checks.append(Check("size_split", "pass", "; ".join(over) + "; kept together with a recorded reason"))
+    if not haiku:
+        checks.append(Check("haiku_limit", "skip", "executor is not Haiku"))
+        return checks
+    problems = []
+    if len(paths) > HAIKU_MAX_FILES:
+        problems.append(f"{len(paths)} files exceed the Haiku limit of {HAIKU_MAX_FILES}")
+    declared = [path for path, item in entries if VERBATIM_DECLARATION.search(item)]
+    sources = test_reader()
+    matched = [path for path in paths if path not in declared and any(
+        path in text or Path(path).name in text for name, text in sources.items() if name != path)]
+    for path in declared:
+        problems.append(f"{path} is declared as read verbatim")
+    for path in matched:
+        problems.append(f"{path} is referenced by a test, so it may be read word for word")
+    checks.append(Check("haiku_limit", "fail", "; ".join(problems) + "; use at least executor:claude-code-sonnet")
+                  if problems else Check("haiku_limit", "pass", f"{len(paths)} files, none read word for word"))
+    return checks
+
+
 # --- checks --------------------------------------------------------------------------
 
-def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None) -> tuple[str | None, list[Check]]:
+def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None, test_reader=None) -> tuple[str | None, list[Check]]:
     issue_reader = issue_reader or read_issue
     labels_reader = labels_reader or read_repo_labels
     spec_reader = spec_reader or spec_exists
+    test_reader = test_reader or read_test_sources
     checks: list[Check] = []
 
     types = type_labels(issue)
@@ -359,6 +447,7 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
     checks.append(spec_record_check(issue, repo, effective, spec_reader))
     checks.append(feature_criteria_check(issue, effective))
     checks.append(catch_all_sort_check(issue))
+    checks.extend(size_checks(issue, effective, test_reader))
     return effective, checks
 
 

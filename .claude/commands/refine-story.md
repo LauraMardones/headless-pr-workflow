@@ -88,6 +88,7 @@ Every refined Story carries a `## Epic and Feature Requirements Mapping` section
 - A deferred requirement that an existing issue delivers links it (`deferred to #N`). If none exists, the follow-up is a catch-all issue made with `hpw catch-all-issue create --repo <owner/repo> --found-under <epic number of this story> --origin <https link to this story> --title <text> --reason <text>` (`Found under:` the Epic of the story being refined, `Origin:` linking it; add `--kind bug` for a defect). Where `gh` is unavailable, the GitHub plugin creates the issue with the same lines and the Session Summary says the helper could not run. If the catch-all issue cannot be made, raise a `Type: decision` Blocked Declaration. The follow-up must be linked before the story moves to `Ready for implementation`.
 - Cross-cutting check: time bounds, delivery guarantees and similar statements an executor needs must be copied into the story's Scope or Acceptance Criteria, not only referenced in the mapping.
 - Split check: when the story adds a new script, a workflow step and docs together, record a `Split decision:` line in `## Decisions` (`Split decision: split into #A, #B` or `Split decision: keep together because ...`).
+- Size gate (`scripts/refine-check` checks `files_affected`, `size_split` and `haiku_limit`): write a `## Files affected` section listing individual repository-relative file paths, one per list item (no directories or globs). More than 10 distinct paths, or more than 5 distinct `tests/` paths, requires a split, or a `Split decision: keep together because <reason>` line in `## Decisions` and at least `executor:claude-code-sonnet`. `executor:claude-code-haiku` is allowed only for at most 3 listed paths, none read word for word by a test (a test that compares full file content or required literal text, or a path a test source references, counts; mark a declared verbatim read in the item, e.g. `` - `docs/X.md` (read verbatim by tests/test_x.py) ``). When another rule (#367) also sets an executor minimum, use the stronger one; neither lowers the other.
 
 ## Open Questions Format
 
@@ -241,6 +242,10 @@ Revalidate after dependency closes: yes/no
 Split decision: {split into #A, #B | keep together because ...} (required when the story combines a new script, a workflow step and docs)
 
 ...
+
+## Files affected
+
+- `path/to/file` (one individual repository-relative path per item)
 
 ## Technical Notes
 
