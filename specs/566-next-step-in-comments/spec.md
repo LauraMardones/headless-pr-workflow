@@ -38,22 +38,51 @@ Out:
 
 ## Decisions
 
-### <Decision title>
+### Which comments are in scope — 2026-11-15
 
-**Chosen:** <…>
-**Rejected:** <alternative> — <why>
+**Chosen:** Every comment and notification that asks the PO to act. Refinement orders the work, with blockers and `Next action:` first.
+**Rejected:** Only blockers and `Next action:`, with Slack and other comments later — the PO meets the problem very often, in every kind of comment.
+
+### What a next step names — 2026-11-15
+
+**Chosen:** Three parts: the command with its issue or PR number, where to run it, and what happens afterwards.
+**Rejected:** More parts — the PO judged the three enough.
+
+### Decision blockers — 2026-11-15
+
+**Chosen:** Each option names its own next step.
+**Rejected:** One `Resume instruction` for the whole blocker, as today — it does not say what follows each answer (#545).
+
+### How E5 is measured — 2026-11-15
+
+**Chosen:** The first 3 manual stops after the last Feature merges.
+**Rejected:** 5 or 10 stops; no usage criterion at all.
+
+### Milestone — 2026-11-15
+
+**Chosen:** M6 Autonomous Execution. A new milestone split is a separate decision in #569.
+**Rejected:** Decide the milestone split in this spec — it affects many Epics outside this one.
 
 ## Checked Against
 
-- <ADR, `docs/*.md` section, or parent-issue decision> — <no conflict | conflict and how it is resolved>
+- ADR-010 — no conflict. Commands record facts in comments; the next step is text for the PO. No script reads `Next action:` to set a status (only `hpw` prints it).
+- ADR-008, ADR-009, ADR-011 — no conflict.
+- `docs/PROJECT-STATUS.md` → Declaration format — conflict: `Resume instruction` is "n/a" for four of the five types. Resolved: this Epic changes the format, and the Feature that does so updates the document.
+- `docs/TAKEOVER-RULES.md` — no conflict. It is the source for the next step when the PO takes over a merge.
+- `AGENTS.md` → Codex Review Requests — constraint: a next step never writes the Codex review trigger phrase in a comment. It names the command that posts it.
+- Epic #519 and Epic #272 — no conflict in scope. #519 changes the same dispatcher scripts (see Dependencies).
 
 ## Delegated to the Tech Lead
 
-- <Choices refinement may make on its own, e.g. slicing, technical approach, ordering.>
+- Slicing into Features and Stories, and their order.
+- The list of comment kinds in scope, by this rule: a comment is in scope when the flow waits for the PO.
+- Field names and exact wording, for example a new field or a changed `Resume instruction`.
+- The technical approach, for example one shared source for next-step text, and how E4's check finds new comment kinds.
 
 ## Dependencies
 
-- <Other Epics or external work this depends on, or "None".>
+- Hard: none.
+- Soft: Epic #519 changes the same dispatcher scripts. The scheduler's file-overlap rule keeps the two from colliding.
 
 ## Open Questions
 
