@@ -129,7 +129,7 @@ def test_refine_commands_state_the_size_gate(name: str) -> None:
     assert "Split decision: keep together because <reason>" in command
     assert "at least `executor:claude-code-sonnet`" in command
     assert "at most 3 listed paths" in command
-    assert "use the stronger one" in command
+    assert "taking the stronger minimum" in command
 
 
 def test_lens_and_pipeline_state_the_same_thresholds() -> None:
@@ -145,3 +145,24 @@ def test_lens_and_pipeline_state_the_same_thresholds() -> None:
         assert "stronger minimum" in text
         for check_id in ("files_affected", "size_split", "haiku_limit"):
             assert check_id in text
+
+
+@pytest.mark.parametrize("name", ("refine-story", "refine-bug", "refine-task"))
+def test_refine_commands_state_the_orchestration_executor_rule(name: str) -> None:
+    command = read(f".claude/commands/{name}.md")
+
+    assert "`flow:orchestration` or `cp:critical-path`" in command
+    assert "exactly the label `executor:claude-code-opus`" in command
+    assert "`orchestration_executor`" in command
+    assert "taking the stronger minimum" in command
+    assert "#367" not in command
+
+
+def test_pipeline_and_lens_state_the_orchestration_executor_rule() -> None:
+    pipeline = read("docs/REFINEMENT-PIPELINE.md")
+    lens = read(".claude/commands/refinement-lenses/token-economics.md")
+
+    assert "`orchestration_executor`" in pipeline
+    assert "exactly `executor:claude-code-opus`" in pipeline
+    assert "#367" not in pipeline
+    assert "`orchestration_executor`" in lens and "`executor:claude-code-opus`" in lens

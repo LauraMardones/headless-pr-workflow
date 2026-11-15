@@ -160,6 +160,19 @@ Routing logic must read declared profiles, not branch on executor names. This is
 
 **Rejected:** Adding Fable as a fifth executor tier now (new label, four `scripts/dispatcher-invoke.sh` table rows, a per-tier daily cap). Rejected because Fable costs roughly 2× Opus per unit of work (`claude-fable-5` at $10/$50 per MTok vs. `claude-opus-5` at $5/$25 per MTok) and responds more slowly, while Opus already covers the "deep code review, complex reasoning, long-horizon tasks" niche Fable would also serve. Building and maintaining a costly, unused fifth tier speculatively isn't worth it. Matches the precedent set in Bug #244, which deferred an analogous automated label-existence guard until a fifth tier is actually proposed.
 
+### Orchestration and critical-path stories use Opus — 2026-11-15
+
+**Chosen:** A story, task or bug labelled `flow:orchestration` or `cp:critical-path` (either label is enough) gets exactly `executor:claude-code-opus` at refinement. `scripts/refine-check` reports `orchestration_executor` and fails any other executor label, none, or two. Epics and Features carry no `executor:` label and are not affected. The rule combines with the size gate (`size_split`, `haiku_limit`) by taking the stronger minimum; neither lowers the other. It changes no dispatcher code: `executor:claude-code-opus` is already routed. Issues refined before the rule merged are not rechecked (issue #367, Epic #418 criterion E2).
+
+**Allowance cost trade-off.** An Opus session spends more of the one subscription allowance than a Sonnet session, and Opus alone does not prevent a lost session. Figures that exist:
+
+- `[SESSION]` lines and #401's survey (dispatcher runs 2026-10-13 to 2026-11-08, 94 `/implement` sessions, 147.6M input tokens): 7 sessions ended at the turn limit and used 56.5M input tokens (38 %); 3 of the 7 were Opus sessions on orchestration stories (#409 at 7.9M, #449 at 9.2M, #432 at 10.6M input tokens). A lost Opus session therefore counts as part of the cost of the rule. The cause #401 found is a large story worked as one unpushed session, which the checkpoint pushes of `/implement` step 14 address; the executor rule does not.
+- Fix rounds per PR: the 2026-10-15 analysis of the 20 most recent issue PRs (#309–#355) found about 67 Codex P1 findings across 10 PRs, heaviest on #338, #342, #355, #328, #341 and #327, which carried `executor:claude-code-sonnet`; small stories (#347, #340, #323, #313) passed cleanly with Sonnet. The #369 report is not yet available, so these are the baseline; per-PR round counts come from #369. Whether Opus lowers the rounds is measured by `/verify-closure 487` (F3.8), not here.
+
+**ADR-012 assumptions do not change.** ADR-012 rests on one subscription token for the three Claude tiers, one allowance reading before a start, and a PO reserve of the allowance (10 % of the five-hour and 20 % of the weekly window). Opus is an existing tier on the same token, the probe reads the same windows, and the reserve applies to every session, so more Opus sessions draw down the same allowance faster but break none of these assumptions. No ADR is written. `docs/DISPATCHER-CONFIG.md` is not affected: no dispatcher setting changes.
+
+**Rejected:** `executor:codex` for these stories (reviewer and review policy are out of scope) and a new tier (see the Fable decision above).
+
 ## Cross-Reference
 
 The canonical executor routing entry points are split by responsibility:
