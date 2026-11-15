@@ -118,3 +118,30 @@ def test_pipeline_doc_names_the_catch_all_sort_and_check() -> None:
     sched = (Path(__file__).resolve().parents[1] / "docs" / "commands" / "dispatcher-scheduler.md").read_text(encoding="utf-8")
     assert "### Catch-all sort" in doc and "`catch_all_sort`" in doc
     assert "Catch-all issues" in sched and "catch_all_sort" in sched
+
+
+@pytest.mark.parametrize("name", ("refine-story", "refine-bug", "refine-task"))
+def test_refine_commands_state_the_size_gate(name: str) -> None:
+    command = read(f".claude/commands/{name}.md")
+
+    assert "## Files affected" in command
+    assert "More than 10 distinct paths, or more than 5 distinct `tests/` paths" in command
+    assert "Split decision: keep together because <reason>" in command
+    assert "at least `executor:claude-code-sonnet`" in command
+    assert "at most 3 listed paths" in command
+    assert "use the stronger one" in command
+
+
+def test_lens_and_pipeline_state_the_same_thresholds() -> None:
+    lens = read(".claude/commands/refinement-lenses/token-economics.md")
+    pipeline = read("docs/REFINEMENT-PIPELINE.md")
+
+    assert "more than 10 distinct files, or more than 5 distinct `tests/` files" in lens
+    assert "at most 3 listed files" in lens
+    assert "stronger minimum" in lens
+    for text in (pipeline,):
+        assert "more than 10 distinct paths or more than 5 distinct `tests/` paths" in text
+        assert "more than 3 listed paths" in text
+        assert "stronger minimum" in text
+        for check_id in ("files_affected", "size_split", "haiku_limit"):
+            assert check_id in text

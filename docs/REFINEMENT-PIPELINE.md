@@ -18,6 +18,10 @@ This document defines the normative strategy for issue refinement in HPW-based A
 
 Exit `0`: every applicable check passes. Exit `1`: a check fails and is named. Exit `2`: something could not be read, or the arguments are invalid; never a pass. Only exit `0` permits reporting `Refined` or `Ready for implementation`. After a non-zero exit the refine session lists the failing checks as blockers and reports no `Next action: Ready for implementation`. The refine Session Summary carries the result in `Checks run:`. The script is not an `hpw` command, so `docs/PR-AUTOMATION-MAP.md` does not list it.
 
+## Size gate and executor by size
+
+`/refine-story`, `/refine-bug` and `/refine-task` require a `## Files affected` section of individual repository-relative paths (no directories or globs). `scripts/refine-check` reports `files_affected` (the list is present and usable), `size_split` (more than 10 distinct paths or more than 5 distinct `tests/` paths fails unless the body records `Split decision: keep together because <reason>` and the executor is at least `executor:claude-code-sonnet`) and `haiku_limit` (`executor:claude-code-haiku` fails for more than 3 listed paths, a path declared as read verbatim, or a path or basename referenced by a test source, which is treated conservatively as a word-for-word read). When #367's executor minimum also applies, the stronger minimum wins. The rule does not recheck issues refined before it merged.
+
 ## Normative Strategy: Rolling, Just-in-Time Refinement
 
 Rolling, just-in-time refinement is the required strategy. Story refinement is always just-in-time against the ready buffer; there is no big-bang refinement, in which all stories of an Epic or Feature are refined before implementation begins. A small Epic simply has all its stories in the buffer at once (ADR-009; Epic #306 → Decisions "No big-bang refinement").
