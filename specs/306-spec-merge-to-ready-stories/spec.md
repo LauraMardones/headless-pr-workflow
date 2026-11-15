@@ -1,7 +1,6 @@
 # Epic #306: Tech Lead: from spec merge to ready stories without the PO
 
 **Epic issue:** #306
-**Milestone:** 6 — Autonomous Execution
 
 ## Goal
 
@@ -155,6 +154,11 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 **Chosen:** Work found during implementation that lies outside an Epic's scope goes to a catch-all Feature under a catch-all Epic for the whole repository. That Epic gets its own spec, which states how the Tech Lead sorts its findings into existing Features and what maintenance the Tech Lead may refine without asking the PO. This Epic does not change for it.
 **Rejected:** Add the sorting of findings and the follow-up of leftovers to this Epic — this Epic would depend on an Epic that has no spec yet.
 
+### No milestone — 2026-11-15
+
+**Chosen:** This Epic has no milestone. The `**Milestone:**` line is removed from this spec. This replaces the decision "Milestone — 2026-10-01". HPW no longer uses milestones (ADR-015).
+**Rejected:** Keep the line as a historical record, as ADR-015 item 4 allows for merged specs — this spec changes anyway in this PR, and the line would name a milestone that no longer guides any work.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -168,6 +172,7 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - ADR-012 (how model sessions are started) — no conflict. Refinement sessions start by its mechanism, and its "Effective when" line names #319 under this Epic. Its rule of one session at a time also holds for refinement sessions.
 - ADR-013 (dispatcher trigger) — no conflict. An external caller starts the dispatcher every five minutes; the scheduler runs inside that dispatcher run.
 - ADR-014 (dispatcher building blocks) — no conflict. It binds the technical approach: a new rule that decides from GitHub facts what the dispatcher does is written in Python, and board writes go through the verified-write block. The blocks (#432, #433, #434) are delivered.
+- ADR-015 (retire milestones) — conflict: this spec named a milestone and had a milestone decision. Resolved by the decision "No milestone", which replaces "Milestone — 2026-10-01". ADR-015 item 4 lets merged specs keep their milestone text; the PO chose to remove it here because this spec changes anyway.
 - `docs/PROJECT-STATUS.md` — conflict in several sections, all resolved by rewriting them in this Epic: Fact vs Intent and the transition table (intent statuses authorize work); Recovery Protocol (rolls status back); Blocked Status Protocol → Resolution (status moved back by hand, and `/unblock` returns a story to a trigger status); "In refinement" and File Ownership Tagging (refinement done by the PO); Rolling Refinement ("refine story N+1 while implementing story N"), which ADR-009 item 6 replaces with the ready buffer. The decision-blocker rules, including the question, options and recommendation from #296, the WIP limit and the file-overlap rule are kept.
 - `docs/REFINEMENT-PIPELINE.md` — conflict: the pipeline starts at `spec-kit → gh issue create`, the escalation triggers go to the Human Approver in the session, and big-bang refinement is allowed. Resolved by rewriting the document in this Epic: the pipeline starts at the spec merge, the triggers become decision blockers, and the big-bang exception is removed (see Decisions). Its section on the refinement completeness gate (#344) writes and compares board status and is rewritten with the commands. The buffer of 3–5, now repository variables, and the usage-feedback loop are kept.
 - `docs/ADAPTERS.md` → Executor Routing — conflict: the `executor:` label is applied when a status changes. Resolved in this Epic: the label is set in refinement, which is delegated.
