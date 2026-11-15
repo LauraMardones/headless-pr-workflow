@@ -261,7 +261,22 @@ class _Facts:
     def dependency_blocker(self, comments: list[dict[str, Any]], refinement: dict[str, Any]) -> dict[str, Any]:
         """Like ``decision_blocker``; a passing refine summary or a trusted ``Unblocked`` comment after it lifts it too (#529)."""
 
-        found = self._blocker(comments, "dependency")
+        found = self._unblocked_comment(comments, self._blocker(comments, "dependency"))
+        if found["state"] == "open" and refinement.get("refine_check") == "pass":
+            summary_at = str(refinement.get("created_at") or "")
+            if summary_at > str(found["created_at"] or ""):
+                found = {**found, "state": "unblocked", "unblocked_at": summary_at}
+        return found
+
+    def other_blocker(self, comments: list[dict[str, Any]]) -> dict[str, Any]:
+        """An open ``Type: external``, ``resource`` or ``conflict`` declaration (#561), the rule of ``status.other_blocker_open``.
+
+        The PO's ``/unblock`` line or a trusted ``Unblocked`` comment lifts it; a passing refine summary does not.
+        """
+
+        return self._unblocked_comment(comments, self._blocker(comments, "external", "resource", "conflict"))
+
+    def _unblocked_comment(self, comments: list[dict[str, Any]], found: dict[str, Any]) -> dict[str, Any]:
         if found["state"] == "open":
             lifted = [
                 str(c.get("created_at") or "") for c in comments
@@ -271,17 +286,13 @@ class _Facts:
             ]  # fmt: skip
             if lifted:
                 found = {**found, "state": "unblocked", "unblocked_at": max(lifted)}
-        if found["state"] == "open" and refinement.get("refine_check") == "pass":
-            summary_at = str(refinement.get("created_at") or "")
-            if summary_at > str(found["created_at"] or ""):
-                found = {**found, "state": "unblocked", "unblocked_at": summary_at}
         return found
 
-    def _blocker(self, comments: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+    def _blocker(self, comments: list[dict[str, Any]], *kinds: str) -> dict[str, Any]:
         blocker = None
         for comment in comments:
             body = str(comment.get("body") or "")
-            if self.trusted(comment) and "## Blocked Declaration" in body and f"Type: {kind}" in body:
+            if self.trusted(comment) and "## Blocked Declaration" in body and any(f"Type: {kind}" in body for kind in kinds):
                 if blocker is None or str(comment.get("created_at") or "") >= str(blocker.get("created_at") or ""):
                     blocker = comment
         if blocker is None:
@@ -333,7 +344,7 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
     entry: dict[str, Any] = {
         "number": number, "title": issue.get("title"), "type": kind, "prio": _label(_labels(issue), "prio:"),
         "executor": _label(_labels(issue), "executor:"), "epic": parent, "feature": None, "criterion_prefix": None, "record": None, "refinement": None,
-        "decision_blocker": None, "dependency_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
+        "decision_blocker": None, "dependency_blocker": None, "other_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
         "stale": False, "reasons": [],
     }  # fmt: skip
     if "body" not in issue:
@@ -399,9 +410,13 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
         dependency_blocked = entry["dependency_blocker"]["state"] == "open"
         if dependency_blocked:
             reasons.append("open-dependency-blocker")
+        entry["other_blocker"] = facts.other_blocker(comments)
+        other_blocked = entry["other_blocker"]["state"] == "open"
+        if other_blocked:
+            reasons.append("open-other-blocker")
         entry["ready"] = (
             refined and deps["state"] == "read" and all(i["state"] == "closed" for i in deps["items"])
-            and not unnumbered and not dependency_blocked
+            and not unnumbered and not dependency_blocked and not other_blocked
         )
     entry["reasons"] = reasons
     return entry

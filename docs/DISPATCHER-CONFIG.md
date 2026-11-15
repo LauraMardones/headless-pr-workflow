@@ -356,6 +356,7 @@ scripts/hpw dispatcher state read-pending --number <n> --item <item> [--expected
 | Name | File (formats and paths unchanged) | Malformed or unreadable |
 |---|---|---|
 | `actionable-events` | `.dispatcher-state/<owner>/<repo>/actionable-events` (`DISPATCHER_STATE_DIR`) | the retry step sends nothing and leaves the file; a malformed *line* is dropped while valid lines are kept; a new event is delivered directly |
+| `red-flow-notified` | `.dispatcher-state/<owner>/<repo>/red-flow-notified` (`DISPATCHER_STATE_DIR`; `sent` or `clear`) | `dispatcher-poll.sh` counts it as not sent and sends `red_flow_health` again; a failed write only logs a `[POLL] Warning:` and never stops the poll |
 | `usage-sessions` | `.dispatcher-usage/sessions` (`YYYY-MM-DD:<count>`, `USAGE_LIMIT_STATE_DIR`) | **starts no session**: `[USAGE LIMIT ERROR]`, exit `2`. A file dated another day is the normal start of a new day: 0 sessions |
 | `usage-notified` | `.dispatcher-usage/notified` (`YYYY-MM-DD`) | the notification is sent again |
 | `allowance-hold` | `.dispatcher-allowance/hold.json` (`ALLOWANCE_STATE_DIR`) | the allowance check probes again |
@@ -383,7 +384,7 @@ The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for t
 | `evidence_unwritable` | required merge or cleanup evidence has been missing for 15 minutes and the story's comments cannot be written, so #348's blocker cannot be posted (issue #372) | yes |
 | `feature_closure_confirmation` | all stories of a Feature are Done, except the standing catch-all Feature (`catch_all.py`) | yes |
 | `epic_closure_approval` | all Features of an Epic are Done, except the standing catch-all Epic (`catch_all.py`) | yes |
-| `red_flow_health` | the board health is Red | re-sent on every poll while Red |
+| `red_flow_health` | the board turns Red (once per Red period, issue #596) | no queue: not recorded as sent after a failed delivery, so the next poll tries again while the board is Red; a change of the Red signal sends nothing and a long Red period gets no reminder |
 | `budget_cap_reached` | every ready story is budget-blocked | no |
 | `dispatcher_error` | the invoke run exited unexpectedly | no: the failing run is itself red |
 | `dispatch_trigger_stopped` | the newest `workflow_dispatch` run of `dispatcher.yml` on `main` is more than 15 minutes old, or none exists (issue #339, [Dispatcher trigger](#dispatcher-trigger)) | yes, until a newer dispatched run exists |
@@ -410,7 +411,7 @@ For local development, copy `.env.example` to `.env` and set your webhook URL th
 
 ### Dispatcher state cache
 
-GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` (the `actionable-events` state above) with `actions/cache`. The step names come from issue #257, when the cache held the retired refinement-notification state (issue #474):
+GitHub-hosted runners are ephemeral, so `.github/workflows/dispatcher.yml` persists `.dispatcher-state/` (the `actionable-events` state above and `red-flow-notified`, which keeps `dispatcher-poll.sh` from repeating `red_flow_health` while the board stays Red) with `actions/cache`. The step names come from issue #257, when the cache held the retired refinement-notification state (issue #474):
 
 1. **Restore refinement notification state** runs before **Run dispatcher poll** on every enabled run. Its `dispatcher-state-` prefix restores the most recently saved snapshot.
 2. **Save poll notification state** and **Save refinement notification state** save it on every enabled default-branch run after a successful poll. Cache entries are immutable, so each save uses a unique key with `<run_id>-<run_attempt>`.

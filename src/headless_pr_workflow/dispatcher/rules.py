@@ -30,6 +30,8 @@ SCHEDULER_SH = "scripts/lib/scheduler.sh"
 LIMITS_SH = "scripts/lib/limits.sh"
 CLAUDE_SESSION_SH = "scripts/lib/claude-session.sh"
 MERGE_GATE = "scripts/merge-gate-summary"
+NOTIFY_RETRY = "scripts/dispatcher-notify-retry.sh"
+BOOKKEEPING = "src/headless_pr_workflow/codex_review_bookkeeping.py"
 REVIEW_POLICY = "src/headless_pr_workflow/review_policy.py"
 IN_FLIGHT = _PY + "in_flight.py"
 SCHEDULER = _PY + "scheduler.py"
@@ -244,11 +246,12 @@ RULES: tuple[Rule, ...] = (
           "test_dispatcher_session_blocker.py test_dispatcher_facts_block.py test_dispatcher_status.py "
           "test_dispatcher_conflict_round.py test_dispatcher_in_flight.py",
           "the jq `open_blocker` counts every type and is not lifted by a trusted Unblocked comment; "
-          "`other_blocker_open` counts four types, only the newest declaration, and is; "
+          "`other_blocker_open` counts four types, only the newest declaration, and is (a standalone PO `/unblock` lifts it when `po_unblock` is set, as both callers do); "
           "`open_session_blocker` leaves out automation declarers."),
     _rule("po_unblock", "Whether a standalone PO `/unblock` line after a time lifts a blocker or marker.", WRITE,
           [(WRITE, "_po_unblocked_after"), (CONFLICT_ROUND_SH, "unblocked_after"), (FACTS, "_UNBLOCK_LINE"),
-           (POLL, "PO_LOGIN"), (INVOKE, "DECISION_BLOCKER_PO_LOGIN")],
+           (POLL, "PO_LOGIN"), (INVOKE, "DECISION_BLOCKER_PO_LOGIN"),
+           (NOTIFY_RETRY, "DECISION_BLOCKER_PO_LOGIN"), (BOOKKEEPING, "DECISION_BLOCKER_PO_LOGIN")],
           "poll invoke resume codex-worker",
           "test_dispatcher_po_login_env.py test_dispatcher_marker_block.py test_dispatcher_in_flight.py "
           "test_dispatcher_invoke_resume.sh",
@@ -273,7 +276,7 @@ RULES: tuple[Rule, ...] = (
           "the foreign-PR check uses the broader `_CLOSES` pattern of `linked_pr_lookup`."),
     _rule("codex_eligibility_reserve", "Whether the Codex worker may start new work given the Claude reserve.",
           CODEX_RESERVE,
-          [(CODEX_RESERVE, "decide"), (CODEX_RESERVE, "below_reserve"), (CODEX_RESERVE, "is_new_work")],
+          [(CODEX_RESERVE, "below_reserve"), (CODEX_RESERVE, "is_new_work")],
           "codex-worker",
           "test_codex_reserve.py",
           "`is_new_work` means no Codex branch, the in-flight rule means no open linked PR: a branch without "

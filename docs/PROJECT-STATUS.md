@@ -266,6 +266,7 @@ Exactly five blocker types are recognised:
 | **resource** | A required resource (token budget, execution environment, tool access) is unavailable. |
 
 The scheduler reads an open `Type: dependency` declaration on a Story, Task or Bug (`dependency_blocker` in `hpw dispatcher facts`): the story is not ready and is not started until the PO's `/unblock` line or a later passing refine Session Summary lifts it.
+It reads an open `Type: external`, `resource` or `conflict` declaration the same way (`other_blocker`, reason `open-other-blocker`): the story is not started until the PO's `/unblock` line or a later trusted `Unblocked` comment lifts it; a refine Session Summary does not.
 
 ### Declaration format
 
@@ -312,7 +313,7 @@ When a blocker is resolved:
 
 1. **Decision blockers:** the PO replies with their decision in a comment that includes a standalone line — trimmed of surrounding whitespace — that is exactly `/unblock`. The word "unblock"/"unblocked" appearing in ordinary prose does not count; only a full line equal to `/unblock` qualifies. The dispatcher detects this automatically on its next poll. The resolution ends the Blocked fact, and the next dispatcher run derives the status from the facts: **Ready to implement** when the story is refined and every hard dependency is closed, **Refined** otherwise. No manual board-status change is required.
    A decision blocker raised by a refinement is not resumed this way: a new refinement session (`dispatcher-invoke.sh --refine <n>`, `docs/DISPATCHER-CONFIG.md` → Refinement sessions) reads the answer, and the refinement's result decides the next status. The resume alone never makes the issue Ready to implement.
-2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration. The next dispatcher run derives the status again: **Refined** while hard dependencies remain, **Ready to implement** once all of them are closed. Nobody moves the status by hand.
+2. **All other blocker types** (dependency, external, conflict, resource): the owner posts an **"Unblocked"** comment on the issue or PR, referencing the original declaration. A standalone PO `/unblock` line after the newest declaration lifts it too, on the board as for the dispatcher (a declaration posted after the `/unblock`, a `/unblock` by anyone else, or the word in prose does not). The next dispatcher run derives the status again: **Refined** while hard dependencies remain, **Ready to implement** once all of them are closed. Nobody moves the status by hand.
 3. The `executor:` label is set in refinement and is not changed by a resolution.
 
 ### Cascading blocked rules

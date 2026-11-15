@@ -172,11 +172,13 @@ def test_concurrency_serializes_scheduled_and_manual_runs():
     assert "on:" in text and "schedule:" in text and "workflow_dispatch:" in text
 
 
-def test_poll_script_reads_and_writes_no_saved_state():
-    """Issue #474: the ready-for-refinement notification and its state are retired."""
+def test_poll_script_saves_only_the_red_flow_state():
+    """Issue #474 retired the refinement state; issue #596 adds red-flow-notified, the only state the poll keeps."""
     code = "\n".join(line for line in POLL_SCRIPT.read_text(encoding="utf-8").splitlines()
                      if not line.lstrip().startswith("#"))
-    assert "dispatcher state" not in code and "STATE_DIR" not in code
+    names = set(re.findall(r"--name\s+([a-z-]+)", code)) | set(re.findall(r"state_write\s+([a-z-]+)", code))
+    assert names == {"red-flow-notified"}
+    assert "STATE_DIR" not in code
     assert "notified-" + "refinement" not in code
 
 

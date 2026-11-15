@@ -29,6 +29,32 @@ class MarkerError(Exception):
     pass
 
 
+class _ListedOnce:
+    """One sync invocation's view of a gateway: each issue list is read once and reused (issue #565).
+
+    The status rule and the row builder both need the open and the closed issues; listing them again for each
+    costs REST pages of the shared token for no fresher fact. The memo lives and dies with one invocation; every
+    other read and every write goes straight to the gateway.
+    """
+
+    def __init__(self, gateway: Gateway) -> None:
+        self._gateway = gateway
+        self._memo: dict[str, list[dict[str, Any]]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._gateway, name)
+
+    def list_open_issues(self) -> list[dict[str, Any]]:
+        if "open" not in self._memo:
+            self._memo["open"] = self._gateway.list_open_issues()
+        return self._memo["open"]
+
+    def list_closed_issues(self) -> list[dict[str, Any]]:
+        if "closed" not in self._memo:
+            self._memo["closed"] = self._gateway.list_closed_issues()
+        return self._memo["closed"]
+
+
 def progress_section(features: list[Mapping[str, Any]], epic_counts: Mapping[str, int]) -> str:
     """The text between (and with) the markers. No date or run id: unchanged facts give identical text."""
 
@@ -83,7 +109,7 @@ def sync_board(gateway: Gateway, repo: str, *, epic: int | None = None, attempts
                dry_run: bool = False, settings: Settings | None = None) -> Result:  # fmt: skip
     settings = settings or Settings.from_env()
     try:
-        return _sync(gateway, epic, attempts, dry_run, settings)
+        return _sync(_ListedOnce(gateway), epic, attempts, dry_run, settings)
     except GatewayError as exc:
         log(f"[SYNC] unreadable: {exc}")
         return _result("unreadable", [], [], [], dry_run, str(exc))

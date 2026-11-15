@@ -379,8 +379,8 @@ def draft_ready_signal_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pyte
 def open_blocker_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Whether the story has an open Blocked Declaration: ``open``, ``not open`` or ``unreadable``.
 
-    ``other_blocker_open`` runs as the in-flight plan calls it (``po_unblock=True``) and as the board status
-    calls it (``po_unblock=False``). ``conflict-round.sh:open_blocker`` runs inside ``conflict_round_rule`` for
+    ``other_blocker_open`` runs as the in-flight plan and the board status call it
+    (both ``po_unblock=True``). ``conflict-round.sh:open_blocker`` runs inside ``conflict_round_rule`` for
     a conflicting PR with no attempt marker: ``blocked`` → open, ``owed`` → not open. A copy whose caller
     reads the comments itself records what that caller does when the read fails.
     """
@@ -406,7 +406,7 @@ def open_blocker_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Mon
                    stdin=f"{conflicting}\n{json.dumps(comments)}\n[]\n")  # fmt: skip
     return {
         "status.py:other_blocker_open (in-flight plan)": word[other_blocker_open(trust, comments, po_unblock=True)],
-        "status.py:other_blocker_open (board status)": word[other_blocker_open(trust, comments)],
+        "status.py:other_blocker_open (board status)": word[other_blocker_open(trust, comments, po_unblock=True)],
         "conflict-round.sh:open_blocker": {"blocked": "open", "owed": "not open"}.get(rule, rule),
         "session_blocker.py:open_session_blocker": word[open_session_blocker(trust, comments) is not None],
         "facts.py:dependency_blocker": word[trust.dependency_blocker(comments, {})["state"] == "open"],
@@ -549,7 +549,7 @@ CASES["open_blocker"] = {
     "po-decision": (facts(comments=[declaration("decision", association="OWNER")]),
                     {**same(BLOCKER, "open"), BLOCKER[0]: "not open", BLOCKER[1]: "not open", BLOCKER[4]: "not open"}),
     "dependency-then-po-unblock": (facts(comments=DEPENDENCY + [comment(PO, "/unblock", T1, association="OWNER")]),
-                                   {**same(BLOCKER, "not open"), BLOCKER[1]: "open"}),
+                                   same(BLOCKER, "not open")),
     "dependency-then-member-unblocked": (facts(comments=DEPENDENCY + [UNBLOCKED_BY_MEMBER]),
                                          {**same(BLOCKER, "not open"), BLOCKER[2]: "open"}),
     "automation-dependency": (facts(comments=[declaration("dependency", author=BOT, declared_by="dispatcher", user_type="Bot")]),
@@ -610,9 +610,6 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
                     "reads only decision blockers. The consolidated rule takes the type as an input."),
     ("open_blocker", "po-decision"): (
         "contract", "As po-dependency: other_blocker_open and dependency_blocker read no decision blocker by contract."),
-    ("open_blocker", "dependency-then-po-unblock"): (
-        "contract", "PROJECT-STATUS.md (dependency_blocker) lets the PO's /unblock lift a dependency blocker: "
-                    "the board status call follows the in-flight plan (po_unblock=True)."),
     ("open_blocker", "dependency-then-member-unblocked"): (
         "contract", "PROJECT-STATUS.md resolves a non-decision blocker with an Unblocked comment: the conflict-round "
                     "open_blocker follows other_blocker_open."),
@@ -674,8 +671,10 @@ def test_ac1_every_implementation_file_of_the_inventory_row_is_a_recorded_copy()
         files = {Path(p).name for p in re.findall(r"`((?:scripts|src)/[^`]+)`", row.split(" | ")[2])}
         copies = {m for _, baseline in cases.values() for name in baseline
                   for m in re.findall(r"([\w.-]+):", name)}  # fmt: skip
-        # dispatcher-poll.sh only supplies the PO login default, which po_unblock reads from the script.
-        assert files - copies <= {"dispatcher-poll.sh"}, (rule, files - copies)
+        # These files only supply the PO login default, which po_unblock reads from the script; the two
+        # that the duplicate-rule guard (#570) added to the allowlist are not decided by a parity fixture.
+        login_only = {"dispatcher-poll.sh", "dispatcher-notify-retry.sh", "codex_review_bookkeeping.py"}
+        assert files - copies <= login_only, (rule, files - copies)
 
 
 def test_doc_links_each_rule_to_its_fixtures_and_lists_each_divergence():

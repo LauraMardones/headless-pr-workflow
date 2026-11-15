@@ -37,12 +37,14 @@ FILES = {
     "usage-sessions": ("usage/sessions", f"{TODAY}:3\n", {"day": None, "count": 0}),
     "usage-notified": ("usage/notified", f"{TODAY}\n", {"day": None}),
     "allowance-hold": ("allowance/hold.json", HOLD + "\n", None),
+    "red-flow-notified": ("dispatcher-state/o/r/red-flow-notified", "sent\n", {"sent": False}),
 }
 MALFORMED = {
     "actionable-events": '{"key":"k"}\n',
     "usage-sessions": "garbage\n",
     "usage-notified": "tomorrow\n",
     "allowance-hold": '{"until": "soon"}',
+    "red-flow-notified": "red\n",
 }
 STALE = {"usage-sessions": "2026-11-05:9\n", "usage-notified": "2026-11-05\n"}
 
