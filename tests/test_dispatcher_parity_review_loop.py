@@ -35,6 +35,7 @@ import pytest
 from headless_pr_workflow.dispatcher.gateway import GatewayError
 from headless_pr_workflow.dispatcher.in_flight import plan_in_flight
 from headless_pr_workflow.dispatcher.marker import marker_holds
+from headless_pr_workflow.dispatcher.session_blocker import read_session_blocker
 from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE, is_codex_review_request
 from tests.dispatcher_fakes import BASH, REPO_ROOT, needs_tools
 from tests.script_tools import windows_env
@@ -96,12 +97,15 @@ def run(conclusion: str | None, at: str = T0, name: str = "pytest") -> dict[str,
 
 def facts(*, story: list | None = None, prc: list | None = None, mergeable: bool | None = True,
           checks: list | None = None, labels: tuple[str, ...] = ("claude-code-opus",), gates_pass: bool = False,
-          fail: tuple[str, ...] = ()) -> dict[str, Any]:  # fmt: skip
-    """``fail`` names the reads that fail: ``story`` and ``prc`` (comments), ``pr`` (detail), ``checks``."""
+          fail: tuple[str, ...] = (), draft: bool = False, head_before: str = "") -> dict[str, Any]:  # fmt: skip
+    """``fail`` names the reads that fail: ``story`` and ``prc`` (comments), ``pr`` (detail), ``checks``, ``list``
+    (the open-PR list the linked PR comes from; the story's PR is in it unless ``linked`` is false, see ``no_pr``).
+    ``head_before`` is the head the /implement session started on (the hand-off's first argument)."""
 
     state = {True: "clean", False: "dirty", None: "unknown"}[mergeable]
     return {"story": story or [], "prc": prc or [], "checks": checks or [], "labels": labels, "gates_pass": gates_pass,
-            "pr": {"number": PR, "state": "open", "draft": False, "head": {"sha": HEAD}, "mergeable": mergeable,
+            "head_before": head_before,
+            "pr": {"number": PR, "state": "open", "draft": draft, "body": f"Closes #{STORY}", "head": {"sha": HEAD}, "mergeable": mergeable,
                    "mergeable_state": state}, "fail": set(fail)}  # fmt: skip
 
 
@@ -130,6 +134,7 @@ case "$path" in
     user) echo '{{"login": "{BOT}"}}' ;;
     */issues/{STORY}/comments*) [[ -f "$FACTS/fail-story" ]] && exit 1; cat "$FACTS/story.json" ;;
     */issues/{PR}/comments*) [[ -f "$FACTS/fail-prc" ]] && exit 1; cat "$FACTS/prc.json" ;;
+    */pulls\\?state=open*) [[ -f "$FACTS/fail-list" ]] && exit 1; cat "$FACTS/list.json" ;;
     */pulls/{PR}) [[ -f "$FACTS/fail-pr" ]] && exit 1; cat "$FACTS/pr.json" ;;
     */check-runs*) [[ -f "$FACTS/fail-checks" ]] && exit 1; cat "$FACTS/checks.json" ;;
     *) echo "fake gh: unsupported $*" >&2; exit 1 ;;
@@ -142,7 +147,8 @@ INVOKE_FUNCTIONS = (
     "fix_round_due", "fix_round_attempt_marker", "fix_round_attempt_superseded", "hand_off_pending_marker",
     "hand_off_pending_prefix", "hand_off_done_marker", "complete_pending_hand_off", "merge_owner_marker",
     "head_has_merge_owner_marker", "merge_attempt_marker", "pytest_green_on_head", "conflict_round_state",
-    "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after",
+    "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after", "hand_off_to_codex_review_loop",
+    "find_linked_pr_json", "pr_conflicts_with_main", "no_push_round_is_expected", "latest_decision_blocker_json",
 )  # fmt: skip
 
 
@@ -168,7 +174,8 @@ def bash(tmp: Path, f: dict[str, Any], body: str) -> tuple[int, str]:
         (tmp / f"{name}.json").write_text(json.dumps(f[name]), encoding="utf-8")
     (tmp / "checks.json").write_text(json.dumps({"total_count": len(f["checks"]), "check_runs": f["checks"]}),
                                      encoding="utf-8")  # fmt: skip
-    for name in ("story", "prc", "pr", "checks"):
+    (tmp / "list.json").write_text(json.dumps([] if f.get("no_pr") else [f["pr"]]), encoding="utf-8")
+    for name in ("story", "prc", "pr", "checks", "list"):
         if name in f["fail"]:
             (tmp / f"fail-{name}").write_text("", encoding="utf-8")
     bin_dir = tmp / "bin"
@@ -189,6 +196,8 @@ def bash(tmp: Path, f: dict[str, Any], body: str) -> tuple[int, str]:
         f'CODEX_BOOKKEEPING_LOGIN="{BK}"', 'LOG_PREFIX=""',
         f'export DECISION_BLOCKER_PO_LOGIN="{PO}"',  # set for every dispatcher job by .github/workflows/dispatcher.yml
         f'REVIEW_POLICY_FILE="{(REPO_ROOT / "src" / "headless_pr_workflow" / "review_policy.py").as_posix()}"',
+        "DRY_RUN=false", f'ISSUE_NUMBER={STORY}', 'TARGET_TITLE="Story"', 'DECLARED_BY=dispatcher',
+        'LAST_ACTION=""', 'DISPATCH_HANDLED=false', "declare -A CODEX_REVIEW_LOOP_ROUTING=([claude-code-opus]=codex)",
         "RESUME_SESSIONS=0", 'NON_EXECUTABLE_ISSUES=""', 'post_comment() { echo "posted"; }',
         f"LABELS=({labels})", 'STORY_EXECUTOR_LABEL_COUNT=${#LABELS[@]}', 'EXECUTOR_LABEL="${LABELS[0]:-}"',
         f'source "{(LIB / "review-routing.sh").as_posix()}"', f'source "{(LIB / "conflict-round.sh").as_posix()}"',
@@ -372,6 +381,28 @@ def review_path_routing_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str
             "dispatcher-invoke.sh:is_review_loop_story": invoke}
 
 
+def post_implement_outcome_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
+    """What /implement's end does: ``declaration kept`` (the story's own open Blocked Declaration stays the record),
+    ``blocker`` (the dispatcher declares one), ``conflict blocker``, ``waits for PO`` or ``hand-off``.
+
+    ``open_session_blocker`` decides only the no-PR branch; the facts of a story with a linked PR reach the hand-off
+    alone, so only the no-PR cases record both copies (the overlap the story names under Risks)."""
+
+    body = ('post_mid_cycle_blocker() { if [[ "${5:-}" == *"conflicts with main"* ]]; then echo "BLOCKER conflict"; '
+            'else echo "BLOCKER generic"; fi; }\n'
+            f'hand_off_to_codex_review_loop "{f["head_before"]}" "" 2>&1')
+    rc, out = bash(tmp, f, "( " + body + " )")
+    shell = ("declaration kept" if "open Blocked Declaration" in out else "conflict blocker" if "BLOCKER conflict" in out
+             else "blocker" if "BLOCKER" in out else "waits for PO" if "waiting for the PO" in out
+             else "hand-off" if "handed to the Codex review loop" in out else f"none ({rc})")
+    decisions = {"dispatcher-invoke.sh:hand_off_to_codex_review_loop": shell}
+    if f.get("no_pr") and "list" not in f["fail"]:
+        result = read_session_blocker(FakeGateway(f), STORY, env=ENV)
+        decisions["session_blocker.py:open_session_blocker"] = (
+            "declaration kept" if result.fields.get("outcome") == "open_blocker" else "blocker")  # unreadable: the caller keeps its own
+    return decisions
+
+
 DECIDE: dict[str, Callable[[dict[str, Any], Path], dict[str, str]]] = {
     "fix_round_due": fix_round_due_decisions,
     "fix_round_attempt_once_per_head": fix_round_attempt_once_per_head_decisions,
@@ -383,6 +414,7 @@ DECIDE: dict[str, Callable[[dict[str, Any], Path], dict[str, str]]] = {
     "conflict_round_owed": conflict_round_owed_decisions,
     "pytest_check_green": pytest_check_green_decisions,
     "review_path_routing": review_path_routing_decisions,
+    "post_implement_outcome": post_implement_outcome_decisions,
 }
 
 
@@ -407,6 +439,17 @@ CONFLICT = ("conflict-round.sh:conflict_round_rule (dispatcher-invoke.sh:check_r
 GREEN = ("merge-gate-summary:_checks_value", "dispatcher-invoke.sh:pytest_green_on_head")
 ROUTING = ("review-routing.sh:review_by_dispatcher_session + CODEX_REVIEW_LOOP_ROUTING (poll)", "dispatcher-invoke.sh:is_review_loop_story")
 PHRASE = CODEX_REVIEW_TRIGGER_PHRASE
+OUTCOME = ("session_blocker.py:open_session_blocker", "dispatcher-invoke.sh:hand_off_to_codex_review_loop")
+SHELL_ONLY = ("dispatcher-invoke.sh:hand_off_to_codex_review_loop",)
+
+
+def declaration(by: str, kind: str = "dependency", at: str = T0, author: str = PO, association: str = "OWNER") -> dict[str, Any]:
+    body = f"## Blocked Declaration\nType: {kind}\nDeclared by: {by}\nBlocks: #{STORY}\n"
+    return comment(author, body, at, association=association)
+
+
+def no_pr(**kw: Any) -> dict[str, Any]:
+    return {**facts(**kw), "no_pr": True}
 
 
 def heads(count: int) -> list[dict[str, Any]]:
@@ -516,6 +559,32 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "two-executors": (facts(labels=("codex", "claude-code-opus")), same(ROUTING, "none")),
         "unknown-executor": (facts(labels=("someone",)), same(ROUTING, "none")),
     },
+    "post_implement_outcome": {
+        "no-pr-no-blocker": (no_pr(), same(OUTCOME, "blocker")),
+        "no-pr-session-declaration": (no_pr(story=[declaration("claude-code-session")]), same(OUTCOME, "declaration kept")),
+        "no-pr-person-declaration": (no_pr(story=[declaration("someone", "decision", author=MEMBER, association="MEMBER")]),
+                                     same(OUTCOME, "declaration kept")),
+        "no-pr-session-declaration-then-po-unblock": (no_pr(story=[declaration("claude-code-session"), unblock(T1)]),
+                                                      same(OUTCOME, "blocker")),
+        "no-pr-dispatcher-declaration": (no_pr(story=[declaration("dispatcher", "external")]), same(OUTCOME, "blocker")),
+        "no-pr-story-comments-unreadable": (no_pr(story=[declaration("claude-code-session")], fail=("story",)),
+                                            same(OUTCOME, "blocker")),
+        "pr-list-unreadable": (no_pr(story=[declaration("claude-code-session")], fail=("list",)),
+                                same(SHELL_ONLY, "declaration kept")),
+        "draft-pr": (facts(draft=True), same(SHELL_ONLY, "blocker")),
+        "draft-pr-conflicting": (facts(draft=True, mergeable=False), same(SHELL_ONLY, "conflict blocker")),
+        "draft-pr-mergeability-unknown": (facts(draft=True, mergeable=None), same(SHELL_ONLY, "blocker")),
+        "draft-pr-unreadable": (facts(draft=True, fail=("pr",)), same(SHELL_ONLY, "blocker")),
+        "ready-pr": (facts(), same(SHELL_ONLY, "hand-off")),
+        "ready-pr-with-session-declaration": (facts(story=[declaration("claude-code-session")]), same(SHELL_ONLY, "hand-off")),
+        "round-pushed-nothing": (facts(prc=FOUND, head_before=HEAD), same(SHELL_ONLY, "blocker")),
+        "round-pushed-a-commit": (facts(prc=FOUND, head_before=OLD), same(SHELL_ONLY, "hand-off")),
+        "round-pushed-nothing-waiting-for-po": (
+            facts(prc=FOUND, head_before=HEAD, story=[declaration("claude-code-session", "decision")]),
+            same(SHELL_ONLY, "waits for PO")),
+        "round-pushed-nothing-pr-comments-unreadable": (facts(prc=FOUND, head_before=HEAD, fail=("prc",)),
+                                                        same(SHELL_ONLY, "hand-off")),
+    },
 }  # fmt: skip
 
 # Every case whose copies decide differently, with its resolution class under the #525 divergence decision.
@@ -563,18 +632,21 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
 
 REQUIRED_KINDS = {
     "unreadable facts": [("conflict_round_owed", "pr-unreadable"), ("pytest_check_green", "check-runs-unreadable"),
-                         ("fix_round_due", "pr-comments-unreadable"), ("fix_round_max", "pr-comments-unreadable")],
+                         ("fix_round_due", "pr-comments-unreadable"), ("fix_round_max", "pr-comments-unreadable"),
+                         ("post_implement_outcome", "draft-pr-unreadable"), ("post_implement_outcome", "pr-list-unreadable")],
     "failed marker read": [("fix_round_attempt_once_per_head", "story-comments-unreadable"),
                            ("hand_off_pending", "story-comments-unreadable"),
                            ("attempt_once_per_head", "story-comments-unreadable"),
                            ("merge_owner_evidence", "pr-comments-unreadable"),
-                           ("no_push_round_expected", "pr-comments-unreadable")],
+                           ("no_push_round_expected", "pr-comments-unreadable"),
+                           ("post_implement_outcome", "no-pr-story-comments-unreadable")],
     "unknown mergeability": [("conflict_round_owed", "mergeability-unknown"),
-                             ("merge_owner_evidence", "mergeability-unknown")],
+                             ("merge_owner_evidence", "mergeability-unknown"),
+                             ("post_implement_outcome", "draft-pr-mergeability-unknown")],
 }  # fmt: skip
 
 # Inventory rules of this group not in CASES yet, with the follow-up that records them.
-DEFERRED = {"post_implement_outcome"}
+DEFERRED: set[str] = set()
 
 ALL_CASES = [(rule, case) for rule, cases in CASES.items() for case in cases]
 
