@@ -127,6 +127,7 @@ All `hpw` commands are fully implemented:
 | `merge-pr` | Merge execution with pre-merge gates |
 | `post-merge-sync` | Post-merge state verification |
 | `branch-cleanup` | Local branch and worktree cleanup guidance |
+| `catch-all-issue` | Create or check the catch-all issue for work found outside a session's scope |
 | `worktree-status` | Worktree state relative to PR head |
 | `ci-summary` | CI check summary for a PR |
 | `review-sha` | Head SHA recorded at last review |
