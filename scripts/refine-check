@@ -277,7 +277,7 @@ def catch_all_sort_check(issue: Issue) -> Check:
     return Check("catch_all_sort", "pass", f"maintenance {classes[0]}")
 
 
-def files_affected(sections: dict[str, str]) -> tuple[list[tuple[str, str]], list[str]]:
+def inventory_paths(sections: dict[str, str]) -> tuple[list[tuple[str, str]], list[str]]:
     """Distinct (path, item text) pairs of `## Files affected`, and the entries that are not file paths."""
     paths: dict[str, str] = {}
     bad: list[str] = []
@@ -308,7 +308,7 @@ def size_checks(issue: Issue, effective: str | None, test_reader) -> list[Check]
     if effective not in EXECUTABLE_TYPES:
         return [Check(i, "skip", "issue type unknown" if effective is None else f"not applicable to type:{effective}") for i in ids]
     sections = parse_sections(issue.body)
-    entries, bad = files_affected(sections)
+    entries, bad = inventory_paths(sections)
     if bad or not entries:
         reason = ("entries that are not individual repository-relative file paths: " + ", ".join(f"'{b}'" for b in bad)
                   if bad else "no '## Files affected' list of individual file paths")
