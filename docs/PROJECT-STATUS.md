@@ -266,6 +266,7 @@ Exactly five blocker types are recognised:
 | **resource** | A required resource (token budget, execution environment, tool access) is unavailable. |
 
 The scheduler reads an open `Type: dependency` declaration on a Story, Task or Bug (`dependency_blocker` in `hpw dispatcher facts`): the story is not ready and is not started until the PO's `/unblock` line or a later passing refine Session Summary lifts it.
+It reads an open `Type: external`, `resource` or `conflict` declaration the same way (`other_blocker`, reason `open-other-blocker`): the story is not started until the PO's `/unblock` line or a later trusted `Unblocked` comment lifts it; a refine Session Summary does not.
 
 ### Declaration format
 

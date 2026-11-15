@@ -482,6 +482,87 @@ def test_dependency_blocker_by_a_stranger_is_ignored(gw, capsys):
     assert facts_of(out, 30)["dependency_blocker"]["state"] == "none" and facts_of(out, 30)["ready"]
 
 
+def other_blocker(kind):
+    return f"## Blocked Declaration\nType: {kind}\nQuestion: x"
+
+
+OTHER_KINDS = pytest.mark.parametrize("kind", ["external", "resource", "conflict"])
+
+
+@OTHER_KINDS
+def test_open_other_blocker(gw, capsys, kind):
+    story(gw)
+    gw.comment(30, other_blocker(kind))
+    _, out, err = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["other_blocker"]["state"] == "open" and entry["refined"] and not entry["ready"]
+    assert entry["reasons"] == ["open-other-blocker"]
+    assert entry["decision_blocker"]["state"] == "none" and entry["dependency_blocker"]["state"] == "none"
+    assert "ready=no stale=no open-other-blocker" in err
+
+
+@OTHER_KINDS
+def test_other_blocker_is_lifted_by_unblock(gw, capsys, kind):
+    story(gw)
+    gw.comment(30, other_blocker(kind))
+    gw.comment(30, "/unblock")
+    _, out, _ = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["other_blocker"]["state"] == "unblocked" and entry["ready"] and entry["reasons"] == []
+
+
+@OTHER_KINDS
+def test_other_blocker_is_lifted_by_a_trusted_unblocked_comment_only(gw, capsys, kind):
+    story(gw)
+    gw.comment(30, other_blocker(kind))
+    gw.comment(30, "Unblocked: done", login="stranger", assoc="NONE")
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "open"
+    gw.comment(30, other_blocker(kind) + "\nUnblocked when: x", login=PO)
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "open"
+    gw.comment(30, "Unblocked: done", login=PO)
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "unblocked" and facts_of(out, 30)["ready"]
+
+
+@OTHER_KINDS
+def test_other_blocker_is_not_lifted_by_a_passing_summary(gw, capsys, kind):
+    story(gw)
+    gw.comment(30, other_blocker(kind))
+    gw.comment(30, summary())
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "open" and not facts_of(out, 30)["ready"]
+
+
+@OTHER_KINDS
+def test_other_blocker_by_a_stranger_is_ignored(gw, capsys, kind):
+    story(gw)
+    gw.comment(30, other_blocker(kind), login="stranger")
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "none" and facts_of(out, 30)["ready"]
+
+
+def test_a_newer_other_blocker_after_a_lift_opens_again(gw, capsys):
+    story(gw)
+    gw.comment(30, other_blocker("external"))
+    gw.comment(30, "/unblock")
+    gw.comment(30, other_blocker("conflict"))
+    _, out, _ = run(capsys, gw)
+    entry = facts_of(out, 30)
+    assert entry["other_blocker"]["state"] == "open" and not entry["ready"]
+
+
+def test_other_blocker_is_none_without_a_declaration_and_null_for_a_feature(gw, capsys):
+    story(gw)
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 30)["other_blocker"]["state"] == "none" and facts_of(out, 30)["ready"]
+    gw.add_issue(21, ["type:feature", "prio:P1"], story_body().replace("Feature group:", "X:") + "\nCriterion prefix: F3\n")
+    gw.comment(21, other_blocker("external"))
+    _, out, _ = run(capsys, gw)
+    assert facts_of(out, 21)["other_blocker"] is None
+
+
 def test_decision_blocker_still_makes_the_story_unrefined_not_dependency_blocked(gw, capsys):
     story(gw)
     gw.comment(30, BLOCKER)
