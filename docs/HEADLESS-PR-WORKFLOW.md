@@ -147,6 +147,8 @@ Rules:
 
 `/review` remains the path for `executor:codex` stories and for a separate-session review (path 2).
 
+**Review path for `executor:codex` stories.** The local Codex worker implements and hands off the PR; no Codex review request is posted for it. The dispatcher starts one Claude `/review` (path 2) on each PR head. Blockers send the story back to `In implementation`, where the worker runs a bounded fix round on the same PR and branch; the new head gets its own `/review`. A review of the current head with no blockers lets the story reach `In merge` through the usual merge gates. The rounds are bounded by `CODEX_FIX_ROUND_MAX` (default `3`): above it the worker starts nothing and declares one `Type: resource` blocker, and Claude never takes over the implementation or the fix round. The cycle and its configuration are in [DISPATCHER-CONFIG.md → Codex review and fix-round cycle](DISPATCHER-CONFIG.md#codex-review-and-fix-round-cycle); `tests/test_codex_review_fix_cycle.py` runs it end to end.
+
 ## Human Attention Is Pulled, Not Polled
 
 **Human attention is pulled, not polled.** The workflow must never require the Human Approver to poll for state. Every point where work requires human judgment:
