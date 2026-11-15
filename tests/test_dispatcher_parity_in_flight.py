@@ -674,8 +674,10 @@ def test_ac1_every_implementation_file_of_the_inventory_row_is_a_recorded_copy()
         files = {Path(p).name for p in re.findall(r"`((?:scripts|src)/[^`]+)`", row.split(" | ")[2])}
         copies = {m for _, baseline in cases.values() for name in baseline
                   for m in re.findall(r"([\w.-]+):", name)}  # fmt: skip
-        # dispatcher-poll.sh only supplies the PO login default, which po_unblock reads from the script.
-        assert files - copies <= {"dispatcher-poll.sh"}, (rule, files - copies)
+        # These files only supply the PO login default, which po_unblock reads from the script; the two
+        # that the duplicate-rule guard (#570) added to the allowlist are not decided by a parity fixture.
+        login_only = {"dispatcher-poll.sh", "dispatcher-notify-retry.sh", "codex_review_bookkeeping.py"}
+        assert files - copies <= login_only, (rule, files - copies)
 
 
 def test_doc_links_each_rule_to_its_fixtures_and_lists_each_divergence():
