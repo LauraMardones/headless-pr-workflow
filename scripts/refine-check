@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -284,7 +285,9 @@ def files_affected(sections: dict[str, str]) -> tuple[list[tuple[str, str]], lis
         ticked = re.match(r"^`([^`]+)`", item)
         token = ticked.group(1) if ticked else item.split()[0] if item.split() else ""
         token = token.strip()
-        if not token or token.endswith("/") or token.startswith("/") or re.search(r"[*?\[\]{}]|\s", token):
+        if token and not token.startswith("/") and not token.endswith("/"):
+            token = posixpath.normpath(token)
+        if token == "." or token.startswith("../") or (TESTS_DIR.parent / token).is_dir() or not token or token.endswith("/") or token.startswith("/") or re.search(r"[*?\[\]{}]|\s", token):
             bad.append(token or item)
         else:
             paths.setdefault(token, item)

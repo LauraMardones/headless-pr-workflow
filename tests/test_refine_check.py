@@ -639,6 +639,26 @@ def test_files_affected_missing_or_not_individual_paths_fails(mod):
     assert "'scripts/'" in checks["files_affected"].detail
 
 
+def test_dot_slash_test_paths_count_as_test_files(mod):
+    checks = size_run(mod, tuple(f"`./tests/test_a{i}.py`" for i in range(6)))
+    assert failing(checks) == ["size_split"]
+    assert "6 test files exceed 5" in checks["size_split"].detail
+
+
+def test_dot_slash_and_plain_path_count_once(mod):
+    assert failing(size_run(mod, ("`./scripts/f0`", "`scripts/f0`"))) == []
+
+
+def test_existing_directory_without_trailing_slash_fails(mod):
+    checks = size_run(mod, ("`tests`", "`scripts`"))
+    assert failing(checks) == ["files_affected"]
+    assert "'tests'" in checks["files_affected"].detail
+
+
+def test_parent_relative_path_fails(mod):
+    assert failing(size_run(mod, ("`../outside.py`",))) == ["files_affected"]
+
+
 def test_size_checks_skip_for_an_epic(mod):
     issue = make_issue(mod, labels=("type:epic",), title="Epic: x", files=None)
     checks = {c.id: c for c in mod.run_checks(issue, REPO, issue_reader=lambda r, n: issue, labels_reader=lambda r: set(),
