@@ -418,11 +418,45 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
 # ── refine queue entry (#535) ─────────────────────────────────────────────────
 
 
+def work_in_flight(gateway: Gateway, facts: Mapping[str, Any], env: Mapping[str, str]) -> list[int]:
+    """The open stories, tasks and bugs with work in flight, as ``scripts/lib/in-flight.sh`` finds them.
+
+    A story is in flight when an open PR closes it (draft or not), or, without such a PR, when it has an open
+    dependency, external, conflict or resource blocker that no later PO ``/unblock`` lifts. Open PRs that cannot be
+    read raise ``GatewayError``; comments that cannot be read add no blocker for that story, as on the Actions path.
+    """
+
+    from .facts import STORY_TYPES, _Facts
+    from .status import other_blocker_open
+
+    open_prs = gateway.list_open_prs()
+    trust = _Facts(gateway, env)
+    flight: list[int] = []
+    for entry in facts.get("issues") or []:
+        number = entry.get("number")
+        if not isinstance(number, int) or entry.get("type") not in STORY_TYPES:
+            continue
+        closing = re.compile(_CLOSES.format(n=number), re.IGNORECASE)
+        if any(closing.search(str(p.get("body") or "")) for p in open_prs):
+            flight.append(number)
+            continue
+        try:
+            comments = gateway.list_comments(number)
+        except GatewayError as exc:
+            log(f"[CODEX-WORKER] Warning: could not read the comments of #{number}; its blockers are not checked: {exc}")
+            continue
+        if other_blocker_open(trust, comments, po_unblock=True):
+            flight.append(number)
+    return sorted(flight)
+
+
 def scheduler_refine_due(gateway: Gateway, repo: str, env: Mapping[str, str]) -> RefineDue:
     """The ``refine`` queue source: the scheduler's story refinement rules, for ``executor:codex`` stories only.
 
     It reads the facts and the scheduler limits like the Actions scheduler. Stories on the board with status
-    ``In implementation`` count for the WIP limit. Limits that cannot be used queue no refinement (fail closed);
+    ``In implementation`` count for the WIP limit; every other story with work in flight (``work_in_flight``) is
+    passed as ``in_flight``, as ``scripts/dispatcher-invoke.sh::ask_scheduler`` does, so a stale record of a story in
+    review is refined whatever the ready buffer holds. Limits that cannot be used queue no refinement (fail closed);
     the implementation queue is not affected.
     """
 
@@ -438,9 +472,11 @@ def scheduler_refine_due(gateway: Gateway, repo: str, env: Mapping[str, str]) ->
         read = read_facts(gateway, repo, env=env)
         if read.result != "read":
             raise GatewayError("read refinement facts", read.error or "unreadable")
+        facts = read.to_dict()
         implementing = [c.number for c in gateway.list_board_items().cards
                         if c.number is not None and c.state == "open" and c.status == "In implementation"]  # fmt: skip
-        return codex_refine_due(read.to_dict(), in_implementation=implementing, limits=limits)
+        flight = [n for n in work_in_flight(gateway, facts, env) if n not in implementing]
+        return codex_refine_due(facts, in_implementation=implementing, in_flight=flight, limits=limits)
 
     return due
 

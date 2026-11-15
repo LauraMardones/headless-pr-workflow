@@ -6,6 +6,7 @@ scheduler rule against fixed facts, and the runbook is read as text.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,59 @@ def test_a_due_refinement_is_queued_for_a_story_already_in_implementation(gh, se
     result = claim(gh, REPO, owner="po", run="r1", eligibility=Gate(), now=lambda: gh.at, config=CONFIG,
                    settings=settings, env={}, refine_due=lambda: [10])  # fmt: skip
     assert result.result == "claimed" and result.fields["invocation"]["command"] == "refine"
+
+
+# ── work in flight reaches the refinement rule, as on the Actions path ────────
+
+LIMIT_ENV = {"WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "2", "READY_BUFFER_MAX": "4",
+             "DECISION_BLOCKER_PO_LOGIN": "po"}  # fmt: skip
+
+
+def stale_story_and_full_buffer() -> dict:
+    """Codex story #10 has a stale record; two ready stories fill the ready buffer."""
+
+    return facts({"number": 10, "executor": "executor:codex", "stale": True},
+                 {"number": 20, "refined": True, "ready": True}, {"number": 21, "refined": True, "ready": True})  # fmt: skip
+
+
+@pytest.fixture
+def read_facts_returns(monkeypatch):
+    def use(rows: dict) -> None:
+        class Read:
+            result = "read"
+            error = None
+
+            def to_dict(self) -> dict:
+                return rows
+
+        monkeypatch.setattr("headless_pr_workflow.dispatcher.facts.read_facts", lambda *a, **k: Read())
+
+    return use
+
+
+def test_a_stale_story_in_review_is_due_for_refinement_whatever_the_ready_buffer(gh, read_facts_returns):  # noqa: F811
+    read_facts_returns(stale_story_and_full_buffer())
+    gh.story(10, "In review", "type:story", "executor:codex")
+    assert codex_worker.scheduler_refine_due(gh, REPO, LIMIT_ENV)() == []  # no PR yet: the buffer is full
+    gh.add_pr(30, "codex/issue-10-x", H1, body="Closes #10")  # a non-draft PR in review
+    assert codex_worker.scheduler_refine_due(gh, REPO, LIMIT_ENV)() == [10]
+
+
+def test_work_in_flight_lists_linked_prs_and_open_blockers_as_the_actions_path(gh):  # noqa: F811
+    rows = facts({"number": 10}, {"number": 11}, {"number": 12}, {"number": 13})
+    gh.add_pr(30, "codex/issue-10-x", H1, body="Closes #10")
+    gh.add_pr(31, "claude/issue-11-x", H1, body="Fixes #11", state="closed")  # a closed PR is not in flight
+    gh.add(12, "## Blocked Declaration\nType: external\nReason: waiting", login="po")
+    gh.add(13, "## Blocked Declaration\nType: external\nReason: waiting", login="po")
+    gh.at += timedelta(minutes=1)
+    gh.add(13, "/unblock", login="po")  # a later PO /unblock lifts the blocker
+    assert codex_worker.work_in_flight(gh, rows, LIMIT_ENV) == [10, 12]
+
+
+def test_work_in_flight_fails_closed_when_the_open_prs_cannot_be_read(gh, monkeypatch):  # noqa: F811
+    def broken():
+        raise GatewayError("read open PRs", "HTTP 502")
+
+    monkeypatch.setattr(gh, "list_open_prs", broken)
+    with pytest.raises(GatewayError):
+        codex_worker.work_in_flight(gh, facts({"number": 10}), LIMIT_ENV)
