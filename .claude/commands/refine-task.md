@@ -14,7 +14,7 @@ Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and
 
 ## Core Instructions
 
-- Fetch the current GitHub issue title, body, labels, milestone, parent epic or feature, and relevant comments.
+- Fetch the current GitHub issue title, body, labels, parent epic or feature, and relevant comments.
 - Inspect relevant repository docs before changing the issue.
 - Update the GitHub issue body directly with the refined task.
 - Do not only return the refined task in chat.
@@ -79,7 +79,7 @@ The `## Open Questions` section of the issue body lists the link to each blocker
 
 ## Decisions Format
 
-When a decision blocker is answered by the PO's `/unblock` reply, or the Tech Lead settles a technical or delegated choice (label, milestone, executor, slicing, technical approach), record it under Decisions with the chosen option, rejected alternatives, date and comment link (when answered by the PO). Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
+When a decision blocker is answered by the PO's `/unblock` reply, or the Tech Lead settles a technical or delegated choice (label, executor, slicing, technical approach), record it under Decisions with the chosen option, rejected alternatives, date and comment link (when answered by the PO). Do not delete rejected options — they are part of the record. If a decision reverses a prior decision, add a new entry rather than editing the old one.
 
 Each decision must be structured as:
 
@@ -94,11 +94,6 @@ Each decision must be structured as:
 - Use only existing GitHub labels.
 - Apply `type:task` if not already set.
 - If priority or area is unclear, the Tech Lead chooses among the existing labels and records the choice under `## Decisions`; a choice that needs a product decision becomes a `Type: decision` Blocked Declaration.
-
-## Milestone Handling
-
-- Use an existing milestone only when delivery timing is clear.
-- Otherwise leave milestone unchanged and record the milestone decision under `## Decisions`; a milestone that needs a product decision becomes a `Type: decision` Blocked Declaration.
 
 ## Dependency Handling
 
@@ -229,6 +224,6 @@ After updating GitHub, reply only with:
 - Next action: Ready for implementation, Refined; blocked by #X, or Needs PO decision
 - Summary of what changed
 - Labels changed
-- Milestone changed
 - Remaining hard dependencies
 - Remaining Open Questions
+
