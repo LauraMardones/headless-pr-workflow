@@ -71,6 +71,7 @@ class Reason(str):
 
 
 Eligibility = Callable[[str, int, str], "tuple[bool, str]"]
+RefineDue = Callable[[], "list[int]"]  # the executor:codex stories due for refinement (#535); raises GatewayError
 
 
 @dataclass
@@ -199,6 +200,7 @@ class IssueState:
     recorded: dict[str, str] | None = None
     not_before: datetime | None = None
     done_head: str | None = None
+    done_command: str | None = None
     marks: list[Mark] = field(default_factory=list)
 
     @property
@@ -281,6 +283,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
     if current.end is not None:
         if current.end.fields["result"] == "done":
             state.done_head = current.end.get("head")
+            state.done_command = current.claim.fields.get("command")
         else:
             until = _time(current.end.get("until") or "")
             ended = _time(current.end.created_at)
@@ -306,10 +309,10 @@ def _prio(labels: tuple[str, ...]) -> int:
     return min(ranks) if ranks else 1_000_000
 
 
-def read_queue(gateway: Gateway) -> list[dict[str, Any]]:
+def read_queue(gateway: Gateway, refine_due: RefineDue | None = None) -> list[dict[str, Any]]:
     """The eligible ``executor:codex`` items, in claim order; raises ``GatewayError``."""
 
-    return _queue(gateway.list_board_items().cards)
+    return _queue(gateway.list_board_items().cards, refine_due() if refine_due else None)
 
 
 def _codex_issues(cards: list[Any]) -> list[int]:
@@ -318,13 +321,22 @@ def _codex_issues(cards: list[Any]) -> list[int]:
     return sorted({card.number for card in cards if card.number is not None and CODEX_EXECUTOR_LABEL in card.labels})
 
 
-def _queue(cards: list[Any]) -> list[dict[str, Any]]:
+def _queue(cards: list[Any], refine_due: list[int] | None = None) -> list[dict[str, Any]]:
+    """Implementation items by board status, and ``refine`` items for the stories ``refine_due`` names (#535)."""
+
     queue = []
+    due = set(refine_due or [])
     for card in cards:
         executors = [label for label in card.labels if label.startswith("executor:")]
         if card.number is None or card.state != "open" or executors != [CODEX_EXECUTOR_LABEL]:
             continue
-        if card.status not in COMMAND_BY_STATUS or not any(label in TYPE_LABELS for label in card.labels):
+        if not any(label in TYPE_LABELS for label in card.labels):
+            continue
+        if card.number in due:  # a due refinement comes before implementation, whatever the board status shows
+            queue.append({"issue": card.number, "status": card.status, "command": "refine",
+                          "rank": (0.5, _prio(card.labels), card.number)})  # fmt: skip
+            continue
+        if card.status not in COMMAND_BY_STATUS:
             continue
         queue.append({"issue": card.number, "status": card.status, "command": COMMAND_BY_STATUS[card.status],
                       "rank": (STATUS_ORDER.index(card.status), _prio(card.labels), card.number)})  # fmt: skip
@@ -408,6 +420,72 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
         if matches:
             pr = int(matches[0]["number"])
     return Resume(pr, branch, head)
+
+
+# ── refine queue entry (#535) ─────────────────────────────────────────────────
+
+
+def work_in_flight(gateway: Gateway, facts: Mapping[str, Any], env: Mapping[str, str]) -> list[int]:
+    """The open stories, tasks and bugs with work in flight, as ``scripts/lib/in-flight.sh`` finds them.
+
+    A story is in flight when an open PR closes it (draft or not), or, without such a PR, when it has an open
+    dependency, external, conflict or resource blocker that no later PO ``/unblock`` lifts. Open PRs that cannot be
+    read raise ``GatewayError``; comments that cannot be read add no blocker for that story, as on the Actions path.
+    """
+
+    from .facts import STORY_TYPES, _Facts
+    from .status import other_blocker_open
+
+    open_prs = gateway.list_open_prs()
+    trust = _Facts(gateway, env)
+    flight: list[int] = []
+    for entry in facts.get("issues") or []:
+        number = entry.get("number")
+        if not isinstance(number, int) or entry.get("type") not in STORY_TYPES:
+            continue
+        closing = re.compile(_CLOSES.format(n=number), re.IGNORECASE)
+        if any(closing.search(str(p.get("body") or "")) for p in open_prs):
+            flight.append(number)
+            continue
+        try:
+            comments = gateway.list_comments(number)
+        except GatewayError as exc:
+            log(f"[CODEX-WORKER] Warning: could not read the comments of #{number}; its blockers are not checked: {exc}")
+            continue
+        if other_blocker_open(trust, comments, po_unblock=True):
+            flight.append(number)
+    return sorted(flight)
+
+
+def scheduler_refine_due(gateway: Gateway, repo: str, env: Mapping[str, str]) -> RefineDue:
+    """The ``refine`` queue source: the scheduler's story refinement rules, for ``executor:codex`` stories only.
+
+    It reads the facts and the scheduler limits like the Actions scheduler. Stories on the board with status
+    ``In implementation`` count for the WIP limit; every other story with work in flight (``work_in_flight``) is
+    passed as ``in_flight``, as ``scripts/dispatcher-invoke.sh::ask_scheduler`` does, so a stale record of a story in
+    review is refined whatever the ready buffer holds. Limits that cannot be used queue no refinement (fail closed);
+    the implementation queue is not affected.
+    """
+
+    from .facts import read_facts
+    from .scheduler import InvalidLimits, codex_refine_due, load_limits
+
+    def due() -> list[int]:
+        try:
+            limits = load_limits(env)
+        except InvalidLimits as exc:
+            log(f"[CODEX-WORKER] no refine entries: scheduler limits: {exc}")
+            return []
+        read = read_facts(gateway, repo, env=env)
+        if read.result != "read":
+            raise GatewayError("read refinement facts", read.error or "unreadable")
+        facts = read.to_dict()
+        implementing = [c.number for c in gateway.list_board_items().cards
+                        if c.number is not None and c.state == "open" and c.status == "In implementation"]  # fmt: skip
+        flight = [n for n in work_in_flight(gateway, facts, env) if n not in implementing]
+        return codex_refine_due(facts, in_implementation=implementing, in_flight=flight, limits=limits)
+
+    return due
 
 
 # ── eligibility hook (#524) ───────────────────────────────────────────────────
@@ -497,7 +575,7 @@ def _end_fields(issue: int, attempt: int, run: str, result: str, reason: str, he
 def claim(
     gateway: Gateway, repo: str, *, owner: str, run: str | None = None, eligibility: Eligibility,
     now: Callable[[], datetime] | None = None, config: Config | None = None, settings: Settings | None = None,
-    env: Mapping[str, str] | None = None, dry_run: bool = False,
+    env: Mapping[str, str] | None = None, dry_run: bool = False, refine_due: RefineDue | None = None,
 ) -> WorkerResult:
     """Claim at most one queued item and return its invocation (exit 0), or start nothing."""
 
@@ -517,7 +595,7 @@ def claim(
     try:
         login = resolve_login(gateway, "dispatcher", env)
         cards = gateway.list_board_items().cards
-        queue = _queue(cards)
+        queue = _queue(cards, refine_due() if refine_due else None)
         # A named run also reads every other executor:codex issue: its claimed item may have left the queue (for
         # example to In review, or closed), and a replay must find that claim rather than claim a second item.
         numbers = _codex_issues(cards) if named else [item["issue"] for item in queue]
@@ -663,7 +741,10 @@ def claim(
             continue
         except GatewayError as exc:
             return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
-        if st.done_head and resume.head and resume.head.lower() == st.done_head.lower():
+        # Only an implementation handoff suppresses: a finished refinement neither blocks the first implementation
+        # nor a later re-refinement, because its branch head does not move when the spec changes.
+        if (st.done_head and st.done_command == "implement" == item["command"] and resume.head
+                and resume.head.lower() == st.done_head.lower()):
             skipped.append({"issue": issue, "reason": "handed-off-on-head"})
             continue
 
@@ -741,7 +822,7 @@ def _still_owned(gateway: Gateway, op: str, issue: int, attempt: int, run: str, 
 def record_progress(
     gateway: Gateway, repo: str, issue: int, attempt: int, run: str, *, branch: str, head: str, pr: int | None = None,
     now: Callable[[], datetime] | None = None, config: Config | None = None, settings: Settings | None = None,
-    env: Mapping[str, str] | None = None, dry_run: bool = False,
+    env: Mapping[str, str] | None = None, dry_run: bool = False, refine_due: RefineDue | None = None,
 ) -> WorkerResult:
     """Record the owning session's pushed branch and head; a replay of the same record writes nothing."""
 

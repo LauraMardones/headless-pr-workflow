@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from ..review_policy import CODEX_EXECUTOR_LABEL
 from .facts import STORY_TYPES, read_facts
 from .gateway import Gateway
 from .write import EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, log
@@ -158,8 +159,12 @@ def _stories_left_to_refine(issues: Mapping[int, dict[str, Any]], epics: Mapping
 
 
 def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits,
-                exclude: Sequence[int] = (), in_flight: Sequence[int] = ()) -> Decision:  # fmt: skip
-    """The next action from the facts (the ``read`` output of ``hpw dispatcher facts read``). No GitHub call."""
+                exclude: Sequence[int] = (), in_flight: Sequence[int] = (), executor: str = "claude") -> Decision:  # fmt: skip
+    """The next action from the facts (the ``read`` output of ``hpw dispatcher facts read``). No GitHub call.
+
+    ``executor="claude"`` (the Actions scheduler) never refines an ``executor:codex`` story, task or bug: the local
+    Codex worker refines it (issue #535). ``executor="codex"`` returns only that story refinement (``codex_refine_due``).
+    """
 
     implementing = set(in_implementation)  # counts for the WIP limit and the file overlap
     active = implementing | set(in_flight)  # every story with work in flight: never started, refined only when stale
@@ -313,6 +318,16 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
 
     # Issues the caller already started or skipped in this run (issue #474): never
     # chosen, and not work in flight, so they do not count for the WIP limit.
+    def codex_story(c: _Candidate) -> bool:
+        return c.entry.get("type") in STORY_TYPES and c.entry.get("executor") == CODEX_EXECUTOR_LABEL
+
+    if executor == "codex":
+        candidates = [c for c in candidates if c.kind == "refine" and codex_story(c)]
+    else:
+        for c in candidates:
+            if c.kind == "refine" and codex_story(c):
+                skip(c.entry["number"], "codex-assigned")
+        candidates = [c for c in candidates if not (c.kind == "refine" and codex_story(c))]
     unavailable = set(exclude)
     for c in candidates:
         if c.entry["number"] in unavailable:
@@ -325,6 +340,19 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
         notes=notes,
         counts={"ready": ready, "waiting": waiting, "in_implementation": len(implementing)},
     )
+
+
+def codex_refine_due(facts: Mapping[str, Any], *, in_implementation: Sequence[int], limits: Limits,
+                     in_flight: Sequence[int] = ()) -> list[int]:  # fmt: skip
+    """The ``executor:codex`` stories, tasks and bugs due for story refinement, in the scheduler's order (issue #535)."""
+
+    due: list[int] = []
+    while True:
+        action = choose_next(facts, in_implementation=in_implementation, limits=limits, exclude=due,
+                             in_flight=in_flight, executor="codex").action
+        if not action:
+            return due
+        due.append(int(action["issue"]))
 
 
 def _unreadable(error: str, limits: Limits | None) -> SchedulerResult:

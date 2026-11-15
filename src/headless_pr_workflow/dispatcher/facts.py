@@ -332,7 +332,7 @@ def _evaluate(facts: _Facts, issue: dict[str, Any], kind: str, epics: dict[int, 
     number = int(issue["number"])
     entry: dict[str, Any] = {
         "number": number, "title": issue.get("title"), "type": kind, "prio": _label(_labels(issue), "prio:"),
-        "epic": parent, "feature": None, "criterion_prefix": None, "record": None, "refinement": None,
+        "executor": _label(_labels(issue), "executor:"), "epic": parent, "feature": None, "criterion_prefix": None, "record": None, "refinement": None,
         "decision_blocker": None, "dependency_blocker": None, "dependencies": None, "files_affected": None, "refined": False, "ready": False,
         "stale": False, "reasons": [],
     }  # fmt: skip

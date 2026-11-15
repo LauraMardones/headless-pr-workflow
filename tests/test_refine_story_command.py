@@ -36,7 +36,8 @@ def test_refine_story_requires_linked_follow_up_for_deferred_requirement() -> No
     command = read(".claude/commands/refine-story.md")
 
     assert "deferred to #N" in command
-    assert "A deferred requirement must link an existing follow-up issue" in command
+    assert "A deferred requirement that an existing issue delivers links it" in command
+    assert "hpw catch-all-issue create" in command
     assert "must be linked before the story moves to `Ready for implementation`" in command
 
 

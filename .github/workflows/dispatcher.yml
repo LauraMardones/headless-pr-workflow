@@ -115,6 +115,10 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      # Issue #546: the facts and status readers (hpw dispatcher scheduler next,
+      # status sync) count a PO /unblock only for this login, and have no
+      # default. Without it every decision blocker stays open.
+      DECISION_BLOCKER_PO_LOGIN: LauraMardones
 
     steps:
       - name: Checkout

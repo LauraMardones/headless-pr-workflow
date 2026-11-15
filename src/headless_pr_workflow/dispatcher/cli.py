@@ -2,13 +2,14 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight``, ``session-blocker`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from .gateway import Gateway, GhGateway, mask_tokens
 from .in_flight import plan as plan_in_flight
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .scheduler import next_action
+from .session_blocker import read_session_blocker
 from .state import FILE_NAMES, read_pending, read_state, write_state
 from .status import read_status
 from .write import (
@@ -44,7 +46,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "codex-worker")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all")
 
 
 class InvalidArguments(Exception):
@@ -123,6 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_next.add_argument("--in-flight", type=_issue_list, default=[])
     s_next.add_argument("--exclude", type=_issue_list, default=[])
     s_next.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
+    session_blocker = blocks.add_parser("session-blocker", add_help=False)
+    session_blocker_ops = session_blocker.add_subparsers(dest="operation", parser_class=_Parser)
+    sb_read = session_blocker_ops.add_parser("read", add_help=False)
+    sb_read.add_argument("--repo", required=True)
+    sb_read.add_argument("--issue", type=_positive, required=True)
+    sb_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     in_flight = blocks.add_parser("in-flight", add_help=False)
     in_flight_ops = in_flight.add_subparsers(dest="operation", parser_class=_Parser)
@@ -218,7 +227,25 @@ def build_parser() -> argparse.ArgumentParser:
     w_status = worker_ops.add_parser("status", add_help=False)
     w_status.add_argument("--repo", required=True)
     w_status.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+    catch_all = blocks.add_parser("catch-all", add_help=False)
+    catch_all_ops = catch_all.add_subparsers(dest="operation", parser_class=_Parser)
+    catch_all_ops.add_parser("numbers", add_help=False)
     return parser
+
+
+def _run_catch_all_numbers() -> int:
+    """Print the standing catch-all Epic and Feature numbers; exit 2 when they cannot be read."""
+
+    try:
+        catch_all = importlib.import_module("headless_pr_workflow.catch_all")
+        epic, feature = catch_all.CATCH_ALL_EPIC, catch_all.CATCH_ALL_FEATURE
+        if not all(type(n) is int and n > 0 for n in (epic, feature)):
+            raise ValueError("a constant is not a positive integer")
+    except (ImportError, AttributeError, ValueError) as exc:
+        print(f"Error: cannot read the catch-all numbers from catch_all.py: {mask_tokens(str(exc))}", file=sys.stderr)
+        return EXIT_INVALID
+    print(json.dumps({"epic": epic, "feature": feature}, separators=(", ", ": ")))
+    return 0
 
 
 def _fields(args: argparse.Namespace) -> list[tuple[str, str]]:
@@ -241,7 +268,11 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
             "| hpw dispatcher in-flight plan ... "
-            "| hpw dispatcher codex-worker claim|progress|finish|status ...")
+            "| hpw dispatcher session-blocker read ... "
+            "| hpw dispatcher codex-worker claim|progress|finish|status ... "
+            "| hpw dispatcher catch-all numbers")
+    if args.block == "catch-all":
+        return  # reads a constant: no repository
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -396,7 +427,8 @@ def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) 
     if args.operation == "claim":
         gate = codex_worker.command_gate(os.environ.get("CODEX_WORKER_ELIGIBILITY_COMMAND"))
         return _emit(codex_worker.claim(gateway, args.repo, owner=args.owner, run=args.run, eligibility=gate,
-                                        config=config, settings=settings, dry_run=args.dry_run))  # fmt: skip
+                                        config=config, settings=settings, dry_run=args.dry_run,
+                                        refine_due=codex_worker.scheduler_refine_due(gateway, args.repo, os.environ)))  # fmt: skip
     if args.operation == "progress":
         return _emit(codex_worker.record_progress(gateway, args.repo, args.issue, args.attempt, args.run,
                                                   branch=args.branch, head=args.head, pr=args.pr, config=config,
@@ -421,6 +453,9 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
                           "error": mask_tokens(f"arguments: {exc}")}))  # fmt: skip
         return EXIT_INVALID
 
+    if args.block == "catch-all":
+        return _run_catch_all_numbers()
+
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")
     settings = settings or Settings.from_env()
@@ -435,6 +470,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_scheduler(args, gateway)
     if args.block == "in-flight":
         return _run_in_flight(args, settings)
+    if args.block == "session-blocker":
+        return _emit(read_session_blocker(gateway, args.issue))
     if args.block == "codex-worker":
         return _run_worker(args, gateway, settings)
     if args.block == "status":
