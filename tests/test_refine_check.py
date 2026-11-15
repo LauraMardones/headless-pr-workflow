@@ -274,7 +274,7 @@ def test_main_exit_1_json(mod, monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     assert (data["issue"], data["type"], data["verdict"], data["exit_code"]) == (5, "story", "fail", 1)
     assert [c["id"] for c in data["checks"]] == [
-        "type_label", "executor_label", "prio_label",
+        "type_label", "executor_label", "orchestration_executor", "prio_label",
         "hard_dependencies", "required_sections", "open_questions", "parent_refs",
         "spec_record", "feature_criteria", "catch_all_sort",
         "files_affected", "size_split", "haiku_limit"]
@@ -674,3 +674,84 @@ def test_size_failure_reaches_the_exit_code_and_output(mod, monkeypatch, capsys)
     assert mod.main(["--issue", "5", "--repo", REPO]) == 1
     out = capsys.readouterr().out
     assert "size_split: fail - 11 files exceed 10" in out
+
+
+# Orchestration executor rule (issue #367).
+OPUS = "executor:claude-code-opus"
+
+
+def orch_run(mod, trigger, executors, kind="story", **kw):
+    labels = (f"type:{kind}", "prio:P2", *trigger, *executors)
+    issue = make_issue(mod, labels=labels, title=f"{kind.capitalize()}: x", **kw)
+    return Env(mod, issue, repo_labels={l for l in labels if l.startswith("executor:")}).run()
+
+
+@pytest.mark.parametrize("trigger", ["flow:orchestration", "cp:critical-path"])
+@pytest.mark.parametrize("kind", ["story", "task", "bug"])
+def test_each_trigger_label_alone_requires_opus(mod, trigger, kind):
+    sonnet = orch_run(mod, (trigger,), ("executor:claude-code-sonnet",), kind)
+    assert sonnet["orchestration_executor"].status == "fail"
+    assert "executor:claude-code-sonnet" in sonnet["orchestration_executor"].detail
+    opus = orch_run(mod, (trigger,), (OPUS,), kind)
+    assert opus["orchestration_executor"].status == "pass"
+
+
+def test_both_trigger_labels_together(mod):
+    both = ("flow:orchestration", "cp:critical-path")
+    assert failing(orch_run(mod, both, (OPUS,))) == []
+    assert failing(orch_run(mod, both, ("executor:claude-code-sonnet",))) == ["orchestration_executor"]
+
+
+@pytest.mark.parametrize("executors", [("executor:claude-code-haiku",), ("executor:codex",)])
+def test_other_executors_fail_naming_the_label(mod, executors):
+    checks = orch_run(mod, ("flow:orchestration",), executors)
+    assert "orchestration_executor" in failing(checks)
+    assert executors[0] in checks["orchestration_executor"].detail
+
+
+def test_no_executor_label_fails_saying_none(mod):
+    checks = orch_run(mod, ("cp:critical-path",), ())
+    assert checks["orchestration_executor"].status == "fail"
+    assert "no executor: label" in checks["orchestration_executor"].detail
+
+
+def test_two_executor_labels_fail_even_with_opus(mod):
+    checks = orch_run(mod, ("cp:critical-path",), (OPUS, "executor:claude-code-sonnet"))
+    assert checks["orchestration_executor"].status == "fail"
+
+
+def test_without_trigger_label_skips_even_with_sonnet(mod):
+    checks = orch_run(mod, (), ("executor:claude-code-sonnet",))
+    assert checks["orchestration_executor"].status == "skip"
+    assert failing(checks) == []
+
+
+@pytest.mark.parametrize("kind", ["epic", "feature"])
+def test_epic_and_feature_skip(mod, kind):
+    labels = (f"type:{kind}", "prio:P2", "flow:orchestration")
+    issue = make_issue(mod, labels=labels, title=f"{kind.capitalize()}: x")
+    checks = Env(mod, issue).run()
+    assert checks["orchestration_executor"].status == "skip"
+
+
+def test_labelled_keep_together_combines_with_the_size_gate(mod):
+    trigger = ("flow:orchestration",)
+    kw = dict(files=many(11), decision=KEEP)
+    opus = orch_run(mod, trigger, (OPUS,), **kw)
+    assert opus["size_split"].status == "pass" and opus["orchestration_executor"].status == "pass"
+    sonnet = orch_run(mod, trigger, ("executor:claude-code-sonnet",), **kw)
+    assert sonnet["size_split"].status == "pass" and sonnet["orchestration_executor"].status == "fail"
+    haiku = orch_run(mod, trigger, ("executor:claude-code-haiku",), **kw)
+    assert {"size_split", "orchestration_executor"} <= set(failing(haiku))
+
+
+def test_main_exit_1_and_output_line_for_wrong_executor(mod, monkeypatch, capsys):
+    issue = make_issue(mod, labels=("type:story", "prio:P2", "flow:orchestration", "executor:claude-code-sonnet"))
+    patch_reads(mod, monkeypatch, issue)
+    assert mod.main(["--issue", "5", "--repo", REPO]) == 1
+    out = capsys.readouterr().out
+    assert "orchestration_executor: fail - " in out
+    patch_reads(mod, monkeypatch, issue)
+    assert mod.main(["--issue", "5", "--repo", REPO, "--json"]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert {c["id"]: c["status"] for c in data["checks"]}["orchestration_executor"] == "fail"

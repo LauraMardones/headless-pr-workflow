@@ -74,6 +74,9 @@ MAX_FILES = 10
 MAX_TEST_FILES = 5
 HAIKU_MAX_FILES = 3
 HAIKU_LABEL = "executor:claude-code-haiku"
+# Orchestration executor rule (Epic #418 spec, F3.6; issue #367).
+ORCHESTRATION_TRIGGER_LABELS = ("flow:orchestration", "cp:critical-path")
+OPUS_LABEL = "executor:claude-code-opus"
 KEEP_TOGETHER = re.compile(r"^[ \t]*(?:[-*]\s+)?Split decision:\s*keep together because[ \t]+\S", re.I | re.M)
 VERBATIM_DECLARATION = re.compile(r"verbatim|word[- ]for[- ]word|read exactly", re.I)
 TESTS_DIR = Path(__file__).resolve().parent.parent / "tests"
@@ -385,6 +388,16 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
         checks.append(Check("executor_label", "fail", f"{execs[0]} does not exist in {repo}"))
     else:
         checks.append(Check("executor_label", "pass", execs[0]))
+
+    triggers = [label for label in ORCHESTRATION_TRIGGER_LABELS if label in issue.labels]
+    if effective not in EXECUTABLE_TYPES:
+        checks.append(Check("orchestration_executor", "skip", "not applicable to this issue type"))
+    elif not triggers:
+        checks.append(Check("orchestration_executor", "skip", "no flow:orchestration or cp:critical-path label"))
+    elif execs == [OPUS_LABEL]:
+        checks.append(Check("orchestration_executor", "pass", f"{', '.join(triggers)} with {OPUS_LABEL}"))
+    else:
+        checks.append(Check("orchestration_executor", "fail", f"{', '.join(triggers)} requires exactly {OPUS_LABEL}, found {', '.join(execs) or 'no executor: label'}"))
 
     prios = [label for label in issue.labels if label.startswith("prio:")]
     checks.append(Check("prio_label", "pass", ", ".join(prios)) if prios else Check("prio_label", "fail", "no prio: label"))
