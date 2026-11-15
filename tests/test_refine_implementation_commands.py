@@ -53,11 +53,20 @@ def test_ac2_no_question_to_the_po_inside_the_session(name: str) -> None:
     assert "Ask the PO nothing in the session" in text
     assert "becomes a `Type: decision` Blocked Declaration" in text
     assert "the Tech Lead chooses among the existing labels and records the choice under `## Decisions`" in text
-    assert "record the milestone decision under `## Decisions`" in text
+    assert "## Milestone Handling" not in text
     assert "The affected acceptance criterion stays unchanged while the blocker is open" in text
     assert "lists the link to each blocker comment" in text
     assert "reads `None.`" in text
     assert "- <link to each decision blocker comment, or `None.`>" in body_format(name)
+
+
+@pytest.mark.parametrize("name", ("refine-epic", "refine-feature", *COMMANDS))
+def test_retired_milestones_do_not_gate_refinement(name: str) -> None:
+    assert "milestone" not in command(name).lower()
+
+
+def test_new_spec_template_has_no_milestone() -> None:
+    assert "milestone" not in read("specs/_template/spec.md").lower()
 
 
 @pytest.mark.parametrize("name", COMMANDS)
@@ -151,3 +160,4 @@ def test_ac10_documents_describe_the_coverage_check() -> None:
     readme = read("specs/README.md")
     assert "| Story, Task, Bug | Refinement, just-in-time | Testable behavior | At least one Feature criterion |" in readme
     assert "`scripts/criteria-check --epic <n>`" in readme
+

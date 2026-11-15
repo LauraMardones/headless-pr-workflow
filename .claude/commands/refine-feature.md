@@ -14,7 +14,7 @@ Follow the `## Tech Lead rules` in `.claude/commands/refine.md`: spec lookup and
 
 ## Core Instructions
 
-- Fetch the current GitHub issue title, body, labels, milestone, parent epic, linked issues, and relevant comments.
+- Fetch the current GitHub issue title, body, labels, parent epic, linked issues, and relevant comments.
 - Inspect relevant repository docs before changing the issue.
 - Update the GitHub issue body directly with the refined feature.
 - Do not only return the refined feature in chat.
@@ -212,7 +212,7 @@ Each decision must be structured as:
 
 - Use only existing GitHub labels.
 - Apply `type:feature` if not already set.
-- If priority, area, or milestone is unclear, raise it as a `Type: decision` blocker.
+- If priority or area is unclear, raise it as a `Type: decision` blocker.
 
 ## Issue Body Format
 
@@ -220,7 +220,6 @@ Update the issue body to this structure:
 
 ```md
 Parent epic: #{EPIC_NUMBER} {EPIC_TITLE}
-Milestone: {MILESTONE}
 Spec: [`specs/{EPIC_NUMBER}-{slug}/spec.md`]({blob link at the commit}) at `{commit}`
 Criterion prefix: F{k}
 
@@ -310,3 +309,4 @@ After updating GitHub, reply only with:
 - Stories/Tasks/Bugs created with issue numbers
 - Labels changed
 - Decision blockers raised (comment links), or none
+
