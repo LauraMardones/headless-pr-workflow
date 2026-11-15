@@ -118,6 +118,10 @@ scripts/hpw dispatcher scheduler next --repo <owner/repo> --in-implementation <n
 
 **Retired.** The `ready_for_refinement` Slack notification and its `notified-refinement` saved state are gone (#460 → Decisions "No stored state is needed"). A leftover `notified-refinement` file in the Actions cache does no harm: nothing reads it, and it expires with the cache.
 
+## Decision rules
+
+The rules that decide the dispatcher's next step, each with its implementations, the entry points that use it, its tests and any suspected disagreement between copies, are listed in [DISPATCHER-DECISIONS.md](DISPATCHER-DECISIONS.md#decision-rules) (issue #555). `src/headless_pr_workflow/dispatcher/rules.py` records the same rules as data.
+
 ## Board status — the only writer
 
 The board is a display. One command writes its Status field: `hpw dispatcher status sync` (issue #476, `src/headless_pr_workflow/dispatcher/board_sync.py`). It derives each board item's status from GitHub facts, writes the items that differ and refreshes each Epic's progress section. It is the only writer of board status (issue #478): the dispatcher scripts, the Codex review bookkeeping job and the commands write none, and `tests/test_single_board_writer.py` fails when another tracked file under `scripts/`, `src/`, `.github/` or `.claude/` holds a Status write. Its mutation is in `src/headless_pr_workflow/dispatcher/gateway.py`, the one allowed place.
