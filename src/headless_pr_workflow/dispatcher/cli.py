@@ -427,7 +427,8 @@ def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) 
     if args.operation == "claim":
         gate = codex_worker.command_gate(os.environ.get("CODEX_WORKER_ELIGIBILITY_COMMAND"))
         return _emit(codex_worker.claim(gateway, args.repo, owner=args.owner, run=args.run, eligibility=gate,
-                                        config=config, settings=settings, dry_run=args.dry_run))  # fmt: skip
+                                        config=config, settings=settings, dry_run=args.dry_run,
+                                        refine_due=codex_worker.scheduler_refine_due(gateway, args.repo, os.environ)))  # fmt: skip
     if args.operation == "progress":
         return _emit(codex_worker.record_progress(gateway, args.repo, args.issue, args.attempt, args.run,
                                                   branch=args.branch, head=args.head, pr=args.pr, config=config,

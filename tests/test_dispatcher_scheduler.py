@@ -650,7 +650,7 @@ def test_next_action_in_process_matches_the_command(gw, capsys):
 
 
 def test_choose_next_takes_no_gateway():
-    assert list(inspect.signature(choose_next).parameters) == ["facts", "in_implementation", "limits", "exclude", "in_flight"]
+    assert list(inspect.signature(choose_next).parameters) == ["facts", "in_implementation", "limits", "exclude", "in_flight", "executor"]
 
 
 def test_no_token_in_output(gw, capsys, monkeypatch):
