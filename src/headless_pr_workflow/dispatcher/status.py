@@ -246,7 +246,7 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
         except GatewayError as exc:
             return False, exc.step
         decision = helper.decision_blocker(comments) if decision is None else decision
-        return decision["state"] == "open" or other_blocker_open(helper, comments), None
+        return decision["state"] == "open" or other_blocker_open(helper, comments, po_unblock=True), None
 
     items: list[dict[str, Any]] = []
     for number, entry in epics.items():

@@ -334,8 +334,8 @@ def test_a_later_declarations_unblocked_when_field_does_not_resolve_an_earlier_b
     gw.comment(30, "Unblocked when: later", login=PO)
     assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
     gw.comment(30, "/unblock", login=PO)
-    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"  # the external blocker is still open
-    gw.comment(30, "Unblocked: the vendor answered", login=PO)
+    # the PO's /unblock lifts the newest declaration (#576); the refinement is then older than the /unblock
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Not refined"
     gw.comment(30, summary())  # a refinement after the /unblock, as the facts require
     assert by_number(read_status(gw, "o/r"))[30]["status"] == "Ready to implement"
 
@@ -351,6 +351,37 @@ def test_every_other_blocker_type_blocks(gw, kind):
     gw.add_issue(30, ["type:story"], story_body())
     gw.comment(30, summary())
     gw.comment(30, f"## Blocked Declaration\nType: {kind}", login=PO)
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
+
+
+@pytest.mark.parametrize("kind", ["external", "conflict", "resource", "dependency"])
+def test_po_unblock_after_a_non_decision_declaration_lifts_it_on_the_board(gw, kind):
+    gw.add_issue(30, ["type:story"], story_body())
+    gw.comment(30, summary())
+    gw.comment(30, f"## Blocked Declaration\nType: {kind}\nBlocked by: #99", login=PO)
+    gw.add_pr(60, "Closes #30")
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
+    gw.comment(30, "/unblock", login=PO)
+    gw.comment(30, summary())  # a refinement after the /unblock, as the dependency facts require
+    assert by_number(read_status(gw, "o/r"))[30]["status"] == "In review"
+
+
+@pytest.mark.parametrize("unblock", ["wrong-author", "prose", "before-declaration", "declared-again"])
+def test_other_unblock_forms_leave_the_declaration_open_on_the_board(gw, unblock):
+    gw.add_issue(30, ["type:story"], story_body())
+    gw.comment(30, summary())
+    gw.add_pr(60, "Closes #30")
+    declaration = "## Blocked Declaration\nType: external\nBlocked by: a vendor"
+    if unblock == "before-declaration":
+        gw.comment(30, "/unblock", login=PO)
+    gw.comment(30, declaration, login=PO)
+    if unblock == "wrong-author":
+        gw.comment(30, "/unblock", login="stranger", assoc="NONE")
+    elif unblock == "prose":
+        gw.comment(30, "please unblock this", login=PO)
+    elif unblock == "declared-again":
+        gw.comment(30, "/unblock", login=PO)
+        gw.comment(30, declaration, login=PO)
     assert by_number(read_status(gw, "o/r"))[30]["status"] == "Blocked"
 
 
