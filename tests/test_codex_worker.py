@@ -43,6 +43,7 @@ class WorkerGitHub(FakeGateway):
         self.branches: dict[str, str] = {}
         self.prs: dict[int, dict] = {}
         self.ancestors: set[tuple[str, str]] = set()
+        self.reviews: dict[int, list[dict]] = {}
         self.board_failures = 0
         self.on_post = None  # called after a comment is stored, e.g. to let a second run interleave
         self.before_post = None  # called before a comment is stored
@@ -90,6 +91,15 @@ class WorkerGitHub(FakeGateway):
             raise GatewayError(f"read PR #{number}", "HTTP 404: Not Found", not_found=True)
         return self.prs[number]
 
+    def pr_reviews(self, number: int) -> list[dict]:
+        self.calls.append(f"reviews {number}")
+        return list(self.reviews.get(number, []))
+
+    def review(self, pr: int, head: str, state: str = "CHANGES_REQUESTED", body: str = "", login: str = PO,
+               association: str = "OWNER") -> None:
+        self.reviews.setdefault(pr, []).append({"user": {"login": login}, "commit_id": head, "state": state,
+                                                "body": body, "author_association": association})
+
     def add_pr(self, number: int, branch: str, head: str, body: str = "", state: str = "open") -> None:
         self.prs[number] = {"number": number, "state": state, "body": body, "head": {"ref": branch, "sha": head}}
 
@@ -120,7 +130,7 @@ def settings() -> Settings:
 def _env(monkeypatch):
     for name in ("CODEX_BOOKKEEPING_LOGIN", "DISPATCHER_LOGIN", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_WORKER_ID",
                  "CODEX_WORKER_RUN_ID", "CODEX_WORKER_ELIGIBILITY_COMMAND", "CODEX_WORKER_LEASE_MINUTES",
-                 "CODEX_WORKER_RETRY_MINUTES", "WIP_LIMIT_IMPLEMENTATION", "READY_BUFFER_MIN",
+                 "CODEX_WORKER_RETRY_MINUTES", "CODEX_FIX_ROUND_MAX", "WIP_LIMIT_IMPLEMENTATION", "READY_BUFFER_MIN",
                  "READY_BUFFER_MAX"):
         monkeypatch.delenv(name, raising=False)
 
@@ -1073,3 +1083,167 @@ def test_the_dispatcher_config_documents_the_worker_protocol():
                    "lease-held", "not-queued"):
         assert f"`{reason}`" in section, reason
     assert f"{codex_worker.DEFAULT_LEASE_MINUTES}" in section and f"{codex_worker.DEFAULT_RETRY_MINUTES}" in section
+
+
+# ── #536: a bounded fix round after a Claude review with blockers ────────────
+
+H4 = "4" * 40
+REVIEW_SUMMARY = ("## Session Summary\nCommand: review\nIssue/PR: #5 / #12\nHead: {head}\nChecks: pytest\n"
+                  "Blockers: {blockers}\nNext: {next}\n")
+
+
+def handed_off(gh: WorkerGitHub, head: str = H1, *, status: str = "In implementation", fix: str | None = None) -> None:
+    """A Codex attempt that pushed ``head`` on PR #12 and handed it off; ``fix`` names the head it was to fix."""
+
+    gh.story(5, status)
+    gh.branches[BRANCH] = head
+    gh.add_pr(12, BRANCH, head, body="Closes #5")
+    extra = f" fix={fix}" if fix else ""
+    gh.add(5, codex_worker.dispatcher_marker(
+        f"action=codex-claim issue=5 attempt=1 owner=po-laptop run=r1 command=implement pr=12 branch={BRANCH} "
+        f"head={fix or '-'}{extra}"))
+    gh.add(5, codex_worker.dispatcher_marker(
+        f"action=codex-progress issue=5 attempt=1 run=r1 pr=12 branch={BRANCH} head={head}"))
+    gh.add(5, codex_worker.dispatcher_marker(
+        f"action=codex-end issue=5 attempt=1 run=r1 result=done reason=handoff head={head}"))
+
+
+def blockers(gh, number=5):
+    return [c for c in gh.comments.get(number, []) if "## Blocked Declaration" in c["body"]]
+
+
+@pytest.mark.parametrize("status", ["In review", "In merge"])
+def test_ac1_a_story_in_review_or_in_merge_is_not_claimed(gh, settings, status):
+    handed_off(gh, status=status)
+    gh.review(12, H1)  # even a blocking review does not claim while the board shows the story reviewed
+    gate = Gate()
+    result = do_claim(gh, settings, run="r2", gate=gate)
+    assert result.result == "idle" and gate.calls == [] and gh.writes() == []
+    assert do_claim(gh, settings, run="r1").result in ("ended", "waiting") and gh.writes() == []
+
+
+def test_ac2_a_claude_review_with_blockers_claims_a_fix_round_on_the_same_pr_and_branch(gh, settings):
+    handed_off(gh)
+    gh.review(12, H1)
+    result = do_claim(gh, settings, run="r2", at=T0 + timedelta(minutes=5))
+    assert result.result == "claimed"
+    call = result.fields["invocation"]
+    assert call["command"] == "implement" and call["attempt"] == 2
+    assert call["resume"] == {"pr": 12, "branch": BRANCH, "head": H1}
+    assert call["fix_round"] == {"round": 1, "max": 3, "pr": 12, "reviewed_head": H1}
+    claim_mark = claims(gh)[-1]
+    assert claim_mark.fields["fix"] == H1 and claim_mark.fields["pr"] == "12" and claim_mark.fields["branch"] == BRANCH
+
+    # The session pushes a new head on the same branch and PR, records it and ends the attempt with it.
+    gh.branches[BRANCH] = H2
+    gh.prs[12]["head"]["sha"] = H2
+    other = record_progress(gh, REPO, 5, 2, "r2", branch="codex/issue-5-second", head=H2, pr=13, settings=settings,
+                            env={}, config=CONFIG, now=lambda: gh.at)
+    assert other.result == "refused" and other.fields["reason"] == "fix-round-target"
+    pushed = record_progress(gh, REPO, 5, 2, "r2", branch=BRANCH, head=H2, pr=12, settings=settings, env={},
+                             config=CONFIG, now=lambda: gh.at)
+    done = finish(gh, REPO, 5, 2, "r2", result="done", reason="handoff", head=H2, settings=settings, env={},
+                  config=CONFIG, now=lambda: gh.at)
+    assert pushed.result == "written" and done.result == "written"
+    progress = [m for m in gh.marks(5) if m.action == "progress"][-1]
+    end = [m for m in gh.marks(5) if m.action == "end"][-1]
+    assert (progress.fields["pr"], progress.fields["branch"], progress.fields["head"]) == ("12", BRANCH, H2)
+    assert end.fields["head"] == H2
+    assert sorted(gh.prs) == [12] and sorted(gh.branches) == [BRANCH]  # no second PR or branch
+
+    # The new head waits for its own review: nothing starts on it again.
+    result = do_claim(gh, settings, run="r3")
+    assert result.fields["skipped"] == [{"issue": 5, "reason": "handed-off-on-head"}]
+
+
+def test_ac2_a_replayed_fix_round_claim_keeps_its_round(gh, settings):
+    handed_off(gh)
+    gh.review(12, H1)
+    do_claim(gh, settings, run="r2")
+    result = do_claim(gh, settings, run="r2")
+    assert result.result == "continued"
+    assert result.fields["invocation"]["fix_round"] == {"round": 1, "max": 3, "pr": 12, "reviewed_head": H1}
+
+
+@pytest.mark.parametrize(("state", "body", "login", "association", "blocking"), [
+    ("COMMENTED", REVIEW_SUMMARY.format(head=H1, blockers="test missing for AC 2", next="implementation"), PO, "OWNER", True),
+    ("COMMENTED", REVIEW_SUMMARY.format(head=H1, blockers="none", next="implementation"), PO, "OWNER", False),
+    ("COMMENTED", REVIEW_SUMMARY.format(head=H1, blockers="none", next="merge"), PO, "OWNER", False),
+    ("APPROVED", "", PO, "OWNER", False),
+    ("CHANGES_REQUESTED", "", "chatgpt-codex-connector", "NONE", False),
+    ("CHANGES_REQUESTED", "", "stranger", "NONE", False),
+    ("CHANGES_REQUESTED", "", "teammate", "COLLABORATOR", True),
+])
+def test_ac3_only_a_trusted_non_codex_review_with_blockers_starts_a_fix_round(gh, settings, state, body, login,
+                                                                               association, blocking):
+    handed_off(gh)
+    gh.review(12, H1, state, body, login, association)
+    result = do_claim(gh, settings, run="r2")
+    if blocking:
+        assert result.result == "claimed" and result.fields["invocation"]["fix_round"]["round"] == 1
+    else:
+        assert result.fields["skipped"] == [{"issue": 5, "reason": "handed-off-on-head"}]
+
+
+def test_ac3_a_fix_round_that_ended_on_the_head_it_was_to_fix_is_not_run_again(gh, settings):
+    handed_off(gh, H1, fix=H1)
+    gh.review(12, H1)
+    result = do_claim(gh, settings, run="r2")
+    assert result.fields["skipped"] == [{"issue": 5, "reason": "fix-round-tried-on-head"}] and gh.writes() == []
+
+
+def test_ac3_rounds_are_counted_per_pr_one_per_reviewed_head(gh, settings):
+    handed_off(gh, H3, fix=H2)
+    gh.review(12, H1)
+    gh.review(12, H1, "COMMENTED", REVIEW_SUMMARY.format(head=H1, blockers="still open", next="implementation"))
+    gh.review(12, H2)
+    gh.review(12, H3)
+    gh.review(13, H4)  # another PR's reviews never count
+    result = do_claim(gh, settings, run="r2")
+    assert result.result == "claimed" and result.fields["invocation"]["fix_round"]["round"] == 3
+
+
+def test_ac3_above_the_maximum_the_worker_starts_nothing_and_posts_one_resource_blocker(gh, settings):
+    handed_off(gh, H4, fix=H3)
+    for head in (H1, H2, H3, H4):
+        gh.review(12, head)
+    gate = Gate()
+    result = do_claim(gh, settings, run="r2", gate=gate)
+    assert result.result == "waiting" and gate.calls == []
+    assert result.fields["skipped"] == [{"issue": 5, "reason": "fix-round-max", "round": 4, "max": 3,
+                                         "evidence": "written"}]
+    [blocker] = blockers(gh)
+    assert "Type: resource" in blocker["body"] and "PR #12" in blocker["body"]
+    assert "<!-- hpw:dispatcher action=fix-round-max pr=12 -->" in blocker["body"]
+    assert len(claims(gh)) == 1  # only the first attempt's claim: no session starts
+
+    # A replay, and a later run, post nothing more and still start nothing; the item stays with Codex.
+    for run in ("r2", "r3"):
+        again = do_claim(gh, settings, run=run, gate=gate)
+        assert again.fields["skipped"][0]["reason"] == "fix-round-max" and again.fields["skipped"][0]["evidence"] == "already"
+    assert len(blockers(gh)) == 1 and len(claims(gh)) == 1 and gate.calls == []
+    assert not any(c.startswith(("set ", "add-label", "remove-label")) for c in gh.calls)
+
+
+def test_ac3_the_maximum_is_configured_with_codex_fix_round_max():
+    assert Config.from_env({}).fix_round_max == 3
+    assert Config.from_env({"CODEX_FIX_ROUND_MAX": "4"}).fix_round_max == 4
+    with pytest.raises(codex_worker.InvalidConfig, match="CODEX_FIX_ROUND_MAX"):
+        Config.from_env({"CODEX_FIX_ROUND_MAX": "0"})
+
+
+def test_ac3_a_raised_maximum_lets_the_round_start(gh, settings):
+    handed_off(gh, H4, fix=H3)
+    for head in (H1, H2, H3, H4):
+        gh.review(12, head)
+    result = claim(gh, REPO, owner="po-laptop", run="r2", eligibility=Gate(), now=lambda: gh.at,
+                   config=replace(CONFIG, fix_round_max=4), settings=settings, env={})
+    assert result.result == "claimed" and result.fields["invocation"]["fix_round"] == {
+        "round": 4, "max": 4, "pr": 12, "reviewed_head": H4}
+
+
+def test_unreadable_reviews_start_nothing(gh, settings, monkeypatch):
+    handed_off(gh)
+    monkeypatch.setattr(gh, "pr_reviews", lambda _n: (_ for _ in ()).throw(GatewayError("read reviews", "HTTP 502")))
+    result = do_claim(gh, settings, run="r2")
+    assert result.result == "unreadable" and gh.writes() == []

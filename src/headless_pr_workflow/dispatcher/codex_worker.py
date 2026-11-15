@@ -10,13 +10,21 @@ state, so any later run on any computer reads the same answer.
 
 Markers (own account only, ``<!-- hpw:dispatcher action=<action> ... -->``):
 
-- ``codex-claim issue= attempt= owner= run= command= pr= branch= head=``: the claim; the claim with
-  the lowest comment id of an attempt owns it.
+- ``codex-claim issue= attempt= owner= run= command= pr= branch= head= [fix=]``: the claim; the claim with
+  the lowest comment id of an attempt owns it. ``fix`` names the reviewed head of a fix round (#536).
 - ``codex-progress issue= attempt= run= pr= branch= head=``: what the owning session pushed.
 - ``codex-renew issue= attempt= run=``: a replay renews the lease before its session starts; it carries no resume facts.
 - ``codex-end issue= attempt= run= result=done|wait reason= head= until= by=``: the attempt is over; ``by`` names
   the run that recorded an interruption, which counts only when the lease had run out by GitHub's timestamps.
 - ``codex-wait issue= attempt= reason=``: the item waits before that attempt could be claimed.
+- ``fix-round-max pr=``: the ``Type: resource`` blocker posted once when a PR is above the fix-round maximum; the
+  dispatcher's Codex Cloud review loop posts the same marker.
+
+Fix rounds (#536): an ``implement`` claim whose PR's current head has a blocking review from someone other than
+Codex (``CHANGES_REQUESTED``, or a review Session Summary with blockers and ``Next: implementation``) is a fix
+round on that PR, branch and head. Rounds are counted per PR, one for each reviewed head with blockers; above
+``CODEX_FIX_ROUND_MAX`` (default ``3``) the worker starts nothing and posts the blocker. Codex Cloud findings
+markers are never counted here.
 
 Result words and exit codes: ``claimed``, ``continued``, ``written``, ``already``, ``read``,
 ``dry-run`` (0); ``idle``, ``waiting``, ``lost``, ``ended``, ``refused``, ``not-owner``,
@@ -35,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
-from ..review_policy import CODEX_EXECUTOR_LABEL
+from ..review_policy import CODEX_BOT_LOGIN, CODEX_EXECUTOR_LABEL
 from .gateway import Gateway, GatewayError
 from .marker import Unreadable, dispatcher_marker, marker_text, resolve_login, write_marker
 from .write import EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, Settings, _author, log
@@ -52,6 +60,8 @@ API_KEY_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY")
 
 DEFAULT_LEASE_MINUTES = 240
 DEFAULT_RETRY_MINUTES = 60
+DEFAULT_FIX_ROUND_MAX = 3  # the default of CODEX_FIX_ROUND_MAX in scripts/dispatcher-invoke.sh
+TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 ELIGIBILITY_TIMEOUT = 60
 
 _EXIT_BY_RESULT = {
@@ -62,6 +72,9 @@ _MARK = re.compile(r"<!-- hpw:dispatcher action=codex-(claim|progress|renew|end|
 _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PRIO = re.compile(r"^prio:P(\d+)$")
 _CLOSES = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{n}\b"
+_SUMMARY_COMMAND = re.compile(r"^Command:\s*review\s*$", re.MULTILINE)
+_SUMMARY_BLOCKERS = re.compile(r"^Blockers:\s*(.*?)\s*$", re.MULTILINE)
+_SUMMARY_NEXT = re.compile(r"^Next:\s*implementation\s*$", re.MULTILINE)
 
 
 class Reason(str):
@@ -91,19 +104,22 @@ class InvalidConfig(ValueError):
 class Config:
     lease: timedelta = timedelta(minutes=DEFAULT_LEASE_MINUTES)
     retry: timedelta = timedelta(minutes=DEFAULT_RETRY_MINUTES)
+    fix_round_max: int = DEFAULT_FIX_ROUND_MAX
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         env = os.environ if env is None else env
         values = {}
-        for name, default in (("CODEX_WORKER_LEASE_MINUTES", DEFAULT_LEASE_MINUTES),
-                              ("CODEX_WORKER_RETRY_MINUTES", DEFAULT_RETRY_MINUTES)):  # fmt: skip
+        for name, default, unit in (("CODEX_WORKER_LEASE_MINUTES", DEFAULT_LEASE_MINUTES, "a whole number of minutes"),
+                                    ("CODEX_WORKER_RETRY_MINUTES", DEFAULT_RETRY_MINUTES, "a whole number of minutes"),
+                                    ("CODEX_FIX_ROUND_MAX", DEFAULT_FIX_ROUND_MAX, "a whole number")):  # fmt: skip
             raw = (env.get(name) or "").strip()
             if raw and not re.fullmatch(r"[1-9][0-9]*", raw):
-                raise InvalidConfig(f"{name} must be a whole number of minutes, 1 or more (value: {raw!r})")
+                raise InvalidConfig(f"{name} must be {unit}, 1 or more (value: {raw!r})")
             values[name] = int(raw) if raw else default
         return cls(lease=timedelta(minutes=values["CODEX_WORKER_LEASE_MINUTES"]),
-                   retry=timedelta(minutes=values["CODEX_WORKER_RETRY_MINUTES"]))  # fmt: skip
+                   retry=timedelta(minutes=values["CODEX_WORKER_RETRY_MINUTES"]),
+                   fix_round_max=values["CODEX_FIX_ROUND_MAX"])  # fmt: skip
 
 
 # ── markers ───────────────────────────────────────────────────────────────────
@@ -201,6 +217,7 @@ class IssueState:
     not_before: datetime | None = None
     done_head: str | None = None
     done_command: str | None = None
+    done_fix: str | None = None
     marks: list[Mark] = field(default_factory=list)
 
     @property
@@ -284,6 +301,7 @@ def derive_state(issue: int, marks: list[Mark], *, now: datetime, config: Config
         if current.end.fields["result"] == "done":
             state.done_head = current.end.get("head")
             state.done_command = current.claim.fields.get("command")
+            state.done_fix = current.claim.get("fix")
         else:
             until = _time(current.end.get("until") or "")
             ended = _time(current.end.created_at)
@@ -422,6 +440,74 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
     return Resume(pr, branch, head)
 
 
+# ── fix rounds (#536) ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FixRound:
+    round: int
+    maximum: int
+    pr: int
+    reviewed_head: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"round": self.round, "max": self.maximum, "pr": self.pr, "reviewed_head": self.reviewed_head}
+
+
+def blocking_review(review: Mapping[str, Any], po_login: str | None) -> bool:
+    """A formal review with blockers from a trusted reviewer other than Codex (Codex Cloud findings never count)."""
+
+    user = review.get("user") or {}
+    login = str(user.get("login") or "")
+    if not login or login == CODEX_BOT_LOGIN:
+        return False
+    if not ((po_login and login == po_login) or str(review.get("author_association") or "") in TRUSTED_ASSOCIATIONS):
+        return False
+    if review.get("state") == "CHANGES_REQUESTED":
+        return True
+    body = str(review.get("body") or "")
+    found = _SUMMARY_BLOCKERS.search(body)
+    return bool(_SUMMARY_COMMAND.search(body) and _SUMMARY_NEXT.search(body) and found
+                and found.group(1).lower() not in ("", "none"))  # fmt: skip
+
+
+def blocking_heads(gateway: Gateway, pr: int, po_login: str | None) -> list[str]:
+    """The reviewed heads of ``pr`` with a blocking review, oldest first, each once; raises ``GatewayError``."""
+
+    heads: list[str] = []
+    for review in gateway.pr_reviews(pr):
+        head = str(review.get("commit_id") or "").lower()
+        if head and head not in heads and blocking_review(review, po_login):
+            heads.append(head)
+    return heads
+
+
+def fix_round_for(gateway: Gateway, pr: int | None, head: str | None, config: Config,
+                  settings: Settings) -> FixRound | None:  # fmt: skip
+    """The fix round on ``head`` of ``pr``, or ``None`` when no blocking review names that head; raises ``GatewayError``."""
+
+    if not (pr and head):
+        return None
+    heads = blocking_heads(gateway, pr, settings.po_login)
+    if head.lower() not in heads:
+        return None
+    return FixRound(heads.index(head.lower()) + 1, config.fix_round_max, pr, head.lower())
+
+
+def fix_round_blocker(issue: int, pr: int, head: str, maximum: int) -> str:
+    """The ``Type: resource`` Blocked Declaration in the format of ``docs/PROJECT-STATUS.md``."""
+
+    return ("## Blocked Declaration\n"
+            "Type: resource\n"
+            "Declared by: codex-worker\n"
+            f"Blocks: #{issue}\n"
+            f"Unblocked when: the findings on PR #{pr} are fixed by hand, or CODEX_FIX_ROUND_MAX is raised and the "
+            "PO posts /unblock\n"
+            "Owner: PO (@LauraMardones)\n"
+            f"State of in-progress work: PR #{pr} has had {maximum} automatic fix rounds and the Claude review still "
+            f"has blockers on head {head[:7]}; branch and commits intact; the item is not moved to Claude")  # fmt: skip
+
+
 # ── refine queue entry (#535) ─────────────────────────────────────────────────
 
 
@@ -533,11 +619,17 @@ def _api_key_names(env: Mapping[str, str]) -> list[str]:
     return [name for name in API_KEY_NAMES if (env.get(name) or "").strip()]
 
 
-def invocation(repo: str, issue: int, attempt: int, owner: str, run: str, command: str, resume: Resume) -> dict[str, Any]:
-    """The #523 contract: what the session runs, and the two calls that record its progress and its end."""
+def invocation(repo: str, issue: int, attempt: int, owner: str, run: str, command: str, resume: Resume,
+               fix: FixRound | None = None) -> dict[str, Any]:  # fmt: skip
+    """The #523 contract: what the session runs, and the two calls that record its progress and its end.
+
+    ``fix_round`` is set for a fix round (#536): the session follows ``implement.md``'s fix-round rules with the
+    review's findings on ``resume``'s PR and branch, and opens no second PR or branch.
+    """
 
     base = f"scripts/codex-worker.sh {{op}} --repo {repo} --issue {issue} --attempt {attempt} --run {run}"
     return {
+        "fix_round": fix.to_dict() if fix else None,
         "repo": repo, "issue": issue, "attempt": attempt, "owner": owner, "run": run, "command": command,
         "command_file": COMMAND_FILES[command], "branch_prefix": branch_prefix(issue), "resume": resume.to_dict(),
         "progress": base.format(op="progress") + " --branch <branch> --head <full-sha> [--pr <n>]",
@@ -638,6 +730,8 @@ def claim(
             # a new claim does; a refusal keeps the claim.
             try:
                 resume = resolve_resume(gateway, issue_no, st.recorded)
+                # A replayed fix round keeps the round its claim named, even after its session pushed a new head.
+                fix = fix_round_for(gateway, resume.pr, current.claim.get("fix"), config, settings)
                 eligible, reason = True, ""
             except Waiting as exc:
                 eligible, reason = False, str(exc)
@@ -653,7 +747,7 @@ def claim(
             # Time passes during the reads and the hook, so the lease read at the start no longer decides. The replay
             # renews the lease on GitHub and starts only when the read-back shows it still owns the open attempt:
             # GitHub's order decides against any interruption, as it does for a claim (no local clock in the answer).
-            call = invocation(repo, issue_no, number, owner, run, current.command, resume)
+            call = invocation(repo, issue_no, number, owner, run, current.command, resume, fix)
             renewed = write_marker(
                 gateway, issue_no, "codex-renew", [("issue", str(issue_no)), ("attempt", str(number)), ("run", run)],
                 body=f"Codex worker: run `{run}` resumes its claimed attempt {number} on #{issue_no}.",
@@ -741,11 +835,31 @@ def claim(
             continue
         except GatewayError as exc:
             return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
+        # A blocking review on the current head of the PR makes the implementation a fix round on it (#536).
+        fix: FixRound | None = None
+        if item["command"] == "implement":
+            try:
+                fix = fix_round_for(gateway, resume.pr, resume.head, config, settings)
+            except GatewayError as exc:
+                return WorkerResult("claim", "unreadable", error=str(exc), fields={**base, "skipped": skipped})
         # Only an implementation handoff suppresses: a finished refinement neither blocks the first implementation
-        # nor a later re-refinement, because its branch head does not move when the spec changes.
-        if (st.done_head and st.done_command == "implement" == item["command"] and resume.head
-                and resume.head.lower() == st.done_head.lower()):
-            skipped.append({"issue": issue, "reason": "handed-off-on-head"})
+        # nor a later re-refinement, because its branch head does not move when the spec changes. A blocking review
+        # of the handed-off head lifts it once: a fix round that ended on the head it was to fix is not run again.
+        handed_off = (st.done_head and st.done_command == "implement" == item["command"] and resume.head
+                      and resume.head.lower() == st.done_head.lower())  # fmt: skip
+        if handed_off and (fix is None or (st.done_fix or "").lower() == fix.reviewed_head):
+            skipped.append({"issue": issue, "reason": "handed-off-on-head" if fix is None else "fix-round-tried-on-head"})
+            continue
+        if fix is not None and fix.round > fix.maximum:
+            # Above the bound nothing starts and the item waits for the PO; it is not moved to Claude.
+            assert resume.pr is not None
+            posted = write_marker(gateway, issue, "fix-round-max", [("pr", str(resume.pr))],
+                                  body=fix_round_blocker(issue, resume.pr, fix.reviewed_head, fix.maximum),
+                                  once=True, dry_run=dry_run, settings=settings, env=env)  # fmt: skip
+            if posted.result not in ("written", "already", "dry-run"):
+                log(f"[CODEX WORKER] #{issue}: fix-round blocker not written: {posted.error}")
+            skipped.append({"issue": issue, "reason": "fix-round-max", "round": fix.round, "max": fix.maximum,
+                            "evidence": posted.result})  # fmt: skip
             continue
 
         eligible, reason = eligibility(repo, issue, item["command"])
@@ -761,7 +875,10 @@ def claim(
         text = f"Codex worker `{owner}` claims #{issue} for `/{item['command']}`, attempt {number} (run `{run}`)."
         if resume.to_dict():
             text += f" It resumes branch `{resume.branch}` at `{resume.head}`" + (f" on PR #{resume.pr}." if resume.pr else ".")
-        call = invocation(repo, issue, number, owner, run, item["command"], resume)
+        if fix is not None:
+            fields.append(("fix", fix.reviewed_head))
+            text += f" Fix round {fix.round} of {fix.maximum} for the blocking review of `{fix.reviewed_head[:7]}`."
+        call = invocation(repo, issue, number, owner, run, item["command"], resume, fix)
         written = write_marker(gateway, issue, "codex-claim", fields, body=text, dry_run=dry_run, settings=settings,
                                env=env)  # fmt: skip
         if written.result == "dry-run":
@@ -837,6 +954,11 @@ def record_progress(
     if not owns or (st.attempt and st.attempt.end is not None):
         return WorkerResult("progress", "not-owner", error="check owner: this run does not hold an open claim on the attempt",
                             fields=base)  # fmt: skip
+    claimed = st.attempt.claim if st.attempt else None
+    if claimed is not None and claimed.get("fix") and (branch != claimed.get("branch") or str(pr or "") != claimed.get("pr")):
+        # A fix round continues the claimed PR and branch; a second PR or branch is never recorded (#536).
+        return WorkerResult("progress", "refused", error=f"check fix round: record branch {claimed.get('branch')} and "
+                            f"PR #{claimed.get('pr')}, the ones the fix round claimed", fields={**base, "reason": "fix-round-target"})  # fmt: skip
     fields = [("issue", str(issue)), ("attempt", str(attempt)), ("run", run), ("pr", str(pr) if pr else "-"),
               ("branch", branch), ("head", head)]  # fmt: skip
     outcome = write_marker(gateway, issue, "codex-progress", fields,
