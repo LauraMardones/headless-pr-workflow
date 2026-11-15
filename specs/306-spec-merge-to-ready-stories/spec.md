@@ -1,7 +1,6 @@
 # Epic #306: Tech Lead: from spec merge to ready stories without the PO
 
 **Epic issue:** #306
-**Milestone:** 6 — Autonomous Execution
 
 ## Goal
 
@@ -24,6 +23,7 @@ In:
 - Re-refinement after a scope change: affected Features and stories are re-refined before any of them is implemented further.
 - The scheduler: a script, with no model, chooses the next action from hard dependencies, priority, queue limits, the WIP limit of two and file overlap. It replaces the board trigger in the dispatcher, including for starting implementation.
 - The board shows facts: only the scheduler writes status, it overwrites manual moves, and the intent statuses are removed or renamed. `/implement`, `/review`, `/merge` and `/cleanup` stop moving cards.
+- The board follows events: the scheduler's writer runs on every dispatcher run and also on PR and issue events, such as a PR opened, marked ready for review or merged, or an issue closed. The board then shows a session's result within two minutes, while the session still runs. The writer stays the only writer, two writes never leave an older status on an item, and it writes nothing while `DISPATCHER_ENABLED` is not `true`.
 - The Epic issue as index: the Tech Lead keeps it linked to the spec and showing progress.
 - No refinement under an Epic with no merged spec. Stories already refined under such an Epic can still be implemented.
 - A usage finding that affects scope or an acceptance criterion becomes a decision blocker. Any other finding is noted.
@@ -61,8 +61,8 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
   - **Verified by:** closure evidence from the proof Epic showing a refined story becoming ready on the next scheduler run after its last hard dependency closed, and a buffer that never exceeded five and was refilled when it dropped below three. The evidence also shows a scheduler run that skipped an unrefined Feature while a story from an earlier breakdown was left to refine, and the run that broke that Feature down once none was left.
 - **E5:** Moving a board card starts no work, and the board is corrected. The pause switch stops new refinement.
   - **Verified by:** the PO drags an unrefined item to the ready status; no session starts and the next scheduler run restores the status. Closure evidence shows a scheduler run with `DISPATCHER_ENABLED=false` that started no refinement session.
-- **E6:** The board and the Epic issue show the current state: the stage of each implementation issue, and how much of each Feature and Epic remains.
-  - **Verified by:** closure evidence comparing the board status of the proof Epic's issues with the GitHub facts, with no difference. The proof Epic's issue links to its spec and shows progress.
+- **E6:** The board and the Epic issue show the current state: the stage of each implementation issue, and how much of each Feature and Epic remains. The board follows a PR or issue event within two minutes, also when the event happens in the middle of a session. A stage that lasts longer than two minutes is shown, even when it begins and ends inside one session.
+  - **Verified by:** closure evidence comparing the board status of the proof Epic's issues with the GitHub facts, with no difference. The proof Epic's issue links to its spec and shows progress. The evidence also lists, for one story of the proof Epic, the time of each PR event (opened as draft, marked ready for review, merged) next to the time its board status changed, each within two minutes, and shows "In implementation" and "In review" on the board while the PR was in that state.
 - **E7:** After a scope-change spec PR merges, the affected Features and stories are re-refined before any of them is implemented further.
   - **Verified by:** the PO merges one scope-change spec PR on the proof Epic. The affected issues then show a refinement record naming the new spec commit, and none of them started implementation in between.
 - **E8:** Epic closure is checked against the spec's Epic criteria.
@@ -155,6 +155,31 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 **Chosen:** Work found during implementation that lies outside an Epic's scope goes to a catch-all Feature under a catch-all Epic for the whole repository. That Epic gets its own spec, which states how the Tech Lead sorts its findings into existing Features and what maintenance the Tech Lead may refine without asking the PO. This Epic does not change for it.
 **Rejected:** Add the sorting of findings and the follow-up of leftovers to this Epic — this Epic would depend on an Epic that has no spec yet.
 
+### No milestone — 2026-11-15
+
+**Chosen:** This Epic has no milestone. The `**Milestone:**` line is removed from this spec. This replaces the decision "Milestone — 2026-10-01". HPW no longer uses milestones (ADR-015).
+**Rejected:** Keep the line as a historical record, as ADR-015 item 4 allows for merged specs — this spec changes anyway in this PR, and the line would name a milestone that no longer guides any work.
+
+### The board is written on PR and issue events — 2026-11-15
+
+**Chosen:** Besides each dispatcher run, the scheduler's writer also runs on PR and issue events, so the board shows a session's result while the session still runs. It stays the only writer, and two writes never leave an older status on an item. The PO chose this on #573 (option b, [comment](https://github.com/LauraMardones/headless-pr-workflow/issues/573#issuecomment-6894961375)) and confirmed it in this session. Evidence on #573: in run 43699972219 the board showed "Ready to implement" for about eight minutes after the session had opened PR #568, and never showed "In implementation".
+**Rejected:** Run the writer again inside the dispatcher run after each session ends (#573 option a) — "In implementation" and "In review" stay invisible when one session does both. Keep one write per dispatcher run (#573 option c, Feature #461 decision "Where the writer runs") — the board stays stale for the length of a session.
+
+### The board follows an event within two minutes — 2026-11-15
+
+**Chosen:** Two minutes from a PR or issue event to the board showing its result.
+**Rejected:** Five minutes, the dispatcher's own rhythm — a stage of a few minutes could still be missed. Leave the bound to the Tech Lead — E6 could not be checked against a fixed number at closure.
+
+### The timing is part of E6 — 2026-11-15
+
+**Chosen:** E6 is amended: the board follows an event within two minutes, and its **Verified by:** adds the event and board times for one proof story.
+**Rejected:** A new criterion E9 — one more closure check for the same outcome, a board that shows the current state.
+
+### Event-driven board writes follow the pause switch — 2026-11-15
+
+**Chosen:** No board write while `DISPATCHER_ENABLED` is not `true`, also on PR and issue events. #160's decision "Pause mechanism" keeps its meaning: the switch stops every dispatcher write.
+**Rejected:** Keep writing the board while paused — the board would stay current when the PO merges by hand, but the pause switch would no longer stop every dispatcher write.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -168,6 +193,7 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - ADR-012 (how model sessions are started) — no conflict. Refinement sessions start by its mechanism, and its "Effective when" line names #319 under this Epic. Its rule of one session at a time also holds for refinement sessions.
 - ADR-013 (dispatcher trigger) — no conflict. An external caller starts the dispatcher every five minutes; the scheduler runs inside that dispatcher run.
 - ADR-014 (dispatcher building blocks) — no conflict. It binds the technical approach: a new rule that decides from GitHub facts what the dispatcher does is written in Python, and board writes go through the verified-write block. The blocks (#432, #433, #434) are delivered.
+- ADR-015 (retire milestones) — conflict: this spec named a milestone and had a milestone decision. Resolved by the decision "No milestone", which replaces "Milestone — 2026-10-01". ADR-015 item 4 lets merged specs keep their milestone text; the PO chose to remove it here because this spec changes anyway.
 - `docs/PROJECT-STATUS.md` — conflict in several sections, all resolved by rewriting them in this Epic: Fact vs Intent and the transition table (intent statuses authorize work); Recovery Protocol (rolls status back); Blocked Status Protocol → Resolution (status moved back by hand, and `/unblock` returns a story to a trigger status); "In refinement" and File Ownership Tagging (refinement done by the PO); Rolling Refinement ("refine story N+1 while implementing story N"), which ADR-009 item 6 replaces with the ready buffer. The decision-blocker rules, including the question, options and recommendation from #296, the WIP limit and the file-overlap rule are kept.
 - `docs/REFINEMENT-PIPELINE.md` — conflict: the pipeline starts at `spec-kit → gh issue create`, the escalation triggers go to the Human Approver in the session, and big-bang refinement is allowed. Resolved by rewriting the document in this Epic: the pipeline starts at the spec merge, the triggers become decision blockers, and the big-bang exception is removed (see Decisions). Its section on the refinement completeness gate (#344) writes and compares board status and is rewritten with the commands. The buffer of 3–5, now repository variables, and the usage-feedback loop are kept.
 - `docs/ADAPTERS.md` → Executor Routing — conflict: the `executor:` label is applied when a status changes. Resolved in this Epic: the label is set in refinement, which is delegated.
@@ -188,6 +214,13 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - ADR-009 item 6 (Feature-to-Story breakdown just in time against the ready buffer) — no conflict. The decision "Features are broken into stories just in time" states the rule that item asks for.
 - `docs/commands/dispatcher-scheduler.md` (#473, delivered under Feature #460) — conflict: step 4 refines every unrefined Feature before implementation starts, with no limit. Resolved by the decision "Features are broken into stories just in time"; the scheduler rule and its document change with it. Its ready-buffer rule (step 6 only while ready is below the minimum and ready plus waiting is below the maximum) already counts refined stories that wait for a dependency, and is kept.
 - Open issues under this Epic (#460, #461, #474–#479) — this scope change makes their refinement records stale, so the Tech Lead re-refines them against this spec (E7). The open PR for #474 is reviewed against the re-refined story.
+- ADR-010 item 3 (one writer that rewrites the status on each run), checked 2026-11-15 for the event-driven board writes — no conflict. The writer stays the only one; it also runs between dispatcher runs.
+- ADR-013 (an external scheduler starts the dispatcher every five minutes), checked 2026-11-15 — no conflict. A board write on an event runs only the writer and starts no session, so it is not a dispatcher run, and the five-minute trigger is unchanged.
+- #160 spec, Out "Dispatch latency under five minutes" and decision "Dispatch trigger mechanism" (project-event webhook rejected), checked 2026-11-15 — no conflict. Both are about starting work. A board write on an event starts no work, and it uses PR and issue events, not project webhooks.
+- #160 spec, decision "Pause mechanism" — no conflict; kept by the decision "Event-driven board writes follow the pause switch".
+- Feature #461 → F3.3 ("every dispatcher run writes") and its decision "Where the writer runs" (#478, one write per dispatcher run) — conflict with the decision "The board is written on PR and issue events". Resolved by that decision; #461 is re-refined against this spec (E7). Its decision "Status writes follow the pause switch" is kept.
+- `docs/PROJECT-STATUS.md` → One writer and `docs/DISPATCHER-CONFIG.md` → Board status — the only writer (checked 2026-11-15) — both say the dispatcher runs the writer once per run. Updated when the event-driven writes are implemented.
+- #573 (Story under catch-all Feature #538) — its outcome and the PO's choice of option b (2026-11-15) are carried into Scope, E6 and Decisions after the PO confirmed them in this session. Its draft criteria are input only. Which Feature holds it is delegated.
 
 ## Delegated to the Tech Lead
 
@@ -197,6 +230,7 @@ The proof Epic is the first Epic whose spec merges after this Epic's work is in 
 - The board's status names and the fact behind each, including how Epics, Features and Epics without a merged spec are shown, within ADR-010.
 - The scheduler's working rules other than the Epic priority label, the ready buffer of 3–5, the WIP limit of two and the just-in-time Feature breakdown: how priority is applied within an Epic, and tie-breaks.
 - How the queue of stories waiting for refinement is shown on the board, within ADR-010.
+- For the event-driven board writes: which PR and issue events start a write, how two writes are kept from leaving an older status, and whether #573 is kept, moved under a Feature of this Epic or rewritten.
 - How a spec merge and a scope change are detected, and how "affected" Features and stories are determined for re-refinement.
 - The form of the refinement record, where the spec commit is recorded, and how a criterion names its parent.
 - The form of the Epic issue as index.
