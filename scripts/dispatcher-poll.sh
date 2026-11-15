@@ -23,9 +23,15 @@
 #   HPW_BIN            The `hpw` command (default scripts/hpw); overridable for tests.
 #
 # Side effects:
-#   For Red flow health: calls scripts/slack-notify.sh red_flow_health when
-#   flow_health == "Red". No de-duplication; fires on every Red-health poll run.
-#   Under --dry-run it is not sent. The poll writes no saved state.
+#   For Red flow health: calls scripts/slack-notify.sh red_flow_health once when
+#   the board turns Red (issue #596). The saved state `red-flow-notified`
+#   (`hpw dispatcher state`, DISPATCHER_STATE_DIR) is written as "sent" only after
+#   slack-notify.sh exits 0 and as "clear" by the first poll that reads a
+#   flow_health other than Red; an empty flow_health changes nothing. A missing,
+#   malformed or unreadable state counts as "not sent" and a failed state write
+#   only logs a warning: neither stops the poll or changes its exit code.
+#   Under --dry-run nothing is sent and no state is written; the
+#   "[DRY RUN] Would notify" line appears only when the message is due.
 #   The scheduler's `[SCHEDULER] ...` lines (the action, idle, unreadable and
 #   each skipped entry, such as no-merged-spec) go to stderr unchanged, so they
 #   reach the run log. No comment is posted.
@@ -303,7 +309,40 @@ FLOW_JSON=$(bash "$(dirname "$0")/flow-review.sh" --repo "$REPO" --json) || FLOW
 [[ $FLOW_RC -ne 2 ]] || exit 2
 FLOW_HEALTH=$(printf '%s' "$FLOW_JSON" | jq -r '.flow_health // ""' 2>/dev/null) || FLOW_HEALTH=""
 
-if [[ "$FLOW_HEALTH" == "Red" ]]; then
+# state_block <operation> <args...> — Block 3 (`hpw dispatcher state`); prints its JSON line.
+state_block() {
+    "$HPW_BIN" dispatcher state "$@"
+}
+
+# state_write <name> <content> — Block 3 write through a temporary data file.
+# Returns 1 and logs a warning when the state was not written; never fatal.
+state_write() {
+    local name="$1" content="$2" data out rc=0
+    data=$(mktemp) || { echo "[POLL] Warning: cannot write $name state: no temporary file" >&2; return 1; }
+    printf '%s\n' "$content" > "$data"
+    out=$(state_block write --name "$name" --repo "$REPO" --data-file "$data" 2>/dev/null) || rc=$?
+    rm -f "$data"
+    if (( rc != 0 )); then
+        echo "[POLL] Warning: cannot write $name state ($(jq -r '.error // "unknown error"' <<< "$out" 2>/dev/null || echo unknown error))" >&2
+        return 1
+    fi
+}
+
+# red_flow_sent — succeeds when the saved state says the message of the current
+# Red period was sent. Anything else (missing, malformed, unreadable, no answer)
+# counts as not sent: a duplicate is the lesser harm than a lost alert.
+red_flow_sent() {
+    local out
+    out=$(state_block read --name red-flow-notified --repo "$REPO" 2>/dev/null) || true
+    [[ "$(jq -r 'select(.result == "ok") | .data.sent // false' <<< "$out" 2>/dev/null)" == "true" ]]
+}
+
+if [[ "$FLOW_HEALTH" != "Red" && -n "$FLOW_HEALTH" ]]; then
+    # No longer Red: forget the message so the next turn to Red sends one new message.
+    if ! $DRY_RUN && red_flow_sent; then
+        state_write red-flow-notified clear || true
+    fi
+elif [[ "$FLOW_HEALTH" == "Red" ]] && ! red_flow_sent; then
     WIP_COUNT=$(echo "$FLOW_JSON" | jq '.wip_count')
     BLOCKED_COUNT=$(echo "$FLOW_JSON" | jq '.blocked | length')
     WIP_VIOLATION=$(echo "$FLOW_JSON" | jq -r '.wip_violation')
@@ -327,7 +366,8 @@ if [[ "$FLOW_HEALTH" == "Red" ]]; then
     if $DRY_RUN; then
         echo "[DRY RUN] Would notify: red_flow_health (${SIGNAL})" >&2
     else
-        bash "$(dirname "$0")/slack-notify.sh" red_flow_health "$CONTEXT" >/dev/null || true
+        # Recorded as sent only after slack-notify.sh exits 0; a failure of either only logs.
+        bash "$(dirname "$0")/slack-notify.sh" red_flow_health "$CONTEXT" >/dev/null && state_write red-flow-notified sent || true
     fi
 fi
 

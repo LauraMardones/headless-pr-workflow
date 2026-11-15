@@ -35,7 +35,7 @@ from .marker import list_markers
 from .write import _PENDING_FIELDS, EXIT_INVALID, EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, log
 
 BLOCK = "state"
-FILE_NAMES = ("actionable-events", "usage-sessions", "usage-notified", "allowance-hold")
+FILE_NAMES = ("actionable-events", "usage-sessions", "usage-notified", "allowance-hold", "red-flow-notified")
 
 _EXIT = {
     "ok": EXIT_OK,
@@ -85,6 +85,10 @@ def state_path(name: str, repo: str, env: Mapping[str, str] | None = None) -> Pa
         base = Path(env.get("DISPATCHER_STATE_DIR") or _root() / ".dispatcher-state")
         owner, _, repo_name = repo.partition("/")
         return base / owner / repo_name / name
+    if name == "red-flow-notified":
+        base = Path(env.get("DISPATCHER_STATE_DIR") or _root() / ".dispatcher-state")
+        owner, _, repo_name = repo.partition("/")
+        return base / owner / repo_name / name
     if name in ("usage-sessions", "usage-notified"):
         base = Path(env.get("USAGE_LIMIT_STATE_DIR") or _root() / ".dispatcher-usage")
         return base / ("sessions" if name == "usage-sessions" else "notified")
@@ -98,6 +102,7 @@ def empty_value(name: str) -> Any:
         "usage-sessions": {"day": None, "count": 0},
         "usage-notified": {"day": None},
         "allowance-hold": None,
+        "red-flow-notified": {"sent": False},
     }[name]
 
 
@@ -150,6 +155,11 @@ def parse(name: str, text: str, today: str) -> tuple[str, Any, dict[str, Any]]:
             return "malformed", empty_value(name), {}
         data = {"day": match.group(1)}
         return ("ok" if data["day"] == today else "stale"), data, {}
+    if name == "red-flow-notified":
+        word = text.rstrip("\n")
+        if word not in ("sent", "clear"):
+            return "malformed", empty_value(name), {}
+        return "ok", {"sent": word == "sent"}, {}
     try:
         value = json.loads(text)
     except ValueError:
