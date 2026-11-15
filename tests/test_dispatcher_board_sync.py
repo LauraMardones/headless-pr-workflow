@@ -366,6 +366,77 @@ def test_a_closed_epic_is_not_written(gw):
     assert [p["epic"] for p in fields(result)["progress"]] == [10] and all(n != 12 for n, _ in gw.body_writes)
 
 
+# ── REST request budget (issue #565) ─────────────────────────────────────────
+
+
+class QuotaGateway(SyncGateway):
+    """Allows each issue list once per run (the necessary reads) and refuses any repeat, like an exhausted quota."""
+
+    def __init__(self, allowed: int = 1) -> None:
+        super().__init__()
+        self.allowed = allowed
+        self.listed = {"open": 0, "closed": 0}
+
+    def list_open_issues(self):
+        self.listed["open"] += 1
+        if self.listed["open"] > self.allowed:
+            raise GatewayError("read open issues", "gh: API rate limit exceeded")
+        return super().list_open_issues()
+
+    def list_closed_issues(self):
+        self.listed["closed"] += 1
+        if self.listed["closed"] > self.allowed:
+            raise GatewayError("read closed issues", "gh: API rate limit exceeded")
+        return super().list_closed_issues()
+
+
+def quota_gateway(allowed: int = 1) -> QuotaGateway:
+    g = QuotaGateway(allowed)
+    g.add_issue(10, ["type:epic"], spec_line() + "\n\nEpic text.\n")
+    g.comment(10, summary())
+    g.add_issue(20, ["type:feature"], story_body(feature=20))
+    g.comment(20, summary())
+    g.add_issue(30, ["type:story"], story_body())
+    g.comment(30, summary())
+    g.add_closed(31, ["type:story"], story_body())
+    g.card(10, "In progress", kind="epic")
+    g.card(20, "In progress", kind="feature")
+    g.card(30, "Done")  # moved by hand
+    g.card(31, "Done", state="closed")
+    return g
+
+
+def test_one_sync_lists_open_and_closed_issues_once(gw):
+    gw.card(30, "Done")
+    assert sync(gw).result == "synced"
+    assert gw.calls.count("list_open_issues") == 1 and gw.calls.count("list_closed_issues") == 1
+
+
+def test_sync_finishes_when_the_quota_allows_only_the_necessary_reads():
+    gw = quota_gateway()
+    result = sync(gw)
+    assert result.result == "synced" and result.exit_code == 0
+    assert (30, "Ready to implement") in gw.writes and gw.body_writes
+    assert gw.listed == {"open": 1, "closed": 1}
+    gw.listed = {"open": 0, "closed": 0}
+    again = sync(gw, dry_run=True)
+    assert fields(again)["corrections"] == [] and [p["result"] for p in fields(again)["progress"]] == ["already"]
+
+
+def test_each_invocation_reads_the_lists_afresh():
+    gw = quota_gateway(allowed=2)
+    assert sync(gw).result == "synced"
+    assert sync(gw, dry_run=True).result == "dry-run"
+    assert gw.listed == {"open": 2, "closed": 2}
+
+
+def test_an_exhausted_quota_is_unreadable_and_writes_nothing(capsys):
+    gw = quota_gateway(allowed=0)
+    rc, out, _err = run(capsys, gw)
+    assert rc == 3 and out["result"] == "unreadable" and out["ok"] is False and out["error"]
+    assert gw.writes == [] and gw.body_writes == []
+
+
 # ── only the two permitted writes (AC 8) ─────────────────────────────────────
 
 
