@@ -24,7 +24,7 @@ def test_review_command_classifies_findings_against_story_scope() -> None:
             "when in doubt, a finding is a Blocker",
             "classifying is not a waiver",
             "only the PO waives",
-            "proposed follow-up issue",
+            "proposed catch-all issue",
             "not listed in `--blockers`",
             "`--deviation`",
             "`Type: decision`",
