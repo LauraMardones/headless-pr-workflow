@@ -62,7 +62,13 @@ Required behavior:
 11. Implement only the requested changes.
 12. Add or update deterministic tests as needed.
 13. For mutation work, preserve fresh-refresh and safety checks before mutating behavior.
-14. Push commits to the same PR branch as work progresses.
+14. Push commits to the same PR branch as work progresses, and keep a durable checkpoint on the draft PR (issue #490):
+   - checkpoint push: push a checkpoint commit to the draft PR branch after the first working edit and after each later coherent group of edits; push a checkpoint before a long test run, and at the latest every 15 turns (tool calls) since the last push, whenever the working tree has uncommitted changes
+   - a checkpoint is an ordinary commit (a WIP message is allowed) and an ordinary `git push`: no rebase and no force-push, as in step 16
+   - a checkpoint never marks the PR Ready for review, never posts a review request (ADR-006) and leaves the story "In implementation"; in a conflict round (step 10) the PR stays Ready for review and a checkpoint makes no Draft conversion
+   - turn budget: the dispatcher's limit is 60 turns (`AGENT_MAX_TURNS` default in `scripts/dispatcher-invoke.sh`; a turn is one tool-call round trip); a session that reaches about 40 turns without having finished must stop starting new work, push what it has, and hand off as below
+   - stop with a pushed state: when the session stops before step 16's green, Ready-for-review path (turn budget reached, or any other early stop), push the work first, keep the PR Draft, and generate the handoff with `--next implementation` naming what is done and what is left, so a fresh session continues from the PR
+   - cheap reads: read large files in slices (search for the relevant function first, then `sed -n '<from>,<to>p'`); never read a whole large file at once, such as `scripts/dispatcher-invoke.sh` (about 4,100 lines) or `tests/dispatcher_fakes.py`
 15. Before requesting review, perform a self-review:
    - run `git diff main` (or the equivalent against the base branch) and verify the diff matches the issue scope exactly
    - run `scripts/ac-summary.sh --issue $ARGUMENTS --repo LauraMardones/headless-pr-workflow` and use the extracted checklist to verify AC/DoD coverage; exit `2` means no checklist was found and requires a manual issue-body fallback, not that coverage passed, while exit `1` is an invocation or lookup failure
