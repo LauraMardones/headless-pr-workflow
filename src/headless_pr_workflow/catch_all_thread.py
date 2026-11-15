@@ -111,7 +111,9 @@ def _read_thread(thread: str, *, check: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("errors") or not isinstance(node, dict):
         raise CatchAllThreadError(check, f"{call} could not read thread {thread}", EXIT_GITHUB_FAILED)
     if node.get("id") != thread:
-        raise CatchAllThreadError("thread-on-pr", f"{thread} is not a review thread", EXIT_CHECK_FAILED)
+        # Before the mutation an unknown id is a refused check; after it, the resolution is unconfirmed.
+        code = EXIT_CHECK_FAILED if check == "thread-on-pr" else EXIT_GITHUB_FAILED
+        raise CatchAllThreadError(check, f"{thread} is not a review thread", code)
     comments = node.get("comments") or {}
     nodes = comments.get("nodes") if isinstance(comments, dict) else None
     pr_node = node.get("pullRequest") or {}

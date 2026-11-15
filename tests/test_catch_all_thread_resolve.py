@@ -363,6 +363,22 @@ def test_an_unreadable_re_read_exits_2_and_is_not_retried(gh: FakeGh, monkeypatc
     assert result_json(capsys)["checks"]["resolved-confirmed"] == "fail"
 
 
+def test_a_re_read_that_returns_no_thread_exits_2(gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    original = gh.__call__
+
+    def lose_thread_after_mutation(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        out = original(argv, **kwargs)
+        if gh.calls[-1] == "mutation":
+            gh.thread = None  # type: ignore[assignment]
+        return out
+
+    monkeypatch.setattr(catch_all_issue.subprocess, "run", lose_thread_after_mutation)
+
+    assert run("--json") == 2
+    assert gh.calls.count("mutation") == 1
+    assert result_json(capsys)["checks"]["resolved-confirmed"] == "fail"
+
+
 @pytest.mark.parametrize(
     "argv",
     [
