@@ -43,6 +43,7 @@ class WorkerGitHub(FakeGateway):
         self.branches: dict[str, str] = {}
         self.prs: dict[int, dict] = {}
         self.ancestors: set[tuple[str, str]] = set()
+        self.reviews: dict[int, list[dict]] = {}
         self.board_failures = 0
         self.on_post = None  # called after a comment is stored, e.g. to let a second run interleave
         self.before_post = None  # called before a comment is stored
@@ -89,6 +90,15 @@ class WorkerGitHub(FakeGateway):
         if number not in self.prs:
             raise GatewayError(f"read PR #{number}", "HTTP 404: Not Found", not_found=True)
         return self.prs[number]
+
+    def pr_reviews(self, number: int) -> list[dict]:
+        self.calls.append(f"reviews {number}")
+        return list(self.reviews.get(number, []))
+
+    def review(self, pr: int, head: str, state: str = "CHANGES_REQUESTED", body: str = "", login: str = PO,
+               association: str = "OWNER") -> None:
+        self.reviews.setdefault(pr, []).append({"user": {"login": login}, "commit_id": head, "state": state,
+                                                "body": body, "author_association": association})
 
     def add_pr(self, number: int, branch: str, head: str, body: str = "", state: str = "open") -> None:
         self.prs[number] = {"number": number, "state": state, "body": body, "head": {"ref": branch, "sha": head}}
