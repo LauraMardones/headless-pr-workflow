@@ -108,6 +108,8 @@ Exceptions are an allowlist inside the change-check script, one entry (function 
 
 ### 7. Inventory of hand-rolled variants
 
+The next-step decision rules and their copies are inventoried in [DISPATCHER-DECISIONS.md](../DISPATCHER-DECISIONS.md#decision-rules) (issue #555).
+
 Source: `main` at `976e95f`. **B1** = verified write, **B2** = own-account markers, **B3** = saved state. The ten functions named in #431 are in bold.
 
 `scripts/dispatcher-invoke.sh`:

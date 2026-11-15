@@ -51,10 +51,11 @@ def test_rule_names_are_unique() -> None:
 
 
 def test_comparison_fails_on_a_missing_rule(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rules, "RULES", rules.RULES[1:])
+    registered = rules.RULES
+    monkeypatch.setattr(rules, "RULES", registered[1:])
     with pytest.raises(AssertionError, match="not in the registry"):
         test_inventory_and_registry_name_the_same_rules()
-    monkeypatch.setattr(rules, "RULES", rules.RULES + (rules.Rule(
+    monkeypatch.setattr(rules, "RULES", registered + (rules.Rule(
         name="extra_rule", decides="x", owner="scripts/x.sh",
         implementations=(rules.Implementation("scripts/x.sh", "x"),)),))
     with pytest.raises(AssertionError, match="not in the inventory"):
@@ -89,3 +90,18 @@ def test_inventory_rows_name_each_implementation_marker() -> None:
 def test_inventory_is_linked_from_config_and_adr_014() -> None:
     assert "DISPATCHER-DECISIONS.md" in CONFIG.read_text(encoding="utf-8")
     assert "DISPATCHER-DECISIONS.md" in ADR_014.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("rule", rules.RULES, ids=lambda rule: rule.name)
+def test_entry_points_and_tests_are_real(rule: rules.Rule) -> None:
+    assert rule.entry_points and set(rule.entry_points) <= set(rules.ENTRY_POINTS), rule.name
+    assert rule.tests, rule.name
+    for test in rule.tests:
+        assert (ROOT / test).is_file(), f"{rule.name}: {test} does not exist"
+
+
+def test_inventory_marks_exactly_the_suspected_disagreements() -> None:
+    text = section(INVENTORY.read_text(encoding="utf-8"))
+    rows = {match.group(1): line for line in text.splitlines() if (match := ROW.match(line))}
+    for rule in rules.RULES:
+        assert ("**Suspected:**" in rows[rule.name]) == bool(rule.divergence), rule.name
