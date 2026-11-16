@@ -17,18 +17,20 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .admission import check_start, classify_executable_type, executor_labels
 from .board_sync import sync_board
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
 from .in_flight import plan as plan_in_flight
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
-from .scheduler import next_action
+from .scheduler import InvalidLimits, load_limits, next_action
 from .session_blocker import read_session_blocker
 from .state import FILE_NAMES, read_pending, read_state, write_state
 from .status import read_status
 from .write import (
     DEFAULT_ATTEMPTS,
     EXIT_INVALID,
+    EXIT_UNREADABLE,
     Result,
     Settings,
     retry_pending,
@@ -46,7 +48,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all", "admission")
 
 
 class InvalidArguments(Exception):
@@ -230,7 +232,51 @@ def build_parser() -> argparse.ArgumentParser:
     catch_all = blocks.add_parser("catch-all", add_help=False)
     catch_all_ops = catch_all.add_subparsers(dest="operation", parser_class=_Parser)
     catch_all_ops.add_parser("numbers", add_help=False)
+    admission = blocks.add_parser("admission", add_help=False)
+    admission_ops = admission.add_subparsers(dest="operation", parser_class=_Parser)
+    admission_ops.add_parser("limits", add_help=False)
+    a_type = admission_ops.add_parser("type", add_help=False)
+    a_type.add_argument("--labels", default="")
+    a_type.add_argument("--native", default="")
+    a_executor = admission_ops.add_parser("executor", add_help=False)
+    a_executor.add_argument("--labels", default="")
+    admission_ops.add_parser("start", add_help=False)  # reads {"target_body", "active", "limit"} from stdin
     return parser
+
+
+def _run_admission(args: argparse.Namespace) -> int:
+    """The admission rules of ``admission.py`` for Bash callers; no GitHub call, no repository."""
+
+    def emit(operation: str, ok: bool, **fields: object) -> int:
+        print(json.dumps({"ok": ok, "block": "admission", "operation": operation, **fields}))
+        return 0 if ok else 1
+
+    if args.operation == "limits":
+        try:
+            limits = load_limits(os.environ)
+        except InvalidLimits as exc:
+            for problem in exc.problems:
+                print(f"[LIMITS ERROR] {problem} — starting nothing", file=sys.stderr)
+            return emit("limits", False, result="invalid", problems=exc.problems)
+        return emit("limits", True, result="valid", limits=limits.to_dict())
+    if args.operation == "type":
+        executable, detail = classify_executable_type(args.labels.split(), args.native)
+        return emit("type", executable, result="executable" if executable else "not-executable", detail=detail)
+    if args.operation == "executor":
+        labels = executor_labels(args.labels.split())
+        return emit("executor", bool(labels), result="found" if labels else "none", labels=labels,
+                    first=labels[0] if labels else "", count=len(labels))  # fmt: skip
+    try:
+        data = json.loads(sys.stdin.read())
+        body, active, limit = str(data["target_body"]), list(data["active"]), int(data["limit"])
+        if limit < 1 or not all(isinstance(item, dict) for item in active):
+            raise ValueError("limit or active items")
+    except (ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"ok": False, "block": "admission", "operation": "start", "result": "unreadable",
+                          "error": mask_tokens(f"input: {exc}")}))  # fmt: skip
+        return EXIT_UNREADABLE
+    decision = check_start(body, active, limit)
+    return emit("start", decision["result"] == "pass", **decision)
 
 
 def _run_catch_all_numbers() -> int:
@@ -270,8 +316,9 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher in-flight plan ... "
             "| hpw dispatcher session-blocker read ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
-            "| hpw dispatcher catch-all numbers")
-    if args.block == "catch-all":
+            "| hpw dispatcher catch-all numbers "
+            "| hpw dispatcher admission limits|type|executor|start ...")
+    if args.block in ("catch-all", "admission"):
         return  # reads a constant: no repository
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
@@ -455,6 +502,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
 
     if args.block == "catch-all":
         return _run_catch_all_numbers()
+    if args.block == "admission":
+        return _run_admission(args)
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")

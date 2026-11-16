@@ -104,7 +104,7 @@ SINCE_TS="${SINCE}T00:00:00Z"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/limits.sh
 source "$SCRIPT_DIR/lib/limits.sh"
-load_limits || exit 2
+read_limits || exit 2
 STALE_2H_TS=$((NOW_TS - 7200))
 
 # ─── API helpers ──────────────────────────────────────────────────────────────

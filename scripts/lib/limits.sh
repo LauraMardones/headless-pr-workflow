@@ -9,37 +9,25 @@
 #   READY_BUFFER_MIN          fewest stories kept in "Ready to implement" (0 or more)
 #   READY_BUFFER_MAX          most stories kept in "Ready to implement" (MIN or more)
 #
-# Source this file and call load_limits. On success it sets the three variables
+# Source this file and call read_limits. On success it sets the three variables
 # to their decimal values ("08" becomes 8). On a missing, empty or invalid value
 # it logs one [LIMITS ERROR] line per problem to stderr, names the variable and
 # the value, and returns 1; the caller starts nothing, like [USAGE LIMIT ERROR].
 #
-# Requires: bash 4+
+# The check itself is `load_limits` in src/headless_pr_workflow/dispatcher/scheduler.py
+# (issue #557); `hpw dispatcher admission limits` runs it and this function only
+# reads its JSON. There is no rule here.
+#
+# Requires: bash 4+, jq, HPW_BIN (defaults to scripts/hpw)
 
-load_limits() {
-    local failed=false name value
-    for name in WIP_LIMIT_IMPLEMENTATION READY_BUFFER_MIN READY_BUFFER_MAX; do
-        value="${!name-}"
-        if [[ -z "$value" ]]; then
-            echo "[LIMITS ERROR] $name is not set or is empty — starting nothing" >&2
-            failed=true
-        elif [[ ! "$value" =~ ^[0-9]+$ ]]; then
-            echo "[LIMITS ERROR] $name is not a whole number (value: \"$value\") — starting nothing" >&2
-            failed=true
-        else
-            value=$((10#$value))
-            if [[ "$name" == "WIP_LIMIT_IMPLEMENTATION" && $value -lt 1 ]]; then
-                echo "[LIMITS ERROR] $name must be 1 or more (value: \"${!name}\") — starting nothing" >&2
-                failed=true
-            else
-                printf -v "$name" '%s' "$value"
-            fi
-        fi
-    done
-    $failed && return 1
-    if (( READY_BUFFER_MIN > READY_BUFFER_MAX )); then
-        echo "[LIMITS ERROR] READY_BUFFER_MIN ($READY_BUFFER_MIN) is greater than READY_BUFFER_MAX ($READY_BUFFER_MAX) — starting nothing" >&2
-        return 1
-    fi
+read_limits() {
+    local hpw="${HPW_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/hpw}" out
+    # The error lines go to this function's stderr; a failure to run or read
+    # the result fails closed like an invalid value.
+    out=$("$hpw" dispatcher admission limits) || return 1
+    WIP_LIMIT_IMPLEMENTATION=$(jq -er '.limits.WIP_LIMIT_IMPLEMENTATION' <<< "$out") \
+        && READY_BUFFER_MIN=$(jq -er '.limits.READY_BUFFER_MIN' <<< "$out") \
+        && READY_BUFFER_MAX=$(jq -er '.limits.READY_BUFFER_MAX' <<< "$out") \
+        || { echo "[LIMITS ERROR] the limits could not be read — starting nothing" >&2; return 1; }
     return 0
 }

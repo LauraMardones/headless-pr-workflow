@@ -35,7 +35,7 @@ def load(**values):
     """Source the shared check with exactly these variables; print what it set."""
     env = {k: v for k, v in host_env().items() if k not in VARIABLES}
     env.update({k: v for k, v in values.items() if v is not None})
-    script = f'source "{LIB.as_posix()}"; load_limits && echo "$WIP_LIMIT_IMPLEMENTATION $READY_BUFFER_MIN $READY_BUFFER_MAX"'
+    script = f'source "{LIB.as_posix()}"; read_limits && echo "$WIP_LIMIT_IMPLEMENTATION $READY_BUFFER_MIN $READY_BUFFER_MAX"'
     return subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True)
 
 

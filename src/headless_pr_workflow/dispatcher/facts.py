@@ -27,7 +27,7 @@ STORY_TYPES = ("story", "task", "bug")
 KNOWN_TYPES = ("epic", "feature", *STORY_TYPES)
 
 # Own copies of the rules of scripts/refine-check (SPEC_LINE, parse_sections, hard_dependencies);
-# tests/test_dispatcher_facts_block.py checks that they agree.
+#
 SPEC_LINE = re.compile(r"^[ \t]*Spec:\s*\[`([^`]+)`\]\((\S+)\)\s+at\s+`([0-9a-fA-F]{7,40})`(?:\s.*)?$", re.M)
 _PARENT_EPIC = re.compile(r"^[ \t]*Parent epic:\s*#(\d+)\b", re.I | re.M)
 _FEATURE_GROUP = re.compile(r"^[ \t]*Feature group:\s*#(\d+)\b", re.I | re.M)
@@ -63,9 +63,10 @@ def parse_sections(body: str) -> dict[str, str]:
 def files_affected(body: str) -> list[str] | None:
     """The paths under ``## Files affected``; ``None`` when the section is missing.
 
-    Own copy of ``extract_files`` in scripts/dispatcher-invoke.sh: the section runs from the first line that starts
+    The one parser (issue #557; the pre-flight of scripts/dispatcher-invoke.sh reads it through
+    ``hpw dispatcher admission start``): the section runs from the first line that starts
     with ``## Files affected`` to the next line that starts with ``##``; each ``- `` item loses its backticks and a
-    ``(note)``. tests/test_dispatcher_facts_block.py checks that they agree.
+    ``(note)``.
     """
 
     lines = body.replace("\r\n", "\n").split("\n")
@@ -118,7 +119,7 @@ def unnumbered_dependencies(sections: dict[str, str]) -> list[str]:
 
     Entries are the text on the label line and each list item (or loose paragraph) after it, up to the next
     ``Soft depends on`` / ``Revalidate after`` line. Own copy of the rule in scripts/refine-check;
-    tests/test_dispatcher_facts_block.py checks that they agree.
+   
     """
 
     entries: list[list[str]] = []

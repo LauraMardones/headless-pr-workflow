@@ -77,7 +77,7 @@ chmod +x "$FAKE_BIN/gate"
 # in-flight rule (issue #475) runs for real; no account is known.
 cat > "$FAKE_BIN/hpw" << HPWMOCK
 #!/usr/bin/env bash
-if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" ]]; then
+if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" || "\${1:-} \${2:-}" == "dispatcher admission" ]]; then
     shift; PYTHONPATH="$REPO_ROOT/src" exec "$PYTHON" -m headless_pr_workflow.dispatcher "\$@"
 fi
 if [[ "\${1:-} \${2:-}" == "dispatcher scheduler" ]]; then

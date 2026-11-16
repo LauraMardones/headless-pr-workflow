@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..review_policy import CODEX_EXECUTOR_LABEL
+from .admission import overlapping_paths, wip_reached
 from .facts import STORY_TYPES, read_facts
 from .gateway import Gateway
 from .write import EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, log
@@ -35,7 +36,11 @@ _NO_RANK = 1_000_000
 
 
 class InvalidLimits(Exception):
-    """``str(exc)`` names each variable that cannot be used and its value."""
+    """``str(exc)`` names each variable that cannot be used and its value; ``problems`` lists them one by one."""
+
+    def __init__(self, *problems: str) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = list(problems)
 
 
 @dataclass(frozen=True)
@@ -66,7 +71,7 @@ def load_limits(env: Mapping[str, str]) -> Limits:
         else:
             values[name] = int(raw)
     if problems:
-        raise InvalidLimits("; ".join(problems))
+        raise InvalidLimits(*problems)
     if values["READY_BUFFER_MIN"] > values["READY_BUFFER_MAX"]:
         raise InvalidLimits(f"READY_BUFFER_MIN ({values['READY_BUFFER_MIN']}) is greater than "
                             f"READY_BUFFER_MAX ({values['READY_BUFFER_MAX']})")  # fmt: skip
@@ -285,7 +290,7 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
 
     # ── Implementation start: step 5 ─────────────────────────────────────────
     starts = [s for s in stories if s.get("ready") and not s.get("stale") and s["number"] not in active]
-    if starts and len(implementing) >= limits.wip:
+    if starts and wip_reached(len(implementing), limits.wip):
         for entry in starts:
             skip(entry["number"], "wip-limit")
     elif starts:
@@ -307,9 +312,9 @@ def choose_next(facts: Mapping[str, Any], *, in_implementation: Sequence[int], l
                     continue
                 if mine is None or overlap:
                     continue
-                path = next((p for p in mine if p in theirs), None)
-                if path is not None:
-                    overlap = f"file-overlap #{other} {path}"
+                paths = overlapping_paths(mine, theirs)
+                if paths:
+                    overlap = f"file-overlap #{other} {paths[0]}"
             if overlap:
                 skip(entry["number"], overlap)
             else:

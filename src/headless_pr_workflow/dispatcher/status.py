@@ -20,6 +20,7 @@ import os
 import re
 from typing import Any, Mapping
 
+from .admission import known_type
 from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, read_facts
 from .gateway import Gateway, GatewayError
 from .scheduler import _refine_gate
@@ -132,8 +133,7 @@ def count_progress(items: list[Mapping[str, Any]]) -> dict[str, dict[int, dict[s
 
 
 def _kind(issue: Mapping[str, Any]) -> str | None:
-    kinds = [label.split(":", 1)[1] for label in _labels(dict(issue)) if label.startswith("type:")]
-    return next((k for k in kinds if k in KNOWN_TYPES), None)
+    return known_type(_labels(dict(issue)))
 
 
 def _linked(body: str, number: int) -> bool:
