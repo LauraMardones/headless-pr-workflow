@@ -105,24 +105,28 @@ def test_invoke_runs_dry_run_when_not_the_state_writer():
 
 # ── the board status writer step (issue #478) ────────────────────────────────
 
-def test_board_status_step_runs_after_invoke_and_before_the_trigger_check():
-    names = [n for n, _ in steps()]
-    assert names.index("Run dispatcher invoke") < names.index("Notify usage limit reached") \
-        < names.index("Write the board status") < names.index("Check the dispatch trigger")
+def board_job() -> str:
+    return WORKFLOW.read_text().split("\n  board-status:\n", 1)[1]
+
+
+def test_board_status_step_runs_in_its_own_job_after_dispatch():
+    assert "    needs: dispatch" in board_job()
+    dispatch = WORKFLOW.read_text().split("\n  board-status:\n", 1)[0]
+    assert "Write the board status" not in dispatch.split("jobs:", 1)[1]
 
 
 def test_board_status_step_runs_every_enabled_run_even_after_a_failed_or_skipped_invoke():
     body = step("Write the board status")
     # Not tied to the poll or invoke outputs: it runs when there was no work, when invoke was
     # skipped and when it failed; !cancelled() keeps it running after a failure, and only the guard stops it.
-    assert step_if(body) == "${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}"
+    assert step_if(body) == "${{ !cancelled() && needs.dispatch.outputs.enabled == 'true' }}"
     assert "steps.poll" not in step_if(body) and "steps.invoke" not in step_if(body)
-    assert "timeout-minutes: 10" in body
+    assert "timeout-minutes: 10" in board_job()
     assert "continue-on-error" not in body
 
 
 def test_board_status_step_uses_the_project_token_and_the_state_writer_rule():
     body = step("Write the board status")
-    assert "GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}" in body
-    assert "STATE_WRITER: ${{ steps.scope.outputs.state_writer }}" in body
+    assert "GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}" in board_job()
+    assert "STATE_WRITER: ${{ needs.dispatch.outputs.state_writer }}" in board_job()
     assert "run: bash scripts/dispatcher-workflow-step.sh status-sync" in body
