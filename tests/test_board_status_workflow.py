@@ -189,7 +189,9 @@ def test_recorded_story_event_to_verified_board_write_replay(monkeypatch):
     """Measure a local replay of #490/#568 through the production board writer.
 
     This measures a local serialized queue and fake-GitHub read/write transport,
-    not GitHub runner scheduling or network latency. E6 closure checks those live.
+    not GitHub runner scheduling or network latency. AC 2 separately requires
+    actual hosted event, queue/start and verified-write timestamps before the
+    implementation handoff; this replay cannot satisfy that timing requirement.
     The timestamps of the source events are retained separately from replay times.
     """
     from headless_pr_workflow.dispatcher.board_sync import sync_board

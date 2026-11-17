@@ -95,3 +95,11 @@ def test_thread_only_changes_use_the_po_approved_per_run_fallback():
     assert "PO option A" in section()
     assert "next per-run write" in section()
     assert "two-minute bound does not apply to thread-only changes" in section()
+
+
+def test_local_replay_does_not_replace_hosted_timing_acceptance():
+    text = section()
+    assert "local fake-transport replay does not establish hosted event-to-board latency" in text
+    assert "actual event, workflow queue/start and verified board-write timestamps" in text
+    assert "required before the implementation handoff" in text
+    assert "E6 closure also verifies" in text
