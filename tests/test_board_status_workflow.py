@@ -8,7 +8,12 @@ the production guard/scope/status-sync against the existing fake gateway.
 from __future__ import annotations
 
 import re
+import json
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event, Thread
+from time import perf_counter
 
 import pytest
 
@@ -178,3 +183,79 @@ def test_recorded_story_stages_while_the_dispatcher_session_is_still_running(dra
     facts = {"type": "story", "state": "open", "refined": True, "spec_merged": True,
              "ready": True, "prs": [{"number": 568, "draft": draft, "gates_pass": False}]}
     assert derive_status(facts)[0] == expected
+
+
+def test_recorded_story_event_to_verified_board_write_replay(monkeypatch):
+    """Measure a local replay of #490/#568 through the production board writer.
+
+    This measures a local serialized queue and fake-GitHub read/write transport,
+    not GitHub runner scheduling or network latency. E6 closure checks those live.
+    The timestamps of the source events are retained separately from replay times.
+    """
+    from headless_pr_workflow.dispatcher.board_sync import sync_board
+    from tests.test_dispatcher_board_sync import SETTINGS, SyncGateway
+    from tests.test_dispatcher_facts_block import PO, spec_line, story_body, summary
+
+    monkeypatch.setenv("DECISION_BLOCKER_PO_LOGIN", PO)
+    gateway = SyncGateway()
+    gateway.add_issue(10, ["type:epic"], spec_line())
+    gateway.comment(10, summary())
+    gateway.add_issue(20, ["type:feature"], story_body(feature=20))
+    gateway.comment(20, summary())
+    gateway.add_issue(490, ["type:story"], story_body())
+    gateway.comment(490, summary())
+    gateway.card(10, "In progress", kind="epic")
+    gateway.card(20, "In progress", kind="feature")
+    gateway.card(490, "Ready to implement")
+    assert sync_board(gateway, "o/r", settings=SETTINGS).exit_code == 0
+
+    running, finish = Event(), Event()
+    def session():
+        running.set()
+        finish.wait(120)
+    dispatcher = Thread(target=session)
+    dispatcher.start()
+    rows = []
+    try:
+        assert running.wait(5)
+        # One executor models the shared writer group; the session has its own
+        # lane, so waiting for the session cannot serialize these writes.
+        with ThreadPoolExecutor(max_workers=1) as writer:
+            for event, source_at, expected in (
+                ("opened", "2026-11-15T09:43:41Z", "In implementation"),
+                ("ready_for_review", "2026-11-15T09:48:20Z", "In review"),
+                ("closed/merged", "2026-11-15T10:06:43Z", "Done"),
+            ):
+                if event == "opened":
+                    gateway.add_pr(568, "Closes #490", draft=True)
+                elif event == "ready_for_review":
+                    gateway.prs[0]["draft"] = False
+                    gateway.gates[568] = False
+                else:
+                    gateway.issues = [i for i in gateway.issues if i["number"] != 490]
+                    gateway.add_closed(490, ["type:story"], story_body())
+                    gateway.prs.clear()
+                    gateway.board[490]["state"] = "closed"
+
+                event_at = datetime.now(timezone.utc).isoformat()
+                submitted = perf_counter()
+                def write():
+                    started = perf_counter()
+                    result = sync_board(gateway, "o/r", settings=SETTINGS)
+                    ended = perf_counter()
+                    return result, started, ended, datetime.now(timezone.utc).isoformat()
+                result, started, ended, changed_at = writer.submit(write).result(timeout=120)
+                assert result.exit_code == 0 and gateway.board[490]["status"] == expected
+                correction = next(c for c in result.fields["corrections"] if c["issue"] == 490)
+                assert correction["result"] == "written"
+                assert dispatcher.is_alive() and not finish.is_set()
+                assert 0 <= started - submitted <= ended - submitted < 120
+                rows.append({"event": event, "source_event_at": source_at, "replay_event_at": event_at,
+                             "board_changed_at": changed_at, "status": expected,
+                             "queue_ms": round((started - submitted) * 1000, 3),
+                             "sync_ms": round((ended - started) * 1000, 3),
+                             "total_ms": round((ended - submitted) * 1000, 3)})
+    finally:
+        finish.set()
+        dispatcher.join(timeout=5)
+    print("BOARD_STATUS_REPLAY " + json.dumps(rows))
