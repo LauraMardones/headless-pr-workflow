@@ -73,8 +73,8 @@ def test_required_actions_check_completion_uses_workflow_run():
 
 
 def test_webhook_only_thread_event_is_not_an_invalid_actions_trigger():
-    # GitHub's Actions event reference does not support this webhook. #573
-    # remains blocked on its delivery contract; a green suite cannot waive it.
+    # GitHub's Actions event reference does not support this webhook. PO
+    # option A on #573 explicitly leaves thread-only changes to the per-run write.
     assert "pull_request_review_thread" not in triggers(EVENT.read_text(encoding="utf-8"))
 
 

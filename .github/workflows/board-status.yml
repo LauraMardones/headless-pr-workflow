@@ -8,7 +8,7 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
   # Review-thread resolved/unresolved are webhook-only, not Actions triggers.
-  # Their delivery needs a scope decision on #573 before this PR is ready.
+  # PO option A (#573): the next per-run write corrects thread-only changes.
   # check_run/check_suite do not deliver completions of Actions-created checks.
   workflow_run:
     workflows: [tests]

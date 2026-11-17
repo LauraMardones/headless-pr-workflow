@@ -91,6 +91,7 @@ def test_no_retired_name_and_no_removed_status_outside_the_migration_steps():
     assert [name for name in REMOVED if name in rest] == []
 
 
-def test_pending_thread_delivery_is_not_claimed_as_working():
-    assert "Pending delivery decision (#573)" in section()
-    assert "PR must stay draft" in section()
+def test_thread_only_changes_use_the_po_approved_per_run_fallback():
+    assert "PO option A" in section()
+    assert "next per-run write" in section()
+    assert "two-minute bound does not apply to thread-only changes" in section()

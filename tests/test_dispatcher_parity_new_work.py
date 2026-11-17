@@ -244,11 +244,9 @@ STEP5 = _between("# ─── Step 5: WIP limit check", "# ─── Step 6: Fil
 STEP6 = _between("# ─── Step 6: File overlap check", "# ─── All checks passed")
 HAND_OFF_CHECK = 'if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then'  # the review path after /implement
 assert HAND_OFF_CHECK in INVOKE_TEXT, "the review-path check after /implement was not found"
-EXECUTABLE = re.search(r'^EXECUTABLE_ISSUE_TYPES="[^"]*"$', INVOKE_TEXT, re.MULTILINE)
-assert EXECUTABLE, "EXECUTABLE_ISSUE_TYPES not found in scripts/dispatcher-invoke.sh"
 INVOKE_PIECES = "\n".join([
-    EXECUTABLE.group(0), _declare("EXECUTOR_ROUTING"), _declare("EXECUTOR_PROVIDER"), _declare("EXECUTOR_MODEL"),
-    *(_function(name) for name in ("extract_files", "classify_issue_type", "ask_scheduler", "next_new_work",
+    _declare("EXECUTOR_ROUTING"), _declare("EXECUTOR_PROVIDER"), _declare("EXECUTOR_MODEL"),
+    *(_function(name) for name in ("admission_issue_type", "admission_executor", "ask_scheduler", "next_new_work",
                                    "load_story_context", "is_review_loop_story", "read_resume_facts",
                                    "resume_session_allowed")),
 ])  # fmt: skip
@@ -281,7 +279,7 @@ def bash(tmp: Path, f: dict[str, Any], body_text: str) -> tuple[int, str, str]:
         'RESUME_FACTS_JSON=""', 'RESUME_FACTS_ERROR=""', "STORY_EXECUTOR_LABEL_COUNT=0",
         *(f'source "{(LIB / name).as_posix()}"' for name in ("review-routing.sh", "in-flight.sh", "scheduler.sh",
                                                              "limits.sh")),
-        INVOKE_PIECES, FAKE_GH, 'load_limits || exit 9; WIP_LIMIT="$WIP_LIMIT_IMPLEMENTATION"', body_text])  # fmt: skip
+        INVOKE_PIECES, FAKE_GH, 'read_limits || exit 9; WIP_LIMIT="$WIP_LIMIT_IMPLEMENTATION"', body_text])  # fmt: skip
     env = {**windows_env(), **f["limits"], "PATH": os.environ.get("PATH", ""), "DECISION_BLOCKER_PO_LOGIN": PO}
     proc = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, timeout=120, check=False)
     return proc.returncode, proc.stdout.strip(), proc.stderr
@@ -393,7 +391,7 @@ def limits_valid_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Mon
         python = "invalid"
     exports = "".join(f"export {name}={json.dumps(value)}\n" for name, value in env.items())
     unset = "unset WIP_LIMIT_IMPLEMENTATION READY_BUFFER_MIN READY_BUFFER_MAX\n"
-    rc, out, _ = bash(tmp, world(), unset + exports + 'load_limits && echo "$WIP_LIMIT_IMPLEMENTATION/$READY_BUFFER_MIN/'
+    rc, out, _ = bash(tmp, world(), unset + exports + 'read_limits && echo "$WIP_LIMIT_IMPLEMENTATION/$READY_BUFFER_MIN/'
                                                       '$READY_BUFFER_MAX" || echo invalid')  # fmt: skip
     return {"scheduler.py:load_limits": python, "limits.sh:load_limits": out if rc == 0 else f"exit {rc}"}
 
