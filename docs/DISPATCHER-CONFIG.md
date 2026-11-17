@@ -129,11 +129,13 @@ The board is a display. One command writes its Status field: `hpw dispatcher sta
 **When it runs.** `.github/workflows/dispatcher.yml` has a separate `board-status` job with the step "Write the board status". `.github/workflows/board-status.yml` runs the same step on events. Both run `bash scripts/dispatcher-workflow-step.sh status-sync`, which runs `hpw dispatcher status sync --repo <owner/repo>`:
 
 - once per dispatcher run, after the `dispatch` job, with `needs: dispatch` and `if: ${{ !cancelled() && needs.dispatch.outputs.enabled == 'true' }}`;
-- on PR opened, reopened, converted to draft, ready for review, synchronize and closed (merged or not); PR review submitted or dismissed; review thread resolved or unresolved; completion of the `tests` workflow (the required pytest check); issue opened, closed or reopened; and issue or PR comment created. Label changes, body edits and project events start no write;
+- on PR opened, reopened, converted to draft, ready for review, synchronize and closed (merged or not); PR review submitted or dismissed; completion of the `tests` workflow (the required pytest check); issue opened, closed or reopened; and issue or PR comment created. Label changes, body edits and project events start no write;
 - only when `DISPATCHER_ENABLED` is `true` (the guard step); a paused dispatcher writes no status. The writer itself does not read `DISPATCHER_ENABLED`;
 - also when the poll found no work, when the invoke step was skipped and when it failed, so a card moved by hand is corrected on the next run. The `dispatch` job passes the guard and scope outputs to the writer job; no poll or invoke success condition gates it;
 - with `--dry-run` unless `STATE_WRITER=true`: a run off the default branch only reports what it would write, like the poll;
 - with `GH_TOKEN` set to `PROJECT_TOKEN` and a 10-minute timeout.
+
+**Pending delivery decision (#573).** GitHub supports review thread resolved or unresolved as webhooks, but not as Actions workflow triggers. These changes currently wait for the per-run write. The requested direct delivery and its two-minute evidence remain blocked; the PR must stay draft until the delivery contract is decided. The two-minute target below is not verified by the workflow structure tests.
 
 **Event latency and serialization.** The board follows each event within two minutes, including while a dispatcher session runs: queue time plus one whole-board sync. Both writer jobs share `board-status-${{ github.repository }}` with `cancel-in-progress: false`. The dispatcher run keeps `dispatcher-${{ github.repository }}`; the event workflow has no dispatcher group. GitHub runs one writer at a time, keeps one pending write and replaces an older pending write; every write reads all facts when it starts. Events start no session and leave the five-minute dispatcher trigger unchanged. A queue or sync exceeding two minutes is a decision blocker, not permission for a second writer.
 

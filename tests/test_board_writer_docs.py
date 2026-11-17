@@ -54,7 +54,7 @@ def test_both_docs_describe_event_writes_latency_serialization_and_pause():
         for phrase in ("within two minutes", "board-status-${{ github.repository }}",
                        "cancel-in-progress: false", "paused", "DISPATCHER_ENABLED",
                        "converted to draft", "ready for review", "synchronize", "reopened",
-                       "review submitted or dismissed", "thread resolved or unresolved",
+                       "review submitted or dismissed",
                        "workflow_run", "comment created", "Label changes, body edits and project events"):
             assert phrase in text, phrase
 
@@ -89,3 +89,8 @@ def test_no_retired_name_and_no_removed_status_outside_the_migration_steps():
     rest = DOC.replace(migration(), "")
     assert [name for name in RETIRED if name in DOC] == []
     assert [name for name in REMOVED if name in rest] == []
+
+
+def test_pending_thread_delivery_is_not_claimed_as_working():
+    assert "Pending delivery decision (#573)" in section()
+    assert "PR must stay draft" in section()

@@ -7,8 +7,8 @@ on:
     types: [opened, reopened, converted_to_draft, ready_for_review, synchronize, closed]
   pull_request_review:
     types: [submitted, dismissed]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+  # Review-thread resolved/unresolved are webhook-only, not Actions triggers.
+  # Their delivery needs a scope decision on #573 before this PR is ready.
   # check_run/check_suite do not deliver completions of Actions-created checks.
   workflow_run:
     workflows: [tests]

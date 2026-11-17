@@ -23,7 +23,6 @@ GROUP = "board-status-${{ github.repository }}"
 EVENTS = {
     "pull_request_target": {"opened", "reopened", "converted_to_draft", "ready_for_review", "synchronize", "closed"},
     "pull_request_review": {"submitted", "dismissed"},
-    "pull_request_review_thread": {"resolved", "unresolved"},
     "workflow_run": {"completed"},
     "issues": {"opened", "closed", "reopened"},
     "issue_comment": {"created"},
@@ -71,6 +70,12 @@ def test_required_actions_check_completion_uses_workflow_run():
     assert "    workflows: [tests]\n    types: [completed]" in text
     assert "name: tests" in (ROOT / ".github/workflows/tests.yml").read_text()
     assert not ({"check_run", "check_suite"} & triggers(text).keys())
+
+
+def test_webhook_only_thread_event_is_not_an_invalid_actions_trigger():
+    # GitHub's Actions event reference does not support this webhook. #573
+    # remains blocked on its delivery contract; a green suite cannot waive it.
+    assert "pull_request_review_thread" not in triggers(EVENT.read_text(encoding="utf-8"))
 
 
 def test_events_run_only_existing_step_commands_and_no_session():
