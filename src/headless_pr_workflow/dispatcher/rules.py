@@ -80,15 +80,11 @@ def _rule(name: str, decides: str, owner: str, impls: list[tuple[str, str]], ent
 
 
 RULES: tuple[Rule, ...] = (
-    _rule("linked_pr_lookup", "Which open PR is a story's linked PR.", IN_FLIGHT_SH,
-          [(IN_FLIGHT_SH, "INFLIGHT_JQ_LINKED"), (INVOKE, "find_linked_pr_json"), (INVOKE, "find_linked_pr"),
-           (STATUS, "_linked"), (CODEX_WORKER, "_CLOSES")],
+    _rule("linked_pr_lookup", "Which open PR is a story's linked PR.", FACTS,
+          [(FACTS, "closes_issue"), (FACTS, "linked_pr")],
           "poll invoke resume codex-worker",
           "test_dispatcher_poll_pagination.sh test_dispatcher_status.py test_codex_worker.py "
-          "test_dispatcher_review_loop.py",
-          "`find_linked_pr_json` reads only the first 100 open PRs, `INFLIGHT_JQ_LINKED` every page; `_CLOSES` "
-          "also matches close/closed/fix/fixed/resolve/resolved; `_linked` keeps every linked PR, the jq "
-          "takes the first; `find_linked_pr` has no caller."),
+          "test_dispatcher_review_loop.py test_dispatcher_parity_in_flight.py"),
     _rule("merged_pr_finish", "A story with no open linked PR and a merged one goes to the finish step.", IN_FLIGHT,
           [(IN_FLIGHT, "plan_in_flight"), (IN_FLIGHT_SH, "inflight_compute"), (INVOKE, "find_merged_linked_pr")],
           "poll resume",
@@ -270,8 +266,7 @@ RULES: tuple[Rule, ...] = (
           CODEX_WORKER,
           [(CODEX_WORKER, "resolve_resume")],
           "codex-worker",
-          "test_codex_worker.py",
-          "the foreign-PR check uses the broader `_CLOSES` pattern of `linked_pr_lookup`."),
+          "test_codex_worker.py"),
     _rule("codex_eligibility_reserve", "Whether the Codex worker may start new work given the Claude reserve.",
           CODEX_RESERVE,
           [(CODEX_RESERVE, "below_reserve"), (CODEX_RESERVE, "is_new_work")],
