@@ -1,0 +1,62 @@
+# Whole-board refresh only: no dispatcher session or second writer (issue #573).
+name: Board status
+
+on:
+  # Read trusted base code, including when a PR conflicts or comes from a fork.
+  pull_request_target:
+    types: [opened, reopened, converted_to_draft, ready_for_review, synchronize, closed]
+  pull_request_review:
+    types: [submitted, dismissed]
+  # Review-thread resolved/unresolved are webhook-only, not Actions triggers.
+  # PO option A (#573): the next per-run write corrects thread-only changes.
+  # check_run/check_suite do not deliver completions of Actions-created checks.
+  workflow_run:
+    workflows: [tests]
+    types: [completed]
+  issues:
+    types: [opened, closed, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  board-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: board-status-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+      DECISION_BLOCKER_PO_LOGIN: LauraMardones
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout board writer
+        uses: actions/checkout@v4
+        with:
+          # Reviews use refs/pull/N/merge; execute the trusted base instead.
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Guard — check DISPATCHER_ENABLED
+        id: guard
+        env:
+          DISPATCHER_ENABLED: ${{ vars.DISPATCHER_ENABLED }}
+        run: bash scripts/dispatcher-workflow-step.sh guard
+
+      - name: Resolve board writer scope
+        if: steps.guard.outputs.enabled == 'true'
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.event.pull_request && format('refs/heads/{0}', github.event.pull_request.base.ref) || github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/dispatcher-workflow-step.sh scope
+
+      - name: Write the board status
+        if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}
+        env:
+          STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
+        run: bash scripts/dispatcher-workflow-step.sh status-sync
