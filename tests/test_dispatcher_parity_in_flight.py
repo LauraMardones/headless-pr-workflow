@@ -147,9 +147,9 @@ cat "$FACTS/gate-$2.txt"
 
 
 def _invoke_readers() -> str:
-    """``inflight_get_all`` and ``inflight_get_page`` as ``scripts/dispatcher-invoke.sh`` defines them."""
+    """The invoke shims read through ``gh`` itself: drop the in-flight readers, so the fake ``gh`` answers."""
 
-    return "unset -f inflight_get_all inflight_get_page\n" + _function("inflight_get_all") + _function("inflight_get_page")
+    return "unset -f inflight_get_all inflight_get_page\n"
 
 
 def _function(name: str) -> str:

@@ -1756,14 +1756,15 @@ invoke_executor_command() {
 
 find_linked_pr_json() {
     local issue_num="$1" prs links
-    prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || return 1
+    # Endpoint first, then --paginate: every page of the open PRs (gh takes the flag in either place).
+    prs=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate | jq -s 'add // []') || return 1
     links=$(inflight_linked "[$issue_num]" "$prs" '[]') || return 1
     jq -c --arg n "$issue_num" '.linked[$n] // empty' <<< "$links"
 }
 
 find_merged_linked_pr() {
     local issue_num="$1" closed links
-    closed=$(inflight_get_page "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100") || return 1
+    closed=$(gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100") || return 1
     links=$(inflight_linked "[$issue_num]" '[]' "$closed") || return 1
     jq -r --arg n "$issue_num" '.merged[$n] // empty' <<< "$links"
 }
