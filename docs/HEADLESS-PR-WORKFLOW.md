@@ -186,6 +186,8 @@ Scripts should cover facts and gates that can be determined mechanically:
 
 Humans and assistants should focus on interpretation, architecture, UX, product judgment, risk assessment, and decisions that cannot be reduced to deterministic checks.
 
+Review churn is measured by `hpw review-rounds`, described in [`REVIEW-ROUNDS.md`](REVIEW-ROUNDS.md).
+
 ## Refinement Pipeline
 
 Issue refinement follows the rolling, just-in-time strategy defined in [`REFINEMENT-PIPELINE.md`](REFINEMENT-PIPELINE.md). That document specifies buffer targets, the usage-feedback loop, parent-linking requirements, and escalation triggers.

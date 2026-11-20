@@ -12,6 +12,13 @@ def test_mvp_commands_are_present():
     assert "merge-pr" in names
 
 
+def test_review_rounds_is_a_registered_report():
+    command = find_command("review-rounds")
+
+    assert command is not None
+    assert (command.command_type, command.status) == ("report", "implemented")
+
+
 def test_command_names_are_unique():
     names = command_names()
 
