@@ -51,4 +51,4 @@ Use the same selection and the same definition for a baseline and a later run, s
 
 Labelled subset (`--flow orchestration-or-critical-path`): 15 PRs, #309, #321, #323, #325, #327, #328, #333–#336, #338, #340, #342, #347, #353; 56 P1 findings and 34 fix rounds.
 
-The hand-made analysis of 2026-10-15 said "about 67" P1 findings over 10 PRs; the recorded data gives 79 over 11 PRs (#313, #327, #328, #334, #336, #338, #341, #342, #353, #354, #355). The report is the baseline from now on; differences are listed in the PR that added the command.
+The hand-made analysis of 2026-10-15 said "about 67" P1 findings over 10 PRs. The recorded data gives 79 over 11 PRs (#313, #327, #328, #334, #336, #338, #341, #342, #353, #354, #355). #353 (13 findings) was merged on 2026-10-15 at 14:13, after the analysis; without it the report gives 66 findings over 10 PRs and the six heaviest are #342 (13), #355 (12), #338 (11), #328 (9), #341 (7) and #327 (6), the set the analysis named. The analysis gave #355 as 13; the data has 12 top-level P1 comments on seven Codex reviews of #355. The report is the baseline from now on.
