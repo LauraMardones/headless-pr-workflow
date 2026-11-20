@@ -26,7 +26,8 @@
 #   (scripts/merge-gate-summary; overridable for tests).
 #
 # For each open Story, Task or Bug the *linked PR* is the first open PR whose
-# body says Closes, Fixes or Resolves #<n>. INFLIGHT_JSON is the rule's output:
+# body names #<n> after a GitHub closing keyword (`hpw dispatcher in-flight
+# linked`, the one linked-PR rule, issue #556). INFLIGHT_JSON is the rule's output:
 #   merge        non-draft linked PR whose merge gates pass on the current head,
 #                ignoring the mergeability gate (policy, checks, approval,
 #                threads and head)
@@ -54,12 +55,17 @@
 
 INFLIGHT_JSON=""
 
-# The linked-PR rule (today's rule in both scripts).
-INFLIGHT_JQ_LINKED='
-def linked($list; $n):
-    [ $list[] | select((.body // "") | ascii_downcase
-        | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")) ][0];
-'
+# inflight_linked <issues-json> <open-prs-json> <closed-prs-json> — prints the
+# linked open PR and the merged linked PR of each issue as `hpw dispatcher
+# in-flight linked` decides them ({"linked": {"<n>": PR|null}, "merged":
+# {"<n>": number|null}}). 1 when the rule cannot be run or read.
+inflight_linked() {
+    local out
+    out=$(jq -nc --argjson issues "$1" --slurpfile open <(printf '%s' "$2") --slurpfile closed <(printf '%s' "$3") \
+            '{issues: $issues, open: $open[0], closed: $closed[0]}' \
+        | "$HPW_BIN" dispatcher in-flight linked --repo "$REPO" --input -) || return 1
+    jq -ce 'select(.result == "read") | {linked, merged}' <<< "$out"
+}
 
 # inflight_gates_pass <pr> <head> — 0 when policy, checks, approval, threads and
 # head pass in the gate line of scripts/merge-gate-summary; mergeability is left
@@ -81,7 +87,7 @@ inflight_gates_pass() {
 inflight_compute() {
     local prs issues closed stories row n comments_count executors review_loop
     local pr_json pr_number pr_head pr_draft merged gates story_comments pr_comments
-    local tmp rows out rc=0
+    local tmp rows out links rc=0
     INFLIGHT_JSON=""
     prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || {
         echo "[IN-FLIGHT] unreadable: the open pull requests could not be read" >&2; return 1; }
@@ -98,6 +104,9 @@ inflight_compute() {
         | sort_by(.number) | .[]' <<< "$issues") \
         || { echo "[IN-FLIGHT] unreadable: the open issues are not a list" >&2; return 1; }
 
+    links=$(inflight_linked "$(jq -sc 'map(.number)' <<< "$stories")" "$prs" "$closed") || {
+        echo "[IN-FLIGHT] unreadable: hpw dispatcher in-flight linked could not decide the linked PRs" >&2; return 1; }
+
     tmp=$(mktemp -d) || { echo "[IN-FLIGHT] unreadable: no temporary directory" >&2; return 1; }
     rows="$tmp/rows.jsonl"
     : > "$rows"
@@ -110,16 +119,14 @@ inflight_compute() {
         if [[ "$(jq 'length' <<< "$executors")" -eq 1 ]]; then
             [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$(jq -r '.[0]' <<< "$executors")]:-}" ]] && review_loop=true
         fi
-        pr_json=$(jq -c --argjson n "$n" "$INFLIGHT_JQ_LINKED"'linked(.; $n) // empty' <<< "$prs")
+        pr_json=$(jq -c --arg n "$n" '.linked[$n] // empty' <<< "$links")
         pr_number=$(jq -r '.number // empty' <<< "$pr_json" 2>/dev/null || true)
         pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json" 2>/dev/null || true)
         pr_draft=$(jq -r '.draft // false' <<< "$pr_json" 2>/dev/null || echo false)
         merged=false gates=false story_comments=null pr_comments=null
 
         if [[ -z "$pr_number" ]]; then
-            merged=$(jq -r --argjson n "$n" 'any(.[]; .merged_at != null
-                and ((.body // "") | ascii_downcase | test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")))' \
-                <<< "$closed") || merged=false
+            merged=$(jq -r --arg n "$n" '.merged[$n] != null' <<< "$links") || merged=false
             # A story with comments may carry an open blocker: it is in flight until /unblock.
             if [[ "$merged" != "true" && "$comments_count" -gt 0 ]]; then
                 story_comments=$(inflight_get_all "repos/$REPO/issues/$n/comments") || {

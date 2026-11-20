@@ -21,7 +21,7 @@ import re
 from typing import Any, Mapping
 
 from .admission import known_type
-from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, read_facts
+from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, linked_pr, read_facts
 from .gateway import Gateway, GatewayError
 from .scheduler import _refine_gate
 from .write import Result, _po_unblocked_after, log
@@ -136,10 +136,6 @@ def _kind(issue: Mapping[str, Any]) -> str | None:
     return known_type(_labels(dict(issue)))
 
 
-def _linked(body: str, number: int) -> bool:
-    return re.search(rf"(closes|fixes|resolves)\s+#{number}\b", body.lower()) is not None
-
-
 def _resolves(body: str) -> bool:
     """An ``Unblocked`` line in a comment that is not itself a declaration (its ``Unblocked when:`` field is no resolution)."""
 
@@ -229,12 +225,12 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
         return gates[key]
 
     def linked(number: int) -> list[dict[str, Any]]:
-        out = []
-        for pr in prs:
-            if _linked(str(pr.get("body") or ""), number):
-                draft = bool(pr.get("draft"))
-                out.append({"number": int(pr["number"]), "draft": draft, "gates_pass": False if draft else gates_pass(pr)})
-        return out
+        # The linked-PR rule (facts.linked_pr): of two open linked PRs the first counts, as on every entry point.
+        pr = linked_pr(prs, number)
+        if pr is None:
+            return []
+        draft = bool(pr.get("draft"))
+        return [{"number": int(pr["number"]), "draft": draft, "gates_pass": False if draft else gates_pass(pr)}]
 
     def blocked_and_reason(number: int, decision: Mapping[str, Any] | None, *, read_own: bool) -> tuple[bool, str | None]:
         """Whether the item has an open blocker, or why that cannot be told. ``read_own``: the facts skipped its comments."""
