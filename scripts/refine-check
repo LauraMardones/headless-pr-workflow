@@ -71,6 +71,7 @@ SORT_HEADING = re.compile(r"^###\s+Catch-all sort\b.*$", re.M)
 
 # Size gate and executor-by-size rule (Epic #418 spec, E7; issue #545).
 MAX_FILES = 10
+ISSUE_LIST_LIMIT = 5000
 MAX_TEST_FILES = 5
 HAIKU_MAX_FILES = 3
 HAIKU_LABEL = "executor:claude-code-haiku"
@@ -94,6 +95,7 @@ class Issue:
     body: str
     labels: tuple[str, ...]
     state: str
+    state_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,23 @@ def read_issue(repo: str, number: int) -> Issue:
         )
     except (ValueError, KeyError, TypeError) as error:
         raise ReadError(f"issue #{number}: payload could not be parsed ({error})") from error
+
+
+def read_issue_list(repo: str, limit: int = ISSUE_LIST_LIMIT) -> list[Issue]:
+    out = _gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", str(limit), "--json",
+               "number,title,body,labels,state,stateReason"], "issue list")
+    try:
+        issues = [
+            Issue(number=int(raw["number"]), title=str(raw["title"]), body=str(raw.get("body") or ""),
+                  labels=tuple(str(label["name"]) for label in raw["labels"]), state=str(raw["state"]),
+                  state_reason=str(raw.get("stateReason") or ""))
+            for raw in json.loads(out)
+        ]
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReadError(f"issue list: payload could not be parsed ({error})") from error
+    if len(issues) >= limit:
+        raise ReadError(f"issue list has {len(issues)} entries, as many as the limit; it may be cut off")
+    return issues
 
 
 def read_repo_labels(repo: str) -> set[str]:
@@ -357,11 +376,12 @@ def size_checks(issue: Issue, effective: str | None, test_reader) -> list[Check]
 
 # --- checks --------------------------------------------------------------------------
 
-def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None, test_reader=None) -> tuple[str | None, list[Check]]:
+def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None, spec_reader=None, test_reader=None, list_reader=None) -> tuple[str | None, list[Check]]:
     issue_reader = issue_reader or read_issue
     labels_reader = labels_reader or read_repo_labels
     spec_reader = spec_reader or spec_exists
     test_reader = test_reader or read_test_sources
+    list_reader = list_reader or read_issue_list
     checks: list[Check] = []
 
     types = type_labels(issue)
@@ -459,6 +479,7 @@ def run_checks(issue: Issue, repo: str, *, issue_reader=None, labels_reader=None
 
     checks.append(spec_record_check(issue, repo, effective, spec_reader))
     checks.append(feature_criteria_check(issue, effective))
+    checks.append(epic_children_have_feature_check(issue, repo, effective, issue_reader, list_reader))
     checks.append(catch_all_sort_check(issue))
     checks.extend(size_checks(issue, effective, test_reader))
     return effective, checks
@@ -500,6 +521,51 @@ def feature_criteria_check(issue: Issue, effective: str | None) -> Check:
         if not match or int(match.group(1)) != wanted or not re.search(r"\bE\d+", match.group(2), re.I):
             return Check("feature_criteria", "fail", f"item {position} does not match '**F{wanted}.<m>** (serves E<n>)'")
     return Check("feature_criteria", "pass", f"{len(items)} criteria use prefix F{wanted} and name an Epic criterion")
+
+
+def _body_ref(body: str, label: str) -> int | None:
+    match = re.search(rf"^[ \t]*{label}:\s*#(\d+)\b", body.replace("\r\n", "\n"), re.I | re.M)
+    return int(match.group(1)) if match else None
+
+
+def _group_problem(group: int | None, ok: bool, owner: str) -> str | None:
+    if group is None:
+        return "no Feature group"
+    return None if ok else f"Feature group #{group} is not {owner}"
+
+
+def epic_children_have_feature_check(issue: Issue, repo: str, effective: str | None, issue_reader, list_reader) -> Check:
+    check_id = "epic_children_have_feature"
+    if effective not in ("epic", "feature"):
+        return Check(check_id, "skip", "only applies to type:epic and type:feature")
+    problems: list[str] = []
+    if effective == "epic":
+        children = [
+            i for i in list_reader(repo)
+            if i.number != issue.number and _body_ref(i.body, "Parent epic") == issue.number
+            and not (i.state.upper() == "CLOSED" and i.state_reason.upper() == "NOT_PLANNED")
+        ]
+        features = {i.number for i in children if "type:feature" in i.labels}
+        for child in sorted(children, key=lambda i: i.number):
+            if child.state.upper() != "OPEN" or not any(f"type:{t}" in child.labels for t in EXECUTABLE_TYPES):
+                continue
+            problem = _group_problem(_body_ref(child.body, "Feature group"), _body_ref(child.body, "Feature group") in features,
+                                     f"a Feature of Epic #{issue.number}")
+            if problem:
+                problems.append(f"#{child.number} {problem}")
+        scope = f"Epic #{issue.number}"
+    else:
+        seed = parse_sections(issue.body).get("Seed Stories", "")
+        listed = sorted({int(n) for n in re.findall(r"#(\d+)", seed)} - {issue.number})
+        for number in listed:
+            group = _body_ref(issue_reader(repo, number).body, "Feature group")
+            problem = _group_problem(group, group == issue.number, f"this Feature (#{issue.number})")
+            if problem:
+                problems.append(f"#{number} {problem}")
+        scope = f"{len(listed)} Seed Stories"
+    if problems:
+        return Check(check_id, "fail", "; ".join(problems))
+    return Check(check_id, "pass", f"every story of {scope} names its Feature")
 
 
 def verdict_line(number: int, checks: list[Check]) -> str:
