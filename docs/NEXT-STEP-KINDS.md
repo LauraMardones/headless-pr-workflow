@@ -35,10 +35,10 @@ A producer written in another way is not found. When you add one, add its marker
 
 | Kind | Marker | Producer | Feature | Status | Example |
 |---|---|---|---|---|---|
-| dispatcher-conflict-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | pending | `post_conflict_blocker`, `Type: conflict` for the WIP limit or a file overlap (`tests/test_dispatcher_parity_new_work.py`); converted by #606 |
-| dispatcher-mid-cycle-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | pending | `post_mid_cycle_blocker`, `Type: external` after a failed session (`tests/test_dispatcher_parity_review_loop.py`); converted by #606 |
-| dispatcher-fix-round-max-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | pending | `post_blocker_once`, the fix-round maximum, the #535 case (`tests/test_dispatcher_parity_codex.py`); converted by #606 |
-| dispatcher-merge-owner-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | pending | `block_ownerless_head`, a head with no merge-owner marker; converted by #606 |
+| dispatcher-conflict-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | converted | ``Next step: run `/implement 606` in Claude Code or Codex; then the story starts once the stated condition holds.`` (`post_conflict_blocker`, the WIP limit or a file overlap; `tests/test_dispatcher_next_step_blockers.py`) |
+| dispatcher-mid-cycle-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | converted | ``Next step: run `/implement 606` in Claude Code or Codex; then the PO replies /unblock on #606 and the dispatcher resumes the story.`` (`post_mid_cycle_blocker`; `tests/test_dispatcher_next_step_blockers.py`) |
+| dispatcher-fix-round-max-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | converted | ``Next step: run `/implement 606` in Claude Code or Codex; then the PO replies /unblock on #606 and the dispatcher continues (or raises CODEX_FIX_ROUND_MAX first).`` (`post_blocker_once`, the #535 case; `tests/test_dispatcher_next_step_blockers.py`) |
+| dispatcher-merge-owner-blocker | blocker | `scripts/dispatcher-invoke.sh` | #589 | converted | ``Next step: run `/merge 900` in Claude Code or Codex; then the PO runs /cleanup 900 (Merge Takeover).`` (`block_ownerless_head`, in-merge form; the other form runs `hpw pr-takeover`; `tests/test_dispatcher_next_step_blockers.py`) |
 | bookkeeping-resource-blocker | blocker | `src/headless_pr_workflow/codex_review_bookkeeping.py` | #589 | pending | `blocker_body`, `Type: resource` (`tests/test_codex_review_bookkeeping.py`); converted by #607 |
 | bookkeeping-external-blocker | blocker | `src/headless_pr_workflow/codex_review_bookkeeping.py` | #589 | pending | `blocker_body`, `Type: external` (`tests/test_dispatcher_job_blocker_scan.py`); converted by #607 |
 | codex-worker-fix-round-blocker | blocker | `src/headless_pr_workflow/dispatcher/codex_worker.py` | #589 | pending | `fix_round_blocker`, "fixed by hand" today, the #535 case; converted by #607 |
@@ -49,7 +49,7 @@ A producer written in another way is not found. When you add one, add its marker
 | implement-waiver-blocker | blocker | `.claude/commands/implement.md` | #589 | pending | the `Type: decision` waiver blocker of a fix round; converted by #608 |
 | review-decision-blocker | blocker | `.claude/commands/review.md` | #589 | pending | the `Type: decision` blocker for findings; converted by #608 |
 | review-waiver-blocker | blocker | `.claude/commands/review.md` | #589 | pending | the `Type: decision` waiver blocker; converted by #608 |
-| slack-po-blocker | slack:po_blocker | `scripts/slack-notify.sh` | #589 | pending | "To resume: do what *Unblocked when* says" (`tests/test_dispatcher_po_blocker_notify.py`); converted by #606 |
+| slack-po-blocker | slack:po_blocker | `scripts/slack-notify.sh` | #589 | converted | ``Next step: run `/implement 606` in Claude Code or Codex; then the story starts once the stated condition holds.`` (the `*Next step:*` line of the message; `tests/test_dispatcher_po_blocker_notify.py`) |
 | slack-decision-blocker | slack:decision_blocker | `scripts/slack-notify.sh` | #589 | pending | "To answer: reply on the issue" (`tests/test_slack_notify_decision_blocker.sh`); converted by #608 |
 | refine-session-summary | next-action | `.claude/commands/refine.md`, `.claude/commands/refine-epic.md`, `.claude/commands/refine-feature.md`, `.claude/commands/refine-story.md`, `.claude/commands/refine-task.md`, `.claude/commands/refine-bug.md` | #590 | pending | `Next action: Needs PO decision` on #545; converted by #612 |
 | implement-review-session-summary | next-action | `scripts/session-summary.sh` | #590 | pending | an `/implement` or `/review` summary that leaves a blocker for the PO; converted by #613 |

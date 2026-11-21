@@ -170,7 +170,9 @@
 #                               (also after a session that exits 0, while the blocker is open; #357)
 #   po_blocker                — a blocker this script posted that only the PO can resolve
 #                               (post_blocker_once, post_mid_cycle_blocker; issue #359);
-#                               not post_conflict_blocker. Resolved by the PO's /unblock line
+#                               not post_conflict_blocker. Resolved by the PO's /unblock line.
+#                               Carries next_step, the declaration's "Next step:" text from
+#                               `hpw next-step render` (blocker_next_step; issue #606)
 #   dispatcher_error          — unexpected script failure (EXIT trap, non-zero, unhandled)
 #   feature_closure_confirmation — all stories in a feature group reached Done
 #   epic_closure_approval     — all features in an epic have all stories Done
@@ -580,20 +582,39 @@ register_actionable_event() {
     fi
 }
 
-# register_po_blocker <issue> <title> <type> <unblocked-when> <state> [<cause>]
+# blocker_next_step <command> <number> <where> <then> — the PO's next step for a
+# Blocked Declaration (issue #606, Epic #566): prints the "Next step: ..." line
+# rendered by the one shared source, `hpw next-step render`; no text is built
+# here. Returns 1 and prints nothing when the source rejects a part, so a caller
+# posts the blocker without the field rather than not posting it.
+blocker_next_step() {
+    local line
+    if ! line=$("$HPW_BIN" next-step render --command "$1" --number "$2" --where "$3" --then "$4" 2>/dev/null) \
+            || [[ "$line" != "Next step: "* ]]; then
+        echo "Warning: could not render the next step for the blocker (command '$1', number '$2'); it is posted without one." >&2
+        return 1
+    fi
+    printf '%s' "$line"
+}
+
+# register_po_blocker <issue> <title> <type> <unblocked-when> <state> [<cause>] [<next-step>]
 # Queues the po_blocker event for the "## Blocked Declaration" that
 # post_comment just posted (issue #359): a blocker only the PO can resolve.
 # The event key uses that comment's created_at, so a later blocker on the same
 # issue is a new event. Resolved by the PO's `/unblock` line or by closing the
-# issue (scripts/dispatcher-notify-retry.sh).
+# issue (scripts/dispatcher-notify-retry.sh). <next-step> is the declaration's
+# "Next step:" line (issue #606); the event context carries it without the label
+# as next_step, and scripts/slack-notify.sh shows it in the message.
 register_po_blocker() {
     local issue_num="$1" title="$2" blocker_type="$3" unblocked_when="$4" state="$5" cause="${6:-}"
+    local next_step="${7:-}"
+    next_step="${next_step#Next step: }"
     register_actionable_event "po_blocker" "$issue_num" "$LAST_POSTED_AT" \
         "$(jq -nc --arg st "$title" --arg iu "https://github.com/$REPO/issues/$issue_num" \
                   --arg bt "$blocker_type" --arg uw "$unblocked_when" --arg state "$state" \
-                  --arg cause "$cause" \
+                  --arg cause "$cause" --arg ns "$next_step" \
                   '{story_title: $st, issue_url: $iu, blocker_type: $bt,
-                    unblocked_when: $uw, state: $state, cause: $cause}')"
+                    unblocked_when: $uw, state: $state, cause: $cause, next_step: $ns}')"
 }
 
 # Delivers queued actionable events before the script replaces itself with the
@@ -848,7 +869,11 @@ post_conflict_blocker() {
     local issue_num="$1"
     local issue_title="$2"
     local unblocked_when="$3"
-    local body
+    local body next_step
+    # WIP limit or file overlap: the scheduler starts the story again by itself;
+    # a manual run is the PO's choice (issue #606).
+    next_step=$(blocker_next_step "/implement" "$issue_num" "Claude Code or Codex" \
+        "the story starts once the stated condition holds") || next_step=""
     body="## Blocked Declaration
 Type: conflict
 Declared by: $DECLARED_BY
@@ -856,6 +881,7 @@ Blocks: #$issue_num — $issue_title
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
 State of in-progress work: none"
+    [[ -n "$next_step" ]] && body+=$'\n'"$next_step"
     echo "BLOCKED: posting conflict blocker on #$issue_num"
     post_comment "$issue_num" "$body"
     DISPATCH_HANDLED=true
@@ -881,7 +907,13 @@ post_mid_cycle_blocker() {
     local unblocked_when="${6:-/$failed_command completes successfully for #$issue_num with exit code 0}"
     # Optional state text (issue #502); the default stays the failure text.
     local state="${7:-execution loop halted after /$failed_command failed; board reflects last successful state}"
-    local body
+    # Optional next-step parts (issue #606): command, number, where, outcome. The
+    # default is the failed command on the issue, then the PO's /unblock reply.
+    local ns_command="${8:-/$failed_command}" ns_number="${9:-$issue_num}"
+    local ns_where="${10:-Claude Code or Codex}"
+    local ns_then="${11:-the PO replies /unblock on #$issue_num and the dispatcher resumes the story}"
+    local body next_step
+    next_step=$(blocker_next_step "$ns_command" "$ns_number" "$ns_where" "$ns_then") || next_step=""
     body="## Blocked Declaration
 Type: external
 Declared by: $DECLARED_BY
@@ -889,11 +921,12 @@ Blocks: #$issue_num — $issue_title
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
 State of in-progress work: $state"
+    [[ -n "$next_step" ]] && body+=$'\n'"$next_step"
     [[ -n "$reason" ]] && body+=$'\n'"Cause: $reason"
     [[ -n "$marker" ]] && body+=$'\n\n'"$marker"
     echo "MID-CYCLE FAILURE: posting blocker on #$issue_num (/$failed_command failed)"
     post_comment "$issue_num" "$body" || return 1
-    register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason"
+    register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason" "$next_step"
 }
 
 # pr_conflicts_with_main <pr> — 0 only when GitHub reports the PR as conflicting
@@ -985,11 +1018,15 @@ marker_holds() {
 }
 
 # post_blocker_once <issue> <title> <type> <marker> <unblocked-when> <state>
+#     <next-step-command> <next-step-number> <next-step-where> <next-step-then>
+# The four next-step parts are rendered by blocker_next_step (issue #606).
 post_blocker_once() {
     local issue_num="$1" issue_title="$2" blocker_type="$3" marker="$4" unblocked_when="$5" state="$6"
+    local next_step
     if marker_holds "$issue_num" "$marker" 0; then
         return 0
     fi
+    next_step=$(blocker_next_step "${7:-}" "${8:-}" "${9:-}" "${10:-}") || next_step=""
     echo "BLOCKED: posting $blocker_type blocker on #$issue_num"
     post_comment "$issue_num" "## Blocked Declaration
 Type: $blocker_type
@@ -997,10 +1034,11 @@ Declared by: $DECLARED_BY
 Blocks: #$issue_num — $issue_title
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
-State of in-progress work: $state
+State of in-progress work: $state${next_step:+
+$next_step}
 
 $marker" || return 1
-    register_po_blocker "$issue_num" "$issue_title" "$blocker_type" "$unblocked_when" "$state"
+    register_po_blocker "$issue_num" "$issue_title" "$blocker_type" "$unblocked_when" "$state" "" "$next_step"
 }
 
 # ─── Utility: retry a required comment that could not be written (#348) ──────
@@ -1116,6 +1154,8 @@ $(evidence_failed_marker "$item" "$ref")" || unwritable=true
         post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
             "the evidence ($what) is posted by hand, then the PO posts /unblock" \
             "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write $what; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
+            "/unblock" "$story" "a reply on GitHub" \
+            "the dispatcher continues; the PO first posts the evidence ($item) by hand on the PR or issue" \
             || unwritable=true
     fi
     if $unwritable && [[ $# -ge 8 ]]; then
@@ -1187,6 +1227,8 @@ evidence_retry() {
             post_blocker_once "$story" "$title" "external" "$(evidence_gave_up_marker "$item" "$ref")" \
                 "the evidence (the $item evidence on #$target) is posted by hand, then the PO posts /unblock" \
                 "the dispatcher failed $EVIDENCE_RETRY_MAX runs in a row to write the $item evidence on #$target; no further retry until /unblock. The text is in the evidence-pending comment ($item) on the PR or issue." \
+                "/unblock" "$story" "a reply on GitHub" \
+                "the dispatcher continues; the PO first posts the $item evidence by hand on #$target" \
                 || unwritable=true ;;
         *)
             echo "Warning: the $item evidence on #$target could not be retried ($error); retried on the next run." >&2
@@ -2337,9 +2379,12 @@ run_merge_or_block() {
             cause="PR #$pr_number changes decision documents (ADR-011): ${files:-(files not reported)}. The PO reviews and merges it personally in GitHub. This is a planned step, not a failure."
             post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker" "$cause" \
                 "The PO has reviewed and merged PR #$pr_number in GitHub, then replies with a line that is exactly /unblock." \
-                "waiting for the PO to review and merge PR #$pr_number; the story stays in the merge step"
+                "waiting for the PO to review and merge PR #$pr_number; the story stays in the merge step" \
+                "/unblock" "$ISSUE_NUMBER" "a reply on GitHub" \
+                "the dispatcher continues after the PO has reviewed and merged PR #$pr_number in GitHub"
         else
-            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker"
+            post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "merge" "$marker" "" "" "" \
+                "/merge" "$pr_number"
         fi
         [[ "$merge_err" == /dev/null ]] || rm -f "$merge_err"
         DISPATCH_HANDLED=true
@@ -2609,7 +2654,9 @@ hand_off_to_codex_review_loop() {
             echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement: it conflicts with main, so no CI run can start." >&2
             post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" "" \
                 "PR #$pr_number conflicts with main (merge conflict with main); GitHub starts no CI run for a conflicting PR, so the required pytest check cannot run until it is resolved" \
-                "the PR branch is merged with main and the conflict resolved"
+                "the PR branch is merged with main and the conflict resolved" "" \
+                "/implement" "$ISSUE_NUMBER" "Claude Code or Codex" \
+                "the PR conflict with main is resolved on the PR branch; the PO then replies /unblock on #$ISSUE_NUMBER and the dispatcher resumes the story"
         else
             echo "Error: PR #$pr_number for #$ISSUE_NUMBER is still a draft after /implement." >&2
             post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
@@ -2645,7 +2692,9 @@ $(fix_round_attempt_marker "$pr_number" "$pr_head")" \
         post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
             "$(fix_round_attempt_marker "$pr_number" "$pr_head")" \
             "the post-waiver /implement pushed no commit and posted no review request on PR #$pr_number after the PO's /unblock; the latest Codex result on head ${pr_head:0:7} is still the waived findings" \
-            "a review request for head ${pr_head:0:7} is posted on PR #$pr_number and the PO posts /unblock"
+            "a review request for head ${pr_head:0:7} is posted on PR #$pr_number and the PO posts /unblock" "" \
+            "/implement" "$ISSUE_NUMBER" "Claude Code or Codex" \
+            "the review request for head ${pr_head:0:7} is posted on PR #$pr_number; the PO then replies /unblock on #$ISSUE_NUMBER and the dispatcher resumes the story"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -2875,7 +2924,9 @@ resume_fix_round() {
         post_blocker_once "$issue_num" "$TARGET_TITLE" "resource" \
             "$(dispatcher_marker "action=fix-round-max pr=$pr_number")" \
             "the findings on PR #$pr_number are fixed by hand, or CODEX_FIX_ROUND_MAX is raised and the PO posts /unblock" \
-            "PR #$pr_number has had $CODEX_FIX_ROUND_MAX automatic fix rounds and Codex still has findings on head ${pr_head:0:7}; branch and commits intact"
+            "PR #$pr_number has had $CODEX_FIX_ROUND_MAX automatic fix rounds and Codex still has findings on head ${pr_head:0:7}; branch and commits intact" \
+            "/implement" "$issue_num" "Claude Code or Codex" \
+            "the PO replies /unblock on #$issue_num and the dispatcher continues (or raises CODEX_FIX_ROUND_MAX first)"
         return 0
     fi
 
@@ -3057,7 +3108,7 @@ head_has_merge_owner_marker() {
 # on the same head: only a new head, or the PO's merge takeover, changes what
 # the dispatcher can do.
 block_ownerless_head() {
-    local issue_num="$1" pr_number="$2" pr_head="$3" where="${4:-}" marker own unblocked_when state
+    local issue_num="$1" pr_number="$2" pr_head="$3" where="${4:-}" marker own unblocked_when state next_step ns_command ns_number ns_where ns_then
     marker=$(merge_owner_missing_marker "$pr_number" "$pr_head")
     if ! own=$(bot_comments_json "$issue_num"); then
         echo "Warning: could not read the comments of #$issue_num; the missing merge owner on PR #$pr_number is checked again on the next run" >&2
@@ -3069,10 +3120,16 @@ block_ownerless_head() {
     fi
     unblocked_when="the PO follows docs/TAKEOVER-RULES.md → Merge Takeover for PR #$pr_number, or pushes a new head and posts /unblock"
     state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: a session stopped after its push, before the hand-off finished; the dispatcher starts no session for this head"
+    # docs/TAKEOVER-RULES.md → Merge Takeover (issue #606).
+    ns_command="hpw pr-takeover"; ns_number="$pr_number"; ns_where="Claude Code or Codex"
+    ns_then="the PO follows Merge Takeover for PR #$pr_number and the merge continues"
     if [[ "$where" == "in-merge" ]]; then
+        ns_command="/merge"
+        ns_then="the PO runs /cleanup $pr_number (Merge Takeover)"
         unblocked_when="the PO merges PR #$pr_number by hand with /merge $pr_number and then runs /cleanup $pr_number (docs/TAKEOVER-RULES.md → Merge Takeover)"
         state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: the head was not pushed by a dispatcher session (for example a manual fix round, or a session that stopped after its push), so the dispatcher does not merge it"
     fi
+    next_step=$(blocker_next_step "$ns_command" "$ns_number" "$ns_where" "$ns_then") || next_step=""
     echo "BLOCKED: posting resource blocker on #$issue_num"
     if ! post_comment "$issue_num" "## Blocked Declaration
 Type: resource
@@ -3080,13 +3137,14 @@ Declared by: $DECLARED_BY
 Blocks: #$issue_num — $TARGET_TITLE
 Unblocked when: $unblocked_when
 Owner: PO (@LauraMardones)
-State of in-progress work: $state
+State of in-progress work: $state${next_step:+
+$next_step}
 
 $marker"; then
         echo "Warning: could not post the merge-owner blocker on #$issue_num; the next run tries again." >&2
         return 0
     fi
-    register_po_blocker "$issue_num" "$TARGET_TITLE" "resource" "$unblocked_when" "$state"
+    register_po_blocker "$issue_num" "$TARGET_TITLE" "resource" "$unblocked_when" "$state" "" "$next_step"
     echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: PR #$pr_number head ${pr_head:0:7} has no merge-owner evidence; blocker posted"
 }
 
@@ -3109,6 +3167,8 @@ block_merge_conflict() {
         "$(merge_conflict_marker "$pr_number" "$pr_head")" \
         "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" \
         "merge conflict with main on PR #$pr_number at head ${pr_head:0:7}; /merge was not run, and the dispatcher starts no session for executor:$EXECUTOR_LABEL" \
+        "/unblock" "$issue_num" "a reply on GitHub" \
+        "the dispatcher continues; the PO first resolves the conflict in Claude Code or Codex on the branch of PR #$pr_number" \
         || echo "Warning: could not post the merge-conflict blocker on #$issue_num; the next run tries again." >&2
 }
 
@@ -3136,7 +3196,9 @@ conflict_round_blocker() {
     post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
         "$(conflict_round_attempt_marker "$pr_number" "$pr_head")" \
         "merge conflict with main on PR #$pr_number: $cause. This blocker is the PO's only alert for this conflict." \
-        "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock"
+        "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" "" \
+        "/implement" "$ISSUE_NUMBER" "Claude Code or Codex" \
+        "the conflict with main on PR #$pr_number is resolved on the PR branch; the PO then replies /unblock on #$ISSUE_NUMBER and the dispatcher resumes the story"
     DISPATCH_HANDLED=true
     exit 1
 }
@@ -3294,7 +3356,8 @@ resume_review_story() {
     [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "review" "$pr_number" "$issue_num"
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
+        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker" "" "" "" \
+            "/review" "$pr_number"
         DISPATCH_HANDLED=true
         exit 1
     fi

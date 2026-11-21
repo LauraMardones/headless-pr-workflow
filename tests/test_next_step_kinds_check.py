@@ -28,12 +28,6 @@ STATUSES = {"converted", "pending"}
 # #608, #612, #613, Feature #591) removes its kinds here and marks them
 # `converted` in the inventory.
 PENDING_KINDS = frozenset({
-    # #606
-    "dispatcher-conflict-blocker",
-    "dispatcher-mid-cycle-blocker",
-    "dispatcher-fix-round-max-blocker",
-    "dispatcher-merge-owner-blocker",
-    "slack-po-blocker",
     # #607
     "bookkeeping-resource-blocker",
     "bookkeeping-external-blocker",
