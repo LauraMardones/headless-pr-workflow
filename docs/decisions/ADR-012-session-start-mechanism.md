@@ -1,6 +1,6 @@
 # ADR-012: How Model Sessions Are Started Without the PO
 
-**Status:** Accepted
+**Status:** Accepted; amended by ADR-016 (the account of dispatcher-started sessions)
 **Date:** 2026-10-10
 **Related:** #289 (spike), #160 (E5, E6), #306, #308, #304, #518, #522, ADR-006, ADR-007, ADR-009, ADR-010
 **Supersedes:** ADR-003
@@ -50,7 +50,7 @@ Provider terms (2026-10-08): both candidates are allowed; see [Provider terms ch
 - The embedded API loop in `scripts/dispatcher-invoke.sh` and the API-key secrets are removed in the follow-up work under #308 (#314, #315).
 - ADR-002's runner choice and five-minute poll stand for Claude. Its "the dispatcher invokes executors via API calls" and "executor sessions run outside GitHub Actions" are replaced for Claude: those sessions run inside Actions jobs on the subscription. Epic #518 adds the separate local Codex path described above.
 - A Claude session is bound by the Actions job limit and gets a fresh runner each time. A session stopped by a usage limit leaves its pushed commits on the branch and is started again after the reset. This has not been observed yet; #316 must prove it.
-- The Claude session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today.
+- The Claude session holds `PROJECT_TOKEN`, which can merge. Until a narrower credential exists, the merge gate rests on the command instructions and branch protection, as it does today. ADR-016 moves the dispatcher-started sessions to their own GitHub App once it is effective.
 - The allowance reading depends on a field (`unifiedWindows`) that Anthropic does not document. If it disappears, the dispatcher must stop starting sessions, not start them unchecked.
 - "Ordinary, individual usage" is the limit Anthropic sets on subscription use and it has no number. One session at a time keeps to a fair reading of it.
 - Revisit if Anthropic changes the terms or the token, if GraphQL becomes available in cloud sessions, or if the allowance can no longer be read.
