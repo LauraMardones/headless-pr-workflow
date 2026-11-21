@@ -38,8 +38,7 @@ PENDING_KINDS = frozenset({
     "bookkeeping-resource-blocker",
     "bookkeeping-external-blocker",
     "codex-worker-fix-round-blocker",
-    # Feature #590 (#612, #613)
-    "refine-session-summary",
+    # Feature #590 (#613; #612 converted the refine kinds)
     "implement-review-session-summary",
     # Feature #591
     "verify-closure-request",
