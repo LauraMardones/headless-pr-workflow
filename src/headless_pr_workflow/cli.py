@@ -16,6 +16,7 @@ from .catch_all_issue import CatchAllIssueError, create_catch_all_issue, link_ca
 from .catch_all_thread import resolve_catch_all_thread
 from .catalog import COMMANDS, find_command
 from .ci_summary import summarize_ci
+from .review_rounds import FLOW_FILTER, collect_report, format_report, gh_json
 from .codex_review_bookkeeping import CHANGED_DURING_RUN_STEP, BookkeepingConfig, BookkeepingError, GhCliGateway, run_bookkeeping
 from .github import (
     GHCommandError,
@@ -145,6 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--thread", help="Review thread node id.")
             command_parser.add_argument("--issue", type=int, help="Catch-all issue number named in the thread reply.")
             command_parser.add_argument("--head", help="PR head SHA the session classified; refused when the PR head differs.")
+        if command.name == "review-rounds":
+            command_parser.add_argument("--last", type=int, help="Report the N most recently merged PRs.")
+            command_parser.add_argument("--prs", help="Comma-separated PR numbers or ranges such as 309-355.")
+            command_parser.add_argument(
+                "--flow",
+                choices=(FLOW_FILTER,),
+                help="Limit the set to PRs whose closing issue is an executable issue labelled flow:orchestration or cp:critical-path.",
+            )
         if command.name == "workflow-status":
             command_parser.add_argument(
                 "--path",
@@ -719,6 +728,24 @@ def _print_target_branch_check(
             print(f"- {reason}")
     print(f"hard gate passed: {str(summary.hard_gate_passed).lower()}")
     return 0 if summary.hard_gate_passed else 1
+
+
+def _print_review_rounds(args: argparse.Namespace) -> int:
+    if (args.last is None) == (args.prs is None):
+        print("review-rounds: exactly one of --last and --prs is required", file=sys.stderr)
+        return 2
+    try:
+        repo = args.repo
+        if not repo:
+            repo = gh_json(["repo", "view", "--json", "nameWithOwner"])["nameWithOwner"]
+        report = collect_report(repo, last=args.last, prs=args.prs, flow=args.flow)
+    except ValueError as error:
+        print(f"review-rounds: {error}", file=sys.stderr)
+        return 2
+    except GHCommandError as error:
+        return _print_gh_error(error, as_json=args.json)
+    print(json.dumps(report, indent=2) if args.json else format_report(report))
+    return 0
 
 
 def _print_ci_summary(target: str | None, *, repo: str | None, as_json: bool) -> int:
@@ -1327,6 +1354,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "review-delta":
         return _print_review_delta(args.target, repo=args.repo, as_json=args.json)
+
+    if args.command == "review-rounds":
+        return _print_review_rounds(args)
 
     if args.command == "ci-summary":
         return _print_ci_summary(args.target, repo=args.repo, as_json=args.json)
