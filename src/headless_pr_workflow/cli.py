@@ -28,6 +28,7 @@ from .github import (
 )
 from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
+from .next_step import NextStepError, build as build_next_step
 from .post_merge_sync import fetch_post_merge_pr_state, fetch_pr_changed_paths, summarize_post_merge_sync
 from .pre_merge import summarize_pre_merge
 from .pr_takeover import summarize_pr_takeover
@@ -145,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--thread", help="Review thread node id.")
             command_parser.add_argument("--issue", type=int, help="Catch-all issue number named in the thread reply.")
             command_parser.add_argument("--head", help="PR head SHA the session classified; refused when the PR head differs.")
+        if command.name == "next-step":
+            command_parser.add_argument("--command", dest="step_command", help="The PO's command, for example `/spec` (render).")
+            command_parser.add_argument("--number", help="Issue or PR number the command names (render).")
+            command_parser.add_argument("--where", help="`Claude Code`, `Codex`, `a reply on GitHub`, or `Claude Code or Codex` (render).")
+            command_parser.add_argument("--then", help="What happens afterwards, one sentence (render).")
         if command.name == "workflow-status":
             command_parser.add_argument(
                 "--path",
@@ -1398,6 +1404,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "resolve-catch-all-thread":
         return _print_resolve_catch_all_thread(args)
 
+    if args.command == "next-step":
+        return _print_next_step(args, parser)
+
     return _print_scaffold(args.command, args.target, args.json)
 
 
@@ -1431,6 +1440,18 @@ def _print_catch_all_issue(args: argparse.Namespace, parser: argparse.ArgumentPa
         return fail(str(exc), exc.exit_code)
 
     print(json.dumps(result.as_dict(), indent=2) if args.json else result.human())
+    return 0
+
+
+def _print_next_step(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.target != "render":
+        parser.error("next-step: the action must be `render`")
+    try:
+        step = build_next_step(args.step_command or "", args.number or "", args.where or "", args.then or "")
+    except NextStepError as exc:
+        print(f"next-step: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(step.as_dict(), indent=2) if args.json else step.text)
     return 0
 
 

@@ -37,6 +37,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("branch-cleanup", "Remove stale merged local branches when safe.", "P2-medium", "I-post-merge", "action", "core", "implemented"),
     CommandSpec("catch-all-issue", "Create or check the catch-all issue for work found outside a session's scope.", "P2-medium", "C-session", "action", "core", "implemented"),
     CommandSpec("resolve-catch-all-thread", "Resolve the thread of a finding in code the PR did not change, after fresh checks.", "P1-high", "F-review", "action", "core", "implemented"),
+    CommandSpec("next-step", "Render the PO's next step: the command with its number, where to run it, what follows.", "P1-high", "C-session", "report", "core", "implemented"),
     CommandSpec("workflow-status", "Summarize PR state and next action.", "P1-high", "C-session", "report", "core", "implemented"),
     CommandSpec("next-action", "Suggest exact next safe workflow action.", "P1-high", "C-session", "advisory", "core", "implemented"),
 )

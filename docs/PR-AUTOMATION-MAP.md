@@ -50,6 +50,7 @@ This map normalizes the initial script catalog into reusable command contracts. 
 | `branch-cleanup` | Remove stale merged local branches when safe. | implementer | P2-medium | I-post-merge | action | core | implemented |
 | `catch-all-issue` | Create or check the catch-all issue for work found outside a session's scope. | implementer, reviewer, tech-lead | P2-medium | C-session | action | core | implemented |
 | `resolve-catch-all-thread` | Resolve the thread of a finding in code the PR did not change, after fresh checks. | implementer, reviewer | P1-high | F-review | action | core | implemented |
+| `next-step` | Render the PO's next step: the command with its number, where to run it, what follows. | all | P1-high | C-session | report | core | implemented |
 | `workflow-status` | Summarize PR state and next action. | orchestrator | P1-high | C-session | report | core | implemented |
 | `next-action` | Suggest exact next safe workflow action. | orchestrator | P1-high | C-session | advisory | core | implemented |
 
