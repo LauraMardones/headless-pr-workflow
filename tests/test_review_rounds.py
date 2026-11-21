@@ -12,6 +12,7 @@ from headless_pr_workflow.review_rounds import (
     closing_issue_number,
     collect_report,
     count_pr,
+    last_merged_numbers,
     matches_flow_filter,
     parse_prs,
 )
@@ -145,12 +146,15 @@ def test_parse_prs():
             parse_prs(bad)
 
 
+MERGED_AT: dict[int, str] = {}
+
+
 def _fake_fetch(merged):
     data = FIXTURES
 
     def fetch(args):
         if args[:2] == ["pr", "list"]:
-            return [{"number": n} for n in merged]
+            return [{"number": n, "mergedAt": MERGED_AT.get(n, "2026-01-01T00:00:00Z")} for n in merged]
         path = args[-1]
         found = re.search(r"/(?:pulls|issues)/(\d+)", path)
         number = int(found.group(1)) if found else None
@@ -221,3 +225,14 @@ def test_cli_reports_gh_failure(monkeypatch, capsys):
 
 
 _real = collect_report
+
+
+def test_last_merged_numbers_orders_by_merge_time_not_creation_order():
+    rows = [
+        {"number": 30, "mergedAt": "2026-01-01T00:00:00Z"},  # newest by creation, merged first
+        {"number": 20, "mergedAt": "2026-01-03T00:00:00Z"},  # older PR merged last
+        {"number": 10, "mergedAt": "2026-01-02T00:00:00Z"},
+        {"number": 5, "mergedAt": None},
+    ]
+    assert last_merged_numbers("o/r", 1, fetch=lambda args: rows) == [20]
+    assert last_merged_numbers("o/r", 2, fetch=lambda args: rows) == [20, 10]

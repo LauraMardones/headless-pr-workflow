@@ -8,7 +8,7 @@
 hpw review-rounds --repo <owner/repo> (--last N | --prs <numbers-or-range>) [--flow orchestration-or-critical-path] [--json]
 ```
 
-- Exactly one of `--last N` (the N most recently merged PRs) and `--prs` (comma-separated numbers or ranges, for example `309-355` or `309,313`) is required; otherwise the command exits 2.
+- Exactly one of `--last N` (the N PRs with the latest merge time, not creation order) and `--prs` (comma-separated numbers or ranges, for example `309-355` or `309,313`) is required; otherwise the command exits 2.
 - A number in `--prs` that is not a merged PR is listed under `Skipped:`; the exit code stays 0.
 - `--flow orchestration-or-critical-path` keeps the PRs whose closing issue is `type:story`, `type:task` or `type:bug` and carries `flow:orchestration` or `cp:critical-path`. Counting is identical to an unfiltered run. The report names the labels it read. The closing issue is the first issue the PR body closes (`Closes #n`); labels are read at run time, so a label added later changes the filtered set.
 - A GitHub read failure exits non-zero and prints no report.

@@ -187,9 +187,19 @@ def gh_json(args: list[str]) -> Any:
         return items
 
 
+LAST_SCAN_LIMIT = 1000
+
+
 def last_merged_numbers(repo: str, count: int, *, fetch: GhJson = gh_json) -> list[int]:
-    rows = fetch(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(count), "--json", "number"])
-    return [row["number"] for row in rows]
+    """The `count` PRs with the latest merge time.
+
+    `gh pr list` orders by creation time, so the merged PRs are read in full (up to
+    LAST_SCAN_LIMIT) and sorted by `mergedAt` before the limit is applied.
+    """
+    rows = fetch(["pr", "list", "--repo", repo, "--state", "merged", "--limit", str(LAST_SCAN_LIMIT), "--json", "number,mergedAt"])
+    rows = [row for row in rows if row.get("mergedAt")]
+    rows.sort(key=lambda row: (row["mergedAt"], row["number"]), reverse=True)
+    return [row["number"] for row in rows[:count]]
 
 
 def fetch_pr_data(repo: str, number: int, *, fetch: GhJson = gh_json, need_issue: bool = True) -> dict[str, Any] | None:
