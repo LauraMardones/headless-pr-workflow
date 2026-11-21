@@ -44,7 +44,8 @@ Refinement writes no board status and no status line in the issue body. The outc
 
 - `Next action: Ready for implementation`: the contract is clear, `refine-check` passed and no hard dependency is open.
 - `Next action: Refined; blocked by #X`: the contract is clear and `refine-check` passed, but hard dependencies are still open.
-- `Next action: Needs PO decision`: a decision blocker is declared on the issue.
+- `Next action: Needs PO decision — <next step>`: a decision blocker is declared on the issue. `<next step>` is the step rendered by `hpw next-step render --command /unblock --number <n> --where "a reply on GitHub" --then "the dispatcher's next run starts `/refine <n>`"` without its leading `Next step: `: the PO replies on GitHub on the issue with `Decision <letter>` and a line `/unblock`.
+- `Next action: <next step>`, with no "Needs PO decision", after the PO's answer when the next step is still the PO's, because the answer changes scope (ADR-009 item 5): with no spec PR open, the step rendered with `--command /spec --number <epic> --where "Claude Code or Codex" --then "the PO merges the spec PR and the next `/refine <n>` resumes"`; with the spec PR open, the step rendered with `--command "review and merge the spec PR" --number <pr> --where "a reply on GitHub" --then "the next `/refine <n>` resumes"`, the PO's review and merge of spec PR #<pr> on GitHub.
 
 Never report `Ready for implementation` while hard dependencies are still unresolved.
 
@@ -293,7 +294,7 @@ The last step of every refinement, is the deterministic check; the model is not 
 After updating GitHub, reply only with:
 
 - Issue URL
-- Next action: Ready for implementation, Refined; blocked by #X, or Needs PO decision
+- Next action: Ready for implementation, Refined; blocked by #X, `Needs PO decision — <next step>`, or the PO's next step after an answer (`.claude/commands/refine.md` → Tech Lead rules → PO next step)
 - Summary of what changed
 - Labels changed
 - Remaining hard dependencies
