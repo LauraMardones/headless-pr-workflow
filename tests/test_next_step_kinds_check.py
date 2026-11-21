@@ -292,20 +292,20 @@ def test_check_fails_on_a_synthetic_converted_kind_missing_a_part(example: str) 
 
 
 def test_check_fails_when_a_pending_kind_is_not_listed_by_name() -> None:
-    failures = check_inventory(ROOT, _inventory(), PENDING_KINDS - {"slack-po-blocker"})
+    failures = check_inventory(ROOT, _inventory(), PENDING_KINDS - {"slack-decision-blocker"})
 
-    assert failures == ["pending kind slack-po-blocker is not named in the check's pending list"]
+    assert failures == ["pending kind slack-decision-blocker is not named in the check's pending list"]
 
 
 def test_check_fails_when_the_pending_list_names_a_converted_kind() -> None:
-    text = _inventory().replace("| slack-po-blocker | slack:po_blocker | `scripts/slack-notify.sh` | #589 | pending |",
-                                "| slack-po-blocker | slack:po_blocker | `scripts/slack-notify.sh` | #589 | converted |")
-    text = text.replace('"To resume: do what *Unblocked when* says" (`tests/test_dispatcher_po_blocker_notify.py`); converted by #606',
+    text = _inventory().replace("| slack-decision-blocker | slack:decision_blocker | `scripts/slack-notify.sh` | #589 | pending |",
+                                "| slack-decision-blocker | slack:decision_blocker | `scripts/slack-notify.sh` | #589 | converted |")
+    text = text.replace('"To answer: reply on the issue" (`tests/test_slack_notify_decision_blocker.sh`); converted by #608',
                         _GOOD_STEP)
 
     failures = check_inventory(ROOT, text, PENDING_KINDS)
 
-    assert failures == [f"the pending list names slack-po-blocker, which is not a pending kind of {INVENTORY}"]
+    assert failures == [f"the pending list names slack-decision-blocker, which is not a pending kind of {INVENTORY}"]
 
 
 @pytest.mark.parametrize(
@@ -318,12 +318,16 @@ def test_check_fails_when_the_pending_list_names_a_converted_kind() -> None:
 def test_declaration_readers_do_not_read_the_changed_field(path: str) -> None:
     # The readers use Type:, Declared by:, Unblocked when: and the /unblock
     # line only; neither the former Resume instruction field nor the new
-    # Next step field is read (issue #605 → Assumptions).
+    # Next step field is read (issue #605 → Assumptions), except that the
+    # notify-retry scan reads Next step (issue #606).
     base = ROOT / path
     # codex_worker.py is a producer (fix_round_blocker, converted by #607), not a reader.
     files = sorted(f for f in base.rglob("*.py") if f.name != "codex_worker.py") if base.is_dir() else [base]
     assert files
     for file in files:
         text = file.read_text(encoding="utf-8")
-        for label in ("Resume instruction", "Next step"):
+        # scripts/dispatcher-notify-retry.sh reads the Next step line of a job
+        # declaration into the po_blocker context (issue #606).
+        labels = ("Resume instruction",) if file.name == "dispatcher-notify-retry.sh" else ("Resume instruction", "Next step")
+        for label in labels:
             assert label not in text, f"{file.relative_to(ROOT)} reads {label}"
