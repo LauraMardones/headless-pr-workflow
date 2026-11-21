@@ -12,6 +12,10 @@ Markers count only on comments of the given accounts, as in Block 2
 (``marker.py``): the dispatcher's own markers on the dispatcher's account, the
 findings marker on the bookkeeping job's account, ``/unblock`` on the PO's.
 
+``hpw dispatcher in-flight linked`` is the linked-PR rule (``facts.linked_pr``,
+issue #556) for the Bash callers: ``scripts/lib/in-flight.sh`` and the
+``find_linked_pr_json`` / ``find_merged_linked_pr`` shims of the invoke script.
+
 Result words and exit codes: ``read`` (0), ``unreadable`` (3: the input file
 cannot be read or is not a list of rows).
 """
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence, cast
 
-from .facts import _Facts
+from .facts import _Facts, linked_pr
 from .gateway import Gateway
 from .marker import dispatcher_marker
 from .status import other_blocker_open
@@ -136,3 +140,26 @@ def plan(rows: Any, *, dispatcher: str, bookkeeping: str, po: str) -> Result:
     except (TypeError, ValueError, KeyError) as exc:
         return Result(OPERATION, "unreadable", error=f"input: {exc}", block=BLOCK)
     return Result(OPERATION, "read", fields=fields, block=BLOCK)
+
+
+def linked(data: Any) -> Result:
+    """The linked open PR and the merged linked PR of each issue, from PR lists the caller has read.
+
+    Input: ``{"issues": [n, ...], "open": [PR, ...], "closed": [PR, ...]}`` (``closed`` may be left out).
+    Fields: ``linked`` maps each issue number (a string) to its linked open PR as GitHub returned it, or
+    ``None``; ``merged`` maps it to the number of the first merged linked PR among ``closed``, or ``None``.
+    """
+
+    operation = "linked"
+    try:
+        issues = [int(n) for n in data["issues"]]
+        open_prs, closed = data["open"], data.get("closed") or []
+        if not isinstance(open_prs, list) or not isinstance(closed, list) \
+                or not all(isinstance(p, dict) for p in [*open_prs, *closed]):
+            raise ValueError("open and closed must be lists of PRs")
+    except (TypeError, ValueError, KeyError) as exc:
+        return Result(operation, "unreadable", error=f"input: {exc}", block=BLOCK)
+    found = {str(n): linked_pr(open_prs, n) for n in issues}
+    merged = {str(n): (lambda pr: int(pr["number"]) if pr else None)(linked_pr(closed, n, merged=True))
+              for n in issues}  # fmt: skip
+    return Result(operation, "read", fields={"linked": found, "merged": merged}, block=BLOCK)

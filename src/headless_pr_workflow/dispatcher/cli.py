@@ -21,6 +21,7 @@ from .admission import check_start, classify_executable_type, executor_labels
 from .board_sync import sync_board
 from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
+from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
 from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
 from .scheduler import InvalidLimits, load_limits, next_action
@@ -143,6 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     i_plan.add_argument("--dispatcher", default="")
     i_plan.add_argument("--bookkeeping", default="")
     i_plan.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+    i_linked = in_flight_ops.add_parser("linked", add_help=False)
+    i_linked.add_argument("--repo", required=True)
+    i_linked.add_argument("--input", required=True)  # {"issues", "open", "closed"}; "-" reads stdin
 
     status = blocks.add_parser("status", add_help=False)
     status_ops = status.add_subparsers(dest="operation", parser_class=_Parser)
@@ -313,7 +317,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
-            "| hpw dispatcher in-flight plan ... "
+            "| hpw dispatcher in-flight plan|linked ... "
             "| hpw dispatcher session-blocker read ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
             "| hpw dispatcher catch-all numbers "
@@ -460,9 +464,12 @@ def _run_scheduler(args: argparse.Namespace, gateway: Gateway) -> int:
 
 def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
     try:
-        rows = json.loads(Path(args.input).read_bytes().decode("utf-8"))
+        raw = sys.stdin.buffer.read() if args.input == "-" else Path(args.input).read_bytes()
+        rows = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        return _emit(Result("plan", "unreadable", error=f"read input file: {exc}", block="in-flight"))
+        return _emit(Result(args.operation, "unreadable", error=f"read input file: {exc}", block="in-flight"))
+    if args.operation == "linked":
+        return _emit(linked_prs(rows))
     return _emit(plan_in_flight(rows, dispatcher=args.dispatcher.strip(), bookkeeping=args.bookkeeping.strip(),
                                 po=settings.po_login))  # fmt: skip
 

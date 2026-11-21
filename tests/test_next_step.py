@@ -277,7 +277,9 @@ def test_decision_blocker_context_options_stop_before_a_next_step_line(tmp_path:
         "a) change the spec — the story waits for a spec PR\nb) keep the spec — refinement continues"
     )
     assert context["recommendation"] == "a — the answer changes an acceptance criterion."
-    assert "Next step" not in json.dumps(context)
+    # Issue #608: the next steps are their own field, never part of another one.
+    assert context["next_steps"].startswith("Next step a:")
+    assert "Next step" not in json.dumps({k: v for k, v in context.items() if k != "next_steps"})
 
 
 @requires("bash", "jq")
