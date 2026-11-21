@@ -1,13 +1,14 @@
 """Content assertions for the decision-blocker resume contract in
-``docs/PROJECT-STATUS.md`` (issue #262).
+``docs/PROJECT-STATUS.md`` (issue #262; the next-step field, issue #605).
 
 These deterministic assertions anchor the load-bearing rules of the
 normative "## Blocked Declaration" template and the Resolution protocol so
 they cannot silently drift away from what
 ``check_and_resolve_decision_blocker_comment()`` in
 ``scripts/dispatcher-invoke.sh`` actually implements: the declaration
-template must itself disclose the ``/unblock`` resume instruction (an
-executor following the template "exactly" must not be able to omit it),
+template must itself carry the ``Next step`` field, one per option for a
+decision (an executor following the template "exactly" must not be able to
+omit it),
 and the Resolution section must describe the automated, standalone-line
 detection rule.
 """
@@ -22,26 +23,55 @@ def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_declaration_template_includes_resume_instruction_field() -> None:
+def _template_block() -> str:
     document = read("docs/PROJECT-STATUS.md")
-
-    assert "## Blocked Declaration" in document
-    assert "Resume instruction:" in document
-    assert "/unblock" in document
-
-
-def test_declaration_template_resume_instruction_is_inside_the_fenced_block() -> None:
-    document = read("docs/PROJECT-STATUS.md")
-
     start = document.index("## Blocked Declaration")
-    fence_end = document.index("```", start)
-    template_block = document[start:fence_end]
+    return document[start : document.index("```", start)]
 
-    assert "Resume instruction:" in template_block, (
-        "the Resume instruction field must be part of the normative "
-        "template block itself, not only prose below it — an executor "
-        "following 'this format exactly' must not be able to omit it"
+
+def test_declaration_template_includes_next_step_fields_inside_the_fenced_block() -> None:
+    template = _template_block()
+
+    assert "\nNext step: " in template, (
+        "the Next step field must be part of the normative template block "
+        "itself, not only prose below it (issue #605)"
     )
+    assert "\nNext step <letter>: " in template, (
+        "a Type: decision declaration names one next step per option (issue #605)"
+    )
+    assert "hpw next-step render" in template
+
+
+def test_next_step_field_covers_every_blocker_type() -> None:
+    template = _template_block()
+    plain = next(line for line in template.splitlines() if line.startswith("Next step: "))
+    per_option = next(line for line in template.splitlines() if line.startswith("Next step <letter>: "))
+
+    for kind in ("dependency", "external", "conflict", "resource"):
+        assert kind in plain
+    assert "decision" in per_option
+    assert "one line per option" in per_option
+
+
+def test_resume_instruction_is_no_longer_a_template_field() -> None:
+    template = _template_block()
+
+    assert "Resume instruction:" not in template
+    document = read("docs/PROJECT-STATUS.md")
+    decision_start = document.index("### Decision blockers")
+    decision_section = document[decision_start : document.index("### Monitoring", decision_start)]
+    assert "Resume instruction" not in decision_section
+    assert "Next step <letter>" in decision_section
+
+
+def test_unblock_rule_stays_discoverable_from_the_field_rules() -> None:
+    document = read("docs/PROJECT-STATUS.md")
+    start = document.index("All fields shown for the selected blocker type")
+    paragraph = document[start : document.index("### Decision blockers", start)]
+
+    assert "/unblock" in paragraph
+    assert '"Next step"' in paragraph
+    assert "docs/NEXT-STEP-KINDS.md" in paragraph
 
 
 def test_resolution_section_documents_automated_unblock_detection() -> None:
@@ -56,23 +86,6 @@ def test_resolution_section_documents_automated_unblock_detection() -> None:
     assert "automatically" in resolution_section
     assert "Ready to implement" in resolution_section
     assert "No manual board-status change is required" in resolution_section
-
-
-def test_decision_blockers_section_requires_resume_field_be_filled_in() -> None:
-    document = read("docs/PROJECT-STATUS.md")
-
-    assert "### Decision blockers" in document
-    decision_start = document.index("### Decision blockers")
-    decision_end = document.index("### Monitoring and escalation", decision_start)
-    decision_section = document[decision_start:decision_end]
-
-    assert "Resume instruction" in decision_section
-
-
-def _template_block() -> str:
-    document = read("docs/PROJECT-STATUS.md")
-    start = document.index("## Blocked Declaration")
-    return document[start : document.index("```", start)]
 
 
 def test_declaration_template_includes_decision_content_fields_after_checked() -> None:
