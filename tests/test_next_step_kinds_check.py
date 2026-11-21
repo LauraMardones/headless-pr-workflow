@@ -47,8 +47,7 @@ PENDING_KINDS = frozenset({
     "review-decision-blocker",
     "review-waiver-blocker",
     "slack-decision-blocker",
-    # Feature #590 (#612, #613)
-    "refine-session-summary",
+    # Feature #590 (#613; #612 converted the refine kinds)
     "implement-review-session-summary",
     # Feature #591
     "verify-closure-request",
