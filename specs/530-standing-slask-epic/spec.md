@@ -17,9 +17,13 @@ In:
 - The allowed-maintenance list: which kinds of catch-all finding the Tech Lead may refine without the PO, and where the line goes.
 - The standing exception: the dispatcher's closure notifications and `/verify-closure` never act on this Epic or its catch-all Feature, read from the constants in `src/headless_pr_workflow/catch_all.py`. A second Feature under this Epic delivers it and closes as usual.
 - This Epic's priority (P1) and that it has no milestone.
+- The account of the automation (scope change, 2026-11-21): the dispatcher, board-status and the sessions the dispatcher starts run under their own GitHub App, not `PROJECT_TOKEN`, so they stop sharing its 5000 API calls per hour with the PO's sessions (issue #626).
 
 Out:
 
+- The 5-minute dispatcher schedule.
+- Reading less per run in the dispatcher and board-status: the Tech Lead does it in #626 without a spec.
+- The edits to `docs/DISPATCHER-CONFIG.md` and ADR-012 that follow from the account decision: a separate PR (see Dependencies).
 - The catch-all issue creation helper and the command wording (#516), the waiver and thread rules (#517), the sort before Feature breakdown (#514) and the closure list (#515).
 - Changing how the scheduler orders work, or reserving ready-buffer slots for catch-all issues.
 - Follow-ups that existed before #504's mechanism (spec #504, 2026-11-08).
@@ -37,6 +41,24 @@ This Epic never closes, so its criteria are standing outcomes. Each is verified 
   - **Verified by:** the second Feature's closure evidence: the catch-all Feature with every issue closed, no `feature_closure_confirmation` or `epic_closure_approval` notification for it or for this Epic, and `/verify-closure 530` refusing with a stated reason.
 
 ## Decisions
+
+### Own account for the automation: a GitHub App — 2026-11-21
+
+Scope change. Reconfirms and extends the PO's answer on #626 (option b, `/unblock`, 2026-11-21). No earlier decision is reversed.
+
+**Chosen:**
+- The dispatcher, board-status and the sessions the dispatcher starts run under their own GitHub App, not `PROJECT_TOKEN`. `PROJECT_TOKEN` stays with the PO's own sessions. Reason: they share its 5000 calls per hour, and 11 of the last 40 dispatcher runs failed on the limit (#626, 2026-11-21).
+- Sessions the dispatcher starts use the App's token for everything they do, git pushes included.
+- The App's permissions: repository access (what the automation does today), board (project) write, and administration read, so the merge gate can read branch protection. The gate is not weakened: it still reports `checks=fail(required-unavailable)` when the read fails.
+- Board write is not proven for a user-owned project. The Tech Lead proves it with a test call. If the App cannot write the board, this decision is not worked around: the PO decides again by a new scope change.
+- `docs/DISPATCHER-CONFIG.md` and ADR-012 change to match, in a separate PR the PO merges (see Dependencies). The spec PR cannot carry them: a spec PR changes only the spec folder, and ADR-011 item 1.
+
+**Rejected:**
+- Keep `PROJECT_TOKEN` and only read less (#626 option a) — the limit stays shared with the PO's sessions, so a failure is rarer but still possible. Reading less still happens, as a Tech Lead task in #626 that needs no spec.
+- A bot account (a second user with its own token) — #626 option b named it next to the App; the PO chose the App.
+- The App for everything except board writes, which stay on `PROJECT_TOKEN` — board-status also failed on the limit, so it is a weaker fix.
+- Moving the project to an organization now — not chosen. It is a possible later decision if the board-write proof fails.
+- Changing the 5-minute dispatcher schedule — intentional (#626), not part of this decision.
 
 ### The standing exception is the constants in the catch-all module — 2026-11-13
 
