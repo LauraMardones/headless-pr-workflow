@@ -297,20 +297,20 @@ def test_session_blocker_kinds_and_the_decision_message_are_converted() -> None:
 
 
 def test_check_fails_when_a_pending_kind_is_not_listed_by_name() -> None:
-    failures = check_inventory(ROOT, _inventory(), PENDING_KINDS - {"slack-decision-blocker"})
+    failures = check_inventory(ROOT, _inventory(), PENDING_KINDS - {"slack-dispatcher-error"})
 
-    assert failures == ["pending kind slack-decision-blocker is not named in the check's pending list"]
+    assert failures == ["pending kind slack-dispatcher-error is not named in the check's pending list"]
 
 
 def test_check_fails_when_the_pending_list_names_a_converted_kind() -> None:
-    text = _inventory().replace("| slack-decision-blocker | slack:decision_blocker | `scripts/slack-notify.sh` | #589 | pending |",
-                                "| slack-decision-blocker | slack:decision_blocker | `scripts/slack-notify.sh` | #589 | converted |")
-    text = text.replace('"To answer: reply on the issue" (`tests/test_slack_notify_decision_blocker.sh`); converted by #608',
+    text = _inventory().replace("| slack-dispatcher-error | slack:dispatcher_error | `scripts/slack-notify.sh` | #591 | pending |",
+                                "| slack-dispatcher-error | slack:dispatcher_error | `scripts/slack-notify.sh` | #591 | converted |")
+    text = text.replace('"Dispatcher Error" with the last action',
                         _GOOD_STEP)
 
     failures = check_inventory(ROOT, text, PENDING_KINDS)
 
-    assert failures == [f"the pending list names slack-decision-blocker, which is not a pending kind of {INVENTORY}"]
+    assert failures == [f"the pending list names slack-dispatcher-error, which is not a pending kind of {INVENTORY}"]
 
 
 @pytest.mark.parametrize(
