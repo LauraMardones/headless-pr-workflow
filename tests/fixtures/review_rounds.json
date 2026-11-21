@@ -1,0 +1,494 @@
+{
+ "309": {
+  "closing_issue": {
+   "labels": [
+    "ws:session",
+    "prio:P1",
+    "cp:critical-path",
+    "type:task",
+    "executor:claude-code-sonnet"
+   ],
+   "number": 289
+  },
+  "commits": [
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-08T15:51:52Z"
+     }
+    },
+    "sha": "c1725f81f3b1bbc38767c3e288048a1b6aaa1b79"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-08T16:40:55Z"
+     }
+    },
+    "sha": "808b89ec2d15c5d4fe1b1ec41702e07fddbdf6c4"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-08T16:48:36Z"
+     }
+    },
+    "sha": "49fb039fa6d358485eefefeec1c646fe3412d993"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-10T10:07:59Z"
+     }
+    },
+    "sha": "6614dbb6a4b5b5d74ff89589f9f160c28dacf12a"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-10T10:08:17Z"
+     }
+    },
+    "sha": "50630e9eb830baae63d8a4c0f6fa370b00eade6d"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-10T10:12:26Z"
+     }
+    },
+    "sha": "111d6536754c983023828d479a87a3202d83b73f"
+   }
+  ],
+  "issue_comments": [
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #289 / #309\nHead: 111d6536754c983023828d479a87a3202d83b73f\nChecks: CI pytest green on head; every quoted terms passage compared with the live source on 2026-10-08; AC list from scripts/ac-summary.sh checked against the ADR; local pytest on the first commit only (624 passed, 2 failed in tests/test_worktree_status.py from a nested worktree)\nBlockers: none\nNext: review\nDeviation: Decision-document PR (ADR-011): the next step is the PO's own merge, not an agent review or /merge; AC partly met: criteria 5 and 8 have no observed finding (usage limit, refinement session and Codex-implemented review not tried, by PO decision 2026-10-10); handed to #315, #316, #319; AC partly met: per-session cost split into campaign credit and plan allowance not established; the two full sessions ran at the same time and the credit display did not change; ADR is longer than one page because it carries the terms quotes and the trial record; PO created the routine and committed the trial workflow, because the desktop app blocked the agent from creating unattended agents; WIP exception for #310 and #311 recorded on #289; Left for the PO: delete routine spike-289-trial-a, re-save CLAUDE_CODE_OAUTH_TOKEN without whitespace, decide on throwaway branch claude/spike-session-start-trial-b and on PRs #312 and #313\n"
+   }
+  ],
+  "pull": {
+   "additions": 211,
+   "body": "Closes #289",
+   "changed_files": 3,
+   "created_at": "2026-10-08T15:53:43Z",
+   "deletions": 2,
+   "merged_at": "2026-10-10T10:17:30Z",
+   "number": 309,
+   "title": "docs: ADR-012 \u2014 model sessions are started by the Actions dispatcher on the subscription token"
+  },
+  "review_comments": [],
+  "reviews": []
+ },
+ "313": {
+  "closing_issue": {
+   "labels": [
+    "prio:P2",
+    "type:task",
+    "executor:claude-code-sonnet"
+   ],
+   "number": 311
+  },
+  "commits": [
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-10T10:05:15Z"
+     }
+    },
+    "sha": "9e8b15da4beafd11a83d3047faca85c6c5dcdeaa"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-10T13:02:37Z"
+     }
+    },
+    "sha": "598b4685c90ec65d6064ad9ad24c6626c7232216"
+   }
+  ],
+  "issue_comments": [
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #311 / #313\nHead: 9e8b15da4beafd11a83d3047faca85c6c5dcdeaa\nChecks: python -m pytest: 648 passed; scripts/ac-summary.sh run, all 4 AC verified; dispatcher-change-check not applicable (only tests/test_adr_format.py changed)\nBlockers: none\nNext: review\nDeviation: WIP exception: 2 items already In implementation; PO allowed this run: https://github.com/LauraMardones/headless-pr-workflow/issues/289#issuecomment-6064792151; board status not updated: no board-write script available in this unattended run; intended: In implementation, then In review\n"
+   },
+   {
+    "body": "@codex review"
+   },
+   {
+    "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <relative-time datetime=\"2026-10-10T13:05:25.345477Z\">2026-10-10T13:05:25.345477Z</relative-time> | `598b468` | Manual request |\n\n\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with \ud83d\udc40 while any review is running, comments if it has suggestions, and reacts with \ud83d\udc4d once all reviews finish with no findings.\n\n</details>"
+   },
+   {
+    "body": "@codex review"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #311 / #313\nHead: 598b4685c90ec65d6064ad9ad24c6626c7232216\nChecks: CI pytest green on head; python -m pytest tests/test_adr_format.py: 23 passed locally; every ADR heading on current main (including ADR-012) checked against the stricter rule\nBlockers: none\nNext: review\nDeviation: Fix for the Codex P1 finding on 9e8b15d; earlier review is stale, @codex review requested for the new head; Fix made by the PO's desktop session, not by the unattended trial session that opened the PR\n"
+   },
+   {
+    "body": "Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `598b4685c9`\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>"
+   },
+   {
+    "body": "Merge gate: policy=pass(present_non_required), checks=pass, approval=solo-maintainer, threads=none, mergeable=yes, head=598b468\n\n## Session Summary\nCommand: merge\nIssue/PR: #313\nHead: 598b4685c90ec65d6064ad9ad24c6626c7232216\nChecks: GitHub Actions tests/pytest passed on merged head; merge gate exit 0\nBlockers: none\nNext: cleanup\nDeviation: Merged as merge commit 36018adb10d332b98cae583b6267dd756e4fb916 by a separate merge-owner session, relying on the solo-maintainer override recorded on the merged head\n"
+   }
+  ],
+  "pull": {
+   "additions": 98,
+   "body": "Closes #311",
+   "changed_files": 1,
+   "created_at": "2026-10-10T10:05:20Z",
+   "deletions": 0,
+   "merged_at": "2026-10-10T13:12:18Z",
+   "number": 313,
+   "title": "test(#311): every ADR file has a well-formed header"
+  },
+  "review_comments": [
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5479027036,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "body": "",
+    "in_reply_to_id": 4237692645,
+    "pull_request_review_id": 5479036511,
+    "user": {
+     "login": "LauraMardones"
+    }
+   }
+  ],
+  "reviews": [
+   {
+    "id": 5479027036,
+    "submitted_at": "2026-10-10T12:59:34Z",
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "id": 5479036511,
+    "submitted_at": "2026-10-10T13:03:16Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "id": 5479056994,
+    "submitted_at": "2026-10-10T13:10:11Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "id": 5479058241,
+    "submitted_at": "2026-10-10T13:10:40Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   }
+  ]
+ },
+ "336": {
+  "closing_issue": {
+   "labels": [
+    "type:story",
+    "ws:review",
+    "prio:P2",
+    "flow:orchestration",
+    "executor:claude-code-sonnet",
+    "status:in-review"
+   ],
+   "number": 330
+  },
+  "commits": [
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-14T08:29:40Z"
+     }
+    },
+    "sha": "4fffef7477e6593144e6965df1dd34eef2f5a330"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-14T09:16:59Z"
+     }
+    },
+    "sha": "04faadb4e18e03dea3e3281f1c88518ba765d282"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-14T09:29:00Z"
+     }
+    },
+    "sha": "1dcdc143a9601ae5a7b89dba9ac8756bb3e557eb"
+   }
+  ],
+  "issue_comments": [
+   {
+    "body": "@codex review\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #330 / #336\nHead: 4fffef7477e6593144e6965df1dd34eef2f5a330\nChecks: python -m pytest: 1134 passed; dispatcher-change-check.sh: skipped (no eligible files)\nBlockers: none\nNext: review\nDeviation: board status not updated: gh GraphQL unavailable; intended: In implementation, then In review; history read uses github.token with actions: read (PROJECT_TOKEN not needed); real Slack call proven by fake only\n"
+   },
+   {
+    "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <relative-time datetime=\"2026-10-14T09:32:49.069985Z\">2026-10-14T09:32:49.069985Z</relative-time> | `1dcdc14` | Manual request |\n\n\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with \ud83d\udc40 while any review is running, comments if it has suggestions, and reacts with \ud83d\udc4d once all reviews finish with no findings.\n\n</details>"
+   },
+   {
+    "body": "## Session Summary\nCommand: review\nIssue/PR: #330 / #336\nHead: 4fffef7477e6593144e6965df1dd34eef2f5a330\nChecks: Codex review of the current head: findings (https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515162812)\nBlockers: Codex review findings: https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515162812\nNext: implementation\nDeviation: produced by the codex-review-bookkeeping job without a model session\n\n<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=4fffef7477e6593144e6965df1dd34eef2f5a330 source=https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515162812 -->\n"
+   },
+   {
+    "body": "## Also fix in the next fix round: this PR breaks its own bookkeeping\n\nBesides the Codex P1 finding, there is a second problem. It is not reported as a review thread.\n\n**What happens:** the `bookkeeping` check on head `4fffef7` failed ([run 38535949966](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/38535949966)) with:\n\n```\nhpw: error: unrecognized arguments: --errors-file /home/runner/work/_temp/bookkeeping-errors.json\n```\n\n**Why:** for a `pull_request_review` event, GitHub runs the workflow file from this PR's branch. The job, though, checks out `main` (`ref: ${{ github.event.repository.default_branch }}`) and runs `main`'s `hpw`. This PR's workflow passes `--errors-file`, and `main`'s `hpw` doesn't have that option, so the job exits with code 2.\n\n**Consequence:** Codex's review of `4fffef7` was not recorded, and #330 stayed in \"In review\" until the PO ran the job by hand from `main` ([run 38537402626](https://github.com/LauraMardones/headless-pr-workflow/actions/runs/38537402626)). Every later Codex review of this PR that arrives as a PR review fails the same way, so the story gets stuck again after the fix round.\n\n`issue_comment` runs are not affected, because they use `main`'s workflow file. After merge, the workflow and the code are both on `main` and agree again. The problem exists only while the PR is open, but that is exactly when its review must be recorded.\n\n**What the fix needs:** a workflow from this branch must keep working with `main`'s `hpw` until merge. Two ways to get there:\n\n- pass `--errors-file` only when the installed `hpw codex-review-bookkeeping` accepts it, and skip the notify step when there is no errors file; or\n- split the change, so the `hpw` option lands on `main` first and the workflow starts using it in a later PR.\n\nAdd a test that fails when the workflow passes an option the default-branch `hpw` does not have. Or, if that is not practical, record in the PR why the chosen way is safe during the transition.\n\nRelated, in Codex's P1 finding: runs triggered by `pull_request_review` are recorded under the PR's head branch, not the default branch. `fetch_history()` has to include them.\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #330 / #336\nHead: 04faadb4e18e03dea3e3281f1c88518ba765d282\nChecks: python -m pytest: 1136 passed; dispatcher-change-check.sh: skipped (no eligible files)\nBlockers: none\nNext: review\nDeviation: board status not updated: gh GraphQL unavailable; intended: In implementation, then In review; fix round: errors-file passed only when the default-branch hpw accepts it; run history read across all refs\n"
+   },
+   {
+    "body": "@codex review\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: review\nIssue/PR: #330 / #336\nHead: 04faadb4e18e03dea3e3281f1c88518ba765d282\nChecks: Codex review of the current head: findings (https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515722575)\nBlockers: Codex review findings: https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515722575\nNext: implementation\nDeviation: produced by the codex-review-bookkeeping job without a model session\n\n<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=04faadb4e18e03dea3e3281f1c88518ba765d282 source=https://github.com/LauraMardones/headless-pr-workflow/pull/336#pullrequestreview-5515722575 -->\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #330 / #336\nHead: 1dcdc143a9601ae5a7b89dba9ac8756bb3e557eb\nChecks: python -m pytest: 1171 passed (on a tree that also had main merged); dispatcher-change-check.sh: skipped (no eligible files)\nBlockers: none\nNext: review\nDeviation: board status not updated: gh GraphQL unavailable; intended: In implementation, then In review; fix round: workflow_dispatch runs ignored in the run history (event field). git push returned 403, so the fix was pushed as an API commit on 04faadb without merging main; the local merge commit was not pushed\n"
+   },
+   {
+    "body": "@codex review"
+   },
+   {
+    "body": "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `1dcdc143a9`\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>"
+   },
+   {
+    "body": "## Session Summary\nCommand: review\nIssue/PR: #330 / #336\nHead: 1dcdc143a9601ae5a7b89dba9ac8756bb3e557eb\nChecks: Codex review of the current head: clean (https://github.com/LauraMardones/headless-pr-workflow/pull/336#issuecomment-6165306980); required checks: satisfied (pytest); Codex threads resolved by the job: https://github.com/LauraMardones/headless-pr-workflow/pull/336#discussion_r4268509293 (opened in the Codex review of 4fffef7477e6593144e6965df1dd34eef2f5a330, superseded by the clean Codex result https://github.com/LauraMardones/headless-pr-workflow/pull/336#issuecomment-6165306980), https://github.com/LauraMardones/headless-pr-workflow/pull/336#discussion_r4268967226 (opened in the Codex review of 04faadb4e18e03dea3e3281f1c88518ba765d282, superseded by the clean Codex result https://github.com/LauraMardones/headless-pr-workflow/pull/336#issuecomment-6165306980)\nBlockers: none\nNext: merge\nDeviation: produced by the codex-review-bookkeeping job without a model session\n\n<!-- hpw:codex-review-bookkeeping action=move-in-merge head=1dcdc143a9601ae5a7b89dba9ac8756bb3e557eb source=https://github.com/LauraMardones/headless-pr-workflow/pull/336#issuecomment-6165306980 -->\n"
+   },
+   {
+    "body": "Merge gate: policy=pass(present_required), checks=pass, approval=codex-review, threads=none, mergeable=yes, head=1dcdc14\n\n## Session Summary\nCommand: merge\nIssue/PR: #336\nHead: 1dcdc143a9601ae5a7b89dba9ac8756bb3e557eb\nChecks: pytest=SUCCESS\nBlockers: none\nNext: cleanup\nDeviation: Board status for #330 was already Done (auto-set on close); no write needed. Squash-merged as ca79c420feca147c23d31c16f976808bdea7c39f.\n"
+   }
+  ],
+  "pull": {
+   "additions": 446,
+   "body": "Closes #330",
+   "changed_files": 9,
+   "created_at": "2026-10-14T08:29:48Z",
+   "deletions": 18,
+   "merged_at": "2026-10-14T09:34:15Z",
+   "number": 336,
+   "title": "feat(review): tell the PO when a Codex review bookkeeping run fails (#330)"
+  },
+  "review_comments": [
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5515162812,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5515722575,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   }
+  ],
+  "reviews": [
+   {
+    "id": 5515162812,
+    "submitted_at": "2026-10-14T08:33:24Z",
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "id": 5515722575,
+    "submitted_at": "2026-10-14T09:21:13Z",
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   }
+  ]
+ },
+ "354": {
+  "closing_issue": {
+   "labels": [
+    "type:story",
+    "prio:P2",
+    "executor:claude-code-sonnet"
+   ],
+   "number": 350
+  },
+  "commits": [
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-14T19:21:39Z"
+     }
+    },
+    "sha": "7e9e989d43ffbc38a70a64da7124375ca35e3dba"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-15T06:59:19Z"
+     }
+    },
+    "sha": "e76fdeef5cefbbbc6729d59efdc2bf11faa1f8e7"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-15T07:35:28Z"
+     }
+    },
+    "sha": "ad3e490125fe3e3dfc3012f777df57a386de86e4"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-15T07:35:29Z"
+     }
+    },
+    "sha": "b5f8e736d5024846d8e45c18d90092fa4984743a"
+   },
+   {
+    "commit": {
+     "committer": {
+      "date": "2026-10-15T07:35:31Z"
+     }
+    },
+    "sha": "82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d"
+   }
+  ],
+  "issue_comments": [
+   {
+    "body": "@codex review"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #350 / #354\nHead: e76fdeef5cefbbbc6729d59efdc2bf11faa1f8e7\nChecks: python -m pytest: 1306 passed; CI pytest SUCCESS; dispatcher-change-check: all SKIP (no eligible files)\nBlockers: none\nNext: review\n"
+   },
+   {
+    "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <relative-time datetime=\"2026-10-15T07:39:15.657386Z\">2026-10-15T07:39:15.657386Z</relative-time> | `82ad246` | Manual request |\n\n\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with \ud83d\udc40 while any review is running, comments if it has suggestions, and reacts with \ud83d\udc4d once all reviews finish with no findings.\n\n</details>"
+   },
+   {
+    "body": "## Session Summary\nCommand: review\nIssue/PR: #350 / #354\nHead: e76fdeef5cefbbbc6729d59efdc2bf11faa1f8e7\nChecks: Codex review of the current head: findings (https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529555319)\nBlockers: Codex review findings: https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529555319\nNext: implementation\nDeviation: produced by the codex-review-bookkeeping job without a model session\n\n<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=e76fdeef5cefbbbc6729d59efdc2bf11faa1f8e7 source=https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529555319 -->\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #350 / #354\nHead: 82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d\nChecks: python -m pytest: 1307 passed (local); dispatcher-change-check: all SKIP (no eligible files)\nBlockers: none\nNext: review\nDeviation: git push denied (403); changes pushed as 3 per-file commits via the contents API; resulting head differs from local commit; Fixes both Codex P1 findings on e76fdee: Epic scope sourced from the merged spec (ADR-008); every story AC traced to a Feature criterion (ADR-009)\n"
+   },
+   {
+    "body": "@codex review"
+   },
+   {
+    "body": "<!-- hpw:dispatcher action=merge-owner pr=354 head=82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d -->"
+   },
+   {
+    "body": "## Session Summary\nCommand: review\nIssue/PR: #350 / #354\nHead: 82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d\nChecks: Codex review of the current head: findings (https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529712953)\nBlockers: Codex review findings: https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529712953\nNext: implementation\nDeviation: produced by the codex-review-bookkeeping job without a model session\n\n<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d source=https://github.com/LauraMardones/headless-pr-workflow/pull/354#pullrequestreview-5529712953 -->\n"
+   },
+   {
+    "body": "## Session Summary\nCommand: implement\nIssue/PR: #350 / #354\nHead: 82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d\nChecks: no code change this round; one Out of scope finding classified\nBlockers: Type: decision. Checked: docs/PROJECT-STATUS.md, docs/decisions/ADR-*.md, docs/HEADLESS-PR-WORKFLOW.md, docs/REFINEMENT-PIPELINE.md, Epic #272 and Feature #343 Decisions; none documents a PO waiver. Question: waive the listed findings for this PR? Options: A) waive and track in the follow-up issues - PR proceeds to review; B) bring them into this story's scope and fix them here - story grows beyond its AC. Recommendation: A, the finding is an ADR-009 requirement outside story #350's AC.\nNext: review\nDeviation: Out of scope Codex P1 (record spec commit, thread PRRT_kwDOSDMWdM6sq1XZ) -> follow-up #356; thread left unresolved for the PO; no push and no review request; Next: review applies after PO waiver and /unblock\n"
+   },
+   {
+    "body": "Merged PR #354 (squash, 47732cdcfe8d019f7a186c2d0eb804d3823c6e32).\n\nMerge gate: policy=pass(present_required), checks=pass, approval=separate-session, threads=none, mergeable=yes, head=82ad246\n\n## Session Summary\nCommand: merge\nIssue/PR: #354\nHead: 82ad246ef9e0f0aa8f8dbed36ec6bb1b8e72476d\nChecks: CI pytest SUCCESS; bookkeeping SKIPPED; merge-gate-summary exit 0\nBlockers: none\nNext: cleanup\nDeviation: Local checkout was stale (spec branch, behind main b16b7ea); merge-gate-summary was run from an extracted copy of main b16b7ea, not the local tree (local stale copy reported approval=fail).; Squash-merged as 47732cdcfe8d019f7a186c2d0eb804d3823c6e32 with --match-head-commit 82ad246; issue #350 closed as completed.; Status not set to Done: DoD item 'story added to Feature #343 child list' is unmet (#343 sub-issues: #344 only). Pending PO decision.\n"
+   }
+  ],
+  "pull": {
+   "additions": 115,
+   "body": "Closes #350",
+   "changed_files": 3,
+   "created_at": "2026-10-14T19:21:50Z",
+   "deletions": 0,
+   "merged_at": "2026-10-15T09:36:58Z",
+   "number": 354,
+   "title": "feat(refine): stories map the Epic and Feature requirements they cover (#350)"
+  },
+  "review_comments": [
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5529555319,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5529555319,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=f",
+    "in_reply_to_id": null,
+    "pull_request_review_id": 5529712953,
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "body": "",
+    "in_reply_to_id": 4280321691,
+    "pull_request_review_id": 5529839815,
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "body": "",
+    "in_reply_to_id": 4280195241,
+    "pull_request_review_id": 5530746256,
+    "user": {
+     "login": "LauraMardones"
+    }
+   }
+  ],
+  "reviews": [
+   {
+    "id": 5529555319,
+    "submitted_at": "2026-10-15T07:23:17Z",
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "id": 5529712953,
+    "submitted_at": "2026-10-15T07:39:13Z",
+    "user": {
+     "login": "chatgpt-codex-connector[bot]"
+    }
+   },
+   {
+    "id": 5529839815,
+    "submitted_at": "2026-10-15T07:51:50Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "id": 5530746256,
+    "submitted_at": "2026-10-15T09:12:06Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "id": 5530935683,
+    "submitted_at": "2026-10-15T09:28:09Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   },
+   {
+    "id": 5530976603,
+    "submitted_at": "2026-10-15T09:31:30Z",
+    "user": {
+     "login": "LauraMardones"
+    }
+   }
+  ]
+ }
+}

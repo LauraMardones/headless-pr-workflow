@@ -28,6 +28,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("unresolved-review-threads", "Detect unresolved GitHub review threads.", "P1-high", "F-review", "hard-gate", "core", "implemented"),
     CommandSpec("blocking-comments", "Detect blocking review comments or labels.", "P1-high", "F-review", "hard-gate", "core"),
     CommandSpec("codex-review-bookkeeping", "Move the story and post the Session Summary after a Codex review, with no model.", "P1-high", "F-review", "action", "core", "implemented"),
+    CommandSpec("review-rounds", "Report review requests, Codex reviews, P1 findings and fix rounds per merged PR.", "P2-medium", "F-review", "report", "core", "implemented"),
     CommandSpec("ci-summary", "Summarize CI/check state for the current head SHA.", "P1-high", "E-review-readiness", "report", "core", "implemented"),
     CommandSpec("target-branch-check", "Verify PR targets the expected base branch.", "P0-blocking", "H-merge", "hard-gate", "core", "implemented"),
     CommandSpec("merge-owner", "Determine whether this session may merge.", "P1-high", "H-merge", "hard-gate", "core", "implemented"),
@@ -37,6 +38,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("branch-cleanup", "Remove stale merged local branches when safe.", "P2-medium", "I-post-merge", "action", "core", "implemented"),
     CommandSpec("catch-all-issue", "Create or check the catch-all issue for work found outside a session's scope.", "P2-medium", "C-session", "action", "core", "implemented"),
     CommandSpec("resolve-catch-all-thread", "Resolve the thread of a finding in code the PR did not change, after fresh checks.", "P1-high", "F-review", "action", "core", "implemented"),
+    CommandSpec("next-step", "Render the PO's next step: the command with its number, where to run it, what follows.", "P1-high", "C-session", "report", "core", "implemented"),
     CommandSpec("workflow-status", "Summarize PR state and next action.", "P1-high", "C-session", "report", "core", "implemented"),
     CommandSpec("next-action", "Suggest exact next safe workflow action.", "P1-high", "C-session", "advisory", "core", "implemented"),
 )

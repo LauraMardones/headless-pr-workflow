@@ -112,6 +112,9 @@ concurrency:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.guard.outputs.enabled }}
+      state_writer: ${{ steps.scope.outputs.state_writer }}
     env:
       GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -265,19 +268,6 @@ jobs:
             .dispatcher-allowance
           key: session-state-${{ env.SAVE_DAY }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # Issue #478: the board's only status writer (`hpw dispatcher status
-      # sync`, #476) runs once per enabled run, after the invoke step, also when
-      # the poll found no work, the invoke step was skipped or it failed. It is
-      # read-only (--dry-run) off the default branch, like the poll.
-      - name: Write the board status
-        if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}
-        timeout-minutes: 10
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-          STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
-          REPO: ${{ github.repository }}
-        run: bash scripts/dispatcher-workflow-step.sh status-sync
-
       # Issue #339 (ADR-013): queues one dispatch_trigger_stopped event when the
       # newest workflow_dispatch run on main is more than 15 minutes old, for
       # the retry step below to send. Runs on every enabled cycle whatever
@@ -322,3 +312,28 @@ jobs:
         with:
           path: .dispatcher-state
           key: dispatcher-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Issue #573: event writes can run while dispatch invokes a session. Only
+  # this short job joins the event writer's group; dispatch keeps its own group.
+  board-status:
+    needs: dispatch
+    if: ${{ !cancelled() && needs.dispatch.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: board-status-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+      DECISION_BLOCKER_PO_LOGIN: LauraMardones
+      STATE_WRITER: ${{ needs.dispatch.outputs.state_writer }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout board writer
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Write the board status
+        if: ${{ !cancelled() && needs.dispatch.outputs.enabled == 'true' }}
+        run: bash scripts/dispatcher-workflow-step.sh status-sync

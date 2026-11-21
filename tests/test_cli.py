@@ -55,6 +55,7 @@ def test_catalog_marks_pr_context_implemented(capsys):
     assert "pr-context\tP1-high\tC-session\treport\tcore\timplemented" in output
     assert "approval-check\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
     assert "review-sha\tP0-blocking\tF-review\thard-gate\tcore\timplemented" in output
+    assert "review-rounds\tP2-medium\tF-review\treport\tcore\timplemented" in output
     assert "ci-summary\tP1-high\tE-review-readiness\treport\tcore\timplemented" in output
     assert "target-branch-check\tP0-blocking\tH-merge\thard-gate\tcore\timplemented" in output
     assert "merge-owner\tP1-high\tH-merge\thard-gate\tcore\timplemented" in output

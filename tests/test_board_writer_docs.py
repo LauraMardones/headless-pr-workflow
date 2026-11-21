@@ -37,13 +37,26 @@ def test_the_writer_step_and_its_command_are_named():
 
 def test_the_conditions_are_described():
     text = section()
-    assert 'after "Run dispatcher invoke" and "Notify usage limit reached" and before "Check the dispatch trigger"' in text
+    assert 'once per dispatcher run, after the `dispatch` job' in text
+    assert 'needs.dispatch.outputs.enabled' in text
     assert "only when `DISPATCHER_ENABLED` is `true`" in text
     assert "The writer itself does not read `DISPATCHER_ENABLED`" in text
     assert "when the poll found no work, when the invoke step was skipped and when it failed" in text
     assert "`if: ${{ !cancelled() && steps.guard.outputs.enabled == 'true' }}`" in text
     assert "with `--dry-run` unless `STATE_WRITER=true`: a run off the default branch only reports" in text
     assert "`GH_TOKEN` set to `PROJECT_TOKEN`" in text
+
+
+def test_both_docs_describe_event_writes_latency_serialization_and_pause():
+    model = (Path(__file__).resolve().parents[1] / "docs/PROJECT-STATUS.md").read_text(encoding="utf-8")
+    model = next(line for line in model.splitlines() if line.startswith("- **One writer.**"))
+    for text in (section(), model):
+        for phrase in ("within two minutes", "board-status-${{ github.repository }}",
+                       "cancel-in-progress: false", "paused", "DISPATCHER_ENABLED",
+                       "converted to draft", "ready for review", "synchronize", "reopened",
+                       "review submitted or dismissed",
+                       "workflow_run", "comment created", "Label changes, body edits and project events"):
+            assert phrase in text, phrase
 
 
 def test_the_exit_codes_are_described():
@@ -76,3 +89,17 @@ def test_no_retired_name_and_no_removed_status_outside_the_migration_steps():
     rest = DOC.replace(migration(), "")
     assert [name for name in RETIRED if name in DOC] == []
     assert [name for name in REMOVED if name in rest] == []
+
+
+def test_thread_only_changes_use_the_po_approved_per_run_fallback():
+    assert "PO option A" in section()
+    assert "next per-run write" in section()
+    assert "two-minute bound does not apply to thread-only changes" in section()
+
+
+def test_local_replay_does_not_replace_hosted_timing_acceptance():
+    text = section()
+    assert "local fake-transport replay does not establish hosted event-to-board latency" in text
+    assert "actual event, workflow queue/start and verified board-write timestamps" in text
+    assert "required before the implementation handoff" in text
+    assert "E6 closure also verifies" in text
