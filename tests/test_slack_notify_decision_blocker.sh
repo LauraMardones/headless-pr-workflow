@@ -55,7 +55,8 @@ within_limits() {
 URL="https://github.com/o/r/issues/7"
 FULL=$(jq -n --arg u "$URL" '{story_title:"My story", issue_url:$u, blocker_type:"decision",
     unblocked_when:"PO decides", question:"Ship A or B?",
-    options:"A) ship A — fast but risky\nB) ship B — slow but safe", recommendation:"B because safe"}')
+    options:"A) ship A — fast but risky\nB) ship B — slow but safe", recommendation:"B because safe",
+    next_steps:"Next step a: run `/spec 418` in Claude Code or Codex; then the PO merges the spec PR.\nNext step b: reply `/unblock` on #7 on GitHub; then the dispatcher resumes the story."}')
 
 p=$(send "$FULL") || { echo "FAIL: full context send failed"; FAIL=$(( FAIL + 1 )); p=""; }
 t=$(texts "$p")
@@ -63,11 +64,17 @@ check "full: renders story, question, options, recommendation, unblocked-when" \
     bash -c 'grep -qF "My story" <<< "$1" && grep -qF "Ship A or B?" <<< "$1" && grep -qF "A) ship A — fast but risky" <<< "$1" && grep -qF "B) ship B — slow but safe" <<< "$1" && grep -qF "B because safe" <<< "$1" && grep -qF "PO decides" <<< "$1"' _ "$t"
 check "full: links the issue and names /unblock" \
     bash -c 'grep -qF "<$2|View issue>" <<< "$1" && grep -qF "/unblock" <<< "$1"' _ "$t" "$URL"
+check "full: shows every option's next step (command, number, place, outcome)" \
+    bash -c 'grep -qF "Next step a: run \`/spec 418\` in Claude Code or Codex; then the PO merges the spec PR." <<< "$1" && grep -qF "Next step b: reply \`/unblock\` on #7 on GitHub; then the dispatcher resumes the story." <<< "$1"' _ "$t"
+check "full: next steps follow the options" \
+    bash -c 'o=$(grep -nF "*Options:*" <<< "$1" | head -1 | cut -d: -f1); n=$(grep -nF "*Next steps:*" <<< "$1" | head -1 | cut -d: -f1); [[ -n "$o" && -n "$n" && "$n" -gt "$o" ]]' _ "$t"
+check "full: the fixed To answer line is gone when next steps are shown" bash -c '! grep -qF "To answer:" <<< "$1"' _ "$t"
 check "full: nothing reported missing" bash -c '! grep -qF "missing" <<< "$1"' _ "$t"
 
 LONG=$(head -c 5000 /dev/zero | tr '\0' 'x')
 BIG=$(jq -n --arg u "$URL" --arg l "$LONG" '{story_title:$l, issue_url:$u, blocker_type:"decision",
     unblocked_when:$l, question:$l, recommendation:$l,
+    next_steps:"Next step a: run `/spec 418` in Claude Code or Codex; then the PO merges the spec PR.\nNext step b: reply `/unblock` on #7 on GitHub; then the dispatcher resumes the story.",
     options:([range(0;20) | ["A","B","C","D"][. % 4] + ") name" + (.|tostring) + " — " + $l] | join("\n"))}')
 p=$(send "$BIG") || { echo "FAIL: oversize context send failed"; FAIL=$(( FAIL + 1 )); p=""; }
 t=$(texts "$p")
@@ -77,6 +84,20 @@ check "oversize: issue link and /unblock instruction survive" \
 check "oversize: every option keeps its letter and name, cuts are marked" \
     bash -c 'for i in $(seq 0 19); do grep -qF "name$i — " <<< "$1" || exit 1; done; grep -qF "…" <<< "$1"' _ "$t"
 
+check "oversize: next steps are not cut at the options cap" \
+    bash -c 'grep -qF "then the PO merges the spec PR." <<< "$1" && grep -qF "then the dispatcher resumes the story." <<< "$1"' _ "$t"
+
+# Long next steps (four options, 750-char outcomes) are split across bounded
+# sections with their complete text, not sent as one section over 3000 chars.
+LONGNS=$(jq -n '[range(0;4) | "Next step " + (["a","b","c","d"][.]) + ": run `/unblock 7` on GitHub; then " + ("x" * 750) + "END" + (.|tostring)] | join("\n")')
+LONG=$(jq --arg n "$LONGNS" '.next_steps = $n' <<< "$FULL")
+p=$(send "$LONG") || { echo "FAIL: long next steps send failed"; FAIL=$(( FAIL + 1 )); p=""; }
+t=$(texts "$p")
+check "long next steps: every section <= 3000 chars and <= 50 blocks" within_limits "$p"
+check "long next steps: every option's complete text survives" \
+    bash -c 'for i in 0 1 2 3; do grep -qF "END$i" <<< "$1" || exit 1; done; [[ $(grep -o "x" <<< "$1" | wc -l) -ge 3000 ]]' _ "$t"
+check "long next steps: issue link survives" bash -c 'grep -qF "<$2|View issue>" <<< "$1"' _ "$t" "$URL"
+
 # Many short options: no option is cut when everything fits.
 check "short options are not cut" bash -c '! grep -qF "…" <<< "$1"' _ "$(texts "$(send "$FULL")")"
 
@@ -85,13 +106,20 @@ p=$(send '{"story_title":"Legacy","issue_url":"'"$URL"'","blocker_type":"decisio
 if [[ -n "$p" ]]; then
     t=$(texts "$p")
     check "missing keys: valid payload naming what is missing" \
-        bash -c 'grep -qF "Declaration is missing: Question, Options, Recommendation" <<< "$1" && grep -qF "Legacy" <<< "$1"' _ "$t"
+        bash -c 'grep -qF "Declaration is missing: Question, Options, Recommendation, Next step" <<< "$1" && grep -qF "Legacy" <<< "$1"' _ "$t"
     check "missing keys: within limits" within_limits "$p"
 fi
 
 p=$(send '{"story_title":"S","question":"Q?","options":"","recommendation":"A: ok"}') || p=""
-check "partial: names only the missing field" \
-    bash -c 'grep -qF "Declaration is missing: Options" <<< "$1"' _ "$(texts "$p")"
+check "partial: names only the missing fields" \
+    bash -c 'grep -qF "Declaration is missing: Options, Next step" <<< "$1"' _ "$(texts "$p")"
+
+# A context queued before next steps existed still renders and is sent.
+OLD=$(jq 'del(.next_steps)' <<< "$FULL")
+p=$(send "$OLD") || { echo "FAIL: context without next_steps was not sent"; FAIL=$(( FAIL + 1 )); p=""; }
+t=$(texts "$p")
+check "no next_steps: sent with the missing-next-step note and the fixed answer line" \
+    bash -c 'grep -qF "_Declaration is missing: Next step_" <<< "$1" && grep -qF "To answer: reply on the issue" <<< "$1" && grep -qF "<$2|View issue>" <<< "$1"' _ "$t" "$URL"
 
 p=$(send '{}') || p=""
 check "empty context does not crash" test -n "$p"
