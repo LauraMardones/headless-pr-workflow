@@ -66,7 +66,8 @@ build_payload() {
             # the payload has a fixed number of blocks and every text is capped
             # below 3000. Options are cut consequence-first (letter and name
             # stay); question and recommendation are cut last, with the
-            # larger caps. The issue link and the next steps are never cut (issue #608).
+            # larger caps. The issue link and the next steps are never cut (issue #608);
+            # long next steps are split across sections of at most 2900 characters.
             printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
@@ -83,6 +84,12 @@ build_payload() {
                     | if $k == 0 then ""
                       else (($total - $k + 1) / $k | floor) as $per
                         | $ls | map(cut_option($per)) | join("\n") end;
+                def pieces($n):
+                    if length <= $n then [.] else [.[0:$n]] + (.[$n:] | pieces($n)) end;
+                def pack($n):
+                    reduce (split("\n")[] | pieces($n)[]) as $l ([];
+                        if length > 0 and (.[-1] | length) + 1 + ($l | length) <= $n
+                        then (.[-1] = .[-1] + "\n" + $l) else . + [$l] end);
                 ($c.story_title | clean) as $title
                 | ($c.issue_url | clean) as $url
                 | ($c.blocker_type | clean) as $type
@@ -103,7 +110,7 @@ build_payload() {
                   ]
                   + (if $q != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Question:* " + ($q | cut(1000)))}}] else [] end)
                   + (if $o != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Options:*\n" + ($o | cut_options(2500)))}}] else [] end)
-                  + (if $ns != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Next steps:*\n" + $ns)}}] else [] end)
+                  + (if $ns != "" then ([$ns | pack(2900)] | .[0] | to_entries | map({type: "section", text: {type: "mrkdwn", text: ((if .key == 0 then "*Next steps:*\n" else "" end) + .value)}})) else [] end)
                   + (if $r != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Recommendation:* " + ($r | cut(1000)))}}] else [] end)
                   + (if ($missing | length) > 0 then [{type: "section", text: {type: "mrkdwn", text: ("_Declaration is missing: " + ($missing | join(", ")) + "_")}}] else [] end)
                   + [

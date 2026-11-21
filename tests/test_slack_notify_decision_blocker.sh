@@ -87,6 +87,17 @@ check "oversize: every option keeps its letter and name, cuts are marked" \
 check "oversize: next steps are not cut at the options cap" \
     bash -c 'grep -qF "then the PO merges the spec PR." <<< "$1" && grep -qF "then the dispatcher resumes the story." <<< "$1"' _ "$t"
 
+# Long next steps (four options, 750-char outcomes) are split across bounded
+# sections with their complete text, not sent as one section over 3000 chars.
+LONGNS=$(jq -n '[range(0;4) | "Next step " + (["a","b","c","d"][.]) + ": run `/unblock 7` on GitHub; then " + ("x" * 750) + "END" + (.|tostring)] | join("\n")')
+LONG=$(jq --arg n "$LONGNS" '.next_steps = $n' <<< "$FULL")
+p=$(send "$LONG") || { echo "FAIL: long next steps send failed"; FAIL=$(( FAIL + 1 )); p=""; }
+t=$(texts "$p")
+check "long next steps: every section <= 3000 chars and <= 50 blocks" within_limits "$p"
+check "long next steps: every option's complete text survives" \
+    bash -c 'for i in 0 1 2 3; do grep -qF "END$i" <<< "$1" || exit 1; done; [[ $(grep -o "x" <<< "$1" | wc -l) -ge 3000 ]]' _ "$t"
+check "long next steps: issue link survives" bash -c 'grep -qF "<$2|View issue>" <<< "$1"' _ "$t" "$URL"
+
 # Many short options: no option is cut when everything fits.
 check "short options are not cut" bash -c '! grep -qF "…" <<< "$1"' _ "$(texts "$(send "$FULL")")"
 
