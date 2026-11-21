@@ -515,6 +515,10 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")
     settings = settings or Settings.from_env()
+    if args.block in ("facts", "scheduler", "status"):
+        enable = getattr(gateway, "enable_read_cache", None)  # only GhGateway; fakes read from memory
+        if enable is not None:
+            enable()
 
     if args.block == "marker":
         return _run_marker(args, gateway, settings)
