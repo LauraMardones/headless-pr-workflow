@@ -54,6 +54,10 @@ def test_ac3_decision_blocker_uses_the_project_status_format() -> None:
     assert "`## Blocked Declaration` with `Type: decision`" in text
     assert "docs/PROJECT-STATUS.md" in text
     assert "the affected criterion stays unchanged" in text
+    # Issue #608: the decision blocker carries one next step per option.
+    assert "one `Next step <letter>:` line per option" in text
+    assert "`hpw next-step render --command <command> --number <n> --where <where> --then <outcome>`" in text
+    assert "option a) `/spec 418`" in text
 
 
 def test_ac4_resume_after_unblock() -> None:

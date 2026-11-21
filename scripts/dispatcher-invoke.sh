@@ -1787,43 +1787,28 @@ invoke_executor_command() {
     esac
 }
 
-# ─── Utility: find the open PR linked to an issue (Closes #N pattern) ────────
-
-find_linked_pr() {
-    local issue_num="$1"
-    gh api "repos/$REPO/pulls?state=open&per_page=100" \
-        | jq -r --argjson n "$issue_num" '
-            map(select(
-                (.body // "") | ascii_downcase |
-                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-            )) | first | .number // empty'
-}
-
 # ─── Utility: linked PR facts for the hand-off and resume entries (#293) ─────
+# Thin shims (ADR-014 §2) over the one linked-PR rule, `hpw dispatcher
+# in-flight linked` (inflight_linked in scripts/lib/in-flight.sh, issue #556).
 # find_linked_pr_json prints the linked open PR as one JSON object (number,
-# draft, head.sha), or nothing. find_merged_linked_pr prints the number of a
-# merged PR that closes the issue, looking at the 100 most recently updated
-# closed PRs.
+# draft, head.sha), or nothing; it reads every page of the open PRs.
+# find_merged_linked_pr prints the number of a merged PR that closes the issue,
+# looking at the 100 most recently updated closed PRs. Both return 1 when a
+# read or the rule fails.
 
 find_linked_pr_json() {
-    local issue_num="$1"
-    gh api "repos/$REPO/pulls?state=open&per_page=100" \
-        | jq -c --argjson n "$issue_num" '
-            map(select(
-                (.body // "") | ascii_downcase |
-                test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b")
-            )) | first // empty'
+    local issue_num="$1" prs links
+    # Endpoint first, then --paginate: every page of the open PRs (gh takes the flag in either place).
+    prs=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate | jq -s 'add // []') || return 1
+    links=$(inflight_linked "[$issue_num]" "$prs" '[]') || return 1
+    jq -c --arg n "$issue_num" '.linked[$n] // empty' <<< "$links"
 }
 
 find_merged_linked_pr() {
-    local issue_num="$1"
-    gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
-        | jq -r --argjson n "$issue_num" '
-            map(select(
-                .merged_at != null and
-                ((.body // "") | ascii_downcase |
-                 test("(closes|fixes|resolves)[[:space:]]+#\($n)\\b"))
-            )) | first | .number // empty'
+    local issue_num="$1" closed links
+    closed=$(gh api "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100") || return 1
+    links=$(inflight_linked "[$issue_num]" '[]' "$closed") || return 1
+    jq -r --arg n "$issue_num" '.merged[$n] // empty' <<< "$links"
 }
 
 # ─── Utility: fix-round facts from the bookkeeping job's marker (#293) ───────

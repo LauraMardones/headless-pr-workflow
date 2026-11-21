@@ -32,15 +32,6 @@ PENDING_KINDS = frozenset({
     "bookkeeping-resource-blocker",
     "bookkeeping-external-blocker",
     "codex-worker-fix-round-blocker",
-    # #608
-    "refine-decision-blocker",
-    "implement-decision-blocker",
-    "implement-conflict-blocker",
-    "implement-other-blocker",
-    "implement-waiver-blocker",
-    "review-decision-blocker",
-    "review-waiver-blocker",
-    "slack-decision-blocker",
     # Feature #590 (#612, #613)
     "refine-session-summary",
     "implement-review-session-summary",
@@ -289,6 +280,20 @@ def test_check_fails_on_a_synthetic_converted_kind_missing_a_part(example: str) 
     failures = check_inventory(ROOT, _with_converted_kind(example), PENDING_KINDS)
 
     assert len(failures) == 1 and failures[0].startswith("converted kind synthetic-kind:")
+
+
+def test_session_blocker_kinds_and_the_decision_message_are_converted() -> None:
+    # Issue #608: the session blockers and the Slack decision_blocker message
+    # carry the next step; none of them is pending any more.
+    kinds, _ = parse_inventory(_inventory())
+    converted_by_608 = {
+        "refine-decision-blocker", "implement-decision-blocker", "implement-conflict-blocker",
+        "implement-other-blocker", "implement-waiver-blocker", "review-decision-blocker",
+        "review-waiver-blocker", "slack-decision-blocker",
+    }
+    status = {kind.name: kind.status for kind in kinds}
+    assert {name: status[name] for name in converted_by_608} == dict.fromkeys(converted_by_608, "converted")
+    assert not converted_by_608 & PENDING_KINDS
 
 
 def test_check_fails_when_a_pending_kind_is_not_listed_by_name() -> None:
