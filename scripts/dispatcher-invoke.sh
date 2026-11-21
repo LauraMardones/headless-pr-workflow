@@ -2235,6 +2235,38 @@ ensure_merge_owner() {
     [[ $? -eq 0 ]]
 }
 
+# po_merged_decision_pr <pr> — issue #505. 0 when PR <pr> is a decision-document
+# PR the PO merged by hand (ADR-011): /merge refuses it, so no `Merge gate:`
+# confirmation can exist. All three facts are read from GitHub now: the PR is
+# merged and its body closes this story, merged_by is DECISION_BLOCKER_PO_LOGIN,
+# and a changed file matches the decision-document rule of dispatcher-merge.sh
+# (same regex; keep the two in step). A failed read is not evidence: 1, with
+# the reason logged.
+po_merged_decision_pr() {
+    local pr_number="$1" facts files decision_files
+    if ! facts=$(gh api "repos/$REPO/pulls/$pr_number" --jq \
+        '[((.merged_at != null) | tostring), (.merged_by.login // ""),
+          (((.body // "") | ascii_downcase | test("(closes|fixes|resolves)[[:space:]]+#'"$ISSUE_NUMBER"'\\b")) | tostring)] | join("|")' 2>/dev/null); then
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: PR #$pr_number could not be read for the PO-merge check; handled as an unconfirmed merge" >&2
+        return 1
+    fi
+    local merged merger closes
+    IFS='|' read -r merged merger closes <<< "$facts"
+    [[ "$merged" == "true" && "$closes" == "true" ]] || return 1
+    if [[ -z "$merger" ]]; then
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: merged_by of PR #$pr_number is not readable; handled as an unconfirmed merge" >&2
+        return 1
+    fi
+    [[ -n "$DECISION_BLOCKER_PO_LOGIN" && "$merger" == "$DECISION_BLOCKER_PO_LOGIN" ]] || return 1
+    if ! files=$(gh api --paginate "repos/$REPO/pulls/$pr_number/files?per_page=100" --jq '.[].filename' 2>/dev/null); then
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: the changed files of PR #$pr_number could not be read; handled as an unconfirmed merge" >&2
+        return 1
+    fi
+    # Source of the rule: scripts/dispatcher-merge.sh (decision documents, ADR-011).
+    decision_files=$(grep -E '^(specs/[0-9]+-[^/]+/|docs/decisions/ADR-[^/]*\.md$)' <<< "$files" || true)
+    [[ -n "$decision_files" ]]
+}
+
 # settle_merge_confirmation <pr> — after a completed merge: posts a pending
 # confirmation once. 0: the confirmation is on the PR (or nothing is pending),
 # cleanup may follow; 1: it is still missing. The story then stays in the merge step:
@@ -2251,6 +2283,12 @@ settle_merge_confirmation() {
     if own=$(bot_comments_json "$pr_number") \
         && jq -e 'any(.[]; ((.body // "") | contains("action=evidence-pending") | not)
                            and ((.body // "") | test("(^|\n)Merge gate:")))' <<< "$own" >/dev/null; then
+        return 0
+    fi
+    # Issue #505: the PO merged a decision-document PR by hand; the dispatcher
+    # never merges it, so no confirmation is expected. No marker, no failure.
+    if po_merged_decision_pr "$pr_number"; then
+        echo "${LOG_PREFIX}[RESUME] #$ISSUE_NUMBER: PR #$pr_number changes decision documents and the PO merged it; no merge confirmation from the dispatcher is expected"
         return 0
     fi
     # The PO accepted the gap: the give-up blocker was posted and then unblocked.
