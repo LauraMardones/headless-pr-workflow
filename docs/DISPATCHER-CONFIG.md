@@ -303,6 +303,33 @@ The merge gate reads `repos/<repo>/branches/main/protection`, which GitHub allow
 
 ---
 
+## GitHub App — the account of the automation (ADR-016)
+
+Decided 2026-11-21 (spec #530, ADR-016): the dispatcher, board-status and the sessions the dispatcher starts will run under their own GitHub App, so they stop sharing the 5000 API calls per hour of `PROJECT_TOKEN` with the PO's sessions (issue #626). **Until the Feature under Epic #530 that delivers it is merged, the workflows still use `PROJECT_TOKEN` as the section above describes.** `PROJECT_TOKEN` stays for the PO's own sessions.
+
+The App is `hpw-automation`, owned by and installed on the PO's account for this repository only, with no webhook. The PO stores its credential as two repository secrets (not variables):
+
+| Secret | Holds |
+|---|---|
+| `APP_ID` | The App ID. |
+| `APP_PRIVATE_KEY` | The App's private key (the whole `.pem` text). An agent never reads or prints it. |
+
+Repository permissions of the installation, as granted on 2026-11-21:
+
+| Permission | Access | Reason |
+|---|---|---|
+| Contents | Read and write | Reads, commits and pushes, including a session's `git push`. |
+| Pull requests | Read and write | PR reads, comments, updates and merges. |
+| Issues | Read and write | Issue reads, comments and labels. |
+| Workflows | Read and write | GitHub refuses a push that changes a file under `.github/workflows/` without it. |
+| Administration | Read-only | The merge gate reads `repos/<repo>/branches/main/protection`, which needs admin access. The gate is not weakened. |
+| Actions, Checks, Commit statuses | Read-only | The poll and the merge gate read workflow runs and check results. |
+| Metadata | Read-only | Mandatory. |
+
+Not proven: whether the App can write the user-owned Projects v2 board. It has no Projects permission yet. The Tech Lead proves it with a test call; if it cannot, the PO decides again by a scope change to spec #530 (ADR-016 → Decision 4). The Tech Lead also fixes the final permission list and how the workflows create the App's installation token.
+
+---
+
 ## GitHub writes — `hpw dispatcher write`
 
 Every comment and label the dispatcher writes goes through one building block, `scripts/hpw dispatcher write` (ADR-014 → Block 1, issue #432; code in `src/headless_pr_workflow/dispatcher/`). It runs `gh` with the token above, writes, reads the result back from GitHub and retries. A write that is not confirmed by the read-back is a failure, never a success.
