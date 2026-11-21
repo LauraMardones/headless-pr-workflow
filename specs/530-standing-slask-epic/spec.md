@@ -31,7 +31,7 @@ Out:
 
 ## Acceptance Criteria
 
-This Epic never closes, so its criteria are standing outcomes. Each is verified at a closure the PO confirms: #504's, or that of the second Feature under this Epic.
+This Epic never closes, so its criteria are standing outcomes. Each is verified at a closure the PO confirms: #504's, or that of a Feature under this Epic that closes (the second Feature for E3, the Feature that delivers the account for E4).
 
 - **E1:** A catch-all issue filed with the lines spec #504 decides is scheduled like any other issue. It is never skipped as `no-feature` or `no-parent`.
   - **Verified by:** #504's closure evidence: a catch-all issue under this Epic's catch-all Feature refined and implemented by the scheduler, and the scheduler log for it with no `no-feature` or `no-parent` skip.
@@ -39,6 +39,8 @@ This Epic never closes, so its criteria are standing outcomes. Each is verified 
   - **Verified by:** #504's closure evidence (its E2 proof): one allowed finding refined with no PO action, and one finding that is not allowed, such as a refactoring on its own, raised as a decision blocker.
 - **E3:** The PO never gets a closure request or a closure verification for this Epic or its catch-all Feature, even when the catch-all is empty.
   - **Verified by:** the second Feature's closure evidence: the catch-all Feature with every issue closed, no `feature_closure_confirmation` or `epic_closure_approval` notification for it or for this Epic, and `/verify-closure 530` refusing with a stated reason.
+- **E4:** No dispatcher or board-status run fails on the shared API rate limit over a week, because they run under their own GitHub App.
+  - **Verified by:** the closure evidence of the Feature that delivers the account: the runs of both workflows over seven days after the switch, with none failed on `could not read the work in flight` or `API rate limit exceeded`; a board-status run that wrote a card with the App's token; and a `scripts/merge-gate-summary` run under the App that reports its checks, not `required-unavailable`.
 
 ## Decisions
 
@@ -119,6 +121,12 @@ Scope change. Reconfirms and extends the PO's answer on #626 (option b, `/unbloc
 - `.claude/commands/verify-closure.md` (evaluates any Epic or Feature it is given) — conflict. Resolved: the second Feature makes it refuse this Epic and its catch-all Feature.
 - `scripts/dispatcher-invoke.sh` (`feature_closure_confirmation` and `epic_closure_approval` when every story or Feature is Done) — conflict. Resolved: the second Feature exempts this Epic and its catch-all Feature.
 - `src/headless_pr_workflow/dispatcher/facts.py` and `scheduler.py` (`no-parent`, `no-feature`, Epic priority first, one ready buffer across Epics) — no conflict. Catch-all issues carry `Parent epic:` and `Feature group:`, and P1 follows the existing sort key.
+- ADR-012 (Consequences: the session "holds `PROJECT_TOKEN`… until a narrower credential exists"), `docs/DISPATCHER-CONFIG.md` (GitHub Token — `PROJECT_TOKEN`; token of each step in a session; board status), ADR-013 and ADR-014 (the transport uses the token `gh` already uses, `PROJECT_TOKEN` in the workflow) — conflict. Resolved: the account decision (2026-11-21) supersedes that rule. A separate PR the PO merges changes ADR-012 and `docs/DISPATCHER-CONFIG.md`, and ADR-014's wording if needed (see Dependencies). Until it merges, the documents still name `PROJECT_TOKEN`.
+- ADR-011 item 1 and the Definition of Ready — conflict with the PO's wish to change `docs/DISPATCHER-CONFIG.md` and ADR-012 in this spec PR. Resolved: a spec PR changes only the spec folder, so those changes go in a separate PR.
+- ADR-011 item 5 — no conflict. Merges by the App's account are visible as a different account from the PO's, which makes the PO's own merge easier to tell apart. No change decided.
+- `docs/MERGE-POLICY.md` and M9 — no conflict. The App's administration read keeps the merge gate whole; no gate is changed.
+- #626 (`## Decisions`, 2026-11-21) — consistent. It records option b and keeps #626 blocked until this spec merges. Reading less (its ideas 2 and 3) stays a Tech Lead task.
+- ADR-009 item 7 — no new consequence beyond the one already stated: #626 and any refined issue it affects are re-refined after this spec merges.
 - `docs/ROADMAP.md` milestones and `scripts/refine-check` — no conflict. `scripts/refine-check` does not check a milestone.
 
 ## Delegated to the Tech Lead
@@ -128,11 +136,14 @@ Scope change. Reconfirms and extends the PO's answer on #626 (option b, `/unbloc
 - The `prio:` and `executor:` labels of each catch-all issue; `prio:` orders only among catch-all issues.
 - How the dispatcher and `/verify-closure` read the constants, and the wording of the refusal.
 - Renaming the titles and bodies of #504 and #513 to #517, and the module name `catch_all.py` in #516 and #517 (decided above).
+- The account change: slicing it into a Feature (it closes, so E4 can be verified) and its stories, the App's exact permission names and how workflows get its token, the board-write proof, and re-refining #626.
 
 ## Dependencies
 
 - #504 — E1 and E2 are verified through its closure evidence. Order: this spec merges, the Tech Lead creates the catch-all Feature, #504's F1 (#513) and F2 (#514) can start, #504 closes, E1 and E2 are verified. A chain, not a cycle.
 - #516 and #517 need this Epic's number (#530) and the catch-all Feature's number as constants in `src/headless_pr_workflow/catch_all.py`. The Feature's number exists only after the Epic refinement.
+- The documents that follow from the account decision (2026-11-21): a separate PR changes `docs/DISPATCHER-CONFIG.md` and ADR-012 (and ADR-014's wording if needed). It is a decision-document PR that the PO merges (ADR-011 item 5). #626 stays blocked until this spec and that PR merge.
+- The PO creates the GitHub App and stores its credential as a repository secret. An agent never holds or prints it.
 
 ## Open Questions
 
