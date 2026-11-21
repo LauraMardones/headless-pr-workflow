@@ -201,6 +201,7 @@ def bash(tmp: Path, f: dict[str, Any], body: str) -> tuple[int, str]:
         "RESUME_SESSIONS=0", 'NON_EXECUTABLE_ISSUES=""', 'post_comment() { echo "posted"; }',
         f"LABELS=({labels})", 'STORY_EXECUTOR_LABEL_COUNT=${#LABELS[@]}', 'EXECUTOR_LABEL="${LABELS[0]:-}"',
         f'source "{(LIB / "review-routing.sh").as_posix()}"', f'source "{(LIB / "conflict-round.sh").as_posix()}"',
+        f'source "{(LIB / "in-flight.sh").as_posix()}"',  # inflight_linked, which find_linked_pr_json calls (#556)
         *(_function(name) for name in INVOKE_FUNCTIONS), "bookkeeping_fix_marker_init", body])  # fmt: skip
     proc = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=windows_env(), timeout=120,
                           check=False)  # fmt: skip

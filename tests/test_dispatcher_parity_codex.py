@@ -10,8 +10,8 @@ proved (the case is in ``DIVERGENCES``) or disproved (the copies agree).
   the in-flight rule (``plan_in_flight`` behind ``inflight_compute``), which counts a story as new work when no
   open PR links it; and ``below_reserve`` called directly against ``evaluate``. Facts: the story's
   ``codex/issue-<n>-*`` branches and the open PRs. The rule reads no comment marker and no mergeability.
-- ``codex_resume_branch``: the foreign-PR check of ``resolve_resume`` (``_CLOSES``) against the PR that
-  ``INFLIGHT_JQ_LINKED`` links, with the same head-ref filter applied to it. Facts: the branches and the open PRs.
+- ``codex_resume_branch``: the foreign-PR check of ``resolve_resume`` (``closes_issue``) against the PR that
+  ``inflight_linked`` links, with the same head-ref filter applied to it. Facts: the branches and the open PRs.
   The worker's own marks are read by ``claim`` and passed in, so no marker read is the rule's; no mergeability.
 - ``claude_allowance_usage_gate``: the real ``scripts/dispatcher-invoke.sh`` through three entry points (invoke
   ``/implement``, the resume pass's ``/review`` and its fix round), with the fakes of ``tests/dispatcher_fakes.py``.
@@ -140,7 +140,7 @@ def codex_eligibility_reserve_decisions(f: dict[str, Any], tmp: Path) -> dict[st
 def codex_resume_branch_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
     """Whether an open PR on another branch closes the story and stops a Codex resume: ``foreign-pr``,
     ``no foreign PR`` or ``unreadable``. The in-flight copy applies ``resolve_resume``'s head-ref filter to the PR
-    that ``INFLIGHT_JQ_LINKED`` links, so only the link differs."""
+    that ``inflight_linked`` (the one linked-PR rule, #556) links, so only the link differs."""
 
     try:
         resolve_resume(FakeGateway(f), STORY, None)
@@ -150,9 +150,10 @@ def codex_resume_branch_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str
     except GatewayError:
         python = "unreadable"
     rc, out = inflight_bash(tmp, f, f'prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || exit 1\n'
-                                    f'jq -r --argjson n {STORY} "$INFLIGHT_JQ_LINKED"\'linked(.; $n) | .head.ref // empty\' <<< "$prs"')  # fmt: skip
+                                    f'links=$(inflight_linked "[{STORY}]" "$prs" "[]") || exit 1\n'
+                                    f'jq -r --arg n {STORY} \'.linked[$n].head.ref // empty\' <<< "$links"')  # fmt: skip
     shell = "unreadable" if rc else ("foreign-pr" if out and not out.startswith(f"codex/issue-{STORY}-") else "no foreign PR")
-    return {"codex_worker.py:resolve_resume (_CLOSES)": python, "in-flight.sh:INFLIGHT_JQ_LINKED": shell}
+    return {"codex_worker.py:resolve_resume (closes_issue)": python, "in-flight.sh:inflight_linked": shell}
 
 
 # ── Rule: claude_allowance_usage_gate ────────────────────────────────────────
@@ -317,7 +318,7 @@ def same(copies: tuple[str, ...] | list[str], decision: str) -> dict[str, str]:
 
 NEW = ("codex_reserve.py:is_new_work (evaluate)", "in_flight.py:plan_in_flight + in-flight.sh:inflight_compute")
 RESERVE = ("codex_reserve.py:below_reserve (decide)", "codex_reserve.py:below_reserve (evaluate)")
-FOREIGN = ("codex_worker.py:resolve_resume (_CLOSES)", "in-flight.sh:INFLIGHT_JQ_LINKED")
+FOREIGN = ("codex_worker.py:resolve_resume (closes_issue)", "in-flight.sh:inflight_linked")
 GATE = tuple(ENTRIES)
 PAUSE = tuple(f"{PAUSE_COPY} ({name.rsplit('(', 1)[1]}" for name in ENTRIES)
 RETRY = ("write.py:DEFAULT_EVIDENCE_RETRY_MAX (retry_pending)", "dispatcher-invoke.sh:EVIDENCE_RETRY_MAX (evidence_record_failure)")
@@ -351,8 +352,9 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "own-codex-pr": (facts(branches=(CODEX_REF,), open_prs=[CODEX_PR]), same(FOREIGN, "no foreign PR")),
         "claude-pr-closes": (facts(branches=(CODEX_REF,), open_prs=[CLAUDE_PR]), same(FOREIGN, "foreign-pr")),
         "claude-pr-fixes-lower-case": (facts(open_prs=[pr(body=f"fixes #{STORY}", ref=CLAUDE_REF)]), same(FOREIGN, "foreign-pr")),
+        # Resolved by #556 (PO decision of 2026-11-16, option A (1)): GitHub's full closing-keyword list.
         "claude-pr-closed-past-tense": (facts(branches=(CODEX_REF,), open_prs=[pr(body=f"Closed #{STORY}", ref=CLAUDE_REF)]),
-                                        {**same(FOREIGN, "no foreign PR"), FOREIGN[0]: "foreign-pr"}),
+                                        same(FOREIGN, "foreign-pr")),
         "claude-pr-other-number": (facts(open_prs=[pr(body="Closes #5000", ref=CLAUDE_REF)]), same(FOREIGN, "no foreign PR")),
         "own-pr-listed-before-foreign-pr": (facts(branches=(CODEX_REF,), open_prs=[CODEX_PR, CLAUDE_PR]),
                                             {**same(FOREIGN, "no foreign PR"), FOREIGN[0]: "foreign-pr"}),
@@ -397,12 +399,9 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("codex_eligibility_reserve", "branches-unreadable"): (
         "contract", "ADR-012: when the review capacity cannot be confirmed the worker waits; is_new_work fails closed "
                     "on its branch read. The in-flight rule does not read branches, so it has nothing to fail on."),
-    ("codex_resume_branch", "claude-pr-closed-past-tense"): (
-        "PO decision", "As linked_pr_lookup closed-past-tense (#571): no contract names the closing keywords; "
-                       "_CLOSES also accepts Closed/Fixed/Resolved, INFLIGHT_JQ_LINKED only Closes/Fixes/Resolves."),
     ("codex_resume_branch", "own-pr-listed-before-foreign-pr"): (
         "contract", "DISPATCHER-CONFIG.md (Codex worker, Recovery): no open PR from another branch may close the "
-                    "issue, so every linked PR counts; INFLIGHT_JQ_LINKED keeps only the first, follow resolve_resume."),
+                    "issue, so every linked PR counts; inflight_linked keeps only the first, follow resolve_resume."),
     ("evidence_retry_max", "non-numeric"): (
         "PO decision", "EVIDENCE_RETRY_MAX is not in the DISPATCHER-CONFIG.md variable table: write.py falls back to 3, "
                        "the shell aborts the run (set -u on an unbound name). Other limits reject an invalid value and "

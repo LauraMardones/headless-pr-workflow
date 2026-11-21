@@ -31,11 +31,11 @@ import pytest
 
 from headless_pr_workflow.dispatcher import gateway as gateway_mod
 from headless_pr_workflow.dispatcher.codex_reserve import waiting_codex_prs
-from headless_pr_workflow.dispatcher.codex_worker import _CLOSES, work_in_flight
-from headless_pr_workflow.dispatcher.facts import _Facts
+from headless_pr_workflow.dispatcher.codex_worker import work_in_flight
+from headless_pr_workflow.dispatcher.facts import _Facts, closes_issue, linked_pr
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 from headless_pr_workflow.dispatcher.session_blocker import open_session_blocker, read_session_blocker
-from headless_pr_workflow.dispatcher.status import _linked, derive_status, other_blocker_open
+from headless_pr_workflow.dispatcher.status import derive_status, other_blocker_open
 from headless_pr_workflow.dispatcher.write import DEFAULT_PO_LOGIN, _po_unblocked_after
 from tests.dispatcher_fakes import BASH, REPO_ROOT, needs_tools
 from tests.script_tools import windows_env
@@ -121,7 +121,8 @@ gh() {
     local path="" a
     for a in "$@"; do [[ "$a" == repos/* ]] && path="$a"; done
     case "$path" in
-        *"pulls?state=open"*) [[ -f "$FACTS/fail-open" ]] && return 1; jq -c '.[0:100]' "$FACTS/open.json" ;;
+        *"pulls?state=open"*) [[ -f "$FACTS/fail-open" ]] && return 1
+            if [[ " $* " == *" --paginate "* ]]; then cat "$FACTS/open.json"; else jq -c '.[0:100]' "$FACTS/open.json"; fi ;;
         *"pulls?state=closed"*) [[ -f "$FACTS/fail-closed" ]] && return 1; jq -c '.[0:100]' "$FACTS/closed.json" ;;
         */comments*) [[ -f "$FACTS/fail-comments" ]] && return 1; cat "$FACTS/comments.json" ;;
         *) echo "fake gh: unsupported $path" >&2; return 1 ;;
@@ -143,6 +144,12 @@ FAKE_GATE = """#!/usr/bin/env bash
 [[ -f "$FACTS/gate-$2.txt" ]] || exit 2
 cat "$FACTS/gate-$2.txt"
 """
+
+
+def _invoke_readers() -> str:
+    """The invoke shims read through ``gh`` itself: drop the in-flight readers, so the fake ``gh`` answers."""
+
+    return "unset -f inflight_get_all inflight_get_page\n"
 
 
 def _function(name: str) -> str:
@@ -250,7 +257,7 @@ def status_decision(f: dict[str, Any], monkeypatch: pytest.MonkeyPatch, po: str 
     helper = _Facts(gateway, {"DECISION_BLOCKER_PO_LOGIN": po})
     linked = [{"number": p["number"], "draft": bool(p["draft"]),
                "gates_pass": False if p["draft"] else gateway_gates(f, p["number"], monkeypatch)}
-              for p in prs if _linked(str(p.get("body") or ""), STORY)]  # fmt: skip
+              for p in [linked_pr(prs, STORY)] if p]  # fmt: skip
     blocked = helper.decision_blocker(comments)["state"] == "open" or other_blocker_open(helper, comments)
     status, _ = derive_status({"type": "story", "state": "open", "unreadable": None, "blocked": blocked,
                                "refined": True, "ready": True, "parent_open_epic": True, "spec_merged": True,
@@ -262,28 +269,32 @@ def status_decision(f: dict[str, Any], monkeypatch: pytest.MonkeyPatch, po: str 
 
 
 def linked_pr_lookup_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """The linked PR(s) each copy finds for the story: ``#n[,#m]``, ``none`` or ``unreadable``."""
+    """The linked PR(s) each entry point finds for the story: ``#n[,#m]``, ``none`` or ``unreadable``.
+
+    Since #556 every entry point calls one rule (``facts.linked_pr``): the poll and the resume pass
+    through ``inflight_linked`` in ``inflight_compute``, the invoke steps through the
+    ``find_linked_pr_json`` shim, the board status and the Codex worker directly.
+    """
 
     def shell(name: str, body: str) -> str:
         rc, out = bash(tmp / name, f, body)
         return "unreadable" if rc else (",".join(f"#{n}" for n in out.split()) or "none")
 
-    def python(match: Callable[[str], bool]) -> str:
+    def python(pick: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]) -> str:
         try:
             prs = FakeGateway(f).list_open_prs()
         except GatewayError:
             return "unreadable"
-        return numbers([p for p in prs if match(str(p.get("body") or ""))])
+        return numbers(pick(prs))
 
-    closes = re.compile(_CLOSES.format(n=STORY), re.IGNORECASE)
+    plan = inflight(tmp / "plan", f)
+    entry = [e for step in ("merge", "review") for e in (plan or {}).get(step, []) if e["number"] == STORY]
     return {
-        "in-flight.sh:INFLIGHT_JQ_LINKED": shell("jq", f'prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || exit 1\n'
-                                                       f'jq -r --argjson n {STORY} "$INFLIGHT_JQ_LINKED"\'linked(.; $n) | .number // empty\' <<< "$prs"'),
-        "dispatcher-invoke.sh:find_linked_pr_json": shell("json", _function("find_linked_pr_json")
+        "in-flight.sh:inflight_compute": "unreadable" if plan is None else (f"#{entry[0]['pr']}" if entry else "none"),
+        "dispatcher-invoke.sh:find_linked_pr_json": shell("json", _invoke_readers() + _function("find_linked_pr_json")
                                                           + f"find_linked_pr_json {STORY} | jq -r '.number'"),
-        "dispatcher-invoke.sh:find_linked_pr": shell("plain", _function("find_linked_pr") + f"find_linked_pr {STORY}"),
-        "status.py:_linked": python(lambda body: _linked(body, STORY)),
-        "codex_worker.py:_CLOSES": python(lambda body: bool(closes.search(body))),
+        "facts.py:linked_pr (status.py:derive_status)": python(lambda prs: [p for p in [linked_pr(prs, STORY)] if p]),
+        "codex_worker.py:work_in_flight": python(lambda prs: [p for p in prs if closes_issue(p["body"], STORY)][:1]),
     }  # fmt: skip
 
 
@@ -295,11 +306,11 @@ def merged_pr_finish_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest
 
     plan = inflight(tmp / "inflight", f)
     finish = [e for e in (plan or {}).get("finish", []) if e["number"] == STORY]
-    rc, out = bash(tmp / "invoke", f, _function("find_linked_pr_json") + _function("find_merged_linked_pr")
+    rc, out = bash(tmp / "invoke", f, _invoke_readers() + _function("find_linked_pr_json") + _function("find_merged_linked_pr")
                    + f'open=$(find_linked_pr_json {STORY}) || exit 3\n[[ -z "$open" ]] || exit 0\n'
                    + f"find_merged_linked_pr {STORY}")  # fmt: skip
     invoke = "unreadable" if rc == 3 else (f"finish #{out}" if out else "no finish")
-    merged = [p for p in f["closed"][:100] if p["merged_at"] and _linked(p["body"], STORY)]
+    merged = [p for p in f["closed"][:100] if p["merged_at"] and closes_issue(p["body"], STORY)]
     return {
         "in_flight.py:plan_in_flight + in-flight.sh:inflight_compute": (
             "unreadable" if plan is None else f"finish #{merged[0]['number']}" if finish else "no finish"),
@@ -457,7 +468,7 @@ def unblock_facts(body: str, author: str = PO, at: str = T1, association: str = 
 
 # ── Cases and the recorded baseline ──────────────────────────────────────────
 
-LINKED = "in-flight.sh:INFLIGHT_JQ_LINKED", "dispatcher-invoke.sh:find_linked_pr_json", "dispatcher-invoke.sh:find_linked_pr", "status.py:_linked", "codex_worker.py:_CLOSES"  # fmt: skip
+LINKED = "in-flight.sh:inflight_compute", "dispatcher-invoke.sh:find_linked_pr_json", "facts.py:linked_pr (status.py:derive_status)", "codex_worker.py:work_in_flight"  # fmt: skip
 
 
 def same(copies: tuple[str, ...], decision: str) -> dict[str, str]:
@@ -470,11 +481,9 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "closes": (facts(open_prs=[pr()]), same(LINKED, "#900")),
         "fixes-lower-case": (facts(open_prs=[pr(body="fixes #500")]), same(LINKED, "#900")),
         "other-number": (facts(open_prs=[pr(body="Closes #5000")]), same(LINKED, "none")),
-        "closed-past-tense": (facts(open_prs=[pr(body="Closed #500")]),
-                              {**same(LINKED, "none"), "codex_worker.py:_CLOSES": "#900"}),
-        "two-linked-prs": (facts(open_prs=[pr(), pr(901)]),
-                           {**same(LINKED[:3], "#900"), **same(LINKED[3:], "#900,#901")}),
-        "more-than-100-open-prs": (facts(open_prs=ON_101), {**same(LINKED, "#900"), **same(LINKED[1:3], "none")}),
+        "closed-past-tense": (facts(open_prs=[pr(body="Closed #500")]), same(LINKED, "#900")),
+        "two-linked-prs": (facts(open_prs=[pr(), pr(901)]), same(LINKED, "#900")),
+        "more-than-100-open-prs": (facts(open_prs=ON_101), same(LINKED, "#900")),
         "open-prs-unreadable": (facts(fail=("open",)), same(LINKED, "unreadable")),
     },
     "merged_pr_finish": {
@@ -487,7 +496,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
                              "dispatcher-invoke.sh:find_merged_linked_pr": "no finish"}),
         "more-than-100-open-prs": (facts(open_prs=ON_101, closed=[pr(800, merged_at=T0)]),
                                    {"in_flight.py:plan_in_flight + in-flight.sh:inflight_compute": "no finish",
-                                    "dispatcher-invoke.sh:find_merged_linked_pr": "finish #800"}),
+                                    "dispatcher-invoke.sh:find_merged_linked_pr": "no finish"}),
         "merged-beyond-100-closed": (facts(closed=fillers() + [pr(800, merged_at=T0)]),
                                      {"in_flight.py:plan_in_flight + in-flight.sh:inflight_compute": "no finish",
                                       "dispatcher-invoke.sh:find_merged_linked_pr": "no finish"}),
@@ -525,7 +534,7 @@ CASES["in_flight_step"] = {
     "ready-gates-fail": (facts(open_prs=[pr()], gates={PR: gate_line(threads="1")}), same(STEP, "in flight")),
     "ready-gates-pass": (facts(open_prs=[pr()], gates={PR: gate_line()}), same(STEP, "in flight")),
     "draft-first-then-gated-pr": (facts(open_prs=[pr(draft=True), pr(901)], gates={901: gate_line()}),
-                                  {**same(STEP, "in flight"), STEP[0]: "implementing"}),
+                                  {**same(STEP, "implementing"), STEP[1]: "in flight"}),
     "dependency-blocker-no-pr": (facts(comments=DEPENDENCY), same(STEP, "in flight")),
     "no-pr-no-blocker": (facts(), same(STEP, "none")),
     "comments-unreadable": (facts(comments=DEPENDENCY, fail=("comments",)), {**same(STEP, "none"), STEP[2]: "unreadable"}),
@@ -578,17 +587,6 @@ DECIDE: dict[str, Callable[..., dict[str, str]]] = {
 
 # Every case whose copies decide differently, with its resolution class under the #525 divergence decision.
 DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
-    ("linked_pr_lookup", "closed-past-tense"): (
-        "PO decision", "Which closing keywords link a PR is not in a documented contract: keep both copies on the "
-                       "allowlist until the PO decides between Closes/Fixes/Resolves and GitHub's full keyword list."),
-    ("linked_pr_lookup", "two-linked-prs"): (
-        "PO decision", "No contract says which of two open PRs for one story counts; the jq copies take the newest, "
-                       "the Python copies keep all. Needs a PO decision."),
-    ("linked_pr_lookup", "more-than-100-open-prs"): (
-        "read defect", "find_linked_pr_json and find_linked_pr read one page: follow the paged read of INFLIGHT_JQ_LINKED."),
-    ("merged_pr_finish", "more-than-100-open-prs"): (
-        "read defect", "The invoke copy misses the open PR past the first page and finishes a story with an open PR: "
-                       "follow inflight_compute's paged read."),
     ("merge_gates_pass", "not-mergeable"): (
         "PO decision", "inflight_gates_pass leaves mergeability to the merge step by design (in-flight.sh), "
                        "GateResult needs mergeable=yes (MERGE-POLICY.md); whether the board shows such a PR In review "
@@ -598,7 +596,8 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
         "contract", "PROJECT-STATUS.md counts a draft linked PR as In implementation for the WIP limit: "
                     "work_in_flight follows plan_in_flight and reports a draft as in implementation."),
     ("in_flight_step", "draft-first-then-gated-pr"): (
-        "PO decision", "Follows linked_pr_lookup two-linked-prs: which PR decides the step needs a PO decision."),
+        "contract", "derive_status takes the first linked PR since #556 (PO decision (2)); work_in_flight differs "
+                    "only as in draft-pr: it does not separate drafts."),
     ("in_flight_step", "comments-unreadable"): (
         "read defect", "inflight_compute and work_in_flight treat unreadable comments as no blocker and may start a "
                        "blocked story: follow the fail-closed read of derive_status (unreadable)."),
@@ -621,6 +620,21 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("po_unblock", "default-po-login"): (
         "contract", "PROJECT-STATUS.md lifts a blocker with the PO's /unblock line; the Codex worker's _Facts runs "
                     "without DECISION_BLOCKER_PO_LOGIN and counts none: give every entry point the configured PO login."),
+}
+
+# Divergences of #571 that #556 resolved: the copies now agree, and the baseline above records the resolved
+# decision. Each case names its #525 class and how it was resolved (AC 3).
+PO_DECISION = "PO decision of 2026-11-16 on #556, option A"
+RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
+    ("linked_pr_lookup", "closed-past-tense"): (
+        "PO decision", f"{PO_DECISION} (1): closing keywords follow GitHub's full list, as _CLOSES did."),
+    ("linked_pr_lookup", "two-linked-prs"): (
+        "PO decision", f"{PO_DECISION} (2): with two open linked PRs every entry point takes the first."),
+    ("linked_pr_lookup", "more-than-100-open-prs"): (
+        "read defect", "find_linked_pr_json reads every page of the open PRs; find_linked_pr had no caller and is gone."),
+    ("merged_pr_finish", "more-than-100-open-prs"): (
+        "read defect", "find_linked_pr_json reads every page, so a story with an open PR past the first page is not "
+                       "finished."),
 }
 
 REQUIRED_KINDS = {
@@ -656,6 +670,12 @@ def test_ac2_each_divergence_has_a_resolution_class_and_a_known_case():
     for (rule, case), (kind, resolution) in DIVERGENCES.items():
         assert case in CASES[rule], (rule, case)
         assert kind in RESOLUTION_CLASSES and resolution, (rule, case)
+
+
+def test_ac3_each_resolved_divergence_names_its_case_and_now_agrees():
+    for (rule, case), (kind, resolution) in RESOLVED.items():
+        assert (rule, case) not in DIVERGENCES and kind in RESOLUTION_CLASSES and resolution, (rule, case)
+        assert len(set(CASES[rule][case][1].values())) == 1, (rule, case)
 
 
 def test_ac1_the_cases_cover_read_errors_and_paging():

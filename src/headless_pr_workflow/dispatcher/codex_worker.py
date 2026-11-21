@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from ..review_policy import CODEX_BOT_LOGIN, CODEX_EXECUTOR_LABEL
+from .facts import closes_issue
 from .gateway import Gateway, GatewayError
 from .marker import Unreadable, dispatcher_marker, marker_text, resolve_login, write_marker
 from .write import EXIT_NO, EXIT_OK, EXIT_UNREADABLE, Result, Settings, _author, log
@@ -71,7 +72,6 @@ _EXIT_BY_RESULT = {
 _MARK = re.compile(r"<!-- hpw:dispatcher action=codex-(claim|progress|renew|end|wait) ([^<>]*?) -->")
 _WORD = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PRIO = re.compile(r"^prio:P(\d+)$")
-_CLOSES = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#{n}\b"
 _SUMMARY_COMMAND = re.compile(r"^Command:\s*review\s*$", re.MULTILINE)
 _SUMMARY_BLOCKERS = re.compile(r"^Blockers:\s*(.*?)\s*$", re.MULTILINE)
 _SUMMARY_NEXT = re.compile(r"^Next:\s*implementation\s*$", re.MULTILINE)
@@ -399,8 +399,7 @@ def resolve_resume(gateway: Gateway, issue: int, recorded: dict[str, str] | None
     elif branches:
         branch = next(iter(branches))
     open_prs = gateway.list_open_prs()
-    closing = re.compile(_CLOSES.format(n=issue), re.IGNORECASE)
-    if any(not str((p.get("head") or {}).get("ref") or "").startswith(prefix) and closing.search(str(p.get("body") or ""))
+    if any(not str((p.get("head") or {}).get("ref") or "").startswith(prefix) and closes_issue(str(p.get("body") or ""), issue)
            for p in open_prs):  # fmt: skip
         raise Waiting("foreign-pr")
     if not branch:
@@ -529,8 +528,7 @@ def work_in_flight(gateway: Gateway, facts: Mapping[str, Any], env: Mapping[str,
         number = entry.get("number")
         if not isinstance(number, int) or entry.get("type") not in STORY_TYPES:
             continue
-        closing = re.compile(_CLOSES.format(n=number), re.IGNORECASE)
-        if any(closing.search(str(p.get("body") or "")) for p in open_prs):
+        if any(closes_issue(str(p.get("body") or ""), number) for p in open_prs):
             flight.append(number)
             continue
         try:

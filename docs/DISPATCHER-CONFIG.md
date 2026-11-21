@@ -481,7 +481,7 @@ The `codex-review-bookkeeping` workflow does the part in between. It acts only o
 
 ### Work in flight from PR facts
 
-The resume pass of `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` find every step from the facts below, whatever the story's board status (issue #475). One rule decides for both: `hpw dispatcher in-flight plan` (`src/headless_pr_workflow/dispatcher/in_flight.py`), on the facts `scripts/lib/in-flight.sh` reads. The *linked PR* of an open Story, Task or Bug is the first open PR whose body says `Closes #<n>`, `Fixes #<n>` or `Resolves #<n>`. A story counts as a *review-loop story* when it has exactly one `executor:` label and that label has a `CODEX_REVIEW_LOOP_ROUTING` row.
+The resume pass of `scripts/dispatcher-invoke.sh` and `scripts/dispatcher-poll.sh` find every step from the facts below, whatever the story's board status (issue #475). One rule decides for both: `hpw dispatcher in-flight plan` (`src/headless_pr_workflow/dispatcher/in_flight.py`), on the facts `scripts/lib/in-flight.sh` reads. The *linked PR* of an open Story, Task or Bug is the first open PR, in the order GitHub lists them, whose body names `#<n>` after a GitHub closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved, in any case). One rule decides it for every entry point (issue #556): `closes_issue` and `linked_pr` in `src/headless_pr_workflow/dispatcher/facts.py`, which the poll and the resume pass reach through `hpw dispatcher in-flight linked`, and the board status and the Codex worker call directly. A story counts as a *review-loop story* when it has exactly one `executor:` label and that label has a `CODEX_REVIEW_LOOP_ROUTING` row.
 
 | Step | Fact that selects the story |
 |---|---|

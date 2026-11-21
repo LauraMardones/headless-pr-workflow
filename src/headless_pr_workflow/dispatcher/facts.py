@@ -38,6 +38,28 @@ _CHECK_RESULT = re.compile(
     r"^[ \t]*Checks run:[^\n]*?(?<![\w-])refine-check\s*[—–-]+\s*(pass|fail|unreadable)\b", re.I | re.M
 )
 _UNBLOCK_LINE = re.compile(r"^\s*/unblock\s*$")
+
+# The linked-PR rule (issue #556, PO decision of 2026-11-16, option A): a PR is linked to issue <n> when its
+# body names it after one of GitHub's closing keywords, and of several open linked PRs the first in the list
+# counts. Every entry point calls these: the poll and resume pass through `hpw dispatcher in-flight linked`,
+# the board status and the Codex worker directly.
+CLOSING_KEYWORDS = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+
+
+def closes_issue(body: str, number: int) -> bool:
+    """``body`` names ``#number`` after a closing keyword (any case)."""
+
+    return re.search(rf"\b{CLOSING_KEYWORDS}\s+#{int(number)}\b", str(body or ""), re.IGNORECASE) is not None
+
+
+def linked_pr(prs: list[Mapping[str, Any]], number: int, *, merged: bool = False) -> Mapping[str, Any] | None:
+    """The first PR of ``prs`` linked to ``number``; with ``merged``, the first merged one. ``None`` for none."""
+
+    for pr in prs:
+        if (not merged or pr.get("merged_at") is not None) and closes_issue(str(pr.get("body") or ""), number):
+            return pr
+    return None
+
 # The "Unblocked" comment of the Blocked Status Protocol; dispatcher/status.py reads the same line for the other types.
 _UNBLOCKED_COMMENT = re.compile(r"^\s*Unblocked\b(?!\s+when\b)", re.M | re.I)
 
