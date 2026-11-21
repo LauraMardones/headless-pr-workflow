@@ -7,6 +7,7 @@ the step and ``gh``'s last stderr line; the token never appears in it.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -247,6 +248,24 @@ class GhGateway:
         self.name = name
         self.gh_command = tuple(gh_command)
         self._login: str | None = None
+        self._cache: dict[tuple[str, int | None], list[dict[str, Any]]] | None = None
+
+    def enable_read_cache(self) -> None:
+        """Remember the list reads of this instance (one command invocation); a write drops them."""
+
+        self._cache = {}
+
+    def _cached(self, key: tuple[str, int | None], read: Any) -> list[dict[str, Any]]:
+        # A failed read raises out of ``read`` before anything is stored, so the next call asks again.
+        if self._cache is None:
+            return read()
+        if key not in self._cache:
+            self._cache[key] = read()
+        return copy.deepcopy(self._cache[key])
+
+    def _drop_cache(self) -> None:
+        if self._cache is not None:
+            self._cache.clear()
 
     # ── reads ────────────────────────────────────────────────────────────────
 
@@ -262,11 +281,17 @@ class GhGateway:
         return self._login
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
+        return self._cached(("comments", number), lambda: self._list_comments(number))
+
+    def _list_comments(self, number: int) -> list[dict[str, Any]]:
         step = f"read comments on #{number}"
         output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
         return self._pages(step, output, what="comments")
 
     def list_open_issues(self) -> list[dict[str, Any]]:
+        return self._cached(("open_issues", None), self._list_open_issues)
+
+    def _list_open_issues(self) -> list[dict[str, Any]]:
         """Every open issue of the repository; pull requests (which the issues API also lists) are left out."""
 
         step = "read open issues"
@@ -317,6 +342,9 @@ class GhGateway:
         return str(status)
 
     def list_open_prs(self) -> list[dict[str, Any]]:
+        return self._cached(("open_prs", None), self._list_open_prs)
+
+    def _list_open_prs(self) -> list[dict[str, Any]]:
         """Every open pull request (all pages), as the pulls API returns it."""
 
         step = "read open pull requests"
@@ -331,6 +359,9 @@ class GhGateway:
         return [str(item["filename"]) for item in self._pages(step, output, what="files") if item.get("filename")]
 
     def list_closed_issues(self) -> list[dict[str, Any]]:
+        return self._cached(("closed_issues", None), self._list_closed_issues)
+
+    def _list_closed_issues(self) -> list[dict[str, Any]]:
         """Every closed issue of the repository; pull requests are left out."""
 
         step = "read closed issues"
@@ -491,6 +522,7 @@ class GhGateway:
     # ── writes ───────────────────────────────────────────────────────────────
 
     def post_comment(self, number: int, body: str) -> dict[str, Any]:
+        self._drop_cache()
         step = f"write comment on #{number}"
         # The body goes on stdin as JSON: no command-line length limit and no quoting.
         output = self._run(
@@ -504,6 +536,7 @@ class GhGateway:
         return payload if isinstance(payload, dict) else {}
 
     def set_board_status(self, item: BoardItem, option_id: str) -> None:
+        self._drop_cache()
         payload = self._json(
             "write status",
             ["api", "graphql", "-f", f"query={STATUS_MUTATION}", "-f", f"projectId={item.project_id}",
@@ -514,18 +547,22 @@ class GhGateway:
             raise GatewayError("write status", f"GraphQL returned errors ({messages[:300]})")
 
     def edit_issue_body(self, number: int, body: str) -> None:
+        self._drop_cache()
         # The body goes on stdin as JSON: no command-line length limit and no quoting.
         self._run(f"write body of #{number}", ["api", f"repos/{self.repo}/issues/{number}", "-X", "PATCH", "--input", "-"],
                   stdin=json.dumps({"body": body}))  # fmt: skip
 
     def add_label(self, number: int, name: str) -> None:
+        self._drop_cache()
         self._run(f"add label to #{number}", ["api", f"repos/{self.repo}/issues/{number}/labels", "-X", "POST", "-f", f"labels[]={name}"])
 
     def remove_label(self, number: int, name: str) -> None:
+        self._drop_cache()
         encoded = name.replace("%", "%25").replace(":", "%3A").replace(" ", "%20").replace("/", "%2F")
         self._run(f"remove label from #{number}", ["api", f"repos/{self.repo}/issues/{number}/labels/{encoded}", "-X", "DELETE"])
 
     def create_label(self, name: str, color: str, description: str) -> None:
+        self._drop_cache()
         args = ["api", f"repos/{self.repo}/labels", "-X", "POST", "-f", f"name={name}", "-f", f"color={color}"]
         if description:
             args += ["-f", f"description={description}"]
