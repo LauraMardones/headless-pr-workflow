@@ -16,6 +16,7 @@ import subprocess
 
 import pytest
 
+from headless_pr_workflow.next_step import parse
 from tests.hpw_dispatcher_route import fake_state_route
 from tests.dispatcher_fakes import BASH, HAVE_TOOLS, REPO_ROOT, Dispatcher
 
@@ -64,6 +65,8 @@ def test_ac1_fix_round_maximum_registers_one_po_blocker(d):
     assert context["story_title"] == f"Story {STORY}" and context["issue_url"] == f"https://github.com/o/r/issues/{STORY}"
     assert "fixed by hand" in context["unblocked_when"] and "CODEX_FIX_ROUND_MAX" in context["unblocked_when"]
     assert "2 automatic fix rounds" in context["state"] and context["cause"] == ""
+    step = parse("Next step: " + context["next_step"])
+    assert (step.command, step.number) == ("/implement", STORY)
     assert len(d.slack_calls) == 1  # queued, then delivered once by the drain after the resume item (#349)
 
 
@@ -96,6 +99,9 @@ def test_ac2_failed_mid_cycle_command_registers_a_po_blocker(d):
     assert context["blocker_type"] == "external"
     assert "/implement completes successfully" in context["unblocked_when"]
     assert "execution loop halted after /implement failed" in context["state"]
+    step = parse(context["next_step"] and "Next step: " + context["next_step"])
+    assert (step.command, step.number, step.where) == ("/implement", STORY, "Claude Code or Codex")
+    assert "Next step: " + context["next_step"] in declaration(d)["body"].splitlines()
 
 
 @needs_tools
@@ -404,20 +410,22 @@ def texts(body: dict) -> list[str]:
     return [b["text"]["text"] for b in body["blocks"]]
 
 
-RESUME_LINE = "To resume: do what *Unblocked when* says, then reply on the issue with a line that is exactly `/unblock`."
+NEXT_STEP = "run `/implement 7` in Claude Code or Codex; then the story starts."
+NEXT_LINE = f"*Next step:* {NEXT_STEP}"
 
 
 @needs_tools
 def test_ac6_payload_has_every_field_link_and_resume_line(tmp_path):
     body = texts(payload(tmp_path, {"story_title": "My story", "issue_url": "https://github.com/o/r/issues/7",
                                     "blocker_type": "resource", "unblocked_when": "fix it", "state": "branch x",
-                                    "cause": "merge conflict with main"}))
+                                    "cause": "merge conflict with main",
+                                    "next_step": NEXT_STEP}))
     joined = "\n".join(body)
     for needle in ("waiting for the PO", "*Story:* My story", "*Blocker type:* resource", "*Unblocked when:* fix it",
                    "*State of in-progress work:* branch x", "*Cause:* merge conflict with main",
                    "<https://github.com/o/r/issues/7|View issue>"):
         assert needle in joined, needle
-    assert body[-1] == RESUME_LINE
+    assert body[-1] == NEXT_LINE
 
 
 @needs_tools
@@ -426,6 +434,7 @@ def test_ac6_missing_fields_show_unknown_and_no_cause_section(tmp_path):
     joined = "\n".join(body)
     assert "*Story:* (unknown)" in joined and "*Unblocked when:* (unknown)" in joined
     assert "*State of in-progress work:* (unknown)" in joined and "Cause" not in joined
+    assert body[-1] == "*Next step:* (unknown)"  # a queued event written before #606 still renders
 
 
 @needs_tools
@@ -433,6 +442,7 @@ def test_ac6_texts_stay_below_the_block_kit_limit_and_the_link_is_intact(tmp_pat
     long = "x" * 5000
     url = "https://github.com/o/r/issues/7"
     body = texts(payload(tmp_path, {"story_title": long, "issue_url": url, "blocker_type": long,
-                                    "unblocked_when": long, "state": long, "cause": long}))
+                                    "unblocked_when": long, "state": long, "cause": long,
+                                    "next_step": NEXT_STEP}))
     assert all(len(t) <= 3000 for t in body)
-    assert f"<{url}|View issue>" in "\n".join(body) and body[-1] == RESUME_LINE
+    assert f"<{url}|View issue>" in "\n".join(body) and body[-1] == NEXT_LINE

@@ -14,8 +14,10 @@
 #                                     optional; missing ones are named in the message; next_steps
 #                                     is one "Next step <letter>:" line per option, issue #608)
 #   po_blocker                fields: story_title, issue_url, blocker_type, unblocked_when,
-#                                     state, cause (cause optional; a blocker only the PO resolves,
-#                                     resumed by a standalone "/unblock" line, issue #359)
+#                                     state, cause, next_step (cause optional; a blocker only the PO
+#                                     resolves, resumed by a standalone "/unblock" line, issue #359;
+#                                     next_step is the declaration's "Next step:" text, issue #606;
+#                                     "(unknown)" is shown when it is absent, e.g. a queued event)
 #   evidence_unwritable       fields: story_title, story_number, issue_url, item, target_number,
 #                                     target_url, minutes, has_pending_text (merge or cleanup evidence
 #                                     missing and the story cannot be written, issue #372)
@@ -123,7 +125,7 @@ build_payload() {
         po_blocker)
             # A blocker the dispatcher posted and only the PO can resolve
             # (issue #359). Every text is capped below Block Kit's 3000
-            # characters; the issue link and the resume line are never cut.
+            # characters; the issue link and the next step are never cut.
             printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
@@ -135,6 +137,7 @@ build_payload() {
                 | ($c.unblocked_when | clean) as $uw
                 | ($c.state | clean) as $state
                 | ($c.cause | clean) as $cause
+                | ($c.next_step | clean) as $next
                 | {blocks: ([
                     {type: "section", text: {type: "mrkdwn", text: ":octagonal_sign: *Story stopped — waiting for the PO*"}},
                     {type: "section", text: {type: "mrkdwn", text: (
@@ -146,7 +149,7 @@ build_payload() {
                   + (if $cause != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Cause:* " + ($cause | cut(1000)))}}] else [] end)
                   + [
                     {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
-                    {type: "section", text: {type: "mrkdwn", text: "To resume: do what *Unblocked when* says, then reply on the issue with a line that is exactly `/unblock`."}}
+                    {type: "section", text: {type: "mrkdwn", text: ("*Next step:* " + (if $next == "" then "(unknown)" else $next end))}}
                   ])}'
             ;;
 

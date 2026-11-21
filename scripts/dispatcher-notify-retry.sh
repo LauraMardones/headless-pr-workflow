@@ -264,14 +264,16 @@ print(json.dumps({"declared_by": j.DECLARED_BY, "marker": j.MARKER_PREFIX,
               else {since: $d.created_at,
                     type: (if ($d | lines | any(. == "Type: resource")) then "resource" else "external" end),
                     unblocked_when: ($d | lines | map(select(startswith("Unblocked when: "))) | first // "" | sub("^Unblocked when: "; "")),
-                    state: ($d | lines | map(select(startswith("State of in-progress work: "))) | first // "" | sub("^State of in-progress work: "; ""))}
+                    state: ($d | lines | map(select(startswith("State of in-progress work: "))) | first // "" | sub("^State of in-progress work: "; "")),
+                    next_step: ($d | lines | map(select(startswith("Next step: "))) | first // "" | sub("^Next step: "; ""))}
               end' <<< "$comments" 2>/dev/null) \
             || { echo "[NOTIFY] Warning: cannot evaluate the comments of #$story; its job blockers are not scanned this cycle" >&2; continue; }
         [[ -n "$declaration" ]] || continue
         context=$(jq -nc --argjson d "$declaration" --arg st "$(jq -r '.title // ""' <<< "$info")" \
                          --arg iu "https://github.com/$REPO/issues/$story" \
                   '{story_title: $st, issue_url: $iu, blocker_type: $d.type,
-                    unblocked_when: $d.unblocked_when, state: $d.state, cause: ""}')
+                    unblocked_when: $d.unblocked_when, state: $d.state, cause: "",
+                    next_step: $d.next_step}')
         args=(register --repo "$REPO" --event po_blocker --issue "$story"
               --since "$(jq -r '.since' <<< "$declaration")" --context "$context")
         $DRY_RUN && args+=(--dry-run)

@@ -180,6 +180,24 @@ def test_ac1_ac2_job_blocker_registers_one_po_blocker(s, body, blocker_type, whe
     assert f"Registered actionable event: po_blocker:{STORY}:{T1}" in proc.stderr
 
 
+# ── #606 AC 5: the declaration's next step reaches the po_blocker context ────
+
+@needs_tools
+def test_606_scan_reads_the_next_step_line_into_the_context(s):
+    step = "run `/review 900` in Claude Code or Codex; then the Codex review bookkeeping continues."
+    s.comments(STORY, [c(unknown_format() + f"\nNext step: {step}", at=T1)])
+    assert s.scan().returncode == 0
+    context = json.loads(only_event(s)["context"])
+    assert context["next_step"] == step
+
+
+@needs_tools
+def test_606_a_declaration_without_a_next_step_line_registers_an_empty_next_step(s):
+    s.comments(STORY, [c(unknown_format(), at=T1)])
+    assert s.scan().returncode == 0
+    assert json.loads(only_event(s)["context"])["next_step"] == ""
+
+
 # ── AC 3: delivered in the same cycle, retried, bounded ─────────────────────
 
 @needs_tools
