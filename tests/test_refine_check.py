@@ -85,6 +85,7 @@ class Env:
             labels_reader=lambda repo: self.repo_labels,
             spec_reader=self.spec_reader,
             test_reader=lambda: self.test_sources,
+            list_reader=lambda repo: [],
         )
         return {c.id: c for c in checks}
 
@@ -98,7 +99,7 @@ def test_all_pass(mod):
     assert failing(checks) == []
     assert set(checks) >= {"type_label", "executor_label", "prio_label",
                            "hard_dependencies", "required_sections", "open_questions", "parent_refs",
-                           "spec_record", "feature_criteria", "catch_all_sort"}
+                           "spec_record", "feature_criteria", "epic_children_have_feature", "catch_all_sort"}
 
 
 @pytest.mark.parametrize(
@@ -258,6 +259,7 @@ def patch_reads(mod, monkeypatch, issue, *, fail=None):
     monkeypatch.setattr(mod, "read_issue", boom if fail == "issue" else lambda repo, n: issue if n == 5 else mod.Issue(n, "t", "", (), "CLOSED"))
     monkeypatch.setattr(mod, "read_repo_labels", boom if fail == "labels" else lambda repo: {"executor:claude-code-sonnet"})
     monkeypatch.setattr(mod, "spec_exists", boom if fail == "spec" else lambda repo, path, ref: True)
+    monkeypatch.setattr(mod, "read_issue_list", boom if fail == "list" else lambda repo: [])
 
 
 def test_main_exit_0_human_first_line_is_verdict(mod, monkeypatch, capsys):
@@ -276,7 +278,7 @@ def test_main_exit_1_json(mod, monkeypatch, capsys):
     assert [c["id"] for c in data["checks"]] == [
         "type_label", "executor_label", "orchestration_executor", "prio_label",
         "hard_dependencies", "required_sections", "open_questions", "parent_refs",
-        "spec_record", "feature_criteria", "catch_all_sort",
+        "spec_record", "feature_criteria", "epic_children_have_feature", "catch_all_sort",
         "files_affected", "size_split", "haiku_limit"]
     assert {c["id"]: c["status"] for c in data["checks"]}["executor_label"] == "fail"
 
@@ -662,7 +664,7 @@ def test_parent_relative_path_fails(mod):
 def test_size_checks_skip_for_an_epic(mod):
     issue = make_issue(mod, labels=("type:epic",), title="Epic: x", files=None)
     checks = {c.id: c for c in mod.run_checks(issue, REPO, issue_reader=lambda r, n: issue, labels_reader=lambda r: set(),
-                                               spec_reader=lambda *a: True, test_reader=dict)[1]}
+                                               spec_reader=lambda *a: True, test_reader=dict, list_reader=lambda r: [])[1]}
     assert {checks[i].status for i in ("files_affected", "size_split", "haiku_limit")} == {"skip"}
 
 
@@ -755,3 +757,84 @@ def test_main_exit_1_and_output_line_for_wrong_executor(mod, monkeypatch, capsys
     assert mod.main(["--issue", "5", "--repo", REPO, "--json"]) == 1
     data = json.loads(capsys.readouterr().out)
     assert {c["id"]: c["status"] for c in data["checks"]}["orchestration_executor"] == "fail"
+
+
+# --- epic_children_have_feature (#614) ---------------------------------------------
+
+def child(mod, number, *, kind="story", group=None, parent=10, state="OPEN", reason=""):
+    lines = [f"Parent epic: #{parent}"] + ([f"Feature group: #{group}"] if group else [])
+    return mod.Issue(number, f"{kind}: x", "\n".join(lines), (f"type:{kind}",), state, reason)
+
+
+def epic_children(mod, issues, *, number=10):
+    epic = mod.Issue(number, "Epic: x", "", ("type:epic", "prio:P2"), "OPEN")
+    _, checks = mod.run_checks(epic, REPO, issue_reader=lambda r, n: epic, labels_reader=lambda r: set(),
+                               spec_reader=lambda *a: True, test_reader=dict, list_reader=lambda r: issues)
+    return {c.id: c for c in checks}["epic_children_have_feature"]
+
+
+def test_epic_with_an_orphan_story_fails_and_names_it(mod):
+    check = epic_children(mod, [child(mod, 11, kind="feature"), child(mod, 20), child(mod, 21, group=11)])
+    assert check.status == "fail"
+    assert "#20 no Feature group" in check.detail and "#21" not in check.detail
+
+
+def test_epic_passes_when_story_task_and_bug_name_a_feature_of_the_epic(mod):
+    issues = [child(mod, 11, kind="feature", state="CLOSED", reason="COMPLETED"),
+              child(mod, 20, group=11), child(mod, 21, kind="task", group=11), child(mod, 22, kind="bug", group=11)]
+    assert epic_children(mod, issues).status == "pass"
+
+
+def test_epic_story_naming_a_feature_of_another_epic_fails(mod):
+    issues = [child(mod, 11, kind="feature"), child(mod, 30, kind="feature", parent=99), child(mod, 20, group=30)]
+    check = epic_children(mod, issues)
+    assert check.status == "fail" and "#20 Feature group #30 is not a Feature of Epic #10" in check.detail
+
+
+def test_epic_ignores_not_planned_other_types_and_other_epics(mod):
+    issues = [child(mod, 20, state="CLOSED", reason="NOT_PLANNED"), child(mod, 21, parent=99),
+              child(mod, 11, kind="feature"), mod.Issue(22, "x", "Parent epic: #10", ("type:epic",), "OPEN")]
+    assert epic_children(mod, issues).status == "pass"
+
+
+def feature_seed(mod, seed):
+    body_text = "Criterion prefix: F2\n\n## Seed Stories\n\n" + seed + "\n"
+    issue = mod.Issue(11, "Feature: x", body_text, ("type:feature", "prio:P2"), "OPEN")
+    stories = {20: child(mod, 20, group=11), 21: child(mod, 21, group=12), 22: child(mod, 22)}
+    _, checks = mod.run_checks(issue, REPO, issue_reader=lambda r, n: stories[n], labels_reader=lambda r: set(),
+                               spec_reader=lambda *a: True, test_reader=dict, list_reader=lambda r: pytest.fail("no list"))
+    return {c.id: c for c in checks}["epic_children_have_feature"]
+
+
+def test_feature_seed_story_naming_another_feature_fails(mod):
+    check = feature_seed(mod, "- #20\n- #21\n- #22")
+    assert check.status == "fail"
+    assert "#21 Feature group #12 is not this Feature (#11)" in check.detail and "#22 no Feature group" in check.detail
+    assert "#20" not in check.detail
+
+
+def test_feature_seed_stories_passes_when_listed_or_empty(mod):
+    assert feature_seed(mod, "- #20").status == "pass"
+    assert feature_seed(mod, "None.").status == "pass"
+
+
+@pytest.mark.parametrize("kind", ["story", "task", "bug"])
+def test_epic_children_check_skips_for_executable_types(mod, kind):
+    issue = make_issue(mod, labels=(f"type:{kind}", "prio:P2", "executor:claude-code-sonnet"), title=f"{kind.title()}: x")
+    assert Env(mod, issue).run()["epic_children_have_feature"].status == "skip"
+
+
+def test_failed_child_read_is_exit_2_with_reason(mod, monkeypatch, capsys):
+    epic = mod.Issue(5, "Epic: x", "", ("type:epic", "prio:P2"), "OPEN")
+    patch_reads(mod, monkeypatch, epic, fail="list")
+    assert mod.main(["--issue", "5", "--repo", REPO]) == 2
+    assert "list: unreadable" in capsys.readouterr().out
+
+
+def test_orphan_epic_child_gives_exit_1_in_main(mod, monkeypatch, capsys):
+    epic = mod.Issue(5, "Epic: x", "", ("type:epic", "prio:P2"), "OPEN")
+    patch_reads(mod, monkeypatch, epic)
+    monkeypatch.setattr(mod, "read_issue_list", lambda repo: [child(mod, 20, parent=5)])
+    assert mod.main(["--issue", "5", "--repo", REPO, "--json"]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert {c["id"]: c["status"] for c in data["checks"]}["epic_children_have_feature"] == "fail"
