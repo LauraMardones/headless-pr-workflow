@@ -6,12 +6,14 @@
 #
 # decision_blocker_context <body> <story_title> <issue_url>
 #   Prints {story_title, issue_url, blocker_type, unblocked_when, question,
-#   options, recommendation}. A field runs from its label at the start of a
+#   options, recommendation, next_steps}. A field runs from its label at the start of a
 #   line to the next known declaration label, so Options keeps its lines and a
 #   label name inside option text does not end the field. "Next step" also
 #   matches the per-option "Next step <letter>:" lines of Type: decision
 #   (docs/PROJECT-STATUS.md → Declaration format, issue #605), so Options
-#   ends before the first next step. A field the declaration lacks is an empty string. The body is only ever passed to jq as
+#   ends before the first next step. next_steps keeps those lines whole (label
+#   included), one per line in option order, or the single "Next step:" line
+#   (issue #608). A field the declaration lacks is an empty string. The body is only ever passed to jq as
 #   data (--arg), never interpolated into a shell string or jq program.
 
 decision_blocker_context() {
@@ -24,7 +26,9 @@ decision_blocker_context() {
         | reduce $lines[] as $line ({cur: null, f: {}};
             ([$labels[] | . as $x | select($line | startswith($x + ":"))] | first) as $l0
             | (if $l0 == null and ($line | test("^Next step [a-z]:")) then "Next step" else $l0 end) as $l
-            | if $l != null then
+            | if $l == "Next step" then
+                .cur = $l | .f[$l] = (if (.f[$l] // "") == "" then $line else .f[$l] + "\n" + $line end)
+              elif $l != null then
                 .cur = $l | .f[$l] = ($line | sub("^[^:]*:[ \t]*"; ""))
               elif .cur != null then
                 .f[.cur] += "\n" + $line
@@ -36,5 +40,6 @@ decision_blocker_context() {
                | if . == "" then "condition to be determined by PO" else . end),
            question: field("Question"),
            options: field("Options"),
-           recommendation: field("Recommendation")}'
+           recommendation: field("Recommendation"),
+           next_steps: field("Next step")}'
 }

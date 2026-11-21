@@ -10,8 +10,9 @@
 #
 # Supported EVENT_TYPE values:
 #   decision_blocker          fields: story_title, issue_url, blocker_type, unblocked_when,
-#                                     question, options, recommendation (the last three optional;
-#                                     missing ones are named in the message)
+#                                     question, options, recommendation, next_steps (the last four
+#                                     optional; missing ones are named in the message; next_steps
+#                                     is one "Next step <letter>:" line per option, issue #608)
 #   po_blocker                fields: story_title, issue_url, blocker_type, unblocked_when,
 #                                     state, cause (cause optional; a blocker only the PO resolves,
 #                                     resumed by a standalone "/unblock" line, issue #359)
@@ -65,7 +66,7 @@ build_payload() {
             # the payload has a fixed number of blocks and every text is capped
             # below 3000. Options are cut consequence-first (letter and name
             # stay); question and recommendation are cut last, with the
-            # larger caps. The issue link and resume line are never cut.
+            # larger caps. The issue link and the next steps are never cut (issue #608).
             printf '%s' "$ctx" | jq -n 'input as $c |
                 def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
                 def str: if type == "string" then . else "" end;
@@ -89,9 +90,11 @@ build_payload() {
                 | ($c.question | clean) as $q
                 | ($c.options | clean) as $o
                 | ($c.recommendation | clean) as $r
+                | ($c.next_steps | clean) as $ns
                 | ([if $q == "" then "Question" else empty end,
                     if $o == "" then "Options" else empty end,
-                    if $r == "" then "Recommendation" else empty end]) as $missing
+                    if $r == "" then "Recommendation" else empty end,
+                    if $ns == "" then "Next step" else empty end]) as $missing
                 | {blocks: ([
                     {type: "section", text: {type: "mrkdwn", text: ":warning: *Decision Blocker*"}},
                     {type: "section", text: {type: "mrkdwn", text: (
@@ -100,13 +103,14 @@ build_payload() {
                   ]
                   + (if $q != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Question:* " + ($q | cut(1000)))}}] else [] end)
                   + (if $o != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Options:*\n" + ($o | cut_options(2500)))}}] else [] end)
+                  + (if $ns != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Next steps:*\n" + $ns)}}] else [] end)
                   + (if $r != "" then [{type: "section", text: {type: "mrkdwn", text: ("*Recommendation:* " + ($r | cut(1000)))}}] else [] end)
                   + (if ($missing | length) > 0 then [{type: "section", text: {type: "mrkdwn", text: ("_Declaration is missing: " + ($missing | join(", ")) + "_")}}] else [] end)
                   + [
                     {type: "section", text: {type: "mrkdwn", text: ("*Unblocked when:* " + (if $uw == "" then "(unknown)" else $uw | cut(1000) end))}},
-                    {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}},
-                    {type: "section", text: {type: "mrkdwn", text: "To answer: reply on the issue with your decision and a line that is exactly `/unblock`."}}
-                  ])}'
+                    {type: "section", text: {type: "mrkdwn", text: ("*Issue:* " + (if $url != "" then "<" + $url + "|View issue>" else "(no URL)" end))}}
+                  ]
+                  + (if $ns == "" then [{type: "section", text: {type: "mrkdwn", text: "To answer: reply on the issue with your decision and a line that is exactly `/unblock`."}}] else [] end))}'
             ;;
 
         po_blocker)
