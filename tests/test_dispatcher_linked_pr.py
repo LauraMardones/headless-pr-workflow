@@ -6,11 +6,27 @@ from __future__ import annotations
 
 import io
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from headless_pr_workflow.dispatcher.cli import main
 from headless_pr_workflow.dispatcher.facts import closes_issue, linked_pr
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LINKED_PR_SHELL = ("scripts/lib/in-flight.sh", "scripts/dispatcher-invoke.sh", "scripts/dispatcher-poll.sh")
+
+
+@pytest.mark.parametrize("path", LINKED_PR_SHELL)
+def test_no_process_substitution_path_is_handed_to_jq(path):
+    """A native ``jq.exe`` under Git Bash cannot open the ``/dev/fd`` path of ``<(...)``, so ``inflight_linked``
+    and its callers pass JSON through stdin. Linux cannot show the failure, so the source is checked (#556 review)."""
+
+    lines = (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
+    offenders = [f"{path}:{n}: {line.strip()}" for n, line in enumerate(lines, 1)
+                 if re.search(r"jq\b.*(--slurpfile|--rawfile|--argfile)\s+\S+\s+<\(", line)]  # fmt: skip
+    assert not offenders, offenders
 
 
 @pytest.mark.parametrize("body", ["Closes #500", "fixes #500", "Resolved #500", "CLOSED #500", "close #500",

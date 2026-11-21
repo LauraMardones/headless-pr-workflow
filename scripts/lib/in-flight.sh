@@ -61,8 +61,9 @@ INFLIGHT_JSON=""
 # {"<n>": number|null}}). 1 when the rule cannot be run or read.
 inflight_linked() {
     local out
-    out=$(jq -nc --argjson issues "$1" --slurpfile open <(printf '%s' "$2") --slurpfile closed <(printf '%s' "$3") \
-            '{issues: $issues, open: $open[0], closed: $closed[0]}' \
+    # The three documents go through stdin: a native jq.exe under Git Bash cannot open the /dev/fd paths of
+    # process substitution, and printf is a builtin, so a long PR list does not hit the argument limit.
+    out=$(printf '%s\n%s\n%s\n' "$1" "$2" "$3" | jq -sc '{issues: .[0], open: .[1], closed: .[2]}' \
         | "$HPW_BIN" dispatcher in-flight linked --repo "$REPO" --input -) || return 1
     jq -ce 'select(.result == "read") | {linked, merged}' <<< "$out"
 }
