@@ -190,6 +190,26 @@ Out:
 **Chosen:** The Goal names the PO's own merge of a PR that changes decision documents (ADR-011) as a fourth PO touchpoint. A new criterion, E9, requires that the story then reaches `Done` and cleanup with no further blocker and no further PO action (#505).
 **Rejected:** Extend E1 — E1 is proven on three ordinary stories with no PO action, and a decision-document story always needs the PO's merge. No Epic criterion, only a story under #160 — then the Goal could never hold for such a story, and nothing would check it at closure.
 
+### A draft PR left by `/implement` is continued, not only reported — 2026-11-22
+
+**Chosen:** The dispatcher starts `/implement` again on the existing branch and draft PR in two cases: after the PO's `/unblock` when the session failed, and after a set time when the session stopped silently after its push with a green required test check and no hand-off (#578). The PO first chose this on 2026-11-22 as Decision A on #578, and confirmed it in this spec session. It matches E4: work resumes after the PO's answer with no further PO action, and in the silent case with none at all.
+**Rejected:** Report only (option b on #578) — the PO continues by hand, and the stalled draft PR keeps its WIP place and blocks stories with file overlap, as #606 blocked #503, #507 and #607 for about 16 hours. Report and free the WIP slot (option c) — it changes the documented fact that an open draft PR is In implementation and still leaves the work to the PO.
+
+### The continuation is a new criterion, E10 — 2026-11-22
+
+**Chosen:** A new criterion E10, placed in this Epic. E1 and E8 stay as they are.
+**Rejected:** Extend E1 — E1 is proven on three ordinary stories with no PO action and no failure. Extend E8 — E8 is the stop after repeated failed sessions, not the continuation of one.
+
+### The wait before a silent stop is continued is the Tech Lead's to set — 2026-11-22
+
+**Chosen:** The spec requires only that a set time exists and that the PO can change it without a code change, as for the usage limit and the reserve. The value, and what counts as "no hand-off", are delegated to the Tech Lead.
+**Rejected:** The PO sets the number in this session — it is a technical value that depends on how long `/implement` normally runs, which refinement can read from the run logs.
+
+### A continued session that fails counts toward the stop in E8 — 2026-11-22
+
+**Chosen:** A session started by the continuation counts as any other session for the stop on repeated failed sessions. A provider usage-limit stop still does not count.
+**Rejected:** Leave continued sessions out of the count — a session that always fails would then restart without limit and never reach the stop.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
