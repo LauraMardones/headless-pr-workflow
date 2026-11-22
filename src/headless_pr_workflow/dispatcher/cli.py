@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight``, ``session-blocker`` and ``codex-worker``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight``, ``session-blocker``, ``codex-worker`` and ``failure-stop``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -20,6 +20,9 @@ from typing import Callable, Sequence
 from .admission import check_start, classify_executable_type, executor_labels
 from .board_sync import sync_board
 from .facts import read_facts
+from .failure_stop import InvalidRecord, validate_record
+from .failure_stop import check as failure_stop_check
+from .failure_stop import record as failure_stop_record
 from .gateway import Gateway, GhGateway, mask_tokens
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
@@ -49,7 +52,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all", "admission")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all", "admission", "failure-stop")
 
 
 class InvalidArguments(Exception):
@@ -190,6 +193,18 @@ def build_parser() -> argparse.ArgumentParser:
     m_who = marker_ops.add_parser("whoami", add_help=False)
     common(m_who, attempts=False)
 
+    failure = blocks.add_parser("failure-stop", add_help=False)
+    failure_ops = failure.add_subparsers(dest="operation", parser_class=_Parser)
+    f_check = failure_ops.add_parser("check", add_help=False)
+    f_check.add_argument("--json", action="store_true")  # accepted: the output is always one JSON line
+    common(f_check, attempts=False)
+    f_record = failure_ops.add_parser("record", add_help=False)
+    f_record.add_argument("--issue", type=_positive, required=True)
+    f_record.add_argument("--step", required=True)
+    f_record.add_argument("--run-url", required=True)
+    f_record.add_argument("--json", action="store_true")
+    common(f_record, attempts=False)
+
     state = blocks.add_parser("state", add_help=False)
     state_ops = state.add_subparsers(dest="operation", parser_class=_Parser)
     s_read = state_ops.add_parser("read", add_help=False)
@@ -321,6 +336,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher session-blocker read ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
             "| hpw dispatcher catch-all numbers "
+            "| hpw dispatcher failure-stop check|record ... "
             "| hpw dispatcher admission limits|type|executor|start ...")
     if args.block in ("catch-all", "admission"):
         return  # reads a constant: no repository
@@ -340,6 +356,13 @@ def _validate(args: argparse.Namespace) -> None:
         return
     if args.block == "codex-worker":
         _validate_worker(args)
+        return
+    if args.block == "failure-stop":
+        if args.operation == "record":
+            try:
+                validate_record(args.issue, args.step, args.run_url)
+            except InvalidRecord as exc:
+                raise InvalidArguments(str(exc)) from None
         return
     if args.block == "marker":
         if args.operation == "write":
@@ -515,7 +538,7 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")
     settings = settings or Settings.from_env()
-    if args.block in ("facts", "scheduler", "status"):
+    if args.block in ("facts", "scheduler", "status", "failure-stop"):
         enable = getattr(gateway, "enable_read_cache", None)  # only GhGateway; fakes read from memory
         if enable is not None:
             enable()
@@ -534,6 +557,11 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _emit(read_session_blocker(gateway, args.issue))
     if args.block == "codex-worker":
         return _run_worker(args, gateway, settings)
+    if args.block == "failure-stop":
+        if args.operation == "check":
+            return _emit(failure_stop_check(gateway, dry_run=args.dry_run, settings=settings))
+        return _emit(failure_stop_record(gateway, args.issue, args.step, args.run_url, dry_run=args.dry_run,
+                                         settings=settings))  # fmt: skip
     if args.block == "status":
         if args.operation == "sync":
             return _emit(sync_board(gateway, args.repo, epic=args.epic, attempts=args.attempts, dry_run=args.dry_run,
