@@ -34,6 +34,7 @@ In, remaining:
 - An end-to-end proof in this repository: three consecutive stories, each from ready to cleanup.
 - A stop on repeated failed sessions: the dispatcher starts no new session, tells the PO once, and starts again only after a PO action (#503).
 - After the PO merges a PR that changes decision documents, the story reaches `Done` and cleanup with no further PO action (#505).
+- A story whose `/implement` session left a draft PR behind continues on its existing branch and draft PR, and does not hold a WIP place with no session at work (#578). Two cases: a session that failed, continued after the PO's `/unblock`; and a session that stopped silently after its push, continued after a set time with a green required test check and no hand-off.
 
 Out:
 
@@ -69,6 +70,8 @@ Out:
   - **Verified by:** provoked failed sessions up to the threshold, after which the next poll starts no session and the PO receives exactly one message with the sessions, stories and run links; a further poll with the dispatcher's saved state removed still starts no session; the PO's action, after which the next poll starts a session; and changing the threshold without a code change and seeing the new value take effect.
 - **E9:** When the PO has merged a PR that changes decision documents, its story reaches `Done` and is cleaned up with no further blocker and no further PO action.
   - **Verified by:** a story whose PR changes a decision document and is merged by the PO in GitHub; its issue and PR timelines show no blocker and no PO comment or `/unblock` between the PO's merge and the deletion of its branch.
+- **E10:** A story whose `/implement` session left a draft PR behind is continued by the dispatcher on its existing branch and draft PR, with no PO action beyond what the case already needs: after a failed session, the PO's `/unblock`; after a session that stopped silently after its push, none. The draft PR never keeps a WIP place with no session at work. A continued session that fails counts toward the stop in E8.
+  - **Verified by:** two cases in this repository or a provoked copy of them. First, a story whose `/implement` session failed and left a draft PR: after the PO's `/unblock`, the next poll starts `/implement` on the same branch and PR, not as new work. Second, a draft PR with a green required test check and no hand-off after the set time: the next poll starts `/implement` on it with no PO action. In both, the timelines show no new branch or PR and no PO command other than the `/unblock` of the first case; a failed continued session is counted by the E8 stop.
 
 ## Decisions
 
