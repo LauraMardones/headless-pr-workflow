@@ -34,6 +34,7 @@ In, remaining:
 - An end-to-end proof in this repository: three consecutive stories, each from ready to cleanup.
 - A stop on repeated failed sessions: the dispatcher starts no new session, tells the PO once, and starts again only after a PO action (#503).
 - After the PO merges a PR that changes decision documents, the story reaches `Done` and cleanup with no further PO action (#505).
+- A story whose `/implement` session left a draft PR behind continues on its existing branch and draft PR, and does not hold a WIP place with no session at work (#578). Two cases: a session that failed, continued after the PO's `/unblock`; and a session that stopped silently after its push, continued after a set time with a green required test check and no hand-off.
 
 Out:
 
@@ -69,6 +70,8 @@ Out:
   - **Verified by:** provoked failed sessions up to the threshold, after which the next poll starts no session and the PO receives exactly one message with the sessions, stories and run links; a further poll with the dispatcher's saved state removed still starts no session; the PO's action, after which the next poll starts a session; and changing the threshold without a code change and seeing the new value take effect.
 - **E9:** When the PO has merged a PR that changes decision documents, its story reaches `Done` and is cleaned up with no further blocker and no further PO action.
   - **Verified by:** a story whose PR changes a decision document and is merged by the PO in GitHub; its issue and PR timelines show no blocker and no PO comment or `/unblock` between the PO's merge and the deletion of its branch.
+- **E10:** A story whose `/implement` session left a draft PR behind is continued by the dispatcher on its existing branch and draft PR, with no PO action beyond what the case already needs: after a failed session, the PO's `/unblock`; after a session that stopped silently after its push, none. The draft PR never keeps a WIP place with no session at work. A continued session that fails counts toward the stop in E8.
+  - **Verified by:** two cases in this repository or a provoked copy of them. First, a story whose `/implement` session failed and left a draft PR: after the PO's `/unblock`, the next poll starts `/implement` on the same branch and PR, not as new work. Second, a draft PR with a green required test check and no hand-off after the set time: the next poll starts `/implement` on it with no PO action. In both, the timelines show no new branch or PR and no PO command other than the `/unblock` of the first case; a failed continued session is counted by the E8 stop.
 
 ## Decisions
 
@@ -187,6 +190,26 @@ Out:
 **Chosen:** The Goal names the PO's own merge of a PR that changes decision documents (ADR-011) as a fourth PO touchpoint. A new criterion, E9, requires that the story then reaches `Done` and cleanup with no further blocker and no further PO action (#505).
 **Rejected:** Extend E1 — E1 is proven on three ordinary stories with no PO action, and a decision-document story always needs the PO's merge. No Epic criterion, only a story under #160 — then the Goal could never hold for such a story, and nothing would check it at closure.
 
+### A draft PR left by `/implement` is continued, not only reported — 2026-11-22
+
+**Chosen:** The dispatcher starts `/implement` again on the existing branch and draft PR in two cases: after the PO's `/unblock` when the session failed, and after a set time when the session stopped silently after its push with a green required test check and no hand-off (#578). The PO first chose this on 2026-11-22 as Decision A on #578, and confirmed it in this spec session. It matches E4: work resumes after the PO's answer with no further PO action, and in the silent case with none at all.
+**Rejected:** Report only (option b on #578) — the PO continues by hand, and the stalled draft PR keeps its WIP place and blocks stories with file overlap, as #606 blocked #503, #507 and #607 for about 16 hours. Report and free the WIP slot (option c) — it changes the documented fact that an open draft PR is In implementation and still leaves the work to the PO.
+
+### The continuation is a new criterion, E10 — 2026-11-22
+
+**Chosen:** A new criterion E10, placed in this Epic. E1 and E8 stay as they are.
+**Rejected:** Extend E1 — E1 is proven on three ordinary stories with no PO action and no failure. Extend E8 — E8 is the stop after repeated failed sessions, not the continuation of one.
+
+### The wait before a silent stop is continued is the Tech Lead's to set — 2026-11-22
+
+**Chosen:** The spec requires only that a set time exists and that the PO can change it without a code change, as for the usage limit and the reserve. The value, and what counts as "no hand-off", are delegated to the Tech Lead.
+**Rejected:** The PO sets the number in this session — it is a technical value that depends on how long `/implement` normally runs, which refinement can read from the run logs.
+
+### A continued session that fails counts toward the stop in E8 — 2026-11-22
+
+**Chosen:** A session started by the continuation counts as any other session for the stop on repeated failed sessions. A provider usage-limit stop still does not count.
+**Rejected:** Leave continued sessions out of the count — a session that always fails would then restart without limit and never reach the stop.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -207,6 +230,10 @@ Out:
 - #503 (Story, 2026-11-08) — its wanted outcome and its placement in #160 are carried into E8 after the PO confirmed them in this session. Its questions for refinement are delegated to the Tech Lead.
 - `docs/DISPATCHER-CONFIG.md` → the merged-PR path (checked 2026-11-08) — conflict with E9: a merged PR with no `Merge gate:` confirmation from the dispatcher counts `merge-confirmation-missing` and, after 3 runs, posts a blocker that needs a PO `/unblock`. A PR the PO merged by hand has no such confirmation. Resolved by E9; the document is updated when #505 is implemented.
 - #505 (Story, 2026-11-08) — its wanted outcome is carried into E9 after the PO confirmed it in this session.
+- #578 (Bug, 2026-11-22) and its widening comment (#606, silent stop after push) — the PO's Decision A is carried into E10 after the PO confirmed it in this session. The Tech Lead's Blocked Declaration on #578 cites "Spec #160 → F1 Out of Scope" as saying that a session leaving a draft PR keeps its draft-PR blocker. No such line exists in this spec on `main`, which does not mention draft PRs; nothing is narrowed.
+- `docs/PROJECT-STATUS.md` (an open linked draft PR is the fact for In implementation; WIP pre-flight) and `docs/DISPATCHER-DECISIONS.md` (`wip_limit` / `target-in-implementation`, `draft_ready_signal`) — conflict with E10: a draft PR holds its WIP place and the in-flight rule never starts the story again (`in_flight.py`, `if draft: continue`). Resolved by E10; the documents and the rule are updated when #578 is implemented. The fact itself stays: a draft PR with a session at work is In implementation.
+- `docs/DISPATCHER-CONFIG.md` → the `--in-implementation` lists and the review step — the same conflict, with the same resolution.
+- E1 and E4 — no conflict. A failed session's blocker needing the PO's `/unblock` is existing dispatcher behaviour; E10 adds no PO touchpoint to the Goal. E8's stop is extended to continued sessions by a decision above.
 - #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
 - #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
 - #160 success criterion on OSS compatibility invariants — left out; see Decisions.
@@ -222,6 +249,7 @@ Out:
 - Executor and model choice per issue.
 - For E8: what counts as a failed session (apart from the provider usage-limit stop, which never counts), whether failures are counted in a row or within a time window, the starting threshold, where the setting and the failure count are kept, which PO action starts the dispatcher again, and whether failed `/merge` and `/cleanup` scripts count.
 - For E9: how the dispatcher tells the PO's merge of a decision-document PR apart from other merges it did not confirm.
+- For E10: the wait before a silent stop is continued, where it is set so the PO can change it without a code change, what counts as "no hand-off", how the dispatcher tells a draft PR with a session at work from one left behind, whether the continued session resumes on the same branch by a new `/implement` or by another command, and how the WIP count treats a draft PR left behind until it is continued.
 
 Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
