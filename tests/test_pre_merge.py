@@ -400,3 +400,43 @@ def test_pre_merge_never_passes_when_the_separate_session_recognizer_rejects_the
     assert payload["approval_review_source"]["approval_source"] is None
     assert payload["approval_review_source"]["separate_session_review"]["status"] == "invalid"
     assert payload["approval_review_source"]["separate_session_review"]["reason"] in summary.blocking_reasons
+
+
+@pytest.mark.parametrize(
+    ("pytest_bucket", "passes"),
+    [("success", True), ("failure", False), ("pending", False)],
+)
+def test_pre_merge_ignores_cancelled_non_required_check_under_required_policy(monkeypatch, tmp_path, pytest_bucket, passes):
+    _write_required_policy(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_separate_session_review(
+            head_sha="head123",
+            status_checks=(
+                build_check(name="pytest", bucket=pytest_bucket),
+                build_check(name="board-status", bucket="failure", status="COMPLETED", conclusion="CANCELLED"),
+            ),
+        ),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=("pytest",), status="configured"),
+    )
+
+    assert not any("board-status" in blocker for blocker in summary.blocking_reasons)
+    assert (not any(blocker.startswith("Status check") for blocker in summary.blocking_reasons)) is passes
+
+
+def test_pre_merge_counts_every_reported_check_without_a_required_policy(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    summary = summarize_pre_merge(
+        scenario_separate_session_review(
+            head_sha="head123",
+            status_checks=(
+                build_check(name="pytest", bucket="success"),
+                build_check(name="board-status", bucket="failure", status="COMPLETED", conclusion="CANCELLED"),
+            ),
+        ),
+        expected_base_ref_name="main",
+        required_checks=RequiredStatusChecks(names=("pytest",), status="configured"),
+    )
+
+    assert any(blocker.startswith("Status check board-status is failing") for blocker in summary.blocking_reasons)

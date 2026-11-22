@@ -9,6 +9,7 @@ from .approval_check import ApprovalCheckSummary, summarize_approval_check
 from .ci_summary import CiSummary, summarize_ci
 from .github import CheckSummary, PullRequestContext, RequiredStatusChecks, ReviewThreadGateSummary
 from .github.review_threads import summarize_review_threads
+from .required_check_policy import load_required_check_policy
 from .target_branch import TargetBranchSummary, summarize_target_branch, target_branch_message
 
 
@@ -176,7 +177,7 @@ def summarize_pre_merge(
     )
     blocking_reasons.extend(target_branch.blocking_reasons)
 
-    check_blockers = _status_check_blockers(ci)
+    check_blockers = _status_check_blockers(ci, base_ref_name=context.base_ref_name)
     checks.append(
         PreMergeCheck(
             code="required-checks-passing",
@@ -263,7 +264,7 @@ def _status_check_message(
     return "All reported status checks are passing or skipped."
 
 
-def _status_check_blockers(ci: CiSummary) -> list[str]:
+def _status_check_blockers(ci: CiSummary, *, base_ref_name: str = "") -> list[str]:
     if ci.required_check_status == "unavailable":
         return list(ci.messages)
     if ci.required_check_status in ("policy_required_unconfigured", "policy_inconsistent"):
@@ -274,8 +275,11 @@ def _status_check_blockers(ci: CiSummary) -> list[str]:
     blockers: list[str] = []
     for required_check_name in ci.check_buckets["missing"]:
         blockers.append(f"Required status check {required_check_name} was not reported for the current head SHA.")
+    deciding_names = _required_policy_check_names(ci, base_ref_name)
     for check in ci.status_checks:
         if check.bucket == "success" or check.bucket == "skipped":
+            continue
+        if deciding_names is not None and check.name not in deciding_names:
             continue
         name = _check_name(check)
         facts = _check_facts(check)
@@ -286,6 +290,16 @@ def _status_check_blockers(ci: CiSummary) -> list[str]:
         else:
             blockers.append(f"Status check {name} has an unknown result ({facts}).")
     return blockers
+
+
+def _required_policy_check_names(ci: CiSummary, base_ref_name: str) -> tuple[str, ...] | None:
+    """Return the required check names when a required policy lets only them decide, else None."""
+    if ci.required_checks.status != "configured" or not ci.required_checks.names:
+        return None
+    policy = load_required_check_policy().get(base_ref_name)
+    if policy is None or not policy.is_consistent or not policy.declares_required_checks:
+        return None
+    return ci.required_checks.names
 
 
 def _review_thread_message(summary: ReviewThreadGateSummary, blockers: list[str]) -> str:

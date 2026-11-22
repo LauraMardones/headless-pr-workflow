@@ -125,7 +125,11 @@ def _policy_for_branch(branch: str | None, *, repo_root: Path = REPO_ROOT) -> tu
 
 
 def _checks_value(context, required_checks, policy_kind: str | None) -> str:
-    buckets = {check.bucket for check in context.status_checks}
+    deciding = context.status_checks
+    if policy_kind == REQUIRED_POLICY_VALUE and required_checks.status != "unavailable" and required_checks.names:
+        # A required policy defers to the required checks; other checks do not decide the gate.
+        deciding = tuple(check for check in context.status_checks if check.name in required_checks.names)
+    buckets = {check.bucket for check in deciding}
     if "failure" in buckets:
         return "fail(failing)"
     if "pending" in buckets:
