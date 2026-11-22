@@ -39,9 +39,9 @@ FAILED_ACTION = "session-failed"
 STOP_ACTION = "failure-stop"
 STEPS = ("implement", "review", "refine")
 
-_THRESHOLD = re.compile(r"^[0-9]+$")
+_THRESHOLD = re.compile(r"[0-9]+")
 _MARKER = re.compile(r"<!-- hpw:dispatcher action=(session-failed|failure-stop)((?: [A-Za-z0-9_.-]+=[^\s]+)*) -->")
-_RUN_URL = re.compile(r"^https?://[^\s]+$")
+_RUN_URL = re.compile(r"https?://[^\s]+")
 
 _EXIT = {"clear": EXIT_OK, "recorded": EXIT_OK, "dry-run": EXIT_OK, "holds": EXIT_NO,
          "invalid": EXIT_INVALID, "unreadable": EXIT_UNREADABLE}  # fmt: skip
@@ -68,7 +68,7 @@ def parse_threshold(env: Mapping[str, str] | None = None) -> int:
     raw = env.get(THRESHOLD_VARIABLE)
     if raw is None or raw == "":
         raise InvalidThreshold(f"{THRESHOLD_VARIABLE} is not set")
-    if not _THRESHOLD.match(raw) or int(raw) < 1:
+    if not _THRESHOLD.fullmatch(raw) or int(raw) < 1:
         raise InvalidThreshold(f"{THRESHOLD_VARIABLE}={raw!r} is not a whole number of one or more")
     return int(raw)
 
@@ -209,7 +209,7 @@ def validate_record(issue: int, step: str, run_url: str) -> None:
         raise InvalidRecord("--issue must be a positive integer")
     if step not in STEPS:
         raise InvalidRecord(f"--step must be one of {', '.join(STEPS)}")
-    if not _RUN_URL.match(run_url or "") or "-->" in run_url:
+    if not _RUN_URL.fullmatch(run_url or "") or "-->" in run_url:
         raise InvalidRecord("--run-url must be one http(s) URL without whitespace")
 
 
