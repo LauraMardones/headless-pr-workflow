@@ -896,6 +896,131 @@ State of in-progress work: $state"
     register_po_blocker "$issue_num" "$issue_title" "external" "$unblocked_when" "$state" "$reason"
 }
 
+# ─── Utility: the failure stop (issue #503) ──────────────────────────────────
+# After FAILED_SESSIONS_STOP_THRESHOLD failed model sessions within 24 hours
+# the dispatcher starts no new session until the PO posts a standalone
+# `/unblock` line on the issue whose comment carries the failure-stop marker.
+# The record and the stop are hidden markers in the failure blocker comments of
+# the dispatcher's own account (`hpw dispatcher failure-stop`, never the runner
+# cache), so a lost cache neither lifts the stop nor resets the count.
+# check_failure_stop <step> runs first in invoke_executor_command() and once
+# before the resume pass and the scheduler:
+#   clear      — return 0; this process does not read again until a failure
+#                is recorded.
+#   holds      — [FAILURE STOP]; no session starts; exit 0.
+#   invalid    — [FAILURE STOP ERROR] (unset, empty or invalid threshold);
+#                fail the job without a dispatcher_error Slack message.
+#   unreadable — [FAILURE STOP ERROR] naming the cause; nothing starts (fail
+#                closed); fail the job without a dispatcher_error message.
+
+FAILURE_STOP_CLEAR=false
+FAILURE_STOP_JSON=""
+
+failure_stop_block() {
+    local rc=0
+    FAILURE_STOP_JSON=$(DISPATCHER_LOGIN="${DISPATCHER_LOGIN:-}" \
+        DECISION_BLOCKER_PO_LOGIN="${DECISION_BLOCKER_PO_LOGIN:-}" \
+        FAILED_SESSIONS_STOP_THRESHOLD="${FAILED_SESSIONS_STOP_THRESHOLD-}" \
+        "$HPW_BIN" dispatcher failure-stop "$@" --repo "$REPO") || rc=$?
+    return "$rc"
+}
+
+check_failure_stop() {
+    local step="$1" before="before /$1" rc=0 error
+    [[ -n "$step" ]] || before="before this run"
+    if $DRY_RUN; then
+        echo "[DRY RUN] Would check failure stop $before"
+        return 0
+    fi
+    $FAILURE_STOP_CLEAR && return 0
+    failure_stop_block check || rc=$?
+    error=$(jq -r '.error // empty' <<< "$FAILURE_STOP_JSON" 2>/dev/null || true)
+    case "$rc" in
+        0)
+            FAILURE_STOP_CLEAR=true
+            echo "[FAILURE STOP] clear: $(jq -r '"\(.count) of \(.threshold) failed sessions in the last \(.window_hours) hours"' <<< "$FAILURE_STOP_JSON")"
+            return 0 ;;
+        1)
+            LAST_ACTION="failure stop check $before"
+            echo "[FAILURE STOP] holds: $(jq -r '"\(.count) failed sessions reached the threshold \(.threshold) within \(.window_hours) hours; no session starts. The PO restarts the dispatcher with a standalone /unblock line on #\(.stop_issue) (\(.stop_url // "the failure-stop comment"))"' <<< "$FAILURE_STOP_JSON")"
+            DISPATCH_HANDLED=true
+            exit 0 ;;
+        2)
+            echo "[FAILURE STOP ERROR] ${error:-FAILED_SESSIONS_STOP_THRESHOLD is not a whole number of one or more} — starting nothing" >&2 ;;
+        *)
+            echo "[FAILURE STOP ERROR] the failure markers could not be read (${error:-hpw dispatcher failure-stop exited $rc}) — starting nothing" >&2 ;;
+    esac
+    LAST_ACTION="failure stop check $before"
+    DISPATCH_HANDLED=true
+    exit 1
+}
+
+# record_failed_session <issue> <step> — called for a failed model session
+# (invoke_executor_command() returned non-zero and not CLAUDE_LIMIT_STOP_RC, or
+# an /implement that ended with no PR and no open Blocked Declaration). Leaves
+# the markers for the failure blocker comment in FAILED_SESSION_MARKER and sets
+# FAILURE_STOP_REACHED when this failure records the stop. A record that cannot
+# be read still carries the session-failed marker, so the next failure counts it.
+FAILED_SESSION_MARKER=""
+FAILURE_STOP_REACHED=false
+FAILURE_STOP_RECORD_JSON=""
+
+failure_run_url() {
+    echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-$REPO}/actions/runs/${GITHUB_RUN_ID:-local}"
+}
+
+record_failed_session() {
+    local issue="$1" step="$2" rc=0
+    FAILED_SESSION_MARKER="" FAILURE_STOP_REACHED=false FAILURE_STOP_RECORD_JSON=""
+    $DRY_RUN && return 0
+    FAILURE_STOP_CLEAR=false
+    failure_stop_block record --issue "$issue" --step "$step" --run-url "$(failure_run_url)" || rc=$?
+    FAILURE_STOP_RECORD_JSON="$FAILURE_STOP_JSON"
+    FAILED_SESSION_MARKER=$(jq -r '.marker // empty' <<< "$FAILURE_STOP_JSON" 2>/dev/null || true)
+    if [[ $rc -ne 0 ]]; then
+        echo "[FAILURE STOP ERROR] could not count the failed /$step for #$issue ($(jq -r '.error // empty' <<< "$FAILURE_STOP_JSON" 2>/dev/null || echo "exit $rc")); the next failure counts it" >&2
+        return 0
+    fi
+    [[ "$(jq -r '.reached' <<< "$FAILURE_STOP_JSON" 2>/dev/null)" == true ]] && FAILURE_STOP_REACHED=true
+    echo "[FAILURE STOP] recorded the failed /$step for #$issue: $(jq -r '"\(.count) of \(.threshold) in the last \(.window_hours) hours"' <<< "$FAILURE_STOP_JSON")"
+}
+
+# notify_failure_stop <issue> — after the comment with the failure-stop marker
+# is posted: one failure_stop event through the #295 queue, keyed by that
+# comment's created_at, resolved by the PO's /unblock on the issue.
+notify_failure_stop() {
+    local issue="$1"
+    $FAILURE_STOP_REACHED || return 0
+    echo "[FAILURE STOP] stop recorded on #$issue: no new session starts until the PO posts a standalone /unblock line there"
+    register_actionable_event "failure_stop" "$issue" "$LAST_POSTED_AT" \
+        "$(jq -c --arg iu "https://github.com/$REPO/issues/$issue" --arg n "$issue" \
+                  --arg su "https://github.com/$REPO/settings/variables/actions" --arg repo "$REPO" \
+                  '{threshold, window_hours, settings_url: $su, issue_url: $iu,
+                    sessions: [(.sessions // [])[] | . + {issue_url: ("https://github.com/" + $repo + "/issues/" + (.issue | tostring))}],
+                    restart: ("Fix the cause, then post a standalone /unblock line on #" + $n + ": " + $iu)}' \
+              <<< "$FAILURE_STOP_RECORD_JSON")"
+}
+
+# post_failed_session_blocker <issue> <title> <step> [<marker> [<reason> [<unblocked-when>]]]
+# The failure blocker of post_mid_cycle_blocker with the failure-stop markers added.
+post_failed_session_blocker() {
+    local issue="$1" title="$2" step="$3" marker="${4:-}"
+    record_failed_session "$issue" "$step"
+    if [[ -n "$FAILED_SESSION_MARKER" && -n "$marker" ]]; then
+        marker+=$'\n'"$FAILED_SESSION_MARKER"
+    elif [[ -n "$FAILED_SESSION_MARKER" ]]; then
+        marker="$FAILED_SESSION_MARKER"
+    fi
+    if [[ $# -ge 6 ]]; then
+        post_mid_cycle_blocker "$issue" "$title" "$step" "$marker" "$5" "$6"
+    elif [[ $# -ge 5 ]]; then
+        post_mid_cycle_blocker "$issue" "$title" "$step" "$marker" "$5"
+    else
+        post_mid_cycle_blocker "$issue" "$title" "$step" "$marker"
+    fi || return 1
+    notify_failure_stop "$issue"
+}
+
 # pr_conflicts_with_main <pr> — 0 only when GitHub reports the PR as conflicting
 # (mergeable == false or mergeable_state == "dirty"). A clean PR, an unknown
 # mergeability (null, still being computed) and a failed read all return 1, so
@@ -1694,7 +1819,11 @@ invoke_executor_command() {
     local target_arg="$2"
     local executor_label="${3:-$EXECUTOR_LABEL}"
 
-    # First: an executor with no provider row starts nothing, and spends no
+    # First of all (issue #503): a recorded failure stop starts nothing and
+    # spends no usage-limit count and no allowance probe.
+    check_failure_stop "$slash_command"
+
+    # Then: an executor with no provider row starts nothing, and spends no
     # usage-limit count and no allowance probe.
     local provider="${EXECUTOR_PROVIDER[$executor_label]:-}"
     local model="${EXECUTOR_MODEL[$executor_label]:-}"
@@ -1967,7 +2096,7 @@ run_refine() {
     [[ $rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "refine" "$n" "$n"
     if [[ $rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$n" "$title"
-        post_mid_cycle_blocker "$n" "$title" "refine"
+        post_failed_session_blocker "$n" "$title" "refine"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -1977,6 +2106,10 @@ run_refine() {
     DISPATCH_HANDLED=true
     exit 0
 }
+
+# Before the refinement, the resume pass and the scheduler (issue #503): a
+# recorded failure stop ends the run here.
+check_failure_stop ""
 
 if [[ -n "$REFINE_ISSUE" ]]; then
     run_refine
@@ -2585,7 +2718,7 @@ hand_off_to_codex_review_loop() {
             return 0
         fi
         echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
-        post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+        post_failed_session_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -2898,7 +3031,7 @@ resume_fix_round() {
     [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
+        post_failed_session_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -3116,9 +3249,11 @@ pytest_green_on_head() {
 
 # conflict_round_blocker <pr> <head> <cause> — AC 6: one blocker that names the
 # conflict with main and carries the attempt marker; never returns.
+# A fourth argument "session-failed" counts the round as a failed session (#503).
 conflict_round_blocker() {
-    local pr_number="$1" pr_head="$2" cause="$3"
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
+    local pr_number="$1" pr_head="$2" cause="$3" post=post_mid_cycle_blocker
+    [[ "${4:-}" == session-failed ]] && post=post_failed_session_blocker
+    "$post" "$ISSUE_NUMBER" "$TARGET_TITLE" "implement" \
         "$(conflict_round_attempt_marker "$pr_number" "$pr_head")" \
         "merge conflict with main on PR #$pr_number: $cause. This blocker is the PO's only alert for this conflict." \
         "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock"
@@ -3162,7 +3297,7 @@ run_conflict_round() {
     fi
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed"
+        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed" session-failed
     fi
     reset_conflict_round_session
     echo "✓ /implement completed for #$issue_num (conflict round)"
@@ -3279,7 +3414,7 @@ resume_review_story() {
     [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "review" "$pr_number" "$issue_num"
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        post_mid_cycle_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
+        post_failed_session_blocker "$issue_num" "$TARGET_TITLE" "review" "$marker"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -3627,7 +3762,7 @@ invoke_executor_command "implement" "$ISSUE_NUMBER" || SESSION_RC=$?
 [[ $SESSION_RC -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$ISSUE_NUMBER" "$ISSUE_NUMBER"
 if [[ $SESSION_RC -ne 0 ]]; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
-    post_mid_cycle_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+    post_failed_session_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
     DISPATCH_HANDLED=true
     exit 1
 fi
