@@ -429,3 +429,23 @@ def test_gate_result_accepts_each_passing_approval_value(module, approval):
 def test_gate_result_rejects_every_other_approval_value(module, approval):
     result = module.GateResult("pass(absent)", "pass", approval, "none", "yes", "abcdef1")
     assert result.passed is False
+
+
+@pytest.mark.parametrize(
+    ("policy_kind", "pytest_bucket", "expected"),
+    [
+        ("present_required", "success", "pass"),
+        ("present_required", "failure", "fail(failing)"),
+        ("present_required", "pending", "fail(pending)"),
+        ("present_non_required", "success", "fail(failing)"),
+    ],
+)
+def test_cancelled_non_required_check_decides_only_without_a_required_policy(module, policy_kind, pytest_bucket, expected):
+    context = SimpleNamespace(
+        status_checks=(
+            SimpleNamespace(bucket=pytest_bucket, name="pytest"),
+            SimpleNamespace(bucket="failure", name="board-status"),
+        )
+    )
+    required = RequiredStatusChecks(names=("pytest",), status="configured")
+    assert module._checks_value(context, required, policy_kind) == expected
