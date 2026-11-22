@@ -230,6 +230,10 @@ Out:
 - #503 (Story, 2026-11-08) — its wanted outcome and its placement in #160 are carried into E8 after the PO confirmed them in this session. Its questions for refinement are delegated to the Tech Lead.
 - `docs/DISPATCHER-CONFIG.md` → the merged-PR path (checked 2026-11-08) — conflict with E9: a merged PR with no `Merge gate:` confirmation from the dispatcher counts `merge-confirmation-missing` and, after 3 runs, posts a blocker that needs a PO `/unblock`. A PR the PO merged by hand has no such confirmation. Resolved by E9; the document is updated when #505 is implemented.
 - #505 (Story, 2026-11-08) — its wanted outcome is carried into E9 after the PO confirmed it in this session.
+- #578 (Bug, 2026-11-22) and its widening comment (#606, silent stop after push) — the PO's Decision A is carried into E10 after the PO confirmed it in this session. The Tech Lead's Blocked Declaration on #578 cites "Spec #160 → F1 Out of Scope" as saying that a session leaving a draft PR keeps its draft-PR blocker. No such line exists in this spec on `main`, which does not mention draft PRs; nothing is narrowed.
+- `docs/PROJECT-STATUS.md` (an open linked draft PR is the fact for In implementation; WIP pre-flight) and `docs/DISPATCHER-DECISIONS.md` (`wip_limit` / `target-in-implementation`, `draft_ready_signal`) — conflict with E10: a draft PR holds its WIP place and the in-flight rule never starts the story again (`in_flight.py`, `if draft: continue`). Resolved by E10; the documents and the rule are updated when #578 is implemented. The fact itself stays: a draft PR with a session at work is In implementation.
+- `docs/DISPATCHER-CONFIG.md` → the `--in-implementation` lists and the review step — the same conflict, with the same resolution.
+- E1 and E4 — no conflict. A failed session's blocker needing the PO's `/unblock` is existing dispatcher behaviour; E10 adds no PO touchpoint to the Goal. E8's stop is extended to continued sessions by a decision above.
 - #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
 - #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
 - #160 success criterion on OSS compatibility invariants — left out; see Decisions.
@@ -245,6 +249,7 @@ Out:
 - Executor and model choice per issue.
 - For E8: what counts as a failed session (apart from the provider usage-limit stop, which never counts), whether failures are counted in a row or within a time window, the starting threshold, where the setting and the failure count are kept, which PO action starts the dispatcher again, and whether failed `/merge` and `/cleanup` scripts count.
 - For E9: how the dispatcher tells the PO's merge of a decision-document PR apart from other merges it did not confirm.
+- For E10: the wait before a silent stop is continued, where it is set so the PO can change it without a code change, what counts as "no hand-off", how the dispatcher tells a draft PR with a session at work from one left behind, whether the continued session resumes on the same branch by a new `/implement` or by another command, and how the WIP count treats a draft PR left behind until it is continued.
 
 Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
