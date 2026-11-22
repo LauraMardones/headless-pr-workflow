@@ -96,6 +96,10 @@ if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher facts read" && -f "$MOCK_DIR/facts_r
     cat "$MOCK_DIR/facts_read.json"
     exit "$(cat "$MOCK_DIR/facts_read.rc")"
 fi
+# The shared next-step text (#605): the real renderer, as in production (#606).
+if [[ "${1:-}" == "next-step" ]]; then
+    PYTHONPATH="$HPW_FAKE_SRC" exec "$HPW_FAKE_PYTHON" -m headless_pr_workflow.cli "$@"
+fi
 """
 
 

@@ -58,13 +58,20 @@ jq -n --argjson n 40000 --arg l "$LONG" '{
     recommendation:$l, cause:$l, state:$l, story_number:"7", item:$l,
     target_number:"8", target_url:"https://github.com/o/r/pull/8",
     minutes:"90", has_pending_text:$l, age:"3h", last_created_at:"now",
-    check_command:$l, docs_url:"https://example.com", pad:([range($n) | "p"] | join(""))}' > "$TMP/big.json"
+    check_command:$l, docs_url:"https://example.com",
+    next_step:"run `/implement 7` in Claude Code or Codex; then the story starts.", pad:([range($n) | "p"] | join(""))}' > "$TMP/big.json"
 check "context is larger than 32 KB" test "$(wc -c < "$TMP/big.json")" -gt 32768
 
 for ev in decision_blocker po_blocker evidence_unwritable dispatch_trigger_stopped; do
     check "$ev: >32 KB context exits 0" run_notify "$ev" "$TMP/big.json"
     check "$ev: payload is valid and within the section limit" valid_payload
 done
+
+next_step_survives() {
+    jq -e '[.blocks[].text.text] | any(. == "*Next step:* run `/implement 7` in Claude Code or Codex; then the story starts.")' "$CURL_BODY_FILE" >/dev/null
+}
+run_notify po_blocker "$TMP/big.json"
+check "po_blocker: the next step is not cut by the length caps" next_step_survives
 
 echo '{not json' > "$TMP/bad.json"
 rejects_invalid() {
