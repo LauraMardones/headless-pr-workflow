@@ -40,7 +40,7 @@ Never report `Ready for implementation` while hard dependencies are still unreso
 Before creating any new issues, inventory what already exists:
 
 - Search GitHub for open and closed issues that reference this epic number in their body (`Parent epic: #X`).
-- Also check the epic body for any existing Seed Features or Seed Stories lists.
+- Also check the epic body for any existing Seed Features list, and the open issues with `Parent epic: #<epic>` for Stories, Tasks and Bugs that name no Feature.
 - Classify each found issue by type (`type:feature`, `type:story`, `type:task`, `type:bug`) and state (open/closed).
 - Do not create a duplicate of any existing issue that already covers the same scope.
 - If an existing issue is misclassified, mislabeled, or missing its parent epic reference, note it in the refined issue rather than silently fixing it during this refinement.
@@ -65,22 +65,14 @@ Proceed to the feature assessment and breakdown steps once each lens question is
 
 Before breaking an epic into stories, assess whether a Feature level is warranted:
 
-**Create Features if:**
-- The epic contains more than ~6 stories (counting existing ones), OR
-- There are clearly distinct capability clusters that can be delivered and closed independently.
+Every Story, Task and Bug of an Epic belongs to a Feature (ADR-009 item 3; `scripts/refine-check` fails the Epic refinement otherwise). An Epic with stories gets at least one Feature; there is no branch that places stories directly under an Epic.
 
-**Skip Features and create stories directly if:**
-- The epic is small enough that all work is one coherent delivery.
-- A Feature would be a 1:1 wrapper around the epic with no grouping benefit.
+Group by capability, not one Feature per story: prefer an open Feature for new stories, and create a new Feature only for a capability cluster no open Feature covers.
 
-If Features are warranted:
 - Include existing `type:feature` issues in the Seed Features list.
 - Create new Feature issues only for capability clusters not yet covered.
 - Do not create Story/Task/Bug issues yet - that is the job of `refine-feature`.
-
-If Features are not warranted:
-- Include existing Story/Task/Bug issues in the Seed Stories list.
-- Create new issues only for scope gaps not yet covered by existing issues.
+- Give every pre-existing Story, Task or Bug of the Epic (an open issue with `Parent epic: #<epic>`) a `Feature group: #<feature>` line in this same refinement. Do not move an issue to a Feature without recording it under `## Decisions`.
 
 Assign each Seed Feature its `k` by its place in the Seed Features list; once a Feature has its `F<k>` it is never renumbered, and a new Feature takes the next unused `k`.
 
@@ -196,7 +188,7 @@ Refinement is complete when the epic has:
 - Non-goals
 - Success Criteria (testable)
 - Spec record line (`Spec: [...] at `<commit>``)
-- Seed Features or Seed Stories (created as GitHub issues)
+- Seed Features (created as GitHub issues), with every Story, Task and Bug of the Epic naming one in `Feature group:`
 - Implementation Order derived from seed issue hard dependencies
 - Blocked / Unresolved Hard Dependencies when any seed issue cannot be ordered
 - Dependencies (Hard / Soft)
@@ -261,13 +253,6 @@ If features are warranted (each Feature's `Criterion prefix: F<k>` is its place 
 
 - #X Feature: ... (F1)
 - #Y Feature: ... (F2)
-
-## Seed Stories
-
-If no features needed:
-
-- #X Story: ...
-- #Y Task: ...
 
 ## Implementation Order
 
