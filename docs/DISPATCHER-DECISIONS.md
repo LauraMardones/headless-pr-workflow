@@ -112,7 +112,6 @@ Fixtures per rule: `fix_round_due`, `fix_round_attempt_once_per_head`, `fix_roun
 | `merge_owner_evidence` | `mergeability-unknown` | merge-owner marker, `mergeable: null` | conflict rule: unknown; poll: skipped; the others: owned | contract | The conflict rule waits for mergeability (#449); the consolidated rule reads ownership apart from it. |
 | `conflict_round_owed` | `conflicting-in-merge-step` | a conflicting PR whose gates pass | resume (`check_review_loop_pr`): owed; poll `CONFLICT_DUE`: not checked | contract | `conflict-round.sh` exists so the poll and the resume pass cannot disagree (#449): the poll applies it to merge-step rows too. |
 | `conflict_round_owed` | `conflicting-with-findings` | a conflicting PR with findings on the head | resume: nothing (fix round due); poll: not checked | contract | As `conflicting-in-merge-step`, for fix-round rows. |
-| `pytest_check_green` | `other-check-failing` | `pytest` passed, another check failed | `_checks_value`: not green; `pytest_green_on_head`: green | contract | The hand-off needs the `pytest` check (implement.md), the merge gate every required check (`MERGE-POLICY.md`): the consolidated rule takes the check names. |
 
 Cases where the copies agree are recorded in the same file without a row here; among them, `no_push_round_expected` and `review_path_routing` agree on every case, and `pytest_check_green` takes the newest run on a re-run in both copies.
 

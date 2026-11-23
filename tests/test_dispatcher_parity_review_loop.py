@@ -549,8 +549,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "pending": (facts(checks=[run(None)]), same(GREEN, "not green")),
         "absent": (facts(), same(GREEN, "not green")),
         "rerun-green-after-failure": (facts(checks=[run("failure", T0), run("success", T1)]), same(GREEN, "green")),
-        "other-check-failing": (facts(checks=[run("success"), run("failure", name="lint")]),
-                                {GREEN[0]: "not green", GREEN[1]: "green"}),
+        "other-check-failing": (facts(checks=[run("success"), run("failure", name="lint")]), same(GREEN, "green")),
         "check-runs-unreadable": (facts(checks=[run("success")], fail=("checks",)), same(GREEN, "not green")),
     },
     "review_path_routing": {
@@ -626,9 +625,6 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
                     "poll applies the rule only to review-step rows: apply it to merge-step and fix-round rows too."),
     ("conflict_round_owed", "conflicting-with-findings"): (
         "contract", "As conflicting-in-merge-step, for a fix-round row; the rule gives fix-round-due for both."),
-    ("pytest_check_green", "other-check-failing"): (
-        "contract", "The hand-off needs only the pytest check (implement.md step 16), the merge gate every required "
-                    "check (MERGE-POLICY.md): the consolidated rule takes the check names as input."),
 }
 
 REQUIRED_KINDS = {

@@ -96,6 +96,10 @@ if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher facts read" && -f "$MOCK_DIR/facts_r
     cat "$MOCK_DIR/facts_read.json"
     exit "$(cat "$MOCK_DIR/facts_read.rc")"
 fi
+# The shared next-step text (#605): the real renderer, as in production (#606).
+if [[ "${1:-}" == "next-step" ]]; then
+    PYTHONPATH="$HPW_FAKE_SRC" exec "$HPW_FAKE_PYTHON" -m headless_pr_workflow.cli "$@"
+fi
 """
 
 
@@ -283,6 +287,11 @@ case "$path" in
         else
             cat "$file"
         fi ;;
+    repos/*/pulls/[0-9]*/files)  # changed files of one PR (issue #505), with --jq applied
+        [[ -f "$MOCK_DIR/fail_pr_files" ]] && { echo "fake gh: forced pull request files read failure" >&2; exit 1; }
+        n="${path%/files}"; n="${n##*/}"
+        list=$(jq -c '[.[] | {filename: .}]' "$MOCK_DIR/pr_files_$n.json" 2>/dev/null || echo '[]')
+        if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$list"; else echo "$list"; fi ;;
     repos/*/pulls/[0-9]*)  # one pull request, with --jq applied as the real gh does
         n="${path##*/}"
         [[ "$n" =~ ^[0-9]+$ ]] || { echo '[]'; exit 0; }
@@ -699,6 +708,15 @@ class Dispatcher:
     def fail_pr_read(self, failing: bool = True) -> None:
         """Make the read of a single pull request (``pulls/<n>``) fail (issue #381)."""
         path = self.mock / "fail_pr_read"
+        path.write_text("") if failing else path.unlink(missing_ok=True)
+
+    def set_pr_files(self, pr: int, files: list[str]) -> None:
+        """The changed files ``pulls/<pr>/files`` lists (issue #505)."""
+        self._write(f"pr_files_{pr}.json", files)
+
+    def fail_pr_files_read(self, failing: bool = True) -> None:
+        """Make the read of a PR's changed files fail (issue #505)."""
+        path = self.mock / "fail_pr_files"
         path.write_text("") if failing else path.unlink(missing_ok=True)
 
     def set_gates(self, pr: int, result: str) -> None:

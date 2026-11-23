@@ -186,6 +186,95 @@ def test_348_missing_confirmation_records_no_failure_after_the_give_up_blocker(t
     assert d.status(STORY) == "Mergeable" and not any(p.startswith("cleanup") for p in d.phases)
 
 
+# ── Issue #505: a decision-document PR the PO merged by hand ─────────────────
+
+PO = "LauraMardones"
+MISSING = "action=evidence-retry-failed item=merge-confirmation-missing"
+GAVE_UP = "action=evidence-gave-up item=merge-confirmation-missing"
+EXPECTED = "changes decision documents and the PO merged it; no merge confirmation from the dispatcher is expected"
+
+
+def po_merged(tmp_path, files, merger=PO, body=None):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "Mergeable")
+    extra = {} if merger is None else {"merged_by": {"login": merger}}
+    if body is not None:
+        extra["body"] = body
+    # merged=True would add the dispatcher's `Merge gate:` comment; the PO's merge leaves none
+    d.add_pr(PR, STORY, state="closed", owned=False, **extra)
+    pulls = d._read("pulls.json")
+    for pr in pulls:
+        pr["merged_at"] = "2026-10-13T09:30:00Z"
+    d._write("pulls.json", pulls)
+    d.set_pr_files(PR, files)
+    return d
+
+
+@pytest.mark.parametrize("files", [
+    ["docs/decisions/ADR-020-x.md"],
+    ["specs/160-autonomous-story-execution/spec.md"],
+    ["docs/decisions/ADR-020-x.md", "src/a.py"],
+])
+def test_505_po_merged_decision_pr_reaches_cleanup_without_failure(tmp_path, files):
+    d = po_merged(tmp_path, files)
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert EXPECTED in proc.stdout
+    assert d.phases == [f"cleanup {STORY}"]
+    assert not any(MISSING in b or GAVE_UP in b or "## Blocked Declaration" in b for b in d.posted(STORY))
+    assert d.slack_calls == []
+
+
+def test_505_recognised_after_the_give_up_blocker_without_unblock(tmp_path):
+    d = po_merged(tmp_path, ["src/a.py"])
+    for _ in range(4):
+        d.resume()
+    assert any(GAVE_UP in b for b in d.posted(STORY))
+    d.set_pr_files(PR, ["docs/decisions/ADR-020-x.md"])
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert EXPECTED in proc.stdout
+    assert d.phases == [f"cleanup {STORY}"]
+
+
+@pytest.mark.parametrize("files, merger", [
+    (["src/a.py", "tests/test_a.py"], PO),
+    (["docs/decisions/ADR-020-x.md"], "someone-else"),
+])
+def test_505_other_unconfirmed_merges_are_counted_as_before(tmp_path, files, merger):
+    d = po_merged(tmp_path, files, merger=merger)
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert EXPECTED not in proc.stdout
+    assert not any(p.startswith("cleanup") for p in d.phases)
+    assert any(MISSING in b for b in d.posted(STORY))
+
+
+def test_505_unreadable_files_fall_back_to_the_unconfirmed_handling(tmp_path):
+    d = po_merged(tmp_path, ["docs/decisions/ADR-020-x.md"])
+    d.fail_pr_files_read()
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "changed files of PR #900 could not be read" in proc.stderr + proc.stdout
+    assert not any(p.startswith("cleanup") for p in d.phases) and any(MISSING in b for b in d.posted(STORY))
+
+
+def test_505_unreadable_merger_falls_back_to_the_unconfirmed_handling(tmp_path):
+    d = po_merged(tmp_path, ["docs/decisions/ADR-020-x.md"], merger=None)
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "merged_by of PR #900 is not readable" in proc.stderr + proc.stdout
+    assert not any(p.startswith("cleanup") for p in d.phases) and any(MISSING in b for b in d.posted(STORY))
+
+
+def test_505_pr_that_does_not_close_the_story_is_not_reached(tmp_path):
+    d = po_merged(tmp_path, ["docs/decisions/ADR-020-x.md"], body="Closes #999")
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert EXPECTED not in proc.stdout
+    assert not any(p.startswith("cleanup") for p in d.phases)
+
+
 def test_dry_run_runs_no_script(tmp_path):
     d = Dispatcher(tmp_path)
     d.add_story(STORY, "Mergeable")

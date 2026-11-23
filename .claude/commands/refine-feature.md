@@ -68,6 +68,7 @@ A feature refines into Story/Task/Bug issues - not into further Features.
 - Include existing Story/Task/Bug issues in the Seed Stories list.
 - Create new issues only for scope gaps not yet covered by existing issues.
 - Link all new issues to this feature and its parent epic.
+- Every story this refinement creates or lists carries `Feature group: #<this Feature>` (and `Parent epic:`); `scripts/refine-check` fails the Feature when a listed Seed Story names no Feature or another Feature.
 - List all related issues - both pre-existing and newly created - under Seed Stories in the feature body.
 - If the breakdown reveals that the feature itself should be split into two features, stop and raise it as a `Type: decision` blocker rather than silently splitting.
 
