@@ -362,16 +362,18 @@ Every hidden dispatcher marker (`<!-- hpw:dispatcher action=<action> key=value .
 ```
 scripts/hpw dispatcher marker write  --repo <owner/repo> --number <n> --action <action> [--field key=value ...] [--body-file <path>] [--once] [--attempts <n>] [--dry-run]
 scripts/hpw dispatcher marker holds  --repo <owner/repo> --number <n> --marker <text-or-prefix> [--cancel <marker>] [--author dispatcher|bookkeeping]
+scripts/hpw dispatcher marker decide --login <login> --marker <text-or-prefix> [--cancel <marker>] [--po-login <login>] [--input <file>|-]
 scripts/hpw dispatcher marker list   --repo <owner/repo> --number <n> [--marker <m>] [--author dispatcher|bookkeeping]
 scripts/hpw dispatcher marker whoami --repo <owner/repo>
 ```
 
 - **Accounts:** resolved once per process. `dispatcher` is `DISPATCHER_LOGIN` or the login behind `GH_TOKEN`; `bookkeeping` is `CODEX_BOOKKEEPING_LOGIN` or the same login. `--author` defaults to `dispatcher`.
-- **`holds`:** the newest own comment carrying the marker (a substring, so a prefix works) holds unless a later standalone `/unblock` line from `DECISION_BLOCKER_PO_LOGIN`, or a later own comment carrying `--cancel`, follows it. Result words: `holds` (exit `0`), `absent`, `unblocked`, `cancelled` (exit `1`), `unreadable` (exit `3`).
+- **`holds`:** the newest own comment carrying the marker (a substring, so a prefix works), by `created_at` and not by list order, holds unless a later standalone `/unblock` line from `DECISION_BLOCKER_PO_LOGIN`, or a later own comment carrying `--cancel`, follows it. Result words: `holds` (exit `0`), `absent`, `unblocked`, `cancelled` (exit `1`), `unreadable` (exit `3`).
+- **`decide`:** the same rule (`marker.decide_holds`, the one marker-holds implementation, issue #628) over comments the caller already read: one JSON array of all authors' comments on stdin (or `--input <file>`), the account's `--login`, and the PO login (`--po-login`, default `DECISION_BLOCKER_PO_LOGIN`). It reads nothing from GitHub, and gives the words and exit codes of `holds`; input that is not a JSON array of objects, or an empty `--login`, is `unreadable` (exit `3`). `conflict_round_rule` (`scripts/lib/conflict-round.sh`) decides its conflict-round and fix-round attempt markers with it, so the poll and the resume pass apply the same rule as the `marker_holds` shim.
 - **`write`:** posts the marker (after the text of `--body-file`, when given) through the verified write above, read-back included. With `--once` it posts nothing and reports `already` when the same marker holds; when the markers cannot be read it posts nothing and reports `failed`. The marker text is unchanged, so markers already on GitHub stay valid.
 - **`list`:** the own comments (`id`, `created_at`, `body`), optionally only those carrying `--marker`. **`whoami`:** `dispatcher` and `bookkeeping`.
 - **Fail closed:** a login that cannot be resolved (`gh api user` fails or returns an empty login, and `DISPATCHER_LOGIN` is unset) or comments that cannot be read give `unreadable` (exit `3`); no comment from any author then matches. The bash shim `marker_holds <issue> <marker> <on-read-error> [<cancel>]` needs the caller's direction as a mandatory `0` (treat as held) or `1` (treat as absent): a caller that stops when the marker holds passes `0`, one that acts when it holds passes `1`, so a failed read starts no session, posts no second blocker, writes no board status and merges nothing.
-- **Output:** one JSON line on stdout (`ok`, `block: "marker"`, `operation`, `result`, `error`, plus `url`/`created_at` for `holds`, `comments` for `list`, `dispatcher`/`bookkeeping` for `whoami`); log lines on stderr; the token is never printed. Exit `2` is invalid arguments.
+- **Output:** one JSON line on stdout (`ok`, `block: "marker"`, `operation`, `result`, `error`, plus `url`/`created_at` for `holds` and `decide`, `comments` for `list`, `dispatcher`/`bookkeeping` for `whoami`); log lines on stderr; the token is never printed. Exit `2` is invalid arguments.
 
 The bash functions callers use (`marker_holds`, `resolve_dispatcher_login`, `bookkeeping_login`, `bot_comments_json`, `marker_list_json`, `newest_own_comment_body`, the CLAIM/CONFIRM helpers of the decision-blocker resume) are thin shims in `scripts/dispatcher-invoke.sh`; `dispatcher-merge.sh` reads the owner marker with `holds`, `dispatcher-notify-retry.sh` reads the evidence with `list`, and `dispatcher-poll.sh` takes its login from `whoami`. The "already the newest comment" checks of the allowance, usage-limit and pause comments look at the newest comment of the dispatcher's own account.
 
@@ -634,6 +636,8 @@ When the dispatcher merges one story, another dispatcher PR can start to conflic
 - no fix round is due: no bookkeeping `move-in-implementation` marker for the current head without a fix-round attempt marker that holds for it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
 - the story has no open blocker: a `## Blocked Declaration` with no later standalone `/unblock` line from the PO. A dispatcher blocker whose hidden marker names an older PR head is not open;
 - no conflict-round attempt marker holds for the current head.
+
+Whether an attempt marker holds is decided by the one marker-holds rule (`hpw dispatcher marker decide`, issue #628): the newest marker by `created_at` holds unless a later standalone `/unblock` line from the PO follows it. When that decision cannot be made, the rule gives no word, and the poll and the resume pass treat the story as unreadable and start nothing.
 
 The poll lists such stories in the review step under `conflict_due`; a story with a fix round due is already listed under `in_implementation`, and one in the merge step under `in_merge`. The next run starts one fresh round.
 
