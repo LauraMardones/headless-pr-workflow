@@ -30,7 +30,9 @@ pytestmark = needs_tools
 
 
 def env(threshold: str = "2", **extra: str) -> dict[str, str]:
-    return {"FAILED_SESSIONS_STOP_THRESHOLD": threshold, "FAILURE_STOP_NOW": NOW, **extra}
+    # Three stories with a PR each would reach the WIP limit of 2 and stop every run before a session starts.
+    return {"FAILED_SESSIONS_STOP_THRESHOLD": threshold, "FAILURE_STOP_NOW": NOW, "WIP_LIMIT_IMPLEMENTATION": "10",
+            **extra}
 
 
 @pytest.fixture

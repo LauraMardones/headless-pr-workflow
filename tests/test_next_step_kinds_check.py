@@ -21,7 +21,8 @@ from headless_pr_workflow.next_step import NextStepError, parse_declaration, ren
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = "docs/NEXT-STEP-KINDS.md"
-FEATURES = {"#589", "#590", "#591"}
+# #560 owns slack-failure-stop (issue #503): a Slack message that waits for the PO, outside Epic #566.
+FEATURES = {"#560", "#589", "#590", "#591"}
 STATUSES = {"converted", "pending"}
 
 # Kinds whose producer is not converted yet. A converting story (#606, #607,

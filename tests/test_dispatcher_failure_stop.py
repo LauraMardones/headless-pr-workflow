@@ -355,6 +355,7 @@ def test_ac7_an_unreadable_list_or_login_fails_closed(break_it):
 def run_cli(gw: FakeGateway, capsys, monkeypatch, *argv: str, threshold: str = "3") -> tuple[int, dict[str, Any]]:
     monkeypatch.setenv("FAILED_SESSIONS_STOP_THRESHOLD", threshold)
     monkeypatch.setenv("DECISION_BLOCKER_PO_LOGIN", PO)
+    monkeypatch.setenv("FAILURE_STOP_NOW", NOW.strftime("%Y-%m-%dT%H:%M:%SZ"))  # the CLI reads the real clock otherwise
     rc = dispatcher_main(["failure-stop", *argv, "--repo", "o/r"], gateway_factory=lambda _repo: gw,  # type: ignore[arg-type, return-value]
                          settings=settings())
     lines = capsys.readouterr().out.strip().splitlines()

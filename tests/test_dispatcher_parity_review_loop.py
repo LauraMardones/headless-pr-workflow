@@ -389,8 +389,10 @@ def post_implement_outcome_decisions(f: dict[str, Any], tmp: Path) -> dict[str, 
     ``open_session_blocker`` decides only the no-PR branch; the facts of a story with a linked PR reach the hand-off
     alone, so only the no-PR cases record both copies (the overlap the story names under Risks)."""
 
+    # post_failed_session_blocker (#503) takes the same arguments and posts through the same blocker.
     body = ('post_mid_cycle_blocker() { if [[ "${5:-}" == *"conflicts with main"* ]]; then echo "BLOCKER conflict"; '
             'else echo "BLOCKER generic"; fi; }\n'
+            'post_failed_session_blocker() { post_mid_cycle_blocker "$@"; }\n'
             f'hand_off_to_codex_review_loop "{f["head_before"]}" "" 2>&1')
     rc, out = bash(tmp, f, "( " + body + " )")
     shell = ("declaration kept" if "open Blocked Declaration" in out else "conflict blocker" if "BLOCKER conflict" in out
