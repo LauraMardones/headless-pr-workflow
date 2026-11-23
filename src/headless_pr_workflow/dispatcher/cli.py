@@ -23,7 +23,8 @@ from .facts import read_facts
 from .gateway import Gateway, GhGateway, mask_tokens
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
-from .marker import AUTHORS, DEFAULT_AUTHOR, InvalidMarker, list_markers, marker_holds, marker_text, whoami, write_marker
+from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, list_markers, marker_holds, marker_text,
+                     whoami, write_marker)
 from .scheduler import InvalidLimits, load_limits, next_action
 from .session_blocker import read_session_blocker
 from .state import FILE_NAMES, read_pending, read_state, write_state
@@ -181,6 +182,13 @@ def build_parser() -> argparse.ArgumentParser:
     author_arg(m_holds)
     common(m_holds, attempts=False)
 
+    m_decide = marker_ops.add_parser("decide", add_help=False)  # marker holds over comments already read (#628)
+    m_decide.add_argument("--login", required=True)
+    m_decide.add_argument("--marker", required=True)
+    m_decide.add_argument("--cancel", default="")
+    m_decide.add_argument("--po-login", default=None)
+    m_decide.add_argument("--input", default="-")  # one JSON array of comments, all authors; "-" reads stdin
+
     m_list = marker_ops.add_parser("list", add_help=False)
     m_list.add_argument("--number", type=_positive, required=True)
     m_list.add_argument("--marker", default="")
@@ -312,7 +320,7 @@ def _validate(args: argparse.Namespace) -> None:
     if args.block not in _BLOCKS or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
-            "| hpw dispatcher marker write|holds|list|whoami ... "
+            "| hpw dispatcher marker write|holds|decide|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ... "
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
@@ -324,6 +332,10 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher admission limits|type|executor|start ...")
     if args.block in ("catch-all", "admission"):
         return  # reads a constant: no repository
+    if args.block == "marker" and args.operation == "decide":
+        if not args.marker.strip():
+            raise InvalidArguments("--marker must not be empty")
+        return  # decides over comments it is given: no repository
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -420,6 +432,17 @@ def _emit(result: Result) -> int:
     return result.exit_code
 
 
+def _run_marker_decide(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        raw = sys.stdin.buffer.read() if args.input == "-" else Path(args.input).read_bytes()
+        comments = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return _emit(Result("decide", "unreadable", error=f"read input: {exc}",
+                            fields={"url": None, "created_at": None}, block="marker"))  # fmt: skip
+    po_login = settings.po_login if args.po_login is None else args.po_login.strip()
+    return _emit(decide_marker(comments, args.login, args.marker, po_login=po_login, cancel=args.cancel))
+
+
 def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
     if args.operation == "whoami":
         return _emit(whoami(gateway))
@@ -511,6 +534,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_catch_all_numbers()
     if args.block == "admission":
         return _run_admission(args)
+    if args.block == "marker" and args.operation == "decide":
+        return _run_marker_decide(args, settings or Settings.from_env())
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")

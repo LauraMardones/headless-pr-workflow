@@ -418,12 +418,11 @@ def _po_unblocked_after(comments: list[dict[str, Any]], po_login: str, since: st
 
 
 def _gave_up(comments: list[dict[str, Any]], login: str, marker: str, po_login: str) -> bool:
-    """The give-up marker holds: the dispatcher's own newest marker comment has no later PO ``/unblock``."""
+    """The give-up marker holds (``marker.decide_holds``, issue #628)."""
 
-    held = [c for c in comments if _author(c) == login and marker in str(c.get("body") or "")]
-    if not held:
-        return False
-    return not _po_unblocked_after(comments, po_login, str(held[-1].get("created_at") or ""))
+    from .marker import decide_holds  # marker.py imports this module
+
+    return decide_holds(comments, login, marker, po_login=po_login)[0] == "holds"
 
 
 def _failure_count(own: list[dict[str, Any]], item: str, ref: str) -> int:
