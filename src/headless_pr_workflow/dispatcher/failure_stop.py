@@ -109,8 +109,13 @@ class _State:
     titles: dict[int, str]
 
 
-def _read(gateway: Gateway, threshold: int, settings: Settings, env: Mapping[str, str] | None) -> _State:
-    """Every marker of the dispatcher's own account on the open issues; raises ``Unreadable``."""
+def _read(gateway: Gateway, threshold: int, settings: Settings, env: Mapping[str, str] | None,
+          moment: datetime) -> _State:
+    """Every marker of the dispatcher's own account on the open issues; raises ``Unreadable``.
+
+    Issues closed inside the window add restart evidence only: the PO's ``/unblock`` after a
+    ``failure-stop`` marker still moves the cutoff of the count after the stop issue is
+    closed. They never hold a stop and their failures do not count."""
 
     login = resolve_login(gateway, "dispatcher", env)
     try:
@@ -148,6 +153,26 @@ def _read(gateway: Gateway, threshold: int, settings: Settings, env: Mapping[str
                 if lifted is None:
                     holding.append({"issue": number, "at": at, "url": c.get("html_url") or c.get("url")})
                 else:
+                    resets.append(lifted)
+    try:
+        recently_closed = gateway.list_issues_closed_since(_iso(moment - timedelta(hours=WINDOW_HOURS)))
+    except GatewayError as exc:
+        raise Unreadable(str(exc)) from None
+    for issue in recently_closed:
+        number = issue.get("number")
+        if not isinstance(number, int) or number in titles or issue.get("comments") == 0:
+            continue
+        try:
+            comments = gateway.list_comments(number)
+        except GatewayError as exc:
+            raise Unreadable(str(exc)) from None
+        for c in comments:
+            at = _time(c.get("created_at") or "")
+            if _author(c) != login or at is None:
+                continue
+            if any(action == STOP_ACTION for action, _rest in _MARKER.findall(str(c.get("body") or ""))):
+                lifted = _first_unblock(comments, settings.po_login, at)
+                if lifted is not None:
                     resets.append(lifted)
     return _State(threshold, failures, holding, max(resets) if resets else None, titles)
 
@@ -195,7 +220,7 @@ def check(
     settings = settings or Settings.from_env(env)
     moment = _now(now, env)
     try:
-        state = _read(gateway, threshold, settings, env)
+        state = _read(gateway, threshold, settings, env, moment)
     except Unreadable as exc:
         return StopResult("check", "unreadable", error=f"read failure markers: {exc}", fields=_base(threshold, [], {}))
     if state.holding:
@@ -255,7 +280,7 @@ def record(
         return StopResult("record", "dry-run", fields={**_base(threshold, [], {}), "marker": "", "reached": False})
     settings = settings or Settings.from_env(env)
     try:
-        state = _read(gateway, threshold, settings, env)
+        state = _read(gateway, threshold, settings, env, moment)
     except Unreadable as exc:
         return StopResult("record", "unreadable", error=f"read failure markers: {exc}",
                           fields={**_base(threshold, [], {}), "marker": failed, "reached": False})  # fmt: skip

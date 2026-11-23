@@ -30,6 +30,8 @@ class FakeGateway:
         self.login: str | Exception = BOT
         self.fail_comments: set[int] = set()
         self.fail_issues = False
+        self.fail_closed = False
+        self.closed: set[int] = set()
         self.reads: list[int] = []
 
     def viewer_login(self) -> str:
@@ -40,7 +42,17 @@ class FakeGateway:
     def list_open_issues(self) -> list[dict[str, Any]]:
         if self.fail_issues:
             raise GatewayError("read open issues", "HTTP 502")
-        return [{**issue, "comments": len(self.comments.get(n, []))} for n, issue in self.issues.items()]
+        return [{**issue, "comments": len(self.comments.get(n, []))} for n, issue in self.issues.items()
+                if n not in self.closed]
+
+    def list_issues_closed_since(self, since: str) -> list[dict[str, Any]]:
+        if self.fail_closed:
+            raise GatewayError("read recently closed issues", "HTTP 502")
+        return [{**issue, "comments": len(self.comments.get(n, []))} for n, issue in self.issues.items()
+                if n in self.closed]
+
+    def close(self, number: int) -> None:
+        self.closed.add(number)
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         self.reads.append(number)
@@ -237,6 +249,42 @@ def test_ac5_failures_after_the_unblock_count_toward_the_next_stop():
     out = record(gw, 8)
 
     assert out["reached"] is True and [s["issue"] for s in out["sessions"]] == [5, 6, 8]
+
+
+def test_ac5_a_closed_stop_issue_keeps_its_restart_cutoff():
+    # Codex finding on #643: failures on #5 and #6, the stop on #7, the PO's /unblock on #7, then #7 closes.
+    gw = FakeGateway()
+    gw.failure(5, 6)
+    gw.failure(6, 5)
+    gw.failure(7, 4, stop=True)
+    gw.unblock(7, 3)
+    gw.close(7)
+
+    out = record(gw, 8)
+
+    assert out["reached"] is False and out["count"] == 1 and [s["issue"] for s in out["sessions"]] == [8]
+    assert check(gw)["result"] == "clear" and check(gw)["count"] == 0
+
+
+def test_ac5_a_closed_issue_never_holds_a_stop_and_its_failures_do_not_count():
+    gw = FakeGateway()
+    gw.failure(5, 3)
+    gw.failure(7, 2, stop=True)  # no /unblock, then the PO closes #7
+    gw.close(7)
+
+    out = check(gw)
+
+    assert out["result"] == "clear" and [s["issue"] for s in out["sessions"]] == [5]
+
+
+def test_a_recently_closed_issue_that_cannot_be_read_fails_closed():
+    gw = FakeGateway()
+    gw.failure(5, 1)
+    gw.fail_closed = True
+
+    result = failure_stop.check(gw, settings=settings(), env=env(), now=NOW)  # type: ignore[arg-type]
+
+    assert result.result == "unreadable" and result.exit_code == 3 and "recently closed issues" in result.error
 
 
 @pytest.mark.parametrize("login,body", [
