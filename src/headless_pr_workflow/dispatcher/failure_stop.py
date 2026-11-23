@@ -167,8 +167,17 @@ def _base(threshold: int | None, rows: list[dict[str, Any]], titles: Mapping[int
     return {"threshold": threshold, "count": len(rows), "window_hours": WINDOW_HOURS, "sessions": _sessions(rows, titles)}
 
 
-def _now(now: datetime | None) -> datetime:
-    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+NOW_VARIABLE = "FAILURE_STOP_NOW"
+
+
+def _now(now: datetime | None, env: Mapping[str, str] | None = None) -> datetime:
+    """The clock of the window. ``FAILURE_STOP_NOW`` (an ISO time) fixes it for tests that
+    run the invoke script against a fake GitHub with a fixed clock, like ``USAGE_LIMIT_TODAY``."""
+
+    if now is None:
+        fixed = _time((os.environ if env is None else env).get(NOW_VARIABLE, ""))
+        now = fixed or datetime.now(timezone.utc)
+    return now.astimezone(timezone.utc)
 
 
 def check(
@@ -184,7 +193,7 @@ def check(
     if dry_run:
         return StopResult("check", "dry-run", fields=_base(threshold, [], {}))
     settings = settings or Settings.from_env(env)
-    moment = _now(now)
+    moment = _now(now, env)
     try:
         state = _read(gateway, threshold, settings, env)
     except Unreadable as exc:
@@ -235,7 +244,7 @@ def record(
     """
 
     validate_record(issue, step, run_url)
-    moment = _now(now)
+    moment = _now(now, env)
     failed = failed_marker(issue, step, run_url)
     try:
         threshold = parse_threshold(env)
