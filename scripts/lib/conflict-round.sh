@@ -39,9 +39,40 @@
 #   head allows a new attempt (issue #409 AC 6).
 #   Markers count only on comments of the dispatcher's own account; the
 #   findings marker only on comments of the bookkeeping job's account.
+#   Whether a story marker holds (the conflict-round and fix-round attempt
+#   markers) is decided by the one marker-holds rule, `hpw dispatcher marker
+#   decide` (marker.py, issue #628): the newest marker by created_at holds
+#   unless a later standalone PO /unblock line follows it. When that call
+#   fails, the rule prints no word and fails, which both callers read as
+#   unreadable.
+
+# conflict_marker_decide <login> <po-login> <marker>
+#   Reads the story's comments on stdin and prints the `marker decide` JSON
+#   line when it decides (holds or not); fails on a read or argument error.
+conflict_marker_decide() {
+    local out rc
+    out=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher marker decide \
+        --login "$1" --po-login "$2" --marker "$3")
+    rc=$?
+    [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
+    printf '%s\n' "$out"
+}
 
 conflict_round_rule() {
-    jq -rs --arg bot "$1" --arg bk "$2" --arg po "$3" '
+    local input n head story tried fix_attempt
+    input=$(jq -cs '.') || return 1
+    if jq -e '(.[0].state // "open") != "open" or (.[0].draft // false)' <<< "$input" >/dev/null; then
+        echo "not-open"
+        return 0
+    fi
+    n=$(jq -r '.[0].number | tostring' <<< "$input") || return 1
+    head=$(jq -r '(.[0].head.sha // "") | ascii_downcase' <<< "$input") || return 1
+    story=$(jq -c '.[1] // []' <<< "$input") || return 1
+    tried=$(conflict_marker_decide "$1" "$3" \
+        "<!-- hpw:dispatcher action=conflict-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
+    fix_attempt=$(conflict_marker_decide "$1" "$3" \
+        "<!-- hpw:dispatcher action=fix-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
+    jq -r --arg bot "$1" --arg bk "$2" --arg po "$3" --argjson tried "$tried" --argjson attempt "$fix_attempt" '
         .[0] as $pr | (.[1] // []) as $story | (.[2] // []) as $prc
         | (($pr.head.sha // "") | ascii_downcase) as $head
         | ($pr.number | tostring) as $n
@@ -52,8 +83,6 @@ conflict_round_rule() {
             [$list[] | select((.user.login // "") == $login
                               and ((.body // "") | ascii_downcase | contains($marker)))
              | .created_at] | max;
-          def holds($marker):
-            newest($story; $bot; $marker) as $t | $t != null and (unblocked_after($t) | not);
           def stale_for_head:
             (.user.login // "") == $bot
             and ([(.body // "") | match("<!-- hpw:dispatcher [^>]*\\bhead=([0-9a-fA-F]+)"; "g")
@@ -68,21 +97,19 @@ conflict_round_rule() {
                 and (stale_for_head | not)
                 and (unblocked_after(.created_at) | not));
           newest($prc; $bk; "<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=" + $head + " ") as $moves
-        | newest($story; $bot; "<!-- hpw:dispatcher action=fix-round-attempt pr=" + $n + " head=" + $head + " -->") as $attempt
-        | ($moves != null and ($attempt == null or unblocked_after($attempt) or $moves > $attempt)) as $fix_due
+        | ($moves != null and ($attempt.result != "holds" or $moves > $attempt.created_at)) as $fix_due
         | (any($prc[]; (.user.login // "") == $bot and ((.body // "") | ascii_downcase
               | contains("<!-- hpw:dispatcher action=merge-owner pr=" + $n + " head=" + $head + " -->")
                 or contains("<!-- hpw:dispatcher action=evidence-pending item=merge-owner head=" + $head + " ")))) as $owned
-        | if ($pr.state // "open") != "open" or ($pr.draft // false) then "not-open"
-          elif $fix_due then "fix-round-due"
+        | if $fix_due then "fix-round-due"
           elif ($pr.mergeable == false) or ($pr.mergeable_state == "dirty") then
-              if holds("<!-- hpw:dispatcher action=conflict-round-attempt pr=" + $n + " head=" + $head + " -->") then "tried"
+              if $tried.result == "holds" then "tried"
               elif open_blocker then "blocked"
               else "owed" end
           elif $pr.mergeable == null then "unknown"
           elif $owned then "clean"
-          elif holds("<!-- hpw:dispatcher action=conflict-round-attempt pr=" + $n + " head=" + $head + " -->") then "tried"
+          elif $tried.result == "holds" then "tried"
           elif newest($story; $bot; "<!-- hpw:dispatcher action=merge-owner-missing pr=" + $n + " head=" + $head + " -->") != null
               then "ownerless-reported"
-          else "ownerless" end'
+          else "ownerless" end' <<< "$input"
 }

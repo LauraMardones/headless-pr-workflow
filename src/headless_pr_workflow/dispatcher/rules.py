@@ -171,9 +171,7 @@ RULES: tuple[Rule, ...] = (
           [(INVOKE, "fix_round_attempt_marker"), (INVOKE, "fix_round_attempt_superseded"),
            (CONFLICT_ROUND_SH, "conflict_round_rule")],
           "resume",
-          "test_dispatcher_review_loop.py test_dispatcher_conflict_round.py test_dispatcher_marker_block.py",
-          "`marker_holds` in `marker.py` takes the last marker in list order, the jq takes the newest "
-          "`created_at`."),
+          "test_dispatcher_review_loop.py test_dispatcher_conflict_round.py test_dispatcher_marker_block.py"),
     _rule("fix_round_max", "Stop after `CODEX_FIX_ROUND_MAX` fix rounds with a resource blocker.", INVOKE,
           [(INVOKE, "CODEX_FIX_ROUND_MAX")],
           "resume",
@@ -190,7 +188,6 @@ RULES: tuple[Rule, ...] = (
            (INVOKE, "complete_pending_hand_off")],
           "poll resume",
           "test_dispatcher_in_flight.py test_dispatcher_in_flight_facts.py test_dispatcher_review_loop.py",
-          "`hand_off_pending` takes the newest `created_at`, `marker_holds` the last in list order; "
           "`resume_fix_round` matches the full marker with the head, not the prefix."),
     _rule("post_implement_outcome", "After /implement: no PR, a draft PR, a round that pushed nothing, or a hand-off.",
           SESSION_BLOCKER,
@@ -219,6 +216,12 @@ RULES: tuple[Rule, ...] = (
           "resume",
           "test_dispatcher_marker_block.py test_dispatcher_codex_pr_review.py "
           "test_dispatcher_invoke_merge_cleanup_scripts.py"),
+    _rule("marker_holds", "Whether a dispatcher marker holds: the newest own marker by `created_at`, not lifted by a "
+          "later PO `/unblock` or cancelled by a later own cancel marker.", MARKER,
+          [(MARKER, "decide_holds")],
+          "poll invoke resume",
+          "test_dispatcher_marker_block.py test_dispatcher_marker_shims.sh test_dispatcher_parity_review_loop.py "
+          "test_dispatcher_conflict_round.py test_dispatcher_rule_guard.py"),
     _rule("pytest_check_green", "Hand off only when the `pytest` check passed on the head.", MERGE_GATE,
           [(MERGE_GATE, "_checks_value"), (INVOKE, "pytest_green_on_head")],
           "resume",
