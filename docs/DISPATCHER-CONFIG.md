@@ -14,7 +14,7 @@ The PO caps how many autonomous sessions the dispatcher starts per UTC day with 
 
 **Change it** under **Settings → Secrets and variables → Actions → Variables** (`https://github.com/<owner>/<repo>/settings/variables/actions`). No code change is needed; the new value applies on the next poll that finds work.
 
-**What counts.** Every model session the dispatcher starts counts once, when it starts: `/implement` (including a fix round), `/review` of a Codex-implemented story, and refinement sessions that use the same start function. `/merge` and `/cleanup` are script-only phases (issue #264): they start no model session, so they neither count nor can be stopped by the limit. One full cycle of a Codex-implemented story therefore uses 2 sessions (`/implement` and `/review`), and a Claude-implemented story uses 1 per `/implement` or fix round; size the limit with that in mind. A session that fails, times out or is stopped by a provider limit still counts, so a loop of failing restarts reaches the limit. The allowance probe (#317) does not count, and a start refused by the reserve does not count. Codex Cloud review (ADR-006) is not started by the dispatcher and does not count.
+**What counts.** Every model session the dispatcher starts counts once, when it starts: `/implement` (including a fix round), `/review` of a Codex-implemented story, and refinement sessions that use the same start function. `/merge` and `/cleanup` are script-only phases (issue #264): they start no model session, so they neither count nor can be stopped by the limit. One full cycle of a Codex-implemented story therefore uses 2 sessions (`/implement` and `/review`), and a Claude-implemented story uses 1 per `/implement` or fix round; size the limit with that in mind. A session that fails, times out or is stopped by a provider limit still counts, so a loop of failing restarts reaches the limit; the [failure stop](#failure-stop) ends such a loop sooner. The allowance probe (#317) does not count, and a start refused by the reserve does not count. Codex Cloud review (ADR-006) is not started by the dispatcher and does not count.
 
 **Where.** `invoke_executor_command()` in `scripts/dispatcher-invoke.sh` checks the limit first and the allowance second, so no probe turn is spent when the limit already stops the session. `scripts/dispatcher-usage-limit.sh` holds the count (`check`, `record`, `status`, `notify-due`, `mark-notified`).
 
@@ -35,6 +35,45 @@ The PO caps how many autonomous sessions the dispatcher starts per UTC day with 
 **Invalid value.** A missing, empty or invalid value (`abc`, `-1`, `7.5`, `10 `, `1e3`) starts no session. The run log has the `[USAGE LIMIT ERROR]` line, the job fails and no `dispatcher_error` Slack message is sent. Before `/implement` nothing is written; before `/review` the story gets a `## Usage limit` comment.
 
 `--dry-run` neither counts nor notifies and logs `[DRY RUN] Would check usage limit before /<step>`.
+
+---
+
+## Failure stop
+
+After a set number of failed sessions the dispatcher starts no new session and tells the PO once (issue #503, Epic #160 spec → E8). It starts again only after a PO action, also when its runner cache is lost. The usage limit above counts healthy sessions too; the failure stop counts only failed ones.
+
+| Variable | Valid values | Suggested first value |
+|---|---|---|
+| `FAILED_SESSIONS_STOP_THRESHOLD` | A whole number of one or more, in decimal digits only. No default in code. | `3` |
+
+**Change it** under **Settings → Secrets and variables → Actions → Variables**. The value is read on every run; no code change is needed. A missing, empty or invalid value (`abc`, `0`, `-1`, `2.5`, `3 `) starts no session. The run log has a `[FAILURE STOP ERROR]` line, the job fails and no `dispatcher_error` Slack message is sent.
+
+**What counts as a failed session.** A model session the dispatcher started (`/implement` including a fix round, `/review`, `/refine`) that ends as a session error: a non-zero exit, no `result`, a `result` that is not a success, the wall-clock bound, a 401, or an `/implement` that exited `0` with no open linked PR and neither a blocker of its own nor a hand-off outcome (F1.3).
+
+**What does not count.** A provider usage-limit stop, a session that ends in a decision or other blocker it declared itself (F1.1, F1.2), a refused start (usage limit, allowance or reserve), `/merge` and `/cleanup` (script-only phases, no model session), and a session that succeeded.
+
+**The window.** The stop trips when the threshold is reached within a rolling 24 hours. The failures need not follow each other. The window is a constant (`WINDOW_HOURS` in `src/headless_pr_workflow/dispatcher/failure_stop.py`), not a setting.
+
+**The record.** Each failed session adds one hidden marker, `action=session-failed` with the issue, the step and the run URL, to the failure blocker comment the dispatcher posts on the story. The failure that reaches the threshold also adds `action=failure-stop`. Both are read from comments of the dispatcher's own account (`hpw dispatcher failure-stop`, [Markers](#markers--hpw-dispatcher-marker)); a marker pasted by another author counts for nothing. The runner cache plays no part, so removing `.dispatcher-usage` and `.dispatcher-state` neither lifts a stop nor resets the count. A comment list that cannot be read starts no session in that run (fail closed).
+
+**The stop.** While a `failure-stop` marker on an open issue has no later standalone `/unblock` line by the PO, `invoke_executor_command()` starts no session, before the usage limit and the allowance probe, so a stopped dispatcher spends neither. The run also stops before the resume pass and before the scheduler is asked for work, and exits `0`.
+
+**Restart.** The PO fixes the cause, then posts a standalone `/unblock` line on the issue whose comment carries the `failure-stop` marker. The next run starts sessions again, and failures before that `/unblock` do not count toward the next stop. The `/unblock` also resolves that story's own failure blocker; the other stories' failure blockers stay for the PO to clear one by one. A `/unblock` by anyone but the PO, or a line with other text, lifts nothing. If the issue is closed, the stop ends.
+
+**Slack.** When the stop is recorded the dispatcher queues one `failure_stop` event (`threshold`, `window_hours`, `sessions` with story, step and run link, `settings_url`, `restart`) through `scripts/dispatcher-notify-retry.sh` (#295), so a failed delivery is tried again. A later run that finds the stop holding sends nothing.
+
+**Log lines.**
+
+```
+[FAILURE STOP] clear: 1 of 3 failed sessions in the last 24 hours
+[FAILURE STOP] recorded the failed /<step> for #<N>: 2 of 3 in the last 24 hours
+[FAILURE STOP] stop recorded on #<N>: no new session starts until the PO posts a standalone /unblock line there
+[FAILURE STOP] holds: 3 failed sessions reached the threshold 3 within 24 hours; no session starts. The PO restarts the dispatcher with a standalone /unblock line on #<N> (<url>)
+[FAILURE STOP ERROR] FAILED_SESSIONS_STOP_THRESHOLD is not a whole number of one or more — starting nothing
+[FAILURE STOP ERROR] the failure markers could not be read (<cause>) — starting nothing
+```
+
+`--dry-run` records, counts and sends nothing and logs `[DRY RUN] Would check failure stop before /<step>`.
 
 ---
 
@@ -415,6 +454,7 @@ The dispatcher sends Slack notifications through `scripts/slack-notify.sh` for t
 |---|---|---|
 | `decision_blocker` | a session left a `Type: decision` blocker, whether it failed or exited 0 (a first or fix-round `/implement`, or a `/review` of a Codex-implemented story, that leaves an Out of scope finding waiting for the PO's waiver) | yes |
 | `po_blocker` | the dispatcher posted a blocker only the PO can resolve (issue #359): fix-round maximum, evidence retry given up, a failed or no-progress `/implement`, `/review` or `/merge`, or a PR that changes decision documents and waits for the PO's personal merge (issue #502, below); also every `Type: external` or `Type: resource` blocker the Codex review bookkeeping job posts (issue #393, found by the scan below) | yes |
+| `failure_stop` | the failure that reaches `FAILED_SESSIONS_STOP_THRESHOLD` within 24 hours is recorded (issue #503, [Failure stop](#failure-stop)); a later run that finds the stop holding sends nothing | yes |
 | `evidence_unwritable` | required merge or cleanup evidence has been missing for 15 minutes and the story's comments cannot be written, so #348's blocker cannot be posted (issue #372) | yes |
 | `feature_closure_confirmation` | all stories of a Feature are Done, except the standing catch-all Feature (`catch_all.py`) | yes |
 | `epic_closure_approval` | all Features of an Epic are Done, except the standing catch-all Epic (`catch_all.py`) | yes |

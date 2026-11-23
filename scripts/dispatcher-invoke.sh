@@ -1022,15 +1022,21 @@ record_failed_session() {
 # is posted: one failure_stop event through the #295 queue, keyed by that
 # comment's created_at, resolved by the PO's /unblock on the issue.
 notify_failure_stop() {
-    local issue="$1"
+    local issue="$1" next_step
     $FAILURE_STOP_REACHED || return 0
     echo "[FAILURE STOP] stop recorded on #$issue: no new session starts until the PO posts a standalone /unblock line there"
+    # The PO's next step comes from the one shared source (issue #606); with no
+    # rendered line the message keeps a plain restart sentence.
+    next_step=$(blocker_next_step "/unblock" "$issue" "a reply on GitHub" \
+        "the dispatcher starts sessions again on its next run") || next_step=""
     register_actionable_event "failure_stop" "$issue" "$LAST_POSTED_AT" \
-        "$(jq -c --arg iu "https://github.com/$REPO/issues/$issue" --arg n "$issue" \
+        "$(jq -c --arg iu "https://github.com/$REPO/issues/$issue" --arg n "$issue" --arg ns "$next_step" \
                   --arg su "https://github.com/$REPO/settings/variables/actions" --arg repo "$REPO" \
                   '{threshold, window_hours, settings_url: $su, issue_url: $iu,
                     sessions: [(.sessions // [])[] | . + {issue_url: ("https://github.com/" + $repo + "/issues/" + (.issue | tostring))}],
-                    restart: ("Fix the cause, then post a standalone /unblock line on #" + $n + ": " + $iu)}' \
+                    restart: ("Fix the cause first. "
+                              + (if $ns != "" then $ns else "Post a standalone /unblock line on #" + $n + "." end)
+                              + " " + $iu)}' \
               <<< "$FAILURE_STOP_RECORD_JSON")"
 }
 
