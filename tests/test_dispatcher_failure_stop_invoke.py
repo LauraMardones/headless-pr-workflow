@@ -84,13 +84,14 @@ def test_ac2_the_failure_that_reaches_the_threshold_stops_and_sends_one_message(
 
 def test_ac3_while_the_stop_holds_no_session_starts_and_nothing_is_spent(d):
     fail_twice(d)
-    sessions, count, probes = list(d.sessions), d.usage_count, d.allowance_calls
+    sessions, count = list(d.sessions), d.usage_count
 
     proc = d.run_issue(13, env=env())
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "[FAILURE STOP] holds" in proc.stdout
-    assert d.sessions == sessions and d.usage_count == count and d.allowance_calls == probes
+    assert d.sessions == sessions and d.usage_count == count
+    assert d.allowance_calls == 0  # the counter is per run: this run spent no probe
     assert len(stop_events(d)) == 1  # a run that finds the stop holding sends no second message
 
 
