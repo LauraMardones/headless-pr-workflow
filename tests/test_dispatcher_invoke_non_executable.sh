@@ -209,6 +209,14 @@ if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" || "\${1:-} \${2:-}" == "dispa
 fi
 EOF
 cat >> "$FAKE_BIN/hpw" << 'EOF'
+if [[ "${1:-} ${2:-}" == "dispatcher failure-stop" ]]; then  # issue #503: no failure recorded, no stop
+    if [[ "${3:-}" == record ]]; then
+        echo '{"ok":true,"block":"failure-stop","operation":"record","result":"recorded","threshold":1000,"count":1,"window_hours":24,"sessions":[],"marker":"","reached":false}'
+    else
+        echo '{"ok":true,"block":"failure-stop","operation":"check","result":"clear","threshold":1000,"count":0,"window_hours":24,"sessions":[]}'
+    fi
+    exit 0
+fi
 if [[ "${1:-} ${2:-} ${3:-}" == "dispatcher scheduler next" ]]; then  # issue #474
     n=$(( $(cat "$MOCK_DIR/scheduler.count" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$MOCK_DIR/scheduler.count"
@@ -311,7 +319,7 @@ run_dispatcher() {
         OPENAI_API_KEY_CODEX="fake-openai" \
         USAGE_LIMIT_STATE_DIR="$d/usage" ALLOWANCE_SCRIPT="$FAKE_BIN/allowance-start.sh" \
         HPW_BIN="$FAKE_BIN/hpw" \
-        USAGE_LIMIT_SESSIONS_PER_DAY="${USAGE_LIMIT:-1000}" \
+        USAGE_LIMIT_SESSIONS_PER_DAY="${USAGE_LIMIT:-1000}" FAILED_SESSIONS_STOP_THRESHOLD=1000 \
         WIP_LIMIT_IMPLEMENTATION=2 READY_BUFFER_MIN=3 READY_BUFFER_MAX=5 \
         AGENT_MAX_TURNS=3 AGENT_MAX_WALLCLOCK_SECONDS=600 \
         timeout 120 bash "$DISPATCHER_SCRIPT" --repo "o/r" "$@" \

@@ -332,12 +332,14 @@ case "$path" in
         # Without labels=, the open issues (issue #475), each with its comment count as GitHub returns it.
         want=""
         [[ "$endpoint" == *labels=* ]] && want=$(sed -E 's/.*[?&]labels=([^&]*).*/\1/; s/%3A/:/g' <<< "$endpoint")
+        listed=open  # state=closed lists the closed issues (issue #503: restart evidence of a closed stop issue)
+        [[ "$endpoint" == *state=closed* ]] && listed=closed
         all=$(for f in "$MOCK_DIR"/issue_*.json; do
                   [[ -f "$f" ]] || continue
                   num=$(jq -r '.number' "$f"); count=0
                   [[ -f "$MOCK_DIR/comments_$num.json" ]] && count=$(jq 'length' "$MOCK_DIR/comments_$num.json")
                   jq -c --argjson c "$count" '. + {comments: $c}' "$f"
-              done | jq -s --arg l "$want" '[.[] | select(($l == "" and (.state // "open") == "open") or any(.labels[]?; .name == $l and $l != ""))]')
+              done | jq -s --arg l "$want" --arg s "$listed" '[.[] | select(($l == "" and (.state // "open") == $s) or any(.labels[]?; .name == $l and $l != ""))]')
         if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" <<< "$all"; else echo "$all"; fi ;;
     repos/*/pulls)
         if [[ "$endpoint" == *state=closed* ]]; then
@@ -766,6 +768,7 @@ class Dispatcher:
             "DISPATCHER_STATE_DIR": (self.mock / "state").as_posix(),
             "USAGE_LIMIT_STATE_DIR": (self.mock / "usage").as_posix(),
             "USAGE_LIMIT_SESSIONS_PER_DAY": "1000",
+            "FAILED_SESSIONS_STOP_THRESHOLD": "1000",  # the failure stop (#503) needs a set value; high enough to never stop
             "WIP_LIMIT_IMPLEMENTATION": "2", "READY_BUFFER_MIN": "3", "READY_BUFFER_MAX": "5",
             "AGENT_MAX_TURNS": "3", "AGENT_MAX_WALLCLOCK_SECONDS": "600",
             "ALLOWANCE_SCRIPT": (self.bin / "allowance.sh").as_posix(),

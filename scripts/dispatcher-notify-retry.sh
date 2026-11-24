@@ -3,8 +3,8 @@
 #
 # Delivery of the Slack notifications that need PO action (issue #295):
 # decision_blocker, po_blocker, feature_closure_confirmation,
-# epic_closure_approval, evidence_unwritable (issue #372) and
-# dispatch_trigger_stopped (issue #339).
+# epic_closure_approval, evidence_unwritable (issue #372),
+# dispatch_trigger_stopped (issue #339) and failure_stop (issue #503).
 # Each is retried every dispatcher cycle until it is delivered or the PO no
 # longer needs to act. A failed delivery never aborts the dispatcher.
 #
@@ -53,7 +53,8 @@
 #
 # Resolved (record dropped, even if never delivered):
 #   decision_blocker,     the issue is closed, or the PO ($DECISION_BLOCKER_PO_LOGIN)
-#   po_blocker            posted a standalone "/unblock" line after <since>
+#   po_blocker,           posted a standalone "/unblock" line after <since>
+#   failure_stop          (issue #503; <since> is the failure-stop comment's created_at)
 #   closure events        the Feature or Epic issue is closed
 #   dispatch_trigger_stopped  (issue #339, registered with --issue 0 and --since
 #                         the creation time of the newest dispatched run, or
@@ -342,7 +343,7 @@ resolved() {
     fi
     state=$(gh api "repos/$REPO/issues/$issue" --jq '.state' 2>/dev/null) || state=""
     [[ "$state" == closed ]] && return 0
-    [[ "$event" == decision_blocker || "$event" == po_blocker ]] || return 1
+    [[ "$event" == decision_blocker || "$event" == po_blocker || "$event" == failure_stop ]] || return 1
     comments=$(gh api --paginate "repos/$REPO/issues/$issue/comments?per_page=100" 2>/dev/null | jq -s 'add // []' 2>/dev/null) \
         || return 1
     [[ "$(jq -r --arg login "$DECISION_BLOCKER_PO_LOGIN" --arg since "$since" \

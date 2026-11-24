@@ -26,6 +26,9 @@
 #   red_flow_health           fields: signal, wip_count, blocked_count, board_url
 #   dispatcher_error          fields: error_description, last_action
 #   usage_limit_reached       fields: sessions_today, limit, settings_url
+#   failure_stop              fields: threshold, window_hours, sessions (each issue, title,
+#                                     issue_url, step, run_url), settings_url, issue_url, restart (issue #503: the
+#                                     dispatcher stopped after repeated failed sessions)
 #   dispatch_trigger_stopped  fields: age, last_created_at, check_command, docs_url (issue #339;
 #                                     age is "none" when no dispatched run exists)
 #
@@ -289,6 +292,28 @@ build_payload() {
                 }'
             ;;
 
+        failure_stop)
+            # One message when the stop is recorded (issue #503); the layout of
+            # usage_limit_reached. Each counted session is one line, the list is
+            # capped below Block Kit's 3000 characters, the restart line never.
+            printf '%s' "$ctx" | jq -n 'input as $c |
+                def cut($n): if length > $n then .[0:($n - 1)] + "…" else . end;
+                def str: if type == "string" then . elif type == "number" then tostring else "" end;
+                ($c.threshold | str) as $threshold
+                | ($c.window_hours | str) as $window
+                | ($c.settings_url | str) as $settings_url
+                | ($c.issue_url | str) as $issue_url
+                | ($c.restart | str) as $restart
+                | ([($c.sessions // [])[] | ("• " + (if (.issue_url | str) != "" then "<" + (.issue_url | str) + "|#" + (.issue | str) + " " + (.title | str | cut(120)) + ">" else "#" + (.issue | str) + " " + (.title | str | cut(120)) end)
+                      + " — /" + (.step | str) + " — <" + (.run_url | str) + "|run>")] | join("\n")) as $lines
+                | { blocks: [
+                    { type: "section", text: { type: "mrkdwn", text: ":rotating_light: *Repeated failed sessions -- Dispatcher Stopped*" } },
+                    { type: "section", text: { type: "mrkdwn", text: ("The dispatcher starts no new session: " + (if $threshold == "" then "(unknown)" else $threshold end) + " sessions failed within " + (if $window == "" then "(unknown)" else $window end) + " hours.\n*Failed sessions:*\n" + (if $lines == "" then "(none listed)" else $lines | cut(2500) end)) } },
+                    { type: "section", text: { type: "mrkdwn", text: ("*Restart:* " + (if $restart == "" then "Fix the cause, then post a standalone /unblock line on the issue named in the failure-stop comment." else $restart end)) } },
+                    { type: "section", text: { type: "mrkdwn", text: (if $settings_url != "" then "<" + $settings_url + "|Change FAILED_SESSIONS_STOP_THRESHOLD or toggle DISPATCHER_ENABLED in GitHub Settings>" else "Change FAILED_SESSIONS_STOP_THRESHOLD or toggle DISPATCHER_ENABLED in GitHub Settings" end) } }
+                  ] }'
+            ;;
+
         usage_limit_reached)
             local sessions_today limit settings_url
             sessions_today=$(echo "$ctx" | jq -r '.sessions_today // "(unknown)"')
@@ -325,7 +350,7 @@ build_payload() {
 
 # ─── Validate event type before building payload ──────────────────────────────
 
-KNOWN_EVENTS="decision_blocker po_blocker evidence_unwritable feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error usage_limit_reached dispatch_trigger_stopped"
+KNOWN_EVENTS="decision_blocker po_blocker evidence_unwritable feature_closure_confirmation epic_closure_approval red_flow_health dispatcher_error usage_limit_reached failure_stop dispatch_trigger_stopped"
 if ! echo "$KNOWN_EVENTS" | grep -qw "$EVENT_TYPE"; then
     echo "Warning: Unrecognised event type '${EVENT_TYPE}'. No message sent." >&2
     exit 0

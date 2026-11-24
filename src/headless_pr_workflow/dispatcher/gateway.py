@@ -162,6 +162,8 @@ class Gateway(Protocol):
 
     def list_closed_issues(self) -> list[dict[str, Any]]: ...
 
+    def list_issues_closed_since(self, since: str) -> list[dict[str, Any]]: ...
+
     def merge_gates_pass(self, number: int, head: str) -> bool: ...
 
     # Board sync (``board_sync.py``, issue #476).
@@ -248,14 +250,14 @@ class GhGateway:
         self.name = name
         self.gh_command = tuple(gh_command)
         self._login: str | None = None
-        self._cache: dict[tuple[str, int | None], list[dict[str, Any]]] | None = None
+        self._cache: dict[tuple[str, int | str | None], list[dict[str, Any]]] | None = None
 
     def enable_read_cache(self) -> None:
         """Remember the list reads of this instance (one command invocation); a write drops them."""
 
         self._cache = {}
 
-    def _cached(self, key: tuple[str, int | None], read: Any) -> list[dict[str, Any]]:
+    def _cached(self, key: tuple[str, int | str | None], read: Any) -> list[dict[str, Any]]:
         # A failed read raises out of ``read`` before anything is stored, so the next call asks again.
         if self._cache is None:
             return read()
@@ -366,6 +368,16 @@ class GhGateway:
 
         step = "read closed issues"
         output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues?state=closed&per_page=100"])
+        return [item for item in self._pages(step, output) if "pull_request" not in item]
+
+    def list_issues_closed_since(self, since: str) -> list[dict[str, Any]]:
+        return self._cached(("closed_since", since), lambda: self._list_issues_closed_since(since))
+
+    def _list_issues_closed_since(self, since: str) -> list[dict[str, Any]]:
+        """Closed issues updated at or after ``since`` (an ISO time), one request in the usual case; pull requests are left out."""
+
+        step = "read recently closed issues"
+        output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues?state=closed&since={since}&per_page=100"])
         return [item for item in self._pages(step, output) if "pull_request" not in item]
 
     def merge_gates_pass(self, number: int, head: str) -> bool:
