@@ -26,13 +26,9 @@ FEATURES = {"#560", "#589", "#590", "#591"}
 STATUSES = {"converted", "pending"}
 
 # Kinds whose producer is not converted yet. A converting story (#606, #607,
-# #608, #612, #613, Feature #591) removes its kinds here and marks them
+# #608, #607, #612, #613, Feature #591) removes its kinds here and marks them
 # `converted` in the inventory.
 PENDING_KINDS = frozenset({
-    # #607
-    "bookkeeping-resource-blocker",
-    "bookkeeping-external-blocker",
-    "codex-worker-fix-round-blocker",
     # Feature #590 (#613; #612 converted the refine kinds)
     "implement-review-session-summary",
     # Feature #591

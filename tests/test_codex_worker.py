@@ -1247,3 +1247,23 @@ def test_unreadable_reviews_start_nothing(gh, settings, monkeypatch):
     monkeypatch.setattr(gh, "pr_reviews", lambda _n: (_ for _ in ()).throw(GatewayError("read reviews", "HTTP 502")))
     result = do_claim(gh, settings, run="r2")
     assert result.result == "unreadable" and gh.writes() == []
+
+
+def test_fix_round_blocker_names_the_unblock_command_and_not_a_bare_hand_fix():
+    from headless_pr_workflow.next_step import GITHUB_REPLY, NextStepError, parse, parse_declaration
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    body = codex_worker.fix_round_blocker(5, 12, "a" * 40, 3)
+    step = parse_declaration(body)[None]
+
+    assert (step.command, step.number, step.where) == ("/unblock", 5, GITHUB_REPLY)
+    assert step.then and "CODEX_FIX_ROUND_MAX" in step.then
+    assert "fixed by hand" not in body
+    assert CODEX_REVIEW_TRIGGER_PHRASE not in body.lower()
+    for field in ("Type: resource", "Declared by: codex-worker", "Blocks: #5", "Unblocked when: ", "Owner: ",
+                  "State of in-progress work: "):
+        assert field in body
+    line = next(l for l in body.splitlines() if l.startswith("Next step"))
+    for broken in (line.replace("`/unblock`", ""), line.replace("#5", "#"), line.split("; then")[0] + "."):
+        with pytest.raises(NextStepError):
+            parse(broken)
