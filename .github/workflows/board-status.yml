@@ -22,7 +22,43 @@ permissions:
   contents: read
 
 jobs:
+  # Issue #653: a burst of events writes once. Each run waits, then skips its
+  # writer job when a newer run will write; the newest run reads every fact.
+  debounce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      latest: ${{ steps.debounce.outputs.latest }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout board writer
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Guard — check DISPATCHER_ENABLED
+        id: guard
+        env:
+          DISPATCHER_ENABLED: ${{ vars.DISPATCHER_ENABLED }}
+        run: bash scripts/dispatcher-workflow-step.sh guard
+
+      - name: Skip when a newer run will write
+        if: steps.guard.outputs.enabled == 'true'
+        id: debounce
+        env:
+          RUN_ID: ${{ github.run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/dispatcher-workflow-step.sh debounce
+
   board-status:
+    needs: debounce
+    if: ${{ needs.debounce.outputs.latest == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
