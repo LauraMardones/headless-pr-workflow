@@ -34,7 +34,7 @@ import pytest
 
 from headless_pr_workflow.dispatcher.gateway import GatewayError
 from headless_pr_workflow.dispatcher.in_flight import plan_in_flight
-from headless_pr_workflow.dispatcher.marker import marker_holds
+from headless_pr_workflow.dispatcher.marker import decide_holds, marker_holds
 from headless_pr_workflow.dispatcher.session_blocker import read_session_blocker
 from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE, is_codex_review_request
 from tests.dispatcher_fakes import BASH, REPO_ROOT, needs_tools
@@ -147,7 +147,7 @@ INVOKE_FUNCTIONS = (
     "fix_round_due", "fix_round_attempt_marker", "fix_round_attempt_superseded", "hand_off_pending_marker",
     "hand_off_pending_prefix", "hand_off_done_marker", "complete_pending_hand_off", "merge_owner_marker",
     "head_has_merge_owner_marker", "merge_attempt_marker", "pytest_green_on_head", "conflict_round_state",
-    "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after", "hand_off_to_codex_review_loop",
+    "conflict_round_attempt_marker", "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after", "hand_off_to_codex_review_loop",
     "find_linked_pr_json", "pr_conflicts_with_main", "no_push_round_is_expected", "latest_decision_blocker_json",
 )  # fmt: skip
 
@@ -342,6 +342,24 @@ def attempt_once_per_head_decisions(f: dict[str, Any], tmp: Path) -> dict[str, s
             "dispatcher-invoke.sh:merge_attempt_marker": "no attempt" if rc == 0 else "attempt"}  # fmt: skip
 
 
+def marker_holds_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
+    """Entry equivalence (issue #628): whether a conflict round may start on the conflicting head, decided by the
+    one marker-holds rule as each entry point reaches it: ``start`` (the attempt marker does not hold) or
+    ``no start`` (it holds, or the comments cannot be read)."""
+
+    rc, _ = bash(tmp / "shim", f, f'marker_holds {STORY} "$(conflict_round_attempt_marker {PR} {HEAD})" 0')
+    try:
+        python = decide_holds(FakeGateway(f).list_comments(STORY), BOT, CONFLICT_ATTEMPT, po_login=PO)[0]
+    except GatewayError:
+        python = "unreadable"
+    return {
+        "marker.py:decide_holds": "start" if python in ("absent", "unblocked") else "no start",
+        "dispatcher-poll.sh:conflict_round_rule (marker decide)": "start" if poll_rule(tmp / "poll", f) == "owed" else "no start",
+        "dispatcher-invoke.sh:conflict_round_state (resume, marker decide)": "start" if resume_rule(tmp / "rule", f) == "owed" else "no start",
+        "dispatcher-invoke.sh:marker_holds (resume shim, marker holds)": "no start" if rc == 0 else "start",
+    }  # fmt: skip
+
+
 def conflict_round_owed_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
     """What each entry point does about a conflicting PR: ``owed``, ``nothing``, ``unreadable`` or ``not checked``."""
 
@@ -414,6 +432,7 @@ DECIDE: dict[str, Callable[[dict[str, Any], Path], dict[str, str]]] = {
     "hand_off_pending": hand_off_pending_decisions,
     "merge_owner_evidence": merge_owner_evidence_decisions,
     "attempt_once_per_head": attempt_once_per_head_decisions,
+    "marker_holds": marker_holds_decisions,
     "conflict_round_owed": conflict_round_owed_decisions,
     "pytest_check_green": pytest_check_green_decisions,
     "review_path_routing": review_path_routing_decisions,
@@ -438,6 +457,9 @@ HAND_OFF = ("in_flight.py:hand_off_pending (plan_in_flight)", "dispatcher-invoke
 OWNERSHIP = ("dispatcher-merge.sh:holds_rc (marker.py:marker_holds)", "conflict-round.sh:owned (resume)",
              "dispatcher-invoke.sh:head_has_merge_owner_marker", "dispatcher-poll.sh:OWNER_MISSING_DUE")  # fmt: skip
 ATTEMPT_COPIES = ("marker.py:marker_holds", "dispatcher-invoke.sh:merge_attempt_marker")
+HOLDS = ("marker.py:decide_holds", "dispatcher-poll.sh:conflict_round_rule (marker decide)",
+         "dispatcher-invoke.sh:conflict_round_state (resume, marker decide)",
+         "dispatcher-invoke.sh:marker_holds (resume shim, marker holds)")  # fmt: skip
 CONFLICT = ("conflict-round.sh:conflict_round_rule (dispatcher-invoke.sh:check_review_loop_pr)", "dispatcher-poll.sh:CONFLICT_DUE")
 GREEN = ("merge-gate-summary:_checks_value", "dispatcher-invoke.sh:pytest_green_on_head")
 ROUTING = ("review-routing.sh:review_by_dispatcher_session + CODEX_REVIEW_LOOP_ROUTING (poll)", "dispatcher-invoke.sh:is_review_loop_story")
@@ -480,7 +502,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "attempt-by-another-account": (facts(prc=FOUND, story=[comment(OTHER, ATTEMPT, T0)]), same(TRIED, "round")),
         "newest-attempt-listed-first": (
             facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T1), unblock(T0), comment(BOT, ATTEMPT, T_EARLY)]),
-            {TRIED[0]: "round", TRIED[1]: "no round"}),
+            same(TRIED, "no round")),
         "story-comments-unreadable": (facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T0)], fail=("story",)),
                                       same(TRIED, "no round")),
     },
@@ -508,7 +530,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
                                    {**same(HAND_OFF, "pending"), HAND_OFF[2]: "none"}),
         "newest-pending-listed-first": (
             facts(story=[comment(BOT, PENDING, T1), comment(BOT, DONE, T0), comment(BOT, PENDING, T_EARLY)]),
-            {HAND_OFF[0]: "pending", HAND_OFF[1]: "none", HAND_OFF[2]: "none"}),
+            same(HAND_OFF, "pending")),
         "story-comments-unreadable": (facts(story=[comment(BOT, PENDING, T0)], fail=("story",)), same(HAND_OFF, "none")),
     },
     "merge_owner_evidence": {
@@ -533,6 +555,28 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "attempt-by-another-account": (facts(story=[comment(OTHER, MERGE_ATTEMPT, T0)]), same(ATTEMPT_COPIES, "attempt")),
         "story-comments-unreadable": (facts(story=[comment(BOT, MERGE_ATTEMPT, T0)], fail=("story",)),
                                       same(ATTEMPT_COPIES, "no attempt")),
+    },
+    "marker_holds": {
+        "no-marker": (facts(mergeable=False), same(HOLDS, "start")),
+        "marker": (facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT, T0)]), same(HOLDS, "no start")),
+        "marker-then-po-unblock": (facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT, T0), unblock(T1)]),
+                                   same(HOLDS, "start")),
+        "po-unblock-then-marker": (facts(mergeable=False, story=[unblock(T0), comment(BOT, CONFLICT_ATTEMPT, T1)]),
+                                   same(HOLDS, "no start")),
+        "marker-by-another-account": (facts(mergeable=False, story=[comment(OTHER, CONFLICT_ATTEMPT, T0)]),
+                                      same(HOLDS, "start")),
+        "marker-for-older-head": (facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT.replace(HEAD, OLD), T0)]),
+                                  same(HOLDS, "start")),
+        "newest-marker-listed-first": (
+            facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT, T1), unblock(T0),
+                                          comment(BOT, CONFLICT_ATTEMPT, T_EARLY)]),
+            same(HOLDS, "no start")),
+        "oldest-marker-listed-first": (
+            facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT, T_EARLY), unblock(T1),
+                                          comment(BOT, CONFLICT_ATTEMPT, T0)]),
+            same(HOLDS, "start")),
+        "story-comments-unreadable": (facts(mergeable=False, story=[comment(BOT, CONFLICT_ATTEMPT, T0)],
+                                            fail=("story",)), same(HOLDS, "no start")),
     },
     "conflict_round_owed": {
         "conflicting": (facts(mergeable=False), same(CONFLICT, "owed")),
@@ -598,18 +642,12 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("fix_round_due", "pr-comments-unreadable"): (
         "read defect", "plan_in_flight and fix_round_due read unreadable PR comments as no findings and route the "
                        "story to review; follow conflict_round_state and skip the story this run."),
-    ("fix_round_attempt_once_per_head", "newest-attempt-listed-first"): (
-        "contract", "marker_holds (#262/#293) holds the newest own marker; marker.py takes the last in list order, "
-                    "the jq the newest created_at: follow created_at."),
     ("fix_round_max", "fourth-round"): (
         "contract", "CODEX_FIX_ROUND_MAX stops the rounds with a resource blocker (dispatcher-invoke.sh header); "
                     "plan_in_flight still lists the story in fix_round: apply the maximum in the plan."),
     ("hand_off_pending", "pending-for-older-head"): (
         "contract", "dispatcher-invoke.sh matches a pending hand-off by PR, not by head (issue #478); resume_fix_round "
                     "matches the full marker with the head: match by PR."),
-    ("hand_off_pending", "newest-pending-listed-first"): (
-        "contract", "As fix_round_attempt_once_per_head newest-attempt-listed-first: hand_off_pending takes the newest "
-                    "created_at, marker.py the last in list order; follow created_at."),
     ("merge_owner_evidence", "evidence-pending-copy"): (
         "PO decision", "The conflict rule and the poll accept the evidence-pending copy (#348) as merge-owner evidence, "
                        "the merge script and head_has_merge_owner_marker only the marker; no contract says which."),
@@ -629,6 +667,17 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
         "contract", "As conflicting-in-merge-step, for a fix-round row; the rule gives fix-round-due for both."),
 }
 
+# Divergences that a consolidation story resolved: the copies now agree on the case, so it is no longer a
+# divergence. Each case names its #525 class and how it was resolved (issue #628, AC 3).
+RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
+    ("fix_round_attempt_once_per_head", "newest-attempt-listed-first"): (
+        "contract", "Resolved by #628: marker_holds (#262/#293) holds the newest own marker by created_at, not the "
+                    "last in list order; marker.py decide_holds is the one rule, and conflict_round_rule calls it."),
+    ("hand_off_pending", "newest-pending-listed-first"): (
+        "contract", "Resolved by #628: as newest-attempt-listed-first; the marker_holds shim now takes the newest "
+                    "pending marker by created_at, as hand_off_pending does."),
+}
+
 REQUIRED_KINDS = {
     "unreadable facts": [("conflict_round_owed", "pr-unreadable"), ("pytest_check_green", "check-runs-unreadable"),
                          ("fix_round_due", "pr-comments-unreadable"), ("fix_round_max", "pr-comments-unreadable"),
@@ -636,6 +685,7 @@ REQUIRED_KINDS = {
     "failed marker read": [("fix_round_attempt_once_per_head", "story-comments-unreadable"),
                            ("hand_off_pending", "story-comments-unreadable"),
                            ("attempt_once_per_head", "story-comments-unreadable"),
+                           ("marker_holds", "story-comments-unreadable"),
                            ("merge_owner_evidence", "pr-comments-unreadable"),
                            ("no_push_round_expected", "pr-comments-unreadable"),
                            ("post_implement_outcome", "no-pr-story-comments-unreadable")],
@@ -671,6 +721,12 @@ def test_ac2_each_divergence_has_a_resolution_class_and_a_known_case():
         assert kind in RESOLUTION_CLASSES and resolution, (rule, case)
 
 
+def test_ac3_each_resolved_divergence_names_its_case_and_now_agrees():
+    for (rule, case), (kind, resolution) in RESOLVED.items():
+        assert (rule, case) not in DIVERGENCES and kind in RESOLUTION_CLASSES and resolution, (rule, case)
+        assert len(set(CASES[rule][case][1].values())) == 1, (rule, case)
+
+
 def test_ac1_the_cases_cover_read_errors_and_unknown_mergeability():
     for kind, cases in REQUIRED_KINDS.items():
         for rule, case in cases:
@@ -680,7 +736,7 @@ def test_ac1_the_cases_cover_read_errors_and_unknown_mergeability():
 def test_ac1_each_rule_of_the_group_is_recorded_or_deferred():
     group = {"merge_owner_evidence", "hand_off_pending", "fix_round_due", "fix_round_attempt_once_per_head",
              "fix_round_max", "attempt_once_per_head", "conflict_round_owed", "pytest_check_green",
-             "no_push_round_expected", "post_implement_outcome", "review_path_routing"}  # fmt: skip
+             "no_push_round_expected", "post_implement_outcome", "review_path_routing", "marker_holds"}  # fmt: skip
     assert set(CASES) | DEFERRED == group and not set(CASES) & DEFERRED
 
 

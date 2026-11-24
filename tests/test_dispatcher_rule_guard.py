@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from headless_pr_workflow.dispatcher import rule_guard
-from headless_pr_workflow.dispatcher.rules import Implementation, Rule
+from headless_pr_workflow.dispatcher.rules import RULES, Implementation, Rule
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "scripts/lib/owner.sh"
@@ -71,3 +71,18 @@ def test_guard_fails_when_an_allowlisted_location_lost_its_rule(tmp_path: Path) 
 
 def test_guard_passes_on_the_repository_with_the_registry_allowlist() -> None:
     assert rule_guard.find_violations(ROOT) == []
+
+
+def test_628_marker_holds_has_one_implementation_and_an_empty_allowlist() -> None:
+    rule = next(r for r in RULES if r.name == "marker_holds")
+    assert rule.owner == "src/headless_pr_workflow/dispatcher/marker.py" and rule.duplicates == ()
+    conflict_round = (ROOT / "scripts" / "lib" / "conflict-round.sh").read_text(encoding="utf-8")
+    assert "def holds(" not in conflict_round and "dispatcher marker decide" in conflict_round
+
+
+def test_628_a_second_marker_holds_copy_fails_the_guard(tmp_path: Path) -> None:
+    rule = next(r for r in RULES if r.name == "marker_holds")
+    write(tmp_path, rule.owner, "def decide_holds(comments):\n    return 'holds'\n")
+    write(tmp_path, "scripts/lib/conflict-round.sh", "jq 'def decide_holds($m): . ;'\n")
+    problems = rule_guard.find_violations(tmp_path, [rule])
+    assert problems == [f"marker_holds: new copy: scripts/lib/conflict-round.sh defines 'decide_holds' (owner {rule.owner})"]

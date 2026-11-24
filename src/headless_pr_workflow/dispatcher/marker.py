@@ -7,6 +7,7 @@ be read, give ``unreadable`` (exit 3) and never match any author.
 Result words and exit codes:
 
 - ``holds`` → ``holds`` (0), ``absent``, ``unblocked``, ``cancelled`` (1), ``unreadable`` (3)
+- ``decide`` → as ``holds``, over comments read from ``--input`` instead of GitHub (issue #628)
 - ``list``, ``whoami`` → ``read`` (0) or ``unreadable`` (3)
 - ``write`` → Block 1's words (``written``, ``already``, ``dry-run``; ``failed`` is exit 1)
 """
@@ -101,30 +102,69 @@ def _decided_by(comment: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"url": comment.get("html_url") or comment.get("url"), "created_at": comment.get("created_at")}
 
 
+def _newest(comments: list[dict[str, Any]]) -> dict[str, Any]:
+    """The comment with the newest ``created_at``; on a tie the one listed last (issue #628)."""
+
+    return max(enumerate(comments), key=lambda item: (str(item[1].get("created_at") or ""), item[0]))[1]
+
+
+def decide_holds(
+    comments: list[dict[str, Any]], login: str, marker: str, *, po_login: str, cancel: str = "",
+) -> tuple[str, dict[str, Any] | None]:
+    """The one ``marker_holds`` rule of #262/#293 (issue #628): ``(word, deciding comment)``.
+
+    The newest comment of ``login`` that carries ``marker`` (by ``created_at``, not list
+    order) holds unless a later standalone PO ``/unblock`` line (``unblocked``), or a later
+    comment of ``login`` carrying ``cancel`` (``cancelled``), follows it; with no such
+    comment the word is ``absent``. ``comments`` are all authors' comments.
+    """
+
+    own = [c for c in comments if _author(c) == login]
+    held = [c for c in own if _contains(c, marker)]
+    if not held:
+        return "absent", None
+    newest = _newest(held)
+    since = str(newest.get("created_at") or "")
+    if _po_unblocked_after(comments, po_login, since):
+        return "unblocked", newest
+    if cancel:
+        later = [c for c in own if str(c.get("created_at") or "") > since and _contains(c, cancel)]
+        if later:
+            return "cancelled", _newest(later)
+    return "holds", newest
+
+
 def marker_holds(
     gateway: Gateway, number: int, marker: str, *, cancel: str = "", author: str = DEFAULT_AUTHOR,
     settings: Settings | None = None, env: Mapping[str, str] | None = None,
 ) -> Result:
-    """The ``marker_holds`` rule of #262/#293: the newest own comment carrying ``marker`` holds
-    unless a later PO ``/unblock`` line, or a later own comment carrying ``cancel``, follows it."""
+    """``decide_holds`` over the comments of ``number``, as the account of ``author``."""
 
     settings = settings or Settings.from_env(env)
     try:
-        comments, own = _own_comments(gateway, number, author, env)
-    except Unreadable as exc:
+        login = resolve_login(gateway, author, env)
+        comments = gateway.list_comments(number)
+    except (Unreadable, GatewayError) as exc:
         return Result("holds", "unreadable", error=str(exc), fields=_decided_by(None), block=BLOCK)
-    held = [c for c in own if _contains(c, marker)]
-    if not held:
-        return Result("holds", "absent", fields=_decided_by(None), block=BLOCK)
-    newest = held[-1]
-    since = str(newest.get("created_at") or "")
-    if _po_unblocked_after(comments, settings.po_login, since):
-        return Result("holds", "unblocked", fields=_decided_by(newest), block=BLOCK)
-    if cancel:
-        for c in own:
-            if str(c.get("created_at") or "") > since and _contains(c, cancel):
-                return Result("holds", "cancelled", fields=_decided_by(c), block=BLOCK)
-    return Result("holds", "holds", fields=_decided_by(newest), block=BLOCK)
+    word, comment = decide_holds(comments, login, marker, po_login=settings.po_login, cancel=cancel)
+    return Result("holds", word, fields=_decided_by(comment), block=BLOCK)
+
+
+def decide_marker(
+    comments: Any, login: str, marker: str, *, po_login: str, cancel: str = "",
+) -> Result:
+    """``marker decide``: ``decide_holds`` over comments a caller already read (``conflict_round_rule``).
+
+    Comments that are not a list of objects, or an empty login, give ``unreadable``.
+    """
+
+    if not isinstance(comments, list) or not all(isinstance(c, dict) for c in comments):
+        return Result("decide", "unreadable", error="input: the comments are not a JSON array of objects",
+                      fields=_decided_by(None), block=BLOCK)  # fmt: skip
+    if not login.strip():
+        return Result("decide", "unreadable", error="the login is empty", fields=_decided_by(None), block=BLOCK)
+    word, comment = decide_holds(comments, login.strip(), marker, po_login=po_login, cancel=cancel)
+    return Result("decide", word, fields=_decided_by(comment), block=BLOCK)
 
 
 def list_markers(

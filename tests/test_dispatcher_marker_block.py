@@ -5,14 +5,16 @@ Every path runs against the Python fake gateway of the Block 1 tests: no network
 
 from __future__ import annotations
 
+import io
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from headless_pr_workflow.dispatcher import cli
 from headless_pr_workflow.dispatcher.gateway import GatewayError
-from headless_pr_workflow.dispatcher.marker import dispatcher_marker, marker_text
-from headless_pr_workflow.dispatcher.write import Settings
+from headless_pr_workflow.dispatcher.marker import decide_holds, dispatcher_marker, marker_text
+from headless_pr_workflow.dispatcher.write import Settings, _gave_up
 
 from tests.test_dispatcher_write_block import BOT, PO, FakeGateway
 
@@ -275,3 +277,85 @@ def test_write_that_is_not_confirmed_exits_1(gw, settings, capsys):
 def test_marker_text_equals_the_text_the_bash_builders_print(action, fields, old):
     assert marker_text(action, fields) == old
     assert dispatcher_marker(old) == f"<!-- hpw:dispatcher {old} -->"
+
+
+# ── Issue #628: one marker-holds rule ─────────────────────────────────────────
+
+T_EARLY, T0, T1 = "2026-11-10T09:00:00Z", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z"
+CANCEL = dispatcher_marker("action=hand-off-done pr=5")
+
+
+def c(login, body, at):
+    return {"user": {"login": login}, "body": body, "created_at": at, "html_url": f"https://x/5#{at}"}
+
+
+def test_628_the_newest_marker_by_created_at_holds_not_the_last_listed():
+    comments = [c(BOT, OWNER, T1), c(PO, "/unblock", T0), c(BOT, OWNER, T_EARLY)]
+    word, comment = decide_holds(comments, BOT, OWNER, po_login=PO)
+    assert word == "holds" and comment["created_at"] == T1
+
+
+def test_628_a_po_unblock_after_the_newest_marker_lifts_it_whatever_the_list_order():
+    comments = [c(PO, "/unblock", T1), c(BOT, OWNER, T0), c(BOT, OWNER, T_EARLY)]
+    assert decide_holds(comments, BOT, OWNER, po_login=PO)[0] == "unblocked"
+
+
+def test_628_a_cancel_marker_counts_only_after_the_newest_marker():
+    assert decide_holds([c(BOT, OWNER, T1), c(BOT, CANCEL, T0), c(BOT, OWNER, T_EARLY)], BOT, OWNER, po_login=PO,
+                        cancel=CANCEL)[0] == "holds"  # fmt: skip
+    word, comment = decide_holds([c(BOT, CANCEL, T1), c(BOT, OWNER, T0)], BOT, OWNER, po_login=PO, cancel=CANCEL)
+    assert word == "cancelled" and comment["created_at"] == T1
+
+
+def test_628_markers_of_another_account_and_a_missing_marker_are_absent():
+    assert decide_holds([c(OTHER, OWNER, T0)], BOT, OWNER, po_login=PO) == ("absent", None)
+    assert decide_holds([], BOT, OWNER, po_login=PO) == ("absent", None)
+
+
+def test_628_on_equal_created_at_the_last_listed_marker_decides():
+    first, last = c(BOT, OWNER, T0), {**c(BOT, OWNER, T0), "html_url": "https://x/5#last"}
+    assert decide_holds([first, last], BOT, OWNER, po_login=PO)[1]["html_url"] == "https://x/5#last"
+
+
+def test_628_holds_reads_github_and_follows_created_at(gw, settings, capsys):
+    gw.comments[5] = [c(BOT, OWNER, T1), c(PO, "/unblock", T0), c(BOT, OWNER, T_EARLY)]
+    rc, out, _ = holds(gw, settings, capsys)
+    assert rc == 0 and out["result"] == "holds" and out["created_at"] == T1
+
+
+def test_628_the_evidence_give_up_marker_uses_the_same_rule():
+    gave = dispatcher_marker("action=evidence-gave-up item=merge-owner ref=pr5")
+    assert _gave_up([c(BOT, gave, T1), c(PO, "/unblock", T0), c(BOT, gave, T_EARLY)], BOT, gave, PO) is True
+    assert _gave_up([c(BOT, gave, T0), c(PO, "/unblock", T1)], BOT, gave, PO) is False
+
+
+def decide(capsys, monkeypatch, stdin, *extra):
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(stdin.encode())))
+    rc = cli.main(["marker", "decide", "--login", BOT, "--po-login", PO, *extra],
+                  gateway_factory=lambda repo: pytest.fail("decide reads no GitHub"))  # fmt: skip
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    return rc, json.loads(out[0])
+
+
+@pytest.mark.parametrize("comments,word,rc", [
+    ([c(BOT, OWNER, T1), c(PO, "/unblock", T0), c(BOT, OWNER, T_EARLY)], "holds", 0),
+    ([c(BOT, OWNER, T0), c(PO, "/unblock", T1)], "unblocked", 1),
+    ([c(OTHER, OWNER, T0)], "absent", 1),
+])
+def test_628_decide_gives_the_rule_s_word_and_exit_code(capsys, monkeypatch, comments, word, rc):
+    code, out = decide(capsys, monkeypatch, json.dumps(comments), "--marker", OWNER)
+    assert code == rc and out["result"] == word and out["block"] == "marker" and out["operation"] == "decide"
+
+
+@pytest.mark.parametrize("stdin", ["not json", '{"a": 1}', '[1, 2]'])
+def test_628_decide_with_unreadable_comments_is_unreadable_exit_3(capsys, monkeypatch, stdin):
+    code, out = decide(capsys, monkeypatch, stdin, "--marker", OWNER)
+    assert code == 3 and out["result"] == "unreadable" and out["ok"] is False
+
+
+def test_628_decide_with_an_empty_marker_or_login_reads_nothing(capsys, monkeypatch):
+    code, out = decide(capsys, monkeypatch, "[]", "--marker", " ")
+    assert code == 2 and out["result"] == "invalid"
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"[]")))
+    assert cli.main(["marker", "decide", "--login", " ", "--marker", OWNER]) == 3
