@@ -35,6 +35,7 @@ In, remaining:
 - A stop on repeated failed sessions: the dispatcher starts no new session, tells the PO once, and starts again only after a PO action (#503).
 - After the PO merges a PR that changes decision documents, the story reaches `Done` and cleanup with no further PO action (#505).
 - A story whose `/implement` session left a draft PR behind continues on its existing branch and draft PR, and does not hold a WIP place with no session at work (#578). Two cases: a session that failed, continued after the PO's `/unblock`; and a session that stopped silently after its push, continued after a set time with a green required test check and no hand-off.
+- A head pushed by a dispatcher `/implement` session that then failed counts as dispatcher-owned, so the dispatcher merges it after a continued session hands it off, whether or not that continued session pushes a new commit (#578, third case: #628 with PR #654).
 
 Out:
 
@@ -70,8 +71,8 @@ Out:
   - **Verified by:** provoked failed sessions up to the threshold, after which the next poll starts no session and the PO receives exactly one message with the sessions, stories and run links; a further poll with the dispatcher's saved state removed still starts no session; the PO's action, after which the next poll starts a session; and changing the threshold without a code change and seeing the new value take effect.
 - **E9:** When the PO has merged a PR that changes decision documents, its story reaches `Done` and is cleaned up with no further blocker and no further PO action.
   - **Verified by:** a story whose PR changes a decision document and is merged by the PO in GitHub; its issue and PR timelines show no blocker and no PO comment or `/unblock` between the PO's merge and the deletion of its branch.
-- **E10:** A story whose `/implement` session left a draft PR behind is continued by the dispatcher on its existing branch and draft PR, with no PO action beyond what the case already needs: after a failed session, the PO's `/unblock`; after a session that stopped silently after its push, none. The draft PR never keeps a WIP place with no session at work. A continued session that fails counts toward the stop in E8.
-  - **Verified by:** two cases in this repository or a provoked copy of them. First, a story whose `/implement` session failed and left a draft PR: after the PO's `/unblock`, the next poll starts `/implement` on the same branch and PR, not as new work. Second, a draft PR with a green required test check and no hand-off after the set time: the next poll starts `/implement` on it with no PO action. In both, the timelines show no new branch or PR and no PO command other than the `/unblock` of the first case; a failed continued session is counted by the E8 stop.
+- **E10:** A story whose `/implement` session left a draft PR behind is continued by the dispatcher on its existing branch and draft PR, with no PO action beyond what the case already needs: after a failed session, the PO's `/unblock`; after a session that stopped silently after its push, none. The draft PR never keeps a WIP place with no session at work. A continued session that fails counts toward the stop in E8. A head pushed by any dispatcher `/implement` session that failed counts as dispatcher-owned, so after the continued session hands off the PR, the dispatcher merges it with no PO action, also when the continued session pushed no new commit.
+  - **Verified by:** three cases in this repository or a provoked copy of them. First, a story whose `/implement` session failed and left a draft PR: after the PO's `/unblock`, the next poll starts `/implement` on the same branch and PR, not as new work. Second, a draft PR with a green required test check and no hand-off after the set time: the next poll starts `/implement` on it with no PO action. Third, a story whose `/implement` session pushed commits and then failed, and whose continued session marks the PR Ready and hands it off without pushing a new commit: the dispatcher merges the PR, with no merge-owner-missing blocker and no PO merge by hand. In all three, the timelines show no new branch or PR and no PO command other than the `/unblock` of the first case and of the third; a failed continued session is counted by the E8 stop.
 
 ## Decisions
 
@@ -210,6 +211,16 @@ Out:
 **Chosen:** A session started by the continuation counts as any other session for the stop on repeated failed sessions. A provider usage-limit stop still does not count.
 **Rejected:** Leave continued sessions out of the count — a session that always fails would then restart without limit and never reach the stop.
 
+### A head from a failed dispatcher session counts as dispatcher-owned — 2026-11-24
+
+**Chosen:** E10 and the matching Scope item are widened: a head pushed by a dispatcher `/implement` session that failed counts as dispatcher-owned, so a continued session that hands the PR off, with or without a new commit, reaches the dispatcher's merge with no PO action. The PO first chose this on 2026-11-24 as Decision A on #578 (the third case, #628 with PR #654) and confirmed it in this spec session. It extends the 2026-11-22 decision "A draft PR left by `/implement` is continued, not only reported", which stays as written.
+**Rejected:** Keep the documented rule (option b on #578) — a head from a failed session stays without merge-owner evidence, the story gets the merge-owner-missing blocker after the hand-off, and the PO merges by hand, as for #628. That ends every continuation in a PO merge, against E10's promise of no PO action beyond the `/unblock`.
+
+### The rule covers every failed dispatcher session — 2026-11-24
+
+**Chosen:** The rule covers a head pushed by every failed dispatcher `/implement` session, not only the continuation case. The PO confirmed it in this spec session. How and when the owner is recorded is left to the Tech Lead.
+**Rejected:** Only a session that the continuation of #578 later picks up — a failed session whose PR is then taken over by hand would be treated differently for no reason the PO can see, and the Tech Lead would need a second rule to tell the two apart.
+
 ## Checked Against
 
 - ADR-001 (runner integration) — no conflict; superseded by ADR-002.
@@ -233,6 +244,10 @@ Out:
 - #578 (Bug, 2026-11-22) and its widening comment (#606, silent stop after push) — the PO's Decision A is carried into E10 after the PO confirmed it in this session. The Tech Lead's Blocked Declaration on #578 cites "Spec #160 → F1 Out of Scope" as saying that a session leaving a draft PR keeps its draft-PR blocker. No such line exists in this spec on `main`, which does not mention draft PRs; nothing is narrowed.
 - `docs/PROJECT-STATUS.md` (an open linked draft PR is the fact for In implementation; WIP pre-flight) and `docs/DISPATCHER-DECISIONS.md` (`wip_limit` / `target-in-implementation`, `draft_ready_signal`) — conflict with E10: a draft PR holds its WIP place and the in-flight rule never starts the story again (`in_flight.py`, `if draft: continue`). Resolved by E10; the documents and the rule are updated when #578 is implemented. The fact itself stays: a draft PR with a session at work is In implementation.
 - `docs/DISPATCHER-CONFIG.md` → the `--in-implementation` lists and the review step — the same conflict, with the same resolution.
+- `docs/DISPATCHER-CONFIG.md` → A head left without an owner (line 696) and the bullet that a session stopping after its push is not continued (line 738), checked 2026-11-24 — conflict with the widened E10: both leave a head from a failed session without merge-owner evidence, so a continued session ends in the merge-owner-missing blocker and a PO merge by hand. Resolved by the decision of 2026-11-24; the document is updated when #578 is implemented. The rule for a head the dispatcher did not push (a manual fix round) stays.
+- `docs/MERGE-POLICY.md` → Merge Ownership and `docs/TAKEOVER-RULES.md` → Merge Takeover (checked 2026-11-24) — no conflict. The marker only says a dispatcher session pushed the head; the approval, check and review gates still decide the merge, and the merge-owner chain for the continuation is the Tech Lead's to document with #578.
+- `docs/DISPATCHER-CONFIG.md` → fix round stopped by a provider usage limit (lines 871–873, issues #446 and #447) — no conflict. It already records the owner for a pushed head at the pause; the widened E10 extends the same outcome to a failed `/implement` session.
+- #578 (Bug, 2026-11-24 comment and Decision A) — the third case is carried into E10 after the PO confirmed it in this session.
 - E1 and E4 — no conflict. A failed session's blocker needing the PO's `/unblock` is existing dispatcher behaviour; E10 adds no PO touchpoint to the Goal. E8's stop is extended to continued sessions by a decision above.
 - #160 decision "Token budget granularity" (2026-06-02) — replaced by "Usage limits: only the outcome is specified".
 - #160 decisions "Feature #270 after the Raspberry Pi migration was dropped" and "Shared-file ordering never makes runnable work wait" (2026-09-27) — not carried as decisions; Feature structure and ordering are delegated to the Tech Lead.
@@ -250,6 +265,7 @@ Out:
 - For E8: what counts as a failed session (apart from the provider usage-limit stop, which never counts), whether failures are counted in a row or within a time window, the starting threshold, where the setting and the failure count are kept, which PO action starts the dispatcher again, and whether failed `/merge` and `/cleanup` scripts count.
 - For E9: how the dispatcher tells the PO's merge of a decision-document PR apart from other merges it did not confirm.
 - For E10: the wait before a silent stop is continued, where it is set so the PO can change it without a code change, what counts as "no hand-off", how the dispatcher tells a draft PR with a session at work from one left behind, whether the continued session resumes on the same branch by a new `/implement` or by another command, and how the WIP count treats a draft PR left behind until it is continued.
+- For the dispatcher-owned head after a failed session: where and when the merge-owner marker is recorded for a head a failed `/implement` session pushed (at the failure, or when the PR is handed off), how a head with no commit from a dispatcher session is told apart, and how `docs/DISPATCHER-CONFIG.md` and `docs/MERGE-POLICY.md` are updated.
 
 Not delegated: if #289 finds that a script cannot read the remaining subscription allowance, or that no mechanism meets E5 and E6 together, that is a decision blocker for the PO.
 
