@@ -88,7 +88,9 @@ conflict_open_blocker() {
 #   fails on a read error. A PR with no head SHA has no evidence.
 conflict_merge_owner() {
     local out rc
-    [[ -n "$3" ]] || { echo false; return 0; }
+    # Read the comments even when there is no head: an unread pipe would kill
+    # the writer with SIGPIPE, which `pipefail` in the callers reads as a failure.
+    [[ -n "$3" ]] || { cat >/dev/null; echo false; return 0; }
     out=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher marker merge-owner-decide \
         --login "$1" --pr "$2" --head "$3")
     rc=$?
