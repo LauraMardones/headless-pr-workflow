@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -234,6 +235,68 @@ def _merge_gate_module() -> Any:
             raise
         _MERGE_GATE = module
     return _MERGE_GATE
+
+
+# ── the one merge-gate rule (issue #629) ─────────────────────────────────────
+
+_GATE_LINE = re.compile(r"Merge gate: policy=(?P<policy>[^,]*), checks=(?P<checks>[^,]*), approval=(?P<approval>[^,]*), "
+                        r"threads=(?P<threads>[^,]*), mergeable=(?P<mergeable>[^,]*), head=(?P<head>\S*)\s*")
+_GATE_POLICY = re.compile(r"pass\([A-Za-z_]+\)")
+_GATE_HEAD = re.compile(r"[0-9a-fA-F]{7}")
+GATE_CHECKS = ("pass", "absent-ok")
+GATE_APPROVALS = ("formal", "codex-review", "separate-session")
+GATE_FIELDS = ("policy", "checks", "approval", "threads", "mergeable", "head")
+
+
+def parse_gate_line(text: str) -> dict[str, str] | None:
+    """The fields of the first ``Merge gate:`` line of scripts/merge-gate-summary's output, or ``None``.
+
+    Only the first such line counts, as in ``inflight_gates_pass``: a malformed one is ``None``, not a later line.
+    """
+
+    first = next((row for row in (text or "").splitlines() if row.startswith("Merge gate:")), None)
+    match = _GATE_LINE.fullmatch(first) if first is not None else None
+    return match.groupdict() if match else None
+
+
+def decide_merge_gates(gate: Any, head: str) -> dict[str, Any]:
+    """The one rule "merge gates pass" (issue #629), over the gates scripts/merge-gate-summary read.
+
+    ``gate`` is a ``GateResult``, a mapping with the same six fields, or ``None`` when the gates could not be
+    read. ``outcome`` is ``pass`` when policy, checks, approval, threads and head pass for ``head`` (the PR's
+    current head; a gate line for another head is not a pass), whatever the mergeability; ``fail`` when one
+    of them does not; ``unreadable`` when ``gate`` is ``None``. ``mergeable`` is the gate's value as read.
+
+    Divergence (3) of #556 → Decisions (2026-11-16): ``merge_step`` (in-flight routing) is the ``pass``
+    outcome, so a conflicting or unknown PR stays in the merge step for the conflict rule; ``board_mergeable``
+    also needs ``mergeable=yes``. An unreadable gate or mergeability fails closed: no merge step for an
+    unreadable gate, and no Mergeable card unless mergeability reads ``yes``. Pure: no gateway, no write.
+    """
+
+    if gate is None:
+        return {"outcome": "unreadable", "mergeable": None, "gate_head": None, "merge_step": False,
+                "board_mergeable": False}  # fmt: skip
+    values = {name: str((gate.get(name) if isinstance(gate, dict) else getattr(gate, name, "")) or "")
+              for name in GATE_FIELDS}  # fmt: skip
+    head = (head or "").strip().lower()
+    gate_head = values["head"].lower()
+    passed = (bool(_GATE_POLICY.fullmatch(values["policy"])) and values["checks"] in GATE_CHECKS
+              and values["approval"] in GATE_APPROVALS and values["threads"] == "none"
+              and bool(_GATE_HEAD.fullmatch(gate_head)) and bool(head) and head.startswith(gate_head))  # fmt: skip
+    return {"outcome": "pass" if passed else "fail", "mergeable": values["mergeable"], "gate_head": gate_head or None,
+            "merge_step": passed, "board_mergeable": passed and values["mergeable"] == "yes"}  # fmt: skip
+
+
+def read_merge_gates(repo: str, number: int, head: str) -> tuple[dict[str, Any], str | None]:
+    """``decide_merge_gates`` over the gates of PR ``number`` read now; the error is set when they are unreadable."""
+
+    try:
+        gate = _merge_gate_module().evaluate(number, repo)
+    except Exception as exc:  # GHCommandError, ValueError, an unloadable script: all mean "not readable"
+        text = str(exc).strip()
+        reason = text.splitlines()[-1][:300] if text else type(exc).__name__
+        return decide_merge_gates(None, head), mask_tokens(f"evaluate merge gates of PR #{number}: {reason}")
+    return decide_merge_gates(gate, head), None
 
 
 class GhGateway:

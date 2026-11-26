@@ -2,7 +2,7 @@
 
 Prints exactly one JSON object on one line to stdout, on success and on
 failure. Exit codes: ``0`` yes, ``1`` no, ``2`` invalid arguments, ``3``
-(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight``, ``session-blocker``, ``codex-worker`` and ``failure-stop``) unreadable, ``4`` (``write retry-pending`` only) retrying
+(``marker``, ``state``, ``facts``, ``scheduler``, ``status``, ``in-flight``, ``session-blocker``, ``merge-gates``, ``codex-worker`` and ``failure-stop``) unreadable, ``4`` (``write retry-pending`` only) retrying
 stopped until the PO's ``/unblock``.
 """
 
@@ -24,7 +24,7 @@ from .facts import _Facts, read_facts
 from .failure_stop import InvalidRecord, validate_record
 from .failure_stop import check as failure_stop_check
 from .failure_stop import record as failure_stop_record
-from .gateway import Gateway, GhGateway, mask_tokens
+from .gateway import Gateway, GhGateway, decide_merge_gates, mask_tokens, parse_gate_line, read_merge_gates
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
 from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, list_markers, marker_holds, marker_text,
@@ -54,7 +54,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "codex-worker", "catch-all", "admission", "failure-stop")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "merge-gates", "codex-worker", "catch-all", "admission", "failure-stop")
 
 
 class InvalidArguments(Exception):
@@ -155,6 +155,19 @@ def build_parser() -> argparse.ArgumentParser:
         sb_rule.add_argument("--head", default="")
         sb_rule.add_argument("--refine-pass-at", default="")
         sb_rule.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+
+    # The one merge-gate rule (#629): ``decide`` over merge-gate-summary output already read, ``read`` over the PR now.
+    merge_gates = blocks.add_parser("merge-gates", add_help=False)
+    merge_gates_ops = merge_gates.add_subparsers(dest="operation", parser_class=_Parser)
+    mg_decide = merge_gates_ops.add_parser("decide", add_help=False)
+    # scripts/merge-gate-summary's stdout ("-" reads stdin); the caller counts a script exit above 1 as unreadable.
+    mg_decide.add_argument("--input", default="-")
+    mg_read = merge_gates_ops.add_parser("read", add_help=False)
+    mg_read.add_argument("--repo", required=True)
+    mg_read.add_argument("--pr", type=_positive, required=True)
+    for mg_rule in (mg_decide, mg_read):
+        mg_rule.add_argument("--head", required=True)  # the PR's current head SHA
+        mg_rule.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     in_flight = blocks.add_parser("in-flight", add_help=False)
     in_flight_ops = in_flight.add_subparsers(dest="operation", parser_class=_Parser)
@@ -360,6 +373,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher status read|sync ... "
             "| hpw dispatcher in-flight plan|linked ... "
             "| hpw dispatcher session-blocker read|decide|open ... "
+            "| hpw dispatcher merge-gates decide|read ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
             "| hpw dispatcher catch-all numbers "
             "| hpw dispatcher failure-stop check|record ... "
@@ -376,6 +390,11 @@ def _validate(args: argparse.Namespace) -> None:
             raise InvalidArguments("--bot and --head go together")
         if args.operation == "decide":
             return  # decides over comments it is given: no repository
+    if args.block == "merge-gates":
+        if not _SHA.match(args.head):
+            raise InvalidArguments("--head must be a commit SHA")
+        if args.operation == "decide":
+            return  # decides over a gate line it is given: no repository
     if args.block == "marker" and args.operation == "decide":
         if not args.marker.strip():
             raise InvalidArguments("--marker must not be empty")
@@ -515,6 +534,24 @@ def _run_open_blocker_decide(args: argparse.Namespace, settings: Settings) -> in
     return _emit(decide_open_blocker_result(facts, comments, **_open_blocker_inputs(args)))
 
 
+def _merge_gates_result(operation: str, decision: dict[str, Any], error: str | None) -> Result:
+    word = "unreadable" if decision["outcome"] == "unreadable" else "read"
+    return Result(operation, word, error=error, fields=decision, block="merge-gates")
+
+
+def _run_merge_gates(args: argparse.Namespace) -> int:
+    if args.operation == "read":
+        decision, error = read_merge_gates(args.repo, args.pr, args.head)
+        return _emit(_merge_gates_result("read", decision, error))
+    try:
+        raw = sys.stdin.buffer.read() if args.input == "-" else Path(args.input).read_bytes()
+        gate = parse_gate_line(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        return _emit(_merge_gates_result("decide", decide_merge_gates(None, args.head), f"read input: {exc}"))
+    error = None if gate is not None else "read input: no Merge gate: line"
+    return _emit(_merge_gates_result("decide", decide_merge_gates(gate, args.head), error))
+
+
 def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
     if args.operation == "whoami":
         return _emit(whoami(gateway))
@@ -617,6 +654,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_marker_decide(args, settings or Settings.from_env())
     if args.block == "session-blocker" and args.operation == "decide":
         return _run_open_blocker_decide(args, settings or Settings.from_env())
+    if args.block == "merge-gates":
+        return _run_merge_gates(args)  # evaluates through scripts/merge-gate-summary, not the gateway
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")
