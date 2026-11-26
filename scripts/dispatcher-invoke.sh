@@ -2387,6 +2387,17 @@ record_merge_owner() {
     return 1
 }
 
+# record_failed_session_owner <issue> <head-before> — issue #578 (E10, third case): a
+# dispatcher /implement session that exits non-zero may still have pushed a head. That head
+# is the dispatcher's own work, so it gets the merge-owner marker (or its evidence-pending
+# copy) after the failed-session blocker, and a continued session that pushes nothing still
+# reaches the merge. No new head: no marker. A write that fails never changes the failing
+# exit code of the run.
+record_failed_session_owner() {
+    record_merge_owner "$1" "${2:-}" || echo "Warning: the merge owner of the failed session's head on #$1 could not be recorded." >&2
+    return 0
+}
+
 # ensure_merge_owner <pr> <head> — before a merge: posts a pending owner marker
 # for exactly this head (issue #348). 0: go on to the merge script, which still
 # decides; 1: the marker is still missing, do not merge in this run.
@@ -3123,6 +3134,7 @@ resume_fix_round() {
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_failed_session_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
+        record_failed_session_owner "$issue_num" "$pr_head"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -3359,6 +3371,8 @@ conflict_round_blocker() {
         "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" "" \
         "/implement" "$ISSUE_NUMBER" "Claude Code or Codex" \
         "the conflict with main on PR #$pr_number is resolved on the PR branch; the PO then replies /unblock on #$ISSUE_NUMBER and the dispatcher resumes the story"
+    # Issue #578: a head the failed session pushed is the dispatcher's own (5th argument: the head before).
+    [[ "${4:-}" == session-failed ]] && record_failed_session_owner "$ISSUE_NUMBER" "${5:-}"
     DISPATCH_HANDLED=true
     exit 1
 }
@@ -3386,7 +3400,7 @@ run_conflict_round() {
     RESUMED_ROUND="conflict round"
     RESUMED_ROUND_PLACE="\"$from_status\""
     blocker_before=$(decision_blocker_created_at "$issue_num")
-    local session_rc=0
+    local session_rc=0 round_start_head="$pr_head"
     invoke_executor_command "implement" "$issue_num" || session_rc=$?
     # A pause posts the standard record and ends the run; the next run decides
     # from the PR (issue #449).
@@ -3399,7 +3413,7 @@ run_conflict_round() {
     fi
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed" session-failed
+        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed" session-failed "$round_start_head"
     fi
     reset_conflict_round_session
     echo "✓ /implement completed for #$issue_num (conflict round)"
@@ -3866,6 +3880,7 @@ invoke_executor_command "implement" "$ISSUE_NUMBER" || SESSION_RC=$?
 if [[ $SESSION_RC -ne 0 ]]; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_failed_session_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+    record_failed_session_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT"
     DISPATCH_HANDLED=true
     exit 1
 fi
