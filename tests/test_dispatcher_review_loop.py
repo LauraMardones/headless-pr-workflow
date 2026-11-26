@@ -1346,7 +1346,11 @@ def test_348_owner_marker_and_pending_copy_both_failing_stops_before_the_hand_of
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "could not record merge ownership or its pending copy" in proc.stderr
-    assert d.posted(PR) == [] and d.posted(STORY) == []  # no hand-off was recorded
+    # no hand-off was recorded; the story gets the one blocker of issue #540 with the true reason
+    [blocker] = d.posted(STORY)
+    assert blocker.startswith("## Blocked Declaration") and "the merge-owner record could not be written" in blocker
+    assert f"action=merge-owner-missing pr={PR} " in blocker
+    assert d.posted(PR) == []
 
 
 @needs_tools

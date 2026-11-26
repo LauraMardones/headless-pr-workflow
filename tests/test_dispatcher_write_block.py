@@ -659,3 +659,28 @@ def test_real_gateway_failure_names_the_step(real_gateway):
 def test_paginated_output_is_one_list():
     assert parse_json_stream('[1, 2]\n[3]\n') == [[1, 2], [3]]
     assert parse_json_stream("") == []
+
+
+# ── issue #540: an unexpected exception is one failed JSON line with a cause ──
+
+@pytest.mark.parametrize("exc, expected", [
+    (RuntimeError("boom"), "unexpected RuntimeError: boom"),
+    (RuntimeError(""), "unexpected RuntimeError"),
+    (RuntimeError(f"bad {TOKEN}"), "unexpected RuntimeError: bad "),
+])
+def test_540_ac2_an_unexpected_exception_prints_one_failed_json_line(tmp_path, capsys, monkeypatch, exc, expected):
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    body = tmp_path / "body.md"
+    body.write_text("hello", encoding="utf-8")
+
+    def factory(repo):
+        raise exc
+
+    code = cli.main(["write", "comment", "--number", "7", "--body-file", str(body), "--repo", "o/r"],
+                    gateway_factory=factory, settings=Settings(retry_delay=0, po_login=PO, sleep=lambda _s: None))
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 1 and len(out) == 1
+    data = json.loads(out[0])
+    assert data["ok"] is False and data["result"] == "failed" and data["operation"] == "comment"
+    assert data["error"].startswith(expected) and TOKEN not in out[0]

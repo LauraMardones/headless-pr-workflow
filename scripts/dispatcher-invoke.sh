@@ -502,6 +502,29 @@ write_field() {
 # with its own retry loop (record_merge_owner, B2 until #433) passes 1.
 
 LAST_POSTED_AT=""
+LAST_POST_CAUSE=""
+
+# write_failure_cause <exit-code> — one line naming why the last dispatcher_write failed:
+# the hpw exit code, its result and error, or its last stdout line when no JSON came out
+# (issue #540). Never empty, never longer than 300 characters.
+write_failure_cause() {
+    local rc="$1" err res last cause
+    err=$(write_field error); res=$(write_field result)
+    if [[ -n "$err" ]]; then
+        cause="hpw exit code $rc, result ${res:-unknown}: $err"
+    elif [[ -n "$res" ]]; then
+        cause="hpw exit code $rc, result $res with no error text"
+    else
+        last=$(printf '%s\n' "$WRITE_JSON" | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+        if [[ -n "$last" ]]; then
+            cause="hpw exit code $rc and no JSON result; last output line: $last"
+        else
+            cause="hpw exit code $rc and no output on stdout"
+        fi
+    fi
+    cause=$(printf '%s' "$cause" | tr '\r\n\t' '   ' | cut -c1-300)
+    printf '%s' "$cause"
+}
 
 post_comment() {
     local issue_num="$1"
@@ -515,7 +538,8 @@ post_comment() {
     dispatcher_write comment --number "$issue_num" --body-file "$body_file" --attempts "$attempts" || rc=$?
     rm -f "$body_file"
     if [[ $rc -ne 0 ]]; then
-        echo "Warning: the comment on #$issue_num was not written ($(write_field error))." >&2
+        LAST_POST_CAUSE=$(write_failure_cause "$rc")
+        echo "Warning: the comment on #$issue_num was not written ($LAST_POST_CAUSE)." >&2
         return 1
     fi
     LAST_POSTED_AT=$(write_field created_at)
@@ -2411,6 +2435,16 @@ record_merge_owner() {
     # the session's own. Fail the run (an unexpected exit, so the dispatcher
     # sends its dispatcher_error) instead of advancing without ownership.
     echo "Error: could not record merge ownership or its pending copy on PR #$pr_number; stopping before the hand-off so the story does not advance without it." >&2
+    # Issue #540: say the true reason on the story now, with the marker the next run
+    # reads, so it does not post a neutral blocker that cannot know the cause.
+    local cause="${LAST_POST_CAUSE:-unknown}"
+    post_blocker_once "$issue_num" "${TARGET_TITLE:-}" "resource" \
+        "$(merge_owner_missing_marker "$pr_number" "$head_sha")" \
+        "the PO merges PR #$pr_number by hand with /merge $pr_number and then runs /cleanup $pr_number (docs/TAKEOVER-RULES.md → Merge Takeover)" \
+        "the merge-owner record could not be written for head ${head_sha:0:7} on PR #$pr_number (the dispatcher's own session pushed it, but the comment write failed after 6 attempts); cause: $cause; the dispatcher does not merge it" \
+        "/merge" "$pr_number" "Claude Code or Codex" \
+        "the PO runs /cleanup $pr_number (Merge Takeover)" \
+        || echo "Warning: could not post the merge-owner blocker on #$issue_num (${LAST_POST_CAUSE:-unknown})." >&2
     return 1
 }
 
@@ -3407,7 +3441,7 @@ block_ownerless_head() {
         ns_command="/merge"
         ns_then="the PO runs /cleanup $pr_number (Merge Takeover)"
         unblocked_when="the PO merges PR #$pr_number by hand with /merge $pr_number and then runs /cleanup $pr_number (docs/TAKEOVER-RULES.md → Merge Takeover)"
-        state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: the head was not pushed by a dispatcher session (for example a manual fix round, or a session that stopped after its push), so the dispatcher does not merge it"
+        state="the merge owner is missing for head ${pr_head:0:7} on PR #$pr_number: no dispatcher merge-owner record exists for this head (for example a manual fix round, or a failed record write the run could not report), so the dispatcher cannot show that its own session pushed it and does not merge it"
     fi
     next_step=$(blocker_next_step "$ns_command" "$ns_number" "$ns_where" "$ns_then") || next_step=""
     echo "BLOCKED: posting resource blocker on #$issue_num"
