@@ -100,7 +100,33 @@ def test_ac5_a_failed_continued_session_fails_the_run_and_posts_the_blocker(d):
     proc = d.resume()
     assert proc.returncode != 0
     assert any(c.startswith("## Blocked Declaration") and "Type: external" in c for c in d.posted(STORY))
-    assert any(ATTEMPT in c for c in d.posted(STORY))  # the attempt is recorded first, whatever the result
+    assert any(ATTEMPT in c for c in d.posted(STORY))  # a session that ran records the attempt, whatever the result
+
+
+def test_a_start_refused_by_the_usage_limit_records_no_attempt_and_a_later_run_continues(d):
+    """Codex finding: the attempt marker must not be consumed by a start that never happened."""
+
+    proc = d.resume(env={"USAGE_LIMIT_SESSIONS_PER_DAY": "0"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [] and not marked(d, ATTEMPT)
+
+    proc = d.resume()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(d.sessions) == 1 and marked(d, ATTEMPT)
+
+
+def test_a_draft_of_an_executor_without_a_provider_row_is_skipped_without_comment_or_blocker(tmp_path):
+    """Codex finding: executor:codex stays with its own worker; the Actions dispatcher starts nothing and posts nothing."""
+
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "In implementation", executor="codex")
+    d.add_pr(PR, STORY, draft=True)
+    d.set_pytest(HEAD, "success", completed_at="2026-10-13T10:05:00Z")
+
+    proc = d.resume()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [] and d.posted(STORY) == [] and d.posted(PR) == []
 
 
 def test_ac6_an_invalid_wait_stops_the_run_with_no_blocker(d):

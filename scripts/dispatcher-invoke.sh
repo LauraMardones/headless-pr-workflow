@@ -3194,12 +3194,10 @@ resume_continue_draft() {
         return 0
     fi
     resume_session_allowed "$issue_num" || return 0
-
-    # One attempt per head: the marker is written before the session, whatever its result.
-    if ! $DRY_RUN; then
-        post_comment "$issue_num" "$attempt_marker" 1 || {
-            echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the attempt marker could not be written; no session started"
-            return 0; }
+    # An executor with no provider row is never started here (executor:codex stays with its own worker).
+    if [[ -z "${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}" || -z "${EXECUTOR_MODEL[$EXECUTOR_LABEL]:-}" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: draft PR cannot be continued: executor '$EXECUTOR_LABEL' has no provider entry"
+        return 0
     fi
     local why="failed session after /unblock"
     [[ "$reason" == "silent" ]] && why="silent stop after ${minutes:-$CONTINUE_DRAFT_AFTER_MINUTES} minutes"
@@ -3224,6 +3222,12 @@ resume_continue_draft() {
     fi
     FIX_ROUND_SESSION=false
     echo "✓ /implement completed for #$issue_num (continue)"
+    # One attempt per head: the marker is written after a session that ran, never before the start, so a start
+    # refused by the usage limit or the allowance, or a pause at a provider limit, leaves the draft eligible.
+    # A session that ran and left the PR a draft is not continued again on this head.
+    if ! $DRY_RUN; then
+        post_comment "$issue_num" "$attempt_marker" 1 || echo "Warning: the continue attempt marker for PR #$pr_number could not be written." >&2
+    fi
     notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
     record_merge_owner "$issue_num" "$pr_head" || exit 1
     if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then

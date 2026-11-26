@@ -269,6 +269,13 @@ def continued(result: dict) -> list[int]:
     return [e["number"] for e in result["continue"]]
 
 
+@pytest.mark.parametrize("executors", [["codex"], ["claude-code-sonnet", "codex"]])
+def test_a_draft_of_an_executor_the_dispatcher_cannot_start_is_not_continued(executors):
+    result = plan_at({**draft_row(story=[EXTERNAL, UNBLOCK]), "executors": executors},
+                     {**draft_row(4, green="2026-11-26T08:00:00Z"), "executors": executors})
+    assert continued(result) == [] and result["in_flight"] == [3, 4]
+
+
 def test_failed_session_after_unblock_is_continued():
     result = plan_at(draft_row(story=[EXTERNAL, UNBLOCK]))
     assert continued(result) == [3] and result["continue"][0]["reason"] == "failed"

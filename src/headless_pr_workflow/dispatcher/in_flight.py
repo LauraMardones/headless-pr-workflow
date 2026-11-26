@@ -117,6 +117,9 @@ def continue_reason(row: Mapping[str, Any], *, dispatcher: str, po: str, trust: 
     head = str(pr.get("head") or "")
     if not dispatcher or comments is None or not head or pr.get("number") is None:
         return None
+    # An executor the Actions dispatcher cannot start (executor:codex has no provider row) stays with its own worker.
+    if any(not str(label).startswith("claude-code-") for label in row.get("executors") or []):
+        return None
     comments = list(comments)
     if trust.decision_blocker(comments)["state"] == "open" or other_blocker_open(trust, comments, po_unblock=True):
         return None
