@@ -13,8 +13,8 @@ import pytest
 
 from headless_pr_workflow.dispatcher import cli
 from headless_pr_workflow.dispatcher.gateway import GatewayError
-from headless_pr_workflow.dispatcher.marker import decide_holds, dispatcher_marker, marker_text
-from headless_pr_workflow.dispatcher.write import Settings, _gave_up
+from headless_pr_workflow.dispatcher.marker import decide_holds, decide_merge_owner, dispatcher_marker, marker_text
+from headless_pr_workflow.dispatcher.write import Settings, _gave_up, evidence_pending_comment
 
 from tests.test_dispatcher_write_block import BOT, PO, FakeGateway
 
@@ -359,3 +359,187 @@ def test_628_decide_with_an_empty_marker_or_login_reads_nothing(capsys, monkeypa
     assert code == 2 and out["result"] == "invalid"
     monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"[]")))
     assert cli.main(["marker", "decide", "--login", " ", "--marker", OWNER]) == 3
+
+
+# ── Issue #647: the one merge-owner-evidence rule ─────────────────────────────
+
+PR = 5
+HEAD = "a" * 40
+OTHER_HEAD = "b" * 40
+OWNS = dispatcher_marker(f"action=merge-owner pr={PR} head={HEAD}")
+OWNS_PENDING = evidence_pending_comment("merge-owner", HEAD, OWNS)
+
+
+def owner(comments, head=HEAD, login=BOT):
+    word, evidence, comment = decide_merge_owner(comments, login, PR, head)
+    return word, evidence, (comment or {}).get("created_at")
+
+
+@pytest.mark.parametrize("comments,expected", [
+    # every case of the parity baseline (tests/test_dispatcher_parity_review_loop.py, merge_owner_evidence)
+    ([c(BOT, OWNS, T0)], ("holds", "marker", T0)),                          # marker-on-head
+    ([], ("absent", None, None)),                                          # no-marker
+    ([c(OTHER, OWNS, T0)], ("absent", None, None)),                        # marker-by-another-account
+    ([c(BOT, OWNS_PENDING, T0)], ("holds", "evidence-pending", T0)),       # evidence-pending-copy: decision 5
+    ([c(BOT, OWNS, T0), c(PO, "/unblock", T1)], ("holds", "marker", T0)),  # marker-then-po-unblock: decision 6
+    # cases the copies decide besides the baseline
+    ([c(OTHER, OWNS_PENDING, T0)], ("absent", None, None)),                # a pending copy of another account
+    ([c(BOT, OWNS_PENDING, T1), c(BOT, OWNS, T0)], ("holds", "marker", T0)),  # the marker wins over its pending copy
+    ([c(BOT, OWNS, T_EARLY), c(BOT, OWNS, T1), c(BOT, OWNS, T0)], ("holds", "marker", T1)),  # newest decides
+    ([c(BOT, OWNS.upper(), T0)], ("holds", "marker", T0)),                 # case ignored, as conflict_round_rule
+    ([c(BOT, "merged it, " + OWNS + " thanks", T0)], ("holds", "marker", T0)),  # a substring of the body
+    ([c(BOT, {"no": "string"}, T0), {"body": None}], ("absent", None, None)),  # odd comments match nothing
+])
+def test_647_the_rule_decides_every_case_of_the_copies(comments, expected):
+    assert owner(comments) == expected
+
+
+@pytest.mark.parametrize("body", [
+    dispatcher_marker(f"action=merge-owner pr={PR} head={OTHER_HEAD}"),      # another head
+    dispatcher_marker(f"action=merge-owner pr=55 head={HEAD}"),             # another PR
+    dispatcher_marker(f"action=merge-owner pr={PR} head={HEAD}0"),          # a longer head
+    evidence_pending_comment("merge-owner", OTHER_HEAD, OWNS),              # pending copy of another head
+    evidence_pending_comment("merge-confirmation", HEAD, OWNS),             # pending copy of another item
+    dispatcher_marker(f"action=merge-owner-missing pr={PR} head={HEAD}"),   # the ownerless blocker's marker
+    OWNS.replace("<!-- ", ""),                                             # not the hidden marker
+])
+def test_647_only_the_marker_for_exactly_this_pr_and_head_is_evidence(body):
+    assert owner([c(BOT, body, T0)]) == ("absent", None, None)
+
+
+def test_647_the_head_is_matched_whatever_its_case_and_surrounding_space():
+    assert owner([c(BOT, OWNS, T0)], head=f"  {HEAD.upper()} ") == ("holds", "marker", T0)
+
+
+class PrGateway(FakeGateway):
+    """The Block 1 fake with the pulls API read: ``head`` is the PR head, ``fail_pr`` fails the read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.head: str | None = HEAD
+        self.fail_pr = False
+
+    def pull_request(self, number: int) -> dict:
+        self.calls.append(f"pr {number}")
+        if self.fail_pr:
+            raise GatewayError(f"read PR #{number}", "HTTP 502")
+        return {"number": number, "head": {"sha": self.head}}
+
+
+@pytest.fixture
+def pgw() -> PrGateway:
+    return PrGateway()
+
+
+def merge_owner(gw, settings, capsys, *extra):
+    return run(gw, settings, capsys, "marker", "merge-owner", "--repo", "o/r", "--pr", str(PR), *extra)
+
+
+def test_647_merge_owner_reads_github_and_prints_the_contract_fields(pgw, settings, capsys):
+    pgw.add(PR, OWNS)
+    pgw.add(PR, "/unblock", login=PO)
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert rc == 0 and out["ok"] is True
+    assert (out["block"], out["operation"], out["result"], out["head"], out["evidence"]) == (
+        "marker", "merge-owner", "holds", HEAD, "marker")
+    assert out["url"].startswith(f"https://x/{PR}#") and out["created_at"] and out["error"] is None
+    assert "pr 5" not in pgw.calls  # with --head the PR is not read
+
+
+def test_647_merge_owner_without_head_reads_the_pr_head(pgw, settings, capsys):
+    pgw.add(PR, OWNS_PENDING)
+    rc, out, _ = merge_owner(pgw, settings, capsys)
+    assert (rc, out["result"], out["evidence"], out["head"]) == (0, "holds", "evidence-pending", HEAD)
+    pgw.head = OTHER_HEAD
+    rc, out, _ = merge_owner(pgw, settings, capsys)
+    assert (rc, out["result"], out["evidence"], out["head"]) == (1, "absent", None, OTHER_HEAD)
+
+
+def test_647_a_forged_or_missing_marker_is_absent_exit_1(pgw, settings, capsys):
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"], out["ok"]) == (1, "absent", False)
+    pgw.add(PR, OWNS, login=OTHER)
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"]) == (1, "absent")
+
+
+def test_647_a_pr_that_cannot_be_read_is_unreadable_exit_3(pgw, settings, capsys):
+    pgw.add(PR, OWNS)
+    pgw.fail_pr = True
+    rc, out, _ = merge_owner(pgw, settings, capsys)
+    assert (rc, out["result"], out["ok"], out["evidence"]) == (3, "unreadable", False, None)
+    assert "HTTP 502" in out["error"]
+    pgw.fail_pr, pgw.head = False, None  # a PR read without a head SHA
+    rc, out, _ = merge_owner(pgw, settings, capsys)
+    assert (rc, out["result"]) == (3, "unreadable") and "head SHA" in out["error"]
+
+
+def test_647_a_login_that_cannot_be_resolved_is_unreadable_exit_3(pgw, settings, capsys, monkeypatch):
+    pgw.add(PR, OWNS)
+    monkeypatch.setattr(pgw, "viewer_login", lambda: (_ for _ in ()).throw(GatewayError("resolve login", "HTTP 401")))
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"]) == (3, "unreadable")
+    monkeypatch.setattr(pgw, "viewer_login", lambda: " ")
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"]) == (3, "unreadable")
+
+
+def test_647_comments_that_cannot_be_read_are_unreadable_exit_3(pgw, settings, capsys):
+    pgw.add(PR, OWNS)
+    pgw.list_failures = 1
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"], out["evidence"], out["url"]) == (3, "unreadable", None, None)
+
+
+def test_647_the_bookkeeping_login_supplies_no_merge_owner_evidence(pgw, settings, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_BOOKKEEPING_LOGIN", BK)
+    pgw.add(PR, OWNS, login=BK)
+    rc, out, _ = merge_owner(pgw, settings, capsys, "--head", HEAD)
+    assert (rc, out["result"]) == (1, "absent")
+
+
+def owner_decide(capsys, monkeypatch, stdin, *argv):
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(stdin.encode())))
+    rc = cli.main(["marker", "merge-owner-decide", *argv],
+                  gateway_factory=lambda repo: pytest.fail("merge-owner-decide reads no GitHub"))  # fmt: skip
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    return rc, json.loads(out[0])
+
+
+@pytest.mark.parametrize("comments,word,evidence,rc", [
+    ([c(BOT, OWNS, T0), c(PO, "/unblock", T1)], "holds", "marker", 0),
+    ([c(BOT, OWNS_PENDING, T0)], "holds", "evidence-pending", 0),
+    ([c(OTHER, OWNS, T0)], "absent", None, 1),
+])
+def test_647_merge_owner_decide_gives_the_rule_s_word_and_exit_code(capsys, monkeypatch, comments, word, evidence, rc):
+    code, out = owner_decide(capsys, monkeypatch, json.dumps(comments),
+                             "--login", BOT, "--pr", str(PR), "--head", HEAD)  # fmt: skip
+    assert (code, out["result"], out["evidence"], out["head"]) == (rc, word, evidence, HEAD)
+    assert out["block"] == "marker" and out["operation"] == "merge-owner-decide"
+
+
+@pytest.mark.parametrize("stdin", ["not json", '{"a": 1}', "[1, 2]", "\xff"])
+def test_647_merge_owner_decide_with_unreadable_comments_is_unreadable_exit_3(capsys, monkeypatch, stdin):
+    code, out = owner_decide(capsys, monkeypatch, stdin, "--login", BOT, "--pr", str(PR), "--head", HEAD)
+    assert (code, out["result"], out["ok"], out["evidence"]) == (3, "unreadable", False, None)
+
+
+def test_647_merge_owner_decide_with_an_empty_login_is_unreadable_exit_3(capsys, monkeypatch):
+    code, out = owner_decide(capsys, monkeypatch, json.dumps([c(" ", OWNS, T0)]),
+                             "--login", " ", "--pr", str(PR), "--head", HEAD)  # fmt: skip
+    assert (code, out["result"]) == (3, "unreadable")
+
+
+@pytest.mark.parametrize("argv", [
+    ["merge-owner-decide", "--login", BOT, "--pr", str(PR), "--head", "not-a-sha"],
+    ["merge-owner-decide", "--login", BOT, "--pr", str(PR)],
+    ["merge-owner-decide", "--login", BOT, "--pr", "0", "--head", HEAD],
+    ["merge-owner", "--repo", "o/r", "--pr", str(PR), "--head", "xyz"],
+    ["merge-owner", "--repo", "bad", "--pr", str(PR)],
+    ["merge-owner", "--repo", "o/r"],
+])
+def test_647_invalid_arguments_exit_2_and_read_nothing(capsys, argv):
+    rc = cli.main(["marker", *argv], gateway_factory=lambda repo: pytest.fail("invalid arguments read no GitHub"))
+    out = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert rc == 2 and out["result"] == "invalid"
