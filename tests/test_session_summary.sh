@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUMMARY_SCRIPT="$SCRIPT_DIR/../scripts/session-summary.sh"
+export HPW_BIN="$SCRIPT_DIR/../scripts/hpw"
 PASS=0
 FAIL=0
 
@@ -167,7 +168,64 @@ test_implement_blocked_next() {
     assert_equal "implement blocked handoff exact output" "$expected" "$actual"
 }
 
+assert_rejected() {
+    local label="$1" fragment="$2"
+    shift 2
+    local stdout_file stderr_file status=0
+    stdout_file=$(mktemp)
+    stderr_file=$(mktemp)
+    "$SUMMARY_SCRIPT" "$@" >"$stdout_file" 2>"$stderr_file" || status=$?
+    if [[ "$status" -eq 1 && ! -s "$stdout_file" && "$(<"$stderr_file")" == *"$fragment"* ]]; then
+        pass "$label"
+    else
+        fail "$label"
+        printf '  status=%s stdout=<%s> stderr=<%s>\n' \
+            "$status" "$(<"$stdout_file")" "$(<"$stderr_file")"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+}
+
+test_next_step() {
+    local reply session output expected
+    reply='Next step: reply `/unblock` on #620 on GitHub; then the dispatcher resumes /review 620 with Decision A.'
+    session='Next step: run `/implement 613` in Claude Code or Codex; then the story continues.'
+
+    expected=$'Next: implementation\nNext step: '"${reply#Next step: }"$'\nDeviation: d'
+    output=$("$SUMMARY_SCRIPT" --command review --pr 620 --head abc --checks pass \
+        --blockers "waiver" --next implementation --next-step "$reply" --deviation d)
+    assert_contains "review next-step directly after Next, before Deviation" "$output" "$expected"
+
+    output=$("$SUMMARY_SCRIPT" --command implement --issue 613 --pr 9 --head abc --checks pass \
+        --blockers "decision" --next implementation --next-step "$session" --deviation d)
+    assert_contains "implement session line after Next, before Deviation" "$output" \
+        $'Next: implementation\n'"$session"$'\nDeviation: d'
+    output=$("$SUMMARY_SCRIPT" --command implement --issue 613 --pr 9 --head abc --checks pass \
+        --blockers "decision" --next implementation --next-step "$reply")
+    assert_contains "implement reply line" "$output" $'Next: implementation\n'"$reply"
+
+    for cmd in implement review; do
+        local base=(--command "$cmd" --pr 9 --head abc --checks pass --blockers b --next implementation)
+        assert_rejected "$cmd: missing command number" "number" "${base[@]}" \
+            --next-step 'Next step: run `/implement` in Claude Code; then it goes on.'
+        assert_rejected "$cmd: missing where" "lacks a part" "${base[@]}" \
+            --next-step 'Next step: run `/implement 9`; then it goes on.'
+        assert_rejected "$cmd: missing what follows" "lacks a part" "${base[@]}" \
+            --next-step 'Next step: run `/implement 9` in Codex.'
+        assert_rejected "$cmd: empty" "--next-step" "${base[@]}" --next-step ""
+        assert_rejected "$cmd: two lines" "one line" "${base[@]}" --next-step "$session"$'\nmore'
+        assert_rejected "$cmd: lettered" "Next step: " "${base[@]}" \
+            --next-step 'Next step A: run `/implement 9` in Codex; then it goes on.'
+        assert_rejected "$cmd: wrong start" "Next step: " "${base[@]}" --next-step 'Then run it'
+        assert_rejected "$cmd: repeated" "only once" "${base[@]}" --next-step "$session" --next-step "$session"
+    done
+    for cmd in merge cleanup; do
+        assert_rejected "$cmd: next-step not allowed" "not valid" --command "$cmd" --pr 9 --head abc \
+            --checks pass --blockers none --next-step "$session"
+    done
+}
+
 test_exact_output
+test_next_step
 test_implement_blocked_next
 test_identifiers_and_cleanup
 test_commands_and_next_actions
