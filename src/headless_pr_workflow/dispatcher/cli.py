@@ -663,9 +663,25 @@ def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) 
 
 
 def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
-    """Run ``hpw dispatcher <argv...>``; returns the exit code."""
+    """Run ``hpw dispatcher <argv...>``; returns the exit code.
+
+    An unexpected exception is emitted as one ``result: failed`` JSON line with a
+    non-empty, token-masked ``error`` and exit code 1 (issue #540), so a caller never
+    sees a failure with no cause. ``SystemExit`` (argparse) passes through.
+    """
 
     argv = list(argv)
+    try:
+        return _main(argv, gateway_factory=gateway_factory, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - the catch-all of the issue
+        detail = str(exc).strip()
+        error = f"unexpected {type(exc).__name__}: {detail}" if detail else f"unexpected {type(exc).__name__}"
+        print(json.dumps({"ok": False, "block": _block_of(argv), "operation": _operation_of(argv),
+                          "result": "failed", "error": mask_tokens(error)}))  # fmt: skip
+        return 1
+
+
+def _main(argv: list[str], *, gateway_factory: GatewayFactory | None = None, settings: Settings | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
         _validate(args)

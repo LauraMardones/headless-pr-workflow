@@ -1,0 +1,44 @@
+# Proof that the GitHub App's installation token can do what the automation needs (issue #664, F3.1).
+# It reads and writes the Projects v2 board, reads the branch protection of main and reads a PR's
+# reviewRequests, and logs one result line per call. A refused call is a result: the run stays green.
+name: App token proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Open PR for the review-requests call (default: the newest open PR)"
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/app-token-proof.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # No token means no proof: a failure here fails the run.
+      - name: Create installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Prove the four calls
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          bash scripts/app-token-proof.sh --repo "${{ github.repository }}" ${PR_NUMBER:+--pr "$PR_NUMBER"} | tee -a "$GITHUB_STEP_SUMMARY"
