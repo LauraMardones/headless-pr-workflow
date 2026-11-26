@@ -215,3 +215,255 @@ def test_ac4_without_an_open_session_blocker_the_dispatcher_blocks_as_before(tmp
     assert "Error: No linked open PR found" in proc.stderr + proc.stdout
     blockers = [b for b in d.posted(STORY) if "/implement completes successfully" in b]
     assert len(blockers) == 1 and len(po_events(d)) == 1
+
+
+# ── the one open-blocker rule (issue #646) ───────────────────────────────────
+# ``decide_open_blocker`` decides every case the copies listed under ``open_blocker`` in
+# ``rules.py`` decide (the parity cases of ``tests/test_dispatcher_parity_in_flight.py``), with
+# the divergences resolved: the declaration types are a caller input (po-dependency, po-decision),
+# the PO's /unblock and a member's Unblocked comment lift a non-decision declaration
+# (dependency-then-po-unblock, dependency-then-member-unblocked), an automation declaration blocks
+# unless the caller leaves its declarer out (automation-dependency, #556 → Decisions, case (7)),
+# and an unreadable read fails closed (comments-unreadable).
+
+from headless_pr_workflow.dispatcher.facts import _Facts  # noqa: E402
+from headless_pr_workflow.dispatcher.session_blocker import (  # noqa: E402
+    AUTOMATION_DECLARERS,
+    decide_open_blocker,
+    read_open_blocker,
+)
+from headless_pr_workflow.dispatcher.status import other_blocker_open  # noqa: E402
+
+BOT = "hpw-bot"
+HEAD = "abc1234"
+FOUR = ("dependency", "external", "conflict", "resource")
+T0, T1, T2 = "2026-11-09T05:00:00Z", "2026-11-09T06:00:00Z", "2026-11-09T07:00:00Z"
+
+
+def po(body: str, at: str = T1) -> dict[str, Any]:
+    return reply(body, at, login=PO, association="OWNER")
+
+
+def automation(kind: str = "dependency", at: str = T0, marker: str = "") -> dict[str, Any]:
+    comment = blocked(kind, "dispatcher", at, login=BOT, association="NONE")
+    comment["user"]["type"] = "Bot"
+    comment["body"] += marker
+    return comment
+
+
+def rule(comments: list[dict[str, Any]], **inputs: Any) -> dict[str, Any] | None:
+    return decide_open_blocker(_facts(), comments, **inputs)
+
+
+@pytest.mark.parametrize("kind", ["decision", "dependency", "external", "conflict", "resource"])
+def test_646_each_declaration_type_is_open_with_the_default_types(kind):
+    found = rule([blocked(kind, at=T0)])
+
+    assert found == {"type": kind, "declared_by": "Claude Code (implementer, Sonnet)", "url": "https://x/1",
+                     "created_at": T0}
+
+
+def test_646_po_dependency_the_types_are_a_caller_input():
+    # Divergence po-dependency: latest_decision_blocker_json reads only decision declarations.
+    comments = [blocked("dependency", login=PO, association="OWNER")]
+
+    assert rule(comments) is not None and rule(comments, types=FOUR) is not None
+    assert rule(comments, types=("decision",)) is None
+
+
+def test_646_po_decision_the_four_other_types_leave_a_decision_out():
+    # Divergence po-decision: other_blocker_open and dependency_blocker read no decision declaration.
+    comments = [blocked("decision", login=PO, association="OWNER")]
+
+    assert rule(comments) is not None and rule(comments, types=("decision",)) is not None
+    assert rule(comments, types=FOUR) is None and rule(comments, types=("dependency",)) is None
+
+
+@pytest.mark.parametrize("kind", ["decision", "dependency", "external", "conflict", "resource"])
+def test_646_dependency_then_po_unblock_a_later_po_unblock_line_lifts_every_type(kind):
+    assert rule([blocked(kind, at=T0), po("Go ahead.\n  /unblock  ")]) is None
+
+
+@pytest.mark.parametrize("body,at,login", [
+    ("Please /unblock this.", T1, PO),   # the word in prose
+    ("/UNBLOCK", T1, PO),                # not the exact line
+    ("/unblock", T1, "member"),          # not the PO
+    ("/unblock", "2026-11-09T04:00:00Z", PO),  # before the declaration
+])  # fmt: skip
+def test_646_an_unblock_that_is_not_the_pos_later_line_does_not_lift(body, at, login):
+    assert rule([blocked(at=T0), reply(body, at, login=login, association="OWNER")]) is not None
+
+
+@pytest.mark.parametrize("kind", ["dependency", "external", "conflict", "resource"])
+def test_646_dependency_then_member_unblocked_lifts_a_non_decision_declaration(kind):
+    assert rule([blocked(kind, at=T0), reply("Unblocked: the dependency is closed.", T1)]) is None
+
+
+def test_646_an_unblocked_comment_does_not_lift_a_decision_declaration():
+    # PROJECT-STATUS.md → Resolution 1: only the PO's /unblock line resolves a decision blocker.
+    # open_session_blocker lifts it today; the one rule follows the contract (#649 switches the caller).
+    assert rule([blocked("decision", at=T0), reply("Unblocked: done.", T1)]) is not None
+
+
+@pytest.mark.parametrize("body,login,association", [
+    ("Unblocked: done.", "stranger", "NONE"),             # untrusted
+    ("## Blocked Declaration\n\nUnblocked when: x", "member", "MEMBER"),  # a declaration's own field
+])  # fmt: skip
+def test_646_an_untrusted_or_declaration_unblocked_line_does_not_lift(body, login, association):
+    assert rule([blocked(at=T0), reply(body, T1, login=login, association=association)]) is not None
+
+
+def test_646_automation_dependency_blocks_unless_the_caller_leaves_its_declarer_out():
+    # Divergence automation-dependency, resolved by the PO on 2026-11-16 (#556 → Decisions, case (7)).
+    comments = [automation()]
+
+    assert rule(comments) is not None and rule(comments)["declared_by"] == "dispatcher"
+    assert rule(comments, exclude_declarers=AUTOMATION_DECLARERS) is None
+    assert rule([blocked(by="codex-review-bookkeeping (GitHub Actions)")], exclude_declarers=AUTOMATION_DECLARERS) is None
+    assert rule([blocked(by="dispatcher-fan")], exclude_declarers=AUTOMATION_DECLARERS) is not None
+
+
+def test_646_an_untrusted_declaration_does_not_count():
+    assert rule([blocked(login="stranger", association="NONE")]) is None
+
+
+def test_646_the_newest_open_declaration_is_reported_and_a_lifted_one_is_skipped():
+    comments = [blocked("decision", at=T0, url="https://x/0"), blocked("dependency", at=T1, url="https://x/1"),
+                reply("Unblocked: the dependency is closed.", T2)]
+
+    assert rule(comments)["url"] == "https://x/0"  # the decision declaration stays open
+    assert rule(comments + [blocked("external", at="2026-11-09T08:00:00Z", url="https://x/2")])["url"] == "https://x/2"
+
+
+def test_646_the_conflict_round_head_filter_drops_a_bot_declaration_for_another_head():
+    stale = automation(marker="\n<!-- hpw:dispatcher action=conflict-round pr=900 head=def5678 -->")
+    current = automation(marker=f"\n<!-- hpw:dispatcher action=conflict-round pr=900 head={HEAD.upper()} -->")
+
+    assert rule([stale], bot=BOT, head=HEAD) is None
+    assert rule([current], bot=BOT, head=HEAD) is not None
+    assert rule([automation()], bot=BOT, head=HEAD) is not None  # no marker: not stale
+    assert rule([stale]) is not None  # no head given: no filter
+
+
+def test_646_the_bot_login_is_trusted_as_in_the_conflict_round():
+    comment = blocked(login=BOT, association="NONE")
+
+    assert rule([comment]) is None and rule([comment], bot=BOT, head=HEAD) is not None
+
+
+def test_646_a_passing_refine_summary_after_a_dependency_declaration_lifts_it():
+    # facts.dependency_blocker (#529): a later passing refine Session Summary lifts a dependency declaration only.
+    assert rule([blocked("dependency", at=T0)], refine_pass_at=T1) is None
+    assert rule([blocked("dependency", at=T1)], refine_pass_at=T0) is not None
+    assert rule([blocked("external", at=T0)], refine_pass_at=T1) is not None
+
+
+def test_646_a_declaration_without_a_type_line_counts_only_for_any_type():
+    comment = blocked()
+    comment["body"] = "## Blocked Declaration\n\nUnblocked when: a thing\n"
+
+    assert rule([comment]) is None
+    assert rule([comment], types=None) == {"type": None, "declared_by": None, "url": "https://x/1",
+                                          "created_at": "2026-11-09T05:33:22Z"}
+
+
+def test_646_the_heading_must_start_a_line():
+    comment = blocked()
+    comment["body"] = "Quoted: ## Blocked Declaration\nType: dependency\nDeclared by: member\n"
+
+    assert rule([comment]) is None
+
+
+CROSS = {
+    "po-dependency": [blocked("dependency", login=PO, association="OWNER")],
+    "po-decision": [blocked("decision", login=PO, association="OWNER")],
+    "dependency-then-po-unblock": [blocked(at=T0), po("/unblock")],
+    "dependency-then-member-unblocked": [blocked(at=T0), reply("Unblocked: the dependency is closed.", T1)],
+    "automation-dependency": [automation()],
+    "external-then-dependency-unblocked": [blocked("external", at=T0), blocked("dependency", at=T1),
+                                           reply("Unblocked: done.", T2)],
+    "unblock-before": [po("/unblock", T0), blocked(at=T1)],
+    "untrusted": [blocked(login="stranger", association="NONE")],
+    "none": [reply("A comment.", T0)],
+}
+
+
+@pytest.mark.parametrize("case", sorted(CROSS))
+def test_646_the_rule_decides_as_each_python_copy_with_that_copys_inputs(case):
+    comments, facts = CROSS[case], _facts()
+
+    assert (rule(comments, types=FOUR) is not None) is other_blocker_open(facts, comments, po_unblock=True)
+    assert (rule(comments, types=("dependency",)) is not None) is (facts.dependency_blocker(comments, {})["state"] == "open")
+    assert rule(comments, exclude_declarers=AUTOMATION_DECLARERS) == open_session_blocker(facts, comments)
+
+
+# ── the CLI: session-blocker decide | open (ADR-014 call contract) ───────────
+
+
+def run(argv: list[str], capsys, gateway: Any = None) -> tuple[int, dict[str, Any]]:
+    code = dispatcher_main(argv, gateway_factory=lambda repo: gateway)  # type: ignore[arg-type,return-value]
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_646_decide_reports_the_open_declaration(tmp_path, capsys):
+    path = tmp_path / "comments.json"
+    path.write_text(json.dumps([automation()]))
+
+    code, out = run(["session-blocker", "decide", "--input", str(path), "--po-login", PO], capsys)
+    assert code == 0 and out["ok"] is True and out["block"] == "session-blocker" and out["operation"] == "decide"
+    assert out["result"] == "read" and out["outcome"] == "open" and out["declared_by"] == "dispatcher"
+
+    code, out = run(["session-blocker", "decide", "--input", str(path), "--exclude-declarer", "dispatcher"], capsys)
+    assert code == 0 and out["outcome"] == "none"
+
+
+def test_646_decide_passes_each_caller_input(tmp_path, capsys):
+    path = tmp_path / "comments.json"
+    path.write_text(json.dumps([blocked("decision", at=T0), po("/unblock", T1)]))
+    base = ["session-blocker", "decide", "--input", str(path)]
+
+    assert run(base + ["--po-login", PO], capsys)[1]["outcome"] == "none"
+    assert run(base + ["--po-login", "someone-else"], capsys)[1]["outcome"] == "open"
+    assert run(base + ["--po-login", "someone-else", "--type", "dependency"], capsys)[1]["outcome"] == "none"
+
+
+@pytest.mark.parametrize("content", ["not json", '{"a": 1}', "[1, 2]"])
+def test_646_decide_fails_closed_on_unreadable_input(tmp_path, capsys, content):
+    path = tmp_path / "comments.json"
+    path.write_text(content)
+
+    code, out = run(["session-blocker", "decide", "--input", str(path)], capsys)
+    assert code == 3 and out["ok"] is False and out["result"] == "unreadable" and out["outcome"] == "unreadable"
+
+
+def test_646_decide_fails_closed_on_a_missing_input_file(tmp_path, capsys):
+    code, out = run(["session-blocker", "decide", "--input", str(tmp_path / "absent.json")], capsys)
+    assert code == 3 and out["outcome"] == "unreadable"
+
+
+def test_646_open_reads_the_story_and_fails_closed_when_the_comments_are_unreadable(capsys):
+    argv = ["session-blocker", "open", "--repo", "o/r", "--issue", str(STORY), "--po-login", PO]
+
+    code, out = run(argv, capsys, Comments([blocked()]))
+    assert code == 0 and out["operation"] == "open" and out["outcome"] == "open" and out["type"] == "dependency"
+
+    code, out = run(argv, capsys, Comments(GatewayError("list comments", "HTTP 502")))
+    assert code == 3 and out["result"] == "unreadable" and out["outcome"] == "unreadable"
+
+
+def test_646_read_open_blocker_uses_the_po_login_of_its_environment():
+    comments = Comments([blocked(at=T0), po("/unblock")])
+
+    assert read_open_blocker(comments, STORY, env={"DECISION_BLOCKER_PO_LOGIN": PO}).fields["outcome"] == "none"  # type: ignore[arg-type]
+    assert read_open_blocker(comments, STORY, env={}).fields["outcome"] == "open"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("extra", [["--type", "blocked"], ["--bot", BOT], ["--head", HEAD], ["--any-type", "--type", "decision"]])
+def test_646_invalid_inputs_exit_two(tmp_path, capsys, extra):
+    code, out = run(["session-blocker", "decide", "--input", str(tmp_path / "x.json")] + extra, capsys)
+    assert code == 2 and out["result"] == "invalid"
+
+
+def test_646_open_needs_a_repository(capsys):
+    code, out = run(["session-blocker", "open", "--issue", str(STORY)], capsys)
+    assert code == 2 and out["result"] == "invalid"
