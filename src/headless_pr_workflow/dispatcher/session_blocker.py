@@ -99,6 +99,7 @@ def _stale_for_head(comment: dict[str, Any], bot: str, head: str) -> bool:
 def decide_open_blocker(
     facts: _Facts, comments: list[dict[str, Any]], *, types: Iterable[str] | None = BLOCKED_TYPES,
     exclude_declarers: Iterable[str] = (), bot: str = "", head: str = "", refine_pass_at: str = "",
+    po_unblock: bool = True,
 ) -> dict[str, Any] | None:
     """The newest open Blocked Declaration as ``{type, declared_by, url, created_at}``, or ``None`` (issue #646).
 
@@ -130,7 +131,7 @@ def decide_open_blocker(
         if (declared_by and excluded and _declared_by_any(declared_by, excluded)) or _stale_for_head(comment, bot, head):
             continue
         since = str(comment.get("created_at") or "")
-        if facts.po_login and _po_unblocked_after(comments, facts.po_login, since):
+        if po_unblock and facts.po_login and _po_unblocked_after(comments, facts.po_login, since):
             continue
         if kind != "decision" and any(
             facts.trusted(c) and str(c.get("created_at") or "") > since and _lifts(str(c.get("body") or ""))

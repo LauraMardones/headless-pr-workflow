@@ -135,14 +135,15 @@ def _kind(issue: Mapping[str, Any]) -> str | None:
     return known_type(_labels(dict(issue)))
 
 
-def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
+def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]], *, po_unblock: bool = False) -> bool:
     """An open Blocked Declaration of type dependency, external, conflict or resource (see the command page).
 
     A thin shim (issue #649): the one open-blocker rule, ``session_blocker.decide_open_blocker``, decides
-    with these four types; a later standalone PO ``/unblock`` line or trusted ``Unblocked`` comment lifts it.
+    with these four types; a later trusted ``Unblocked`` comment lifts it, and a later standalone PO
+    ``/unblock`` line only when the caller passes ``po_unblock=True`` (#578).
     """
 
-    return decide_open_blocker(facts, comments, types=_BLOCKED_TYPES) is not None
+    return decide_open_blocker(facts, comments, types=_BLOCKED_TYPES, po_unblock=po_unblock) is not None
 
 
 def _epic_refined(entry: Mapping[str, Any]) -> bool:
