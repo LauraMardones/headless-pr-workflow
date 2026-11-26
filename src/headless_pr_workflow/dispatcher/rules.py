@@ -202,14 +202,11 @@ RULES: tuple[Rule, ...] = (
           "the poll applies the rule only to review-step rows, the resume pass also to merge-step and "
           "fix-round rows."),
     _rule("merge_owner_evidence", "Whether the head carries the dispatcher's merge-owner marker.", MARKER,
-          [(MARKER, "marker_holds"), (CONFLICT_ROUND_SH, "owned"), (INVOKE, "head_has_merge_owner_marker"),
-           (INVOKE, "block_ownerless_head"), (MERGE, "holds_rc"), (POLL, "OWNER_MISSING_DUE")],
+          [(MARKER, "decide_merge_owner")],
           "poll resume",
+          "test_dispatcher_marker_block.py test_dispatcher_parity_review_loop.py test_dispatcher_rule_guard.py "
           "test_dispatcher_in_merge_owner_missing.py test_dispatcher_conflict_round.py "
-          "test_dispatcher_merge_script.py",
-          "`$owned` also accepts the evidence-pending copy, `head_has_merge_owner_marker` only the marker and "
-          "counts a failed read as present; `dispatcher-merge.sh` uses `marker holds`, so a later PO "
-          "`/unblock` voids ownership."),
+          "test_dispatcher_merge_script.py"),
     _rule("attempt_once_per_head", "No second /merge or /review session on the same head.", MARKER,
           [(MARKER, "marker_holds"), (INVOKE, "merge_attempt_marker"), (INVOKE, "review_attempt_marker")],
           "resume",

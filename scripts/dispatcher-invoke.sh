@@ -3053,12 +3053,21 @@ resume_in_merge_story() {
             echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the merge owner marker for PR #$pr_number at head ${pr_head:0:7} is still missing; /merge waits for the retry"
             return 0
         fi
-        # Issue #406: a head with no dispatcher marker (after ensure_merge_owner
+        # Issue #406: a head with no merge-owner evidence (after ensure_merge_owner
         # posted a pending copy) was pushed outside a dispatcher session. The
         # gate in dispatcher-merge.sh would refuse it: say so once, run no /merge.
-        if [[ -n "$pr_head" ]] && ! head_has_merge_owner_marker "$pr_number" "$pr_head"; then
-            block_ownerless_head "$issue_num" "$pr_number" "$pr_head" in-merge
-            return 0
+        # Evidence that cannot be read runs no /merge either (issue #651).
+        if [[ -n "$pr_head" ]]; then
+            local evidence_rc=0
+            head_merge_owner_evidence "$pr_number" "$pr_head" || evidence_rc=$?
+            if [[ $evidence_rc -eq 3 ]]; then
+                echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: could not read the merge-owner evidence on PR #$pr_number at head ${pr_head:0:7}; the next run decides again"
+                return 0
+            fi
+            if [[ $evidence_rc -ne 0 ]]; then
+                block_ownerless_head "$issue_num" "$pr_number" "$pr_head" in-merge
+                return 0
+            fi
         fi
         echo ""
         echo "${LOG_PREFIX}[RESUME] #$issue_num: /merge PR #$pr_number"
@@ -3366,13 +3375,16 @@ check_review_loop_pr() {
     return 0
 }
 
-# head_has_merge_owner_marker <pr> <head> — 0 only when the dispatcher's own
-# account left the merge-owner marker for exactly this head on the PR. A failed
-# read counts as present: the merge script reads the PR itself and decides.
-head_has_merge_owner_marker() {
-    local own
-    own=$(bot_comments_json "$1") || return 0
-    jq -e --arg m "$(merge_owner_marker "$1" "$2")" 'any(.[]; (.body // "") | contains($m))' <<< "$own" >/dev/null
+# head_merge_owner_evidence <pr> <head> — the one merge-owner-evidence rule,
+# `hpw dispatcher marker merge-owner` (marker.py, issue #651): 0 when the
+# dispatcher's own account left the merge-owner marker for exactly this head on
+# the PR, or its evidence-pending copy; 1 when it did not; 3 when the account or
+# the PR comments cannot be read (fail closed: the caller runs no /merge).
+head_merge_owner_evidence() {
+    local rc=0
+    "$HPW_BIN" dispatcher marker merge-owner --repo "$REPO" --pr "$1" --head "$2" >/dev/null 2>&1 || rc=$?
+    [[ $rc -le 1 ]] || rc=3
+    return "$rc"
 }
 
 # block_ownerless_head <issue> <pr> <head> [in-merge] — one blocker per head, sent as one
