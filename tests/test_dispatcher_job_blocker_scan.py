@@ -184,16 +184,18 @@ def test_ac1_ac2_job_blocker_registers_one_po_blocker(s, body, blocker_type, whe
 
 @needs_tools
 def test_606_scan_reads_the_next_step_line_into_the_context(s):
-    step = "run `/review 900` in Claude Code or Codex; then the Codex review bookkeeping continues."
-    s.comments(STORY, [c(unknown_format() + f"\nNext step: {step}", at=T1)])
+    body = unknown_format()
+    step = next(l for l in body.splitlines() if l.startswith("Next step: "))[len("Next step: "):]
+    s.comments(STORY, [c(body, at=T1)])
     assert s.scan().returncode == 0
     context = json.loads(only_event(s)["context"])
-    assert context["next_step"] == step
+    assert context["next_step"] == step and step.startswith("reply `/unblock` on #7 on GitHub; then ")
 
 
 @needs_tools
 def test_606_a_declaration_without_a_next_step_line_registers_an_empty_next_step(s):
-    s.comments(STORY, [c(unknown_format(), at=T1)])
+    body = "\n".join(l for l in unknown_format().splitlines() if not l.startswith("Next step:")) + "\n"
+    s.comments(STORY, [c(body, at=T1)])
     assert s.scan().returncode == 0
     assert json.loads(only_event(s)["context"])["next_step"] == ""
 

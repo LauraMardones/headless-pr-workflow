@@ -16,11 +16,11 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from .admission import check_start, classify_executable_type, executor_labels
 from .board_sync import sync_board
-from .facts import read_facts
+from .facts import _Facts, read_facts
 from .failure_stop import InvalidRecord, validate_record
 from .failure_stop import check as failure_stop_check
 from .failure_stop import record as failure_stop_record
@@ -30,7 +30,7 @@ from .in_flight import plan as plan_in_flight
 from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, list_markers, marker_holds, marker_text,
                      whoami, write_marker)
 from .scheduler import InvalidLimits, load_limits, next_action
-from .session_blocker import read_session_blocker
+from .session_blocker import BLOCKED_TYPES, decide_open_blocker_result, read_open_blocker, read_session_blocker
 from .state import FILE_NAMES, read_pending, read_state, write_state
 from .status import read_status
 from .write import (
@@ -140,6 +140,21 @@ def build_parser() -> argparse.ArgumentParser:
     sb_read.add_argument("--repo", required=True)
     sb_read.add_argument("--issue", type=_positive, required=True)
     sb_read.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
+    # The one open-blocker rule (#646): ``decide`` over comments already read, ``open`` over the story's comments.
+    sb_decide = session_blocker_ops.add_parser("decide", add_help=False)
+    sb_decide.add_argument("--input", default="-")  # one JSON array of comments, all authors; "-" reads stdin
+    sb_open = session_blocker_ops.add_parser("open", add_help=False)
+    sb_open.add_argument("--repo", required=True)
+    sb_open.add_argument("--issue", type=_positive, required=True)
+    for sb_rule in (sb_decide, sb_open):
+        sb_rule.add_argument("--type", action="append", dest="types", default=None)  # repeatable; none: all five
+        sb_rule.add_argument("--any-type", action="store_true")  # every declaration, with or without a Type: line
+        sb_rule.add_argument("--exclude-declarer", action="append", default=[])
+        sb_rule.add_argument("--po-login", default=None)
+        sb_rule.add_argument("--bot", default="")
+        sb_rule.add_argument("--head", default="")
+        sb_rule.add_argument("--refine-pass-at", default="")
+        sb_rule.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
 
     in_flight = blocks.add_parser("in-flight", add_help=False)
     in_flight_ops = in_flight.add_subparsers(dest="operation", parser_class=_Parser)
@@ -344,13 +359,23 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
             "| hpw dispatcher in-flight plan|linked ... "
-            "| hpw dispatcher session-blocker read ... "
+            "| hpw dispatcher session-blocker read|decide|open ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
             "| hpw dispatcher catch-all numbers "
             "| hpw dispatcher failure-stop check|record ... "
             "| hpw dispatcher admission limits|type|executor|start ...")
     if args.block in ("catch-all", "admission"):
         return  # reads a constant: no repository
+    if args.block == "session-blocker" and args.operation in ("decide", "open"):
+        unknown = sorted({t.lower() for t in args.types or []} - set(BLOCKED_TYPES))
+        if unknown:
+            raise InvalidArguments(f"--type must be one of {', '.join(BLOCKED_TYPES)}: {', '.join(unknown)}")
+        if args.any_type and args.types:
+            raise InvalidArguments("--any-type and --type exclude each other")
+        if bool(args.bot.strip()) != bool(args.head.strip()):
+            raise InvalidArguments("--bot and --head go together")
+        if args.operation == "decide":
+            return  # decides over comments it is given: no repository
     if args.block == "marker" and args.operation == "decide":
         if not args.marker.strip():
             raise InvalidArguments("--marker must not be empty")
@@ -469,6 +494,27 @@ def _run_marker_decide(args: argparse.Namespace, settings: Settings) -> int:
     return _emit(decide_marker(comments, args.login, args.marker, po_login=po_login, cancel=args.cancel))
 
 
+def _open_blocker_inputs(args: argparse.Namespace) -> dict[str, Any]:
+    return {"types": None if args.any_type else tuple(t.lower() for t in args.types or BLOCKED_TYPES),
+            "exclude_declarers": tuple(args.exclude_declarer), "bot": args.bot.strip(), "head": args.head.strip(),
+            "refine_pass_at": args.refine_pass_at.strip()}  # fmt: skip
+
+
+def _open_blocker_env(args: argparse.Namespace, settings: Settings) -> dict[str, str]:
+    return {"DECISION_BLOCKER_PO_LOGIN": settings.po_login if args.po_login is None else args.po_login.strip()}
+
+
+def _run_open_blocker_decide(args: argparse.Namespace, settings: Settings) -> int:
+    facts = _Facts(None, _open_blocker_env(args, settings))  # type: ignore[arg-type]  # trust needs no gateway
+    try:
+        raw = sys.stdin.buffer.read() if args.input == "-" else Path(args.input).read_bytes()
+        comments = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return _emit(Result("decide", "unreadable", error=f"read input: {exc}", fields={"outcome": "unreadable"},
+                            block="session-blocker"))  # fmt: skip
+    return _emit(decide_open_blocker_result(facts, comments, **_open_blocker_inputs(args)))
+
+
 def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
     if args.operation == "whoami":
         return _emit(whoami(gateway))
@@ -569,6 +615,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_admission(args)
     if args.block == "marker" and args.operation == "decide":
         return _run_marker_decide(args, settings or Settings.from_env())
+    if args.block == "session-blocker" and args.operation == "decide":
+        return _run_open_blocker_decide(args, settings or Settings.from_env())
 
     factory = gateway_factory or (lambda repo: GhGateway(repo))
     gateway = factory(args.repo or "")
@@ -588,6 +636,9 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_scheduler(args, gateway)
     if args.block == "in-flight":
         return _run_in_flight(args, settings)
+    if args.block == "session-blocker" and args.operation == "open":
+        return _emit(read_open_blocker(gateway, args.issue, env=_open_blocker_env(args, settings),
+                                       **_open_blocker_inputs(args)))  # fmt: skip
     if args.block == "session-blocker":
         return _emit(read_session_blocker(gateway, args.issue))
     if args.block == "codex-worker":

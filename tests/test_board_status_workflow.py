@@ -48,6 +48,10 @@ def job(text):
     return text.split("\n  board-status:\n", 1)[1]
 
 
+def debounce_job(text):
+    return text.split("\n  debounce:\n", 1)[1].split("\n  board-status:\n", 1)[0]
+
+
 def assert_events(text):
     assert triggers(text) == EVENTS
 
@@ -86,10 +90,23 @@ def test_webhook_only_thread_event_is_not_an_invalid_actions_trigger():
 def test_events_run_only_existing_step_commands_and_no_session():
     text = EVENT.read_text(encoding="utf-8")
     assert re.findall(r"^\s+run: (.*)$", text, re.M) == [
-        f"bash scripts/dispatcher-workflow-step.sh {name}" for name in ("guard", "scope", "status-sync")
+        f"bash scripts/dispatcher-workflow-step.sh {name}" for name in ("guard", "debounce", "guard", "scope", "status-sync")
     ]
-    assert re.findall(r"^\s+uses: (.*)$", text, re.M) == ["actions/checkout@v4"]
+    assert re.findall(r"^\s+uses: (.*)$", text, re.M) == ["actions/checkout@v4"] * 2
     assert "run: |" not in text
+
+
+def test_debounce_job_gates_the_writer_and_holds_no_project_token():
+    text = EVENT.read_text(encoding="utf-8")
+    block = debounce_job(text)
+    assert "PROJECT_TOKEN" not in block
+    assert "GH_TOKEN: ${{ github.token }}" in block and "actions: read" in block
+    assert "concurrency" not in block
+    assert "outputs:\n      latest: ${{ steps.debounce.outputs.latest }}" in block
+    assert "if: steps.guard.outputs.enabled == 'true'" in block
+    writer = job(text)
+    assert writer.startswith("    needs: debounce\n    if: ${{ needs.debounce.outputs.latest == 'true' }}\n")
+    assert "sleep" not in writer and "debounce" not in writer.split("steps:", 1)[1]
 
 
 def assert_group(text):

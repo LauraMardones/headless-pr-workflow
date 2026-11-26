@@ -737,7 +737,8 @@ def test_second_run_posts_no_second_blocker(events, action, blocker_type):
     assert lines[4].startswith("Unblocked when: ")
     assert lines[5] == "Owner: PO (@LauraMardones)"
     assert lines[6].startswith("State of in-progress work: PR #123 at head ")
-    assert lines[7] == "Resume instruction: n/a"
+    assert lines[7].startswith("Next step: ")
+    assert "Resume instruction" not in github.story_comments[0]
     assert lines[8] == first.decision.marker
     if action == ACTION_BLOCKER_EXTERNAL:
         assert UNKNOWN_URL in github.story_comments[0]
@@ -2020,3 +2021,50 @@ def test_a_blocked_story_with_an_open_decision_blocker_is_still_held():
 
 def test_the_entry_guard_is_in_review_or_blocked_only():
     assert bookkeeping.ACTED_ON_STATUSES == ("In review", "Blocked")
+
+
+def _kind_bodies():
+    from headless_pr_workflow.codex_review_bookkeeping import StoryBoard
+
+    story = StoryBoard(number=290, title="Story: scenario", status="In review")
+    kinds = {
+        "resource": (ACTION_BLOCKER_RESOURCE, "Codex posts a review result"),
+        "unknown-reply": (ACTION_BLOCKER_EXTERNAL, "the Codex reply is understood"),
+        "threads": (ACTION_BLOCKER_EXTERNAL, "the listed threads are resolved"),
+    }
+    from headless_pr_workflow.codex_review_bookkeeping import Decision
+
+    return {
+        name: bookkeeping.blocker_body(
+            Decision(
+                pr=123, head_sha="a" * 40, story=290, story_status="In review", codex_result="unknown",
+                codex_url=None, action=action, reason="reason", requests_posted=3, max_requests=3,
+                marker=f"<!-- m {name} -->", blocker_unblocked_when=unblocked,
+            ),
+            story,
+        )
+        for name, (action, unblocked) in kinds.items()
+    }
+
+
+@pytest.mark.parametrize("name", ["resource", "unknown-reply", "threads"])
+def test_each_blocker_kind_names_the_next_step_in_three_parts(name):
+    from headless_pr_workflow.next_step import GITHUB_REPLY, parse_declaration
+    from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE
+
+    body = _kind_bodies()[name]
+    step = parse_declaration(body)[None]
+
+    assert (step.command, step.number, step.where) == ("/unblock", 290, GITHUB_REPLY)
+    assert step.then
+    assert "Resume instruction" not in body
+    assert CODEX_REVIEW_TRIGGER_PHRASE not in step.text.lower()
+
+
+def test_a_blocker_without_a_part_of_the_next_step_fails_the_parser():
+    from headless_pr_workflow.next_step import NextStepError, parse
+
+    line = next(l for l in _kind_bodies()["resource"].splitlines() if l.startswith("Next step"))
+    for broken in (line.replace("`/unblock`", ""), line.replace("#290", "#"), line.split("; then")[0] + "."):
+        with pytest.raises(NextStepError):
+            parse(broken)
