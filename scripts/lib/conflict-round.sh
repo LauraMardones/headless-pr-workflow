@@ -85,9 +85,10 @@ conflict_open_blocker() {
 # conflict_merge_owner <dispatcher-login> <pr> <head>
 #   Reads the PR's conversation comments on stdin and prints true or false:
 #   whether the one merge-owner-evidence rule finds evidence for the head;
-#   fails on a read error.
+#   fails on a read error. A PR with no head SHA has no evidence.
 conflict_merge_owner() {
     local out rc
+    [[ -n "$3" ]] || { echo false; return 0; }
     out=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher marker merge-owner-decide \
         --login "$1" --pr "$2" --head "$3")
     rc=$?
