@@ -27,8 +27,8 @@ from .failure_stop import record as failure_stop_record
 from .gateway import Gateway, GhGateway, decide_merge_gates, mask_tokens, parse_gate_line, read_merge_gates
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
-from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, list_markers, marker_holds, marker_text,
-                     whoami, write_marker)
+from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, decide_merge_owner_result, list_markers,
+                     marker_holds, marker_text, merge_owner_evidence, whoami, write_marker)
 from .scheduler import InvalidLimits, load_limits, next_action
 from .session_blocker import BLOCKED_TYPES, decide_open_blocker_result, read_open_blocker, read_session_blocker
 from .state import FILE_NAMES, read_pending, read_state, write_state
@@ -223,6 +223,17 @@ def build_parser() -> argparse.ArgumentParser:
     m_decide.add_argument("--po-login", default=None)
     m_decide.add_argument("--input", default="-")  # one JSON array of comments, all authors; "-" reads stdin
 
+    m_owner = marker_ops.add_parser("merge-owner", add_help=False)  # merge-owner evidence for a head (#647)
+    m_owner.add_argument("--pr", type=_positive, required=True)
+    m_owner.add_argument("--head", default="")  # empty: the PR's current head is read
+    common(m_owner, attempts=False)
+
+    m_owner_decide = marker_ops.add_parser("merge-owner-decide", add_help=False)  # over comments already read
+    m_owner_decide.add_argument("--login", required=True)
+    m_owner_decide.add_argument("--pr", type=_positive, required=True)
+    m_owner_decide.add_argument("--head", required=True)
+    m_owner_decide.add_argument("--input", default="-")  # one JSON array of the PR's comments; "-" reads stdin
+
     m_list = marker_ops.add_parser("list", add_help=False)
     m_list.add_argument("--number", type=_positive, required=True)
     m_list.add_argument("--marker", default="")
@@ -366,7 +377,7 @@ def _validate(args: argparse.Namespace) -> None:
     if args.block not in _BLOCKS or not args.operation:
         raise InvalidArguments(
             "usage: hpw dispatcher write comment|board-status|label|retry-pending ... "
-            "| hpw dispatcher marker write|holds|decide|list|whoami ... "
+            "| hpw dispatcher marker write|holds|decide|merge-owner|merge-owner-decide|list|whoami ... "
             "| hpw dispatcher state read|write|read-pending ... "
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
@@ -399,6 +410,11 @@ def _validate(args: argparse.Namespace) -> None:
         if not args.marker.strip():
             raise InvalidArguments("--marker must not be empty")
         return  # decides over comments it is given: no repository
+    if args.block == "marker" and args.operation in ("merge-owner", "merge-owner-decide"):
+        if (args.head or args.operation == "merge-owner-decide") and not _SHA.match(args.head):
+            raise InvalidArguments("--head must be a commit SHA")
+        if args.operation == "merge-owner-decide":
+            return  # decides over comments it is given: no repository
     # State kept per repository, and the comment state, need the repository; the day files do not.
     repo_free = args.block == "state" and args.operation in ("read", "write") and args.name in (
         "usage-sessions", "usage-notified", "allowance-hold") and not args.repo
@@ -513,6 +529,16 @@ def _run_marker_decide(args: argparse.Namespace, settings: Settings) -> int:
     return _emit(decide_marker(comments, args.login, args.marker, po_login=po_login, cancel=args.cancel))
 
 
+def _run_merge_owner_decide(args: argparse.Namespace) -> int:
+    try:
+        raw = sys.stdin.buffer.read() if args.input == "-" else Path(args.input).read_bytes()
+        comments = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return _emit(Result("merge-owner-decide", "unreadable", error=f"read input: {exc}", block="marker",
+                            fields={"head": args.head.lower(), "evidence": None, "url": None, "created_at": None}))  # fmt: skip
+    return _emit(decide_merge_owner_result(comments, args.login, args.pr, args.head))
+
+
 def _open_blocker_inputs(args: argparse.Namespace) -> dict[str, Any]:
     return {"types": None if args.any_type else tuple(t.lower() for t in args.types or BLOCKED_TYPES),
             "exclude_declarers": tuple(args.exclude_declarer), "bot": args.bot.strip(), "head": args.head.strip(),
@@ -555,6 +581,8 @@ def _run_merge_gates(args: argparse.Namespace) -> int:
 def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
     if args.operation == "whoami":
         return _emit(whoami(gateway))
+    if args.operation == "merge-owner":
+        return _emit(merge_owner_evidence(gateway, args.pr, args.head))
     if args.operation == "list":
         return _emit(list_markers(gateway, args.number, marker=args.marker, author=args.author))
     if args.operation == "holds":
@@ -652,6 +680,8 @@ def main(argv: Sequence[str], *, gateway_factory: GatewayFactory | None = None, 
         return _run_admission(args)
     if args.block == "marker" and args.operation == "decide":
         return _run_marker_decide(args, settings or Settings.from_env())
+    if args.block == "marker" and args.operation == "merge-owner-decide":
+        return _run_merge_owner_decide(args)
     if args.block == "session-blocker" and args.operation == "decide":
         return _run_open_blocker_decide(args, settings or Settings.from_env())
     if args.block == "merge-gates":

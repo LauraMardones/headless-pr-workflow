@@ -8,6 +8,8 @@ Result words and exit codes:
 
 - ``holds`` → ``holds`` (0), ``absent``, ``unblocked``, ``cancelled`` (1), ``unreadable`` (3)
 - ``decide`` → as ``holds``, over comments read from ``--input`` instead of GitHub (issue #628)
+- ``merge-owner`` → ``holds`` (0), ``absent`` (1), ``unreadable`` (3): merge-owner evidence for a head (issue #647)
+- ``merge-owner-decide`` → as ``merge-owner``, over comments read from ``--input`` instead of GitHub
 - ``list``, ``whoami`` → ``read`` (0) or ``unreadable`` (3)
 - ``write`` → Block 1's words (``written``, ``already``, ``dry-run``; ``failed`` is exit 1)
 """
@@ -165,6 +167,84 @@ def decide_marker(
         return Result("decide", "unreadable", error="the login is empty", fields=_decided_by(None), block=BLOCK)
     word, comment = decide_holds(comments, login.strip(), marker, po_login=po_login, cancel=cancel)
     return Result("decide", word, fields=_decided_by(comment), block=BLOCK)
+
+
+def merge_owner_marker(pr: int, head: str) -> str:
+    """The merge-owner marker ``record_merge_owner`` posts for ``head`` on PR ``pr``."""
+
+    return dispatcher_marker(f"action=merge-owner pr={pr} head={head}")
+
+
+def merge_owner_pending_prefix(head: str) -> str:
+    """The start of the evidence-pending copy of the merge-owner marker (issue #348) for ``head``."""
+
+    return f"<!-- hpw:dispatcher action=evidence-pending item=merge-owner head={head} "
+
+
+def decide_merge_owner(
+    comments: list[dict[str, Any]], login: str, pr: int, head: str,
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    """The one merge-owner-evidence rule (issue #647): ``(word, evidence, deciding comment)``.
+
+    The head has merge-owner evidence (``holds``) when a comment of ``login`` on PR ``pr``
+    carries the merge-owner marker for exactly ``head`` (``evidence`` ``marker``) or, with no
+    such comment, its evidence-pending copy (``evidence`` ``evidence-pending``, decision 5 of
+    #556). A later PO ``/unblock`` does not void it (decision 6 of #556). The match ignores
+    case, as ``conflict_round_rule`` does. With neither the word is ``absent``. ``comments``
+    are the PR's comments of all authors.
+    """
+
+    head = head.strip().lower()
+    own = [c for c in comments if _author(c) == login]
+    for evidence, text in (("marker", merge_owner_marker(pr, head)), ("evidence-pending", merge_owner_pending_prefix(head))):
+        found = [c for c in own if text in str(c.get("body") or "").lower()]
+        if found:
+            return "holds", evidence, _newest(found)
+    return "absent", None, None
+
+
+def _merge_owner_result(operation: str, word: str, evidence: str | None, comment: dict[str, Any] | None,
+                        head: str | None, error: str | None = None) -> Result:  # fmt: skip
+    return Result(operation, word, error=error, block=BLOCK,
+                  fields={"head": head, "evidence": evidence, **_decided_by(comment)})  # fmt: skip
+
+
+def merge_owner_evidence(
+    gateway: Gateway, pr: int, head: str = "", *, env: Mapping[str, str] | None = None,
+) -> Result:
+    """``decide_merge_owner`` over the comments of PR ``pr``, as the dispatcher's account.
+
+    Without ``head`` the PR's current head is read. A PR, login or comment list that cannot
+    be read gives ``unreadable`` (fail closed: no merge-owner evidence).
+    """
+
+    try:
+        if not head.strip():
+            head = str(((gateway.pull_request(pr).get("head") or {}).get("sha")) or "").strip()
+            if not head:
+                raise Unreadable(f"read PR #{pr}: the head SHA could not be read")
+        login = resolve_login(gateway, DEFAULT_AUTHOR, env)
+        comments = gateway.list_comments(pr)
+    except (Unreadable, GatewayError) as exc:
+        return _merge_owner_result("merge-owner", "unreadable", None, None, head.strip().lower() or None, str(exc))
+    word, evidence, comment = decide_merge_owner(comments, login, pr, head)
+    return _merge_owner_result("merge-owner", word, evidence, comment, head.strip().lower())
+
+
+def decide_merge_owner_result(comments: Any, login: str, pr: int, head: str) -> Result:
+    """``marker merge-owner-decide``: ``decide_merge_owner`` over comments a caller already read.
+
+    Comments that are not a list of objects, or an empty login, give ``unreadable``.
+    """
+
+    head = head.strip().lower()
+    if not isinstance(comments, list) or not all(isinstance(c, dict) for c in comments):
+        return _merge_owner_result("merge-owner-decide", "unreadable", None, None, head,
+                                   "input: the comments are not a JSON array of objects")  # fmt: skip
+    if not login.strip():
+        return _merge_owner_result("merge-owner-decide", "unreadable", None, None, head, "the login is empty")
+    word, evidence, comment = decide_merge_owner(comments, login.strip(), pr, head)
+    return _merge_owner_result("merge-owner-decide", word, evidence, comment, head)
 
 
 def list_markers(
