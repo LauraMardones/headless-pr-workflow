@@ -593,3 +593,43 @@ def test_the_gateway_edits_a_body_through_stdin():
 def test_the_gateway_reads_a_body():
     assert Recorded([{"body": None}]).issue_body(10) == ""
     assert Recorded([{"body": "x"}]).issue_body(10) == "x"
+
+
+# ── the rate limit is named (issue #660) ─────────────────────────────────────
+
+
+class RateLimitedGateway(SyncGateway):
+    """The open-issue read fails because the rate limit is used up."""
+
+    def __init__(self, reset=1798200000) -> None:
+        super().__init__()
+        self.reset = reset
+
+    def list_open_issues(self):
+        raise GatewayError("read open issues", "gh: API rate limit exceeded for user")
+
+    def rate_limit_reset(self):
+        return self.reset
+
+
+def test_a_rate_limited_read_names_the_limit_and_its_reset_and_writes_nothing(capsys):
+    gw = RateLimitedGateway()
+    result = sync(gw)
+    err = capsys.readouterr().err
+    assert (result.result, result.exit_code) == ("unreadable", 3)
+    assert err.count("[RATE LIMIT]") == 1
+    assert "[RATE LIMIT] read open issues: GitHub API rate limit used up; resets 2026-12-25T12:00:00Z" in err
+    assert "[SYNC] unreadable: " in err
+    assert not gw.writes and not gw.body_writes
+
+
+def test_a_rate_limited_read_with_no_reset_time_says_resets_unknown(capsys):
+    assert sync(RateLimitedGateway(reset=None)).result == "unreadable"
+    assert "[RATE LIMIT] read open issues: GitHub API rate limit used up; resets unknown" in capsys.readouterr().err
+
+
+def test_a_failed_read_that_is_not_a_rate_limit_adds_no_rate_limit_line(capsys):
+    gw = SyncGateway()
+    gw.fail.add("board")
+    assert sync(gw).result == "unreadable"
+    assert "[RATE LIMIT]" not in capsys.readouterr().err

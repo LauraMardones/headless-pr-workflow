@@ -190,6 +190,20 @@ inflight_get_page() {
         "$REST/$1"
 }
 
+# The rate limit (issue #660): GET /rate_limit does not count against it; the status of a read names a 403/429.
+inflight_get_rate_limit() {
+    curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/rate_limit"
+}
+inflight_get_status() {
+    curl -s -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/$1"
+}
+
 # The check runs of a commit (issue #578: the silent stop of a draft PR reads its newest green `pytest` check).
 inflight_get_check_runs() {
     curl -sf \

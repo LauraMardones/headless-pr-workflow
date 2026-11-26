@@ -290,6 +290,15 @@ class GhGateway:
         output = self._run(step, ["api", "--paginate", f"repos/{self.repo}/issues/{number}/comments?per_page=100"])
         return self._pages(step, output, what="comments")
 
+    def rate_limit_reset(self) -> int | None:
+        """The epoch second the core rate limit resets (``GET /rate_limit`` does not count against it), else ``None``."""
+
+        try:
+            reset = json.loads(self._run("read rate limit", ["api", "rate_limit"]))["resources"]["core"]["reset"]
+        except (GatewayError, ValueError, KeyError, TypeError):
+            return None
+        return reset if isinstance(reset, int) else None
+
     def list_open_issues(self) -> list[dict[str, Any]]:
         return self._cached(("open_issues", None), self._list_open_issues)
 

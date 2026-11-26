@@ -104,14 +104,35 @@ inflight_green_completed_at() {
         <<< "$runs"
 }
 
+# inflight_report_rate_limit <step> <path> — after a failed read, prints one `[RATE LIMIT]` line when the
+# failure is a used-up GitHub rate limit (issue #660); nothing otherwise. Needs the poll's
+# `inflight_get_rate_limit` (GET /rate_limit, which does not count against the limit) and
+# `inflight_get_status` (the HTTP status of a read); a caller without them prints nothing.
+# `resets unknown` when /rate_limit cannot be read but the failed read answered 403 or 429.
+inflight_report_rate_limit() {
+    local step="$1" path="$2" doc remaining reset status
+    declare -F inflight_get_rate_limit >/dev/null || return 0
+    if doc=$(inflight_get_rate_limit 2>/dev/null) && remaining=$(jq -r '.resources.core.remaining' <<< "$doc" 2>/dev/null); then
+        [[ "$remaining" == "0" ]] || return 0
+        reset=$(jq -r '.resources.core.reset | todate' <<< "$doc" 2>/dev/null) || reset=unknown
+    else
+        status=$(inflight_get_status "$path" 2>/dev/null || true)
+        [[ "$status" == "403" || "$status" == "429" ]] || return 0
+        reset=unknown
+    fi
+    echo "[RATE LIMIT] $step: GitHub API rate limit used up; resets ${reset:-unknown}" >&2
+}
+
 inflight_compute() {
     local prs issues closed stories row n comments_count executors review_loop
     local pr_json pr_number pr_head pr_draft merged gates story_comments pr_comments
     local tmp rows out links rc=0 green_at
     INFLIGHT_JSON=""
     prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || {
+        inflight_report_rate_limit "read open pull requests" "repos/$REPO/pulls?state=open"
         echo "[IN-FLIGHT] unreadable: the open pull requests could not be read" >&2; return 1; }
     issues=$(inflight_get_all "repos/$REPO/issues?state=open") || {
+        inflight_report_rate_limit "read open issues" "repos/$REPO/issues?state=open"
         echo "[IN-FLIGHT] unreadable: the open issues could not be read" >&2; return 1; }
     closed=$(inflight_get_page "repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=100") || {
         echo "[IN-FLIGHT] Warning: the closed pull requests could not be read; no merged PR is finished in this run" >&2
