@@ -393,10 +393,13 @@ def draft_ready_signal_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pyte
 def open_blocker_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Whether the story has an open Blocked Declaration: ``open``, ``not open`` or ``unreadable``.
 
-    ``other_blocker_open`` runs as the in-flight plan and the board status call it
-    (both ``po_unblock=True``). ``conflict-round.sh:open_blocker`` runs inside ``conflict_round_rule`` for
-    a conflicting PR with no attempt marker: ``blocked`` → open, ``owed`` → not open. A copy whose caller
-    reads the comments itself records what that caller does when the read fails.
+    Since #649 every entry decides through the one rule, ``session_blocker.decide_open_blocker``, with its
+    caller's inputs: ``other_blocker_open`` (four types) as the in-flight plan and the board status call it;
+    ``conflict-round.sh:open_blocker`` (``session-blocker decide --any-type``) inside ``conflict_round_rule``
+    for a conflicting PR with no attempt marker: ``blocked`` → open, ``owed`` → not open; ``open_session_blocker``
+    (automation declarers left out); ``dependency_blocker`` (dependency); ``latest_decision_blocker_json``
+    (``session-blocker decide --type decision``). A copy whose caller reads the comments itself records what
+    that caller does when the read fails.
     """
 
     word = {True: "open", False: "not open"}
@@ -435,7 +438,7 @@ def po_unblock_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Monke
                          default_logins: bool = False) -> dict[str, str]:  # fmt: skip
     """Whether a PO ``/unblock`` after the declaration at ``T0`` lifts it: ``lifted`` or ``not lifted``.
 
-    ``conflict-round.sh:unblocked_after`` runs inside ``conflict_round_rule``: a conflicting PR with an attempt
+    ``conflict-round.sh:conflict_round_rule`` (``marker decide`` since #628) runs: a conflicting PR with an attempt
     marker at ``T0`` is ``tried`` while the marker holds and ``owed`` once it is lifted. ``facts.py:_UNBLOCK_LINE``
     runs inside ``_Facts.decision_blocker``. With ``default_logins`` each copy uses its entry point's default PO
     login instead of an explicit one: the poll's ``PO_LOGIN``, the invoke script's ``DECISION_BLOCKER_PO_LOGIN``,
@@ -454,7 +457,7 @@ def po_unblock_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Monke
                    + f'DECISION_BLOCKER_PO_LOGIN="{invoke_po}"\nlatest_decision_blocker_json {STORY}')  # fmt: skip
     return {
         "write.py:_po_unblocked_after": word[_po_unblocked_after(comments, write_po, T0)],
-        "conflict-round.sh:unblocked_after": {"owed": "lifted", "tried": "not lifted"}.get(rule, rule),
+        "conflict-round.sh:conflict_round_rule (marker decide)": {"owed": "lifted", "tried": "not lifted"}.get(rule, rule),
         "facts.py:_UNBLOCK_LINE": word[_Facts(FakeGateway(f), env).decision_blocker(comments)["state"] == "unblocked"],  # type: ignore[arg-type]
         "dispatcher-invoke.sh:latest_decision_blocker_json": "unreadable" if rc else word[json.loads(out)["unblocked"]],
     }
@@ -563,15 +566,14 @@ CASES["open_blocker"] = {
                     {**same(BLOCKER, "open"), BLOCKER[0]: "not open", BLOCKER[1]: "not open", BLOCKER[4]: "not open"}),
     "dependency-then-po-unblock": (facts(comments=DEPENDENCY + [comment(PO, "/unblock", T1, association="OWNER")]),
                                    same(BLOCKER, "not open")),
-    "dependency-then-member-unblocked": (facts(comments=DEPENDENCY + [UNBLOCKED_BY_MEMBER]),
-                                         {**same(BLOCKER, "not open"), BLOCKER[2]: "open"}),
+    "dependency-then-member-unblocked": (facts(comments=DEPENDENCY + [UNBLOCKED_BY_MEMBER]), same(BLOCKER, "not open")),
     "automation-dependency": (facts(comments=[declaration("dependency", author=BOT, declared_by="dispatcher", user_type="Bot")]),
                               {**same(BLOCKER, "open"), BLOCKER[3]: "not open", BLOCKER[5]: "not open"}),
     "comments-unreadable": (facts(comments=DEPENDENCY, fail=("comments",)),
                             {BLOCKER[0]: "not open", BLOCKER[1]: "unreadable", BLOCKER[3]: "unreadable", BLOCKER[5]: "unreadable"}),
 }
 
-UNBLOCK = "write.py:_po_unblocked_after", "conflict-round.sh:unblocked_after", "facts.py:_UNBLOCK_LINE", "dispatcher-invoke.sh:latest_decision_blocker_json"  # fmt: skip
+UNBLOCK = "write.py:_po_unblocked_after", "conflict-round.sh:conflict_round_rule (marker decide)", "facts.py:_UNBLOCK_LINE", "dispatcher-invoke.sh:latest_decision_blocker_json"  # fmt: skip
 CASES["po_unblock"] = {
     "standalone-line": (unblock_facts("Go ahead.\n/unblock"), same(UNBLOCK, "lifted")),
     "padded-line": (unblock_facts("  /unblock  "), same(UNBLOCK, "lifted")),
@@ -609,18 +611,19 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
         "contract", "WORKTREE-MODEL.md names the branch by agent, so the codex/ prefix is the documented sign of a "
                     "Codex PR; the reserve counts only Codex PRs and keeps its copy."),
     ("open_blocker", "po-dependency"): (
-        "contract", "PROJECT-STATUS.md gives each Blocked Declaration type its own rule; latest_decision_blocker_json "
-                    "reads only decision blockers. The consolidated rule takes the type as an input."),
+        "contract", "Resolved by #649 as a caller input: PROJECT-STATUS.md gives each Blocked Declaration type its own "
+                    "rule, so the one rule takes the types as an input; latest_decision_blocker_json asks for decision "
+                    "blockers only."),
     ("open_blocker", "po-decision"): (
-        "contract", "As po-dependency: other_blocker_open and dependency_blocker read no decision blocker by contract."),
-    ("open_blocker", "dependency-then-member-unblocked"): (
-        "contract", "PROJECT-STATUS.md resolves a non-decision blocker with an Unblocked comment: the conflict-round "
-                    "open_blocker follows other_blocker_open."),
+        "contract", "Resolved by #649 as po-dependency: other_blocker_open and dependency_blocker ask for no decision "
+                    "blocker by contract."),
     ("open_blocker", "automation-dependency"): (
-        "PO decision", "open_session_blocker leaves out automation declarers by design, the others count them; "
-                       "no documented contract decides between them. Needs a PO decision."),
+        "PO decision", "Resolved by #649 under the PO decision of 2026-11-16 on #556 (option A), case (7): an automation "
+                       "declaration blocks the story; open_session_blocker leaves automation declarers out as its caller "
+                       "input, and latest_decision_blocker_json asks for decision blockers only."),
     ("open_blocker", "comments-unreadable"): (
-        "read defect", "inflight_compute treats unreadable comments as no blocker: follow the fail-closed copies."),
+        "read defect", "The one rule reads no comments: inflight_compute still treats unreadable comments as no blocker, "
+                       "the in_flight_step comments-unreadable case of its own caller; the other callers fail closed."),
     ("po_unblock", "default-po-login"): (
         "contract", "PROJECT-STATUS.md lifts a blocker with the PO's /unblock line; the Codex worker's _Facts runs "
                     "without DECISION_BLOCKER_PO_LOGIN and counts none: give every entry point the configured PO login."),
@@ -639,6 +642,9 @@ RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
     ("merged_pr_finish", "more-than-100-open-prs"): (
         "read defect", "find_linked_pr_json reads every page, so a story with an open PR past the first page is not "
                        "finished."),
+    ("open_blocker", "dependency-then-member-unblocked"): (
+        "contract", "Resolved by #649: PROJECT-STATUS.md resolves a non-decision blocker with a trusted Unblocked "
+                    "comment, and conflict_round_rule now asks the one rule, which applies it."),
 }
 
 REQUIRED_KINDS = {
@@ -708,3 +714,141 @@ def test_doc_links_each_rule_to_its_fixtures_and_lists_each_divergence():
         assert f"`{rule}`" in section and "tests/test_dispatcher_parity_in_flight.py" in section, rule
     for (rule, case), (kind, _) in DIVERGENCES.items():
         assert re.search(rf"`{rule}`[^\n]*`{case}`[^\n]*{kind}", section), (rule, case)
+
+
+# ── Entry equivalence: open_blocker (issue #649) ─────────────────────────────
+
+from headless_pr_workflow.dispatcher.session_blocker import decide_open_blocker  # noqa: E402
+from tests import test_dispatcher_parity_review_loop as loop  # noqa: E402
+
+OLD_HEAD = "b" * 40
+
+
+def _loop_declaration(kind: str, author: str = PO, at: str = T0, declared_by: str = "PO", association: str = "OWNER",
+                      user_type: str = "User", extra: str = "") -> dict[str, Any]:  # fmt: skip
+    body = f"## Blocked Declaration\n\nType: {kind}\nDeclared by: {declared_by}\nReason: waiting\n{extra}"
+    return loop.comment(author, body, at, association=association, user_type=user_type)
+
+
+MEMBER_UNBLOCKED = loop.comment(MEMBER, "Unblocked: the dependency is closed.", T1, association="MEMBER")
+DISPATCHER_BLOCKER = {"author": loop.BOT, "declared_by": "dispatcher", "association": "NONE", "user_type": "Bot"}
+ENTRY_CASES: dict[str, tuple[list[dict[str, Any]], str]] = {
+    "no-declaration": ([], "owed"),
+    "po-dependency": ([_loop_declaration("dependency")], "blocked"),
+    "po-decision": ([_loop_declaration("decision")], "blocked"),
+    "dependency-then-po-unblock": ([_loop_declaration("dependency"), loop.unblock(T1)], "owed"),
+    "dependency-then-member-unblocked": ([_loop_declaration("dependency"), MEMBER_UNBLOCKED], "owed"),
+    "decision-then-member-unblocked": ([_loop_declaration("decision"), MEMBER_UNBLOCKED], "blocked"),
+    "automation-dependency": ([_loop_declaration("dependency", **DISPATCHER_BLOCKER)], "blocked"),
+    "dispatcher-blocker-for-an-older-head": (
+        [_loop_declaration("conflict", **DISPATCHER_BLOCKER,
+                           extra=f"<!-- hpw:dispatcher action=conflict-round-blocker pr={PR} head={OLD_HEAD} -->")],
+        "owed"),
+    "untrusted-declaration": ([_loop_declaration("dependency", author="stranger", association="NONE")], "owed"),
+}  # fmt: skip
+
+
+def _rule_word(story: list[dict[str, Any]]) -> str:
+    """The one rule with the conflict round's inputs: ``blocked`` when it finds an open blocker, else ``owed``."""
+
+    trust = _Facts(None, {"DECISION_BLOCKER_PO_LOGIN": loop.PO})  # type: ignore[arg-type]
+    found = decide_open_blocker(trust, story, types=None, bot=loop.BOT, head=loop.HEAD)
+    return "blocked" if found is not None else "owed"
+
+
+@pytest.mark.parametrize("case", sorted(ENTRY_CASES))
+def test_649_poll_and_resume_decide_the_open_blocker_alike(case, tmp_path):
+    """AC 2: the same facts through the poll (``CONFLICT_DUE``) and the resume pass (``conflict_round_state``).
+
+    Both entries reach ``conflict_round_rule``, which asks the one rule; a change to either entry, or to the rule's
+    inputs on one side, makes one of the three words differ.
+    """
+
+    story, expected = ENTRY_CASES[case]
+    f = loop.facts(story=story, mergeable=False)
+
+    poll, resume, rule = loop.poll_rule(tmp_path / "poll", f), loop.resume_rule(tmp_path / "resume", f), _rule_word(story)
+
+    assert (poll, resume, rule) == (expected, expected, expected)
+
+
+def test_649_automation_dependency_blocks_at_every_entry_but_the_session_check(tmp_path):
+    """AC 3, divergence (7) ``automation-dependency``: an automation declaration blocks the story (PO decision of
+    2026-11-16 on #556); ``open_session_blocker`` keeps its declarer filter as a caller input."""
+
+    story, _ = ENTRY_CASES["automation-dependency"]
+    f = loop.facts(story=story, mergeable=False)
+    trust = _Facts(None, {"DECISION_BLOCKER_PO_LOGIN": loop.PO})  # type: ignore[arg-type]
+
+    assert loop.poll_rule(tmp_path / "poll", f) == loop.resume_rule(tmp_path / "resume", f) == "blocked"
+    assert decide_open_blocker(trust, story) is not None and other_blocker_open(trust, story)
+    assert open_session_blocker(trust, story) is None
+
+
+def test_649_a_failed_story_comment_read_is_unreadable_at_both_entries(tmp_path):
+    """AC 4: the poll and the resume pass skip the story this run, as before the switch."""
+
+    f = loop.facts(story=[_loop_declaration("dependency")], mergeable=False, fail=("story",))
+
+    assert loop.poll_rule(tmp_path / "poll", f) == loop.resume_rule(tmp_path / "resume", f) == "unreadable"
+
+
+def test_649_a_failing_rule_call_fails_the_conflict_round_rule_closed(tmp_path):
+    """AC 4: when ``session-blocker decide`` cannot decide, ``conflict_round_rule`` prints no word and fails."""
+
+    f = facts(comments=[declaration("dependency", association="OWNER")])
+    failing = tmp_path / "failing-hpw"
+    failing.write_text('#!/usr/bin/env bash\n[[ "$2" == marker ]] && exec "$REAL_HPW" "$@"\nexit 3\n',
+                       encoding="utf-8", newline="\n")  # fmt: skip
+    failing.chmod(0o755)
+    body = (f'REAL_HPW="$HPW_BIN"; export REAL_HPW; HPW_BIN="{failing.as_posix()}"\n'
+            f'conflict_round_rule "{BOT}" "{BK}" "{PO}"')  # fmt: skip
+
+    rc, out = bash(tmp_path / "rule", f, body, stdin=f"{json.dumps(pr(mergeable=False))}\n{json.dumps(f['comments'])}\n[]\n")
+
+    assert rc != 0 and out == ""
+
+
+DECISION_CASES: dict[str, list[dict[str, Any]]] = {
+    "decision": [declaration("decision", association="OWNER")],
+    "decision-then-po-unblock": [declaration("decision", association="OWNER"),
+                                 comment(PO, "/unblock", T1, association="OWNER")],
+    "decision-then-member-unblocked": [declaration("decision", association="OWNER"), UNBLOCKED_BY_MEMBER],
+    "automation-decision": [declaration("decision", author=BOT, declared_by="dispatcher", user_type="Bot")],
+    "dependency-only": [declaration("dependency", association="OWNER")],
+    "untrusted-decision": [declaration("decision", author="stranger")],
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", sorted(DECISION_CASES))
+def test_649_the_resume_decision_blocker_shim_follows_the_one_rule(case, tmp_path):
+    """AC 1, AC 2: ``latest_decision_blocker_json`` (resume pass) is open exactly when the one rule finds an open
+    decision blocker, and keeps its output shape for its callers."""
+
+    comments = DECISION_CASES[case]
+    f = facts(comments=comments)
+    rc, out = bash(tmp_path, f, _function("latest_decision_blocker_json")
+                   + f'DECISION_BLOCKER_PO_LOGIN="{PO}"\nlatest_decision_blocker_json {STORY}')  # fmt: skip
+    trust = _Facts(None, {"DECISION_BLOCKER_PO_LOGIN": PO})  # type: ignore[arg-type]
+    found = decide_open_blocker(trust, comments, types=("decision",))
+
+    assert rc == 0
+    shim_open = bool(out) and json.loads(out)["unblocked"] is False
+    assert shim_open is (found is not None)
+    if out:
+        assert {"created_at", "html_url", "body", "unblocked", "unblocked_at"} <= set(json.loads(out))
+
+
+def test_649_the_resume_decision_blocker_shim_fails_closed_when_the_rule_cannot_decide(tmp_path):
+    """AC 4: a failed rule call returns 1, as a failed comment read does, so no caller acts on a guess."""
+
+    f = facts(comments=DECISION_CASES["decision"])
+    body = (_function("latest_decision_blocker_json") + 'HPW_BIN=false\n'
+            f'DECISION_BLOCKER_PO_LOGIN="{PO}"\nlatest_decision_blocker_json {STORY}')  # fmt: skip
+
+    rc, out = bash(tmp_path, f, body)
+    rc_read, _ = bash(tmp_path / "read", facts(comments=DECISION_CASES["decision"], fail=("comments",)),
+                      _function("latest_decision_blocker_json")
+                      + f'DECISION_BLOCKER_PO_LOGIN="{PO}"\nlatest_decision_blocker_json {STORY}')  # fmt: skip
+
+    assert (rc, out) == (1, "") and rc_read == 1

@@ -32,11 +32,17 @@
 #                    the PO, for example for a pytest check that was not green)
 #     blocked        conflicting; the story has an open blocker
 #     owed           conflicting, and none of the above: a conflict round is owed
-#   Open blocker: a "## Blocked Declaration" by the dispatcher, the PO, a
-#   repository member or a Bot, with no later standalone `/unblock` line by the
-#   PO. A dispatcher blocker whose hidden marker names a different PR head is
-#   not open: it belongs to an older head (the marker_holds rule), so a new
-#   head allows a new attempt (issue #409 AC 6).
+#   Open blocker: decided by the one open-blocker rule, `hpw dispatcher
+#   session-blocker decide` (session_blocker.py, issue #649), over the story's
+#   comments with every declaration counted (`--any-type`): a "## Blocked
+#   Declaration" by the dispatcher, the PO, a repository member or a Bot, with
+#   no later standalone `/unblock` line by the PO and, unless it is a
+#   decision blocker, no later trusted `Unblocked` comment. A dispatcher
+#   blocker whose hidden marker names a different PR head is not open
+#   (`--bot`/`--head`): it belongs to an older head, so a new head allows a
+#   new attempt (issue #409 AC 6). The rule is asked only for a conflicting
+#   PR; when the call fails, the rule prints no word and fails, as for the
+#   marker-holds call.
 #   Markers count only on comments of the dispatcher's own account; the
 #   findings marker only on comments of the bookkeeping job's account.
 #   Whether a story marker holds (the conflict-round and fix-round attempt
@@ -58,8 +64,20 @@ conflict_marker_decide() {
     printf '%s\n' "$out"
 }
 
+# conflict_open_blocker <dispatcher-login> <po-login> <head>
+#   Reads the story's comments on stdin and prints true or false: whether the
+#   one open-blocker rule finds an open blocker; fails on a read error.
+conflict_open_blocker() {
+    local out head_filter=()
+    [[ -n "$1" && -n "$3" ]] && head_filter=(--bot "$1" --head "$3")
+    out=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher session-blocker decide \
+        --any-type --po-login "$2" ${head_filter[@]+"${head_filter[@]}"}) || return 1
+    jq -r 'if .outcome == "open" then true elif .outcome == "none" then false else error("unreadable") end' \
+        <<< "$out" 2>/dev/null
+}
+
 conflict_round_rule() {
-    local input n head story tried fix_attempt
+    local input n head story tried fix_attempt blocked=false
     input=$(jq -cs '.') || return 1
     if jq -e '(.[0].state // "open") != "open" or (.[0].draft // false)' <<< "$input" >/dev/null; then
         echo "not-open"
@@ -72,30 +90,18 @@ conflict_round_rule() {
         "<!-- hpw:dispatcher action=conflict-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
     fix_attempt=$(conflict_marker_decide "$1" "$3" \
         "<!-- hpw:dispatcher action=fix-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
-    jq -r --arg bot "$1" --arg bk "$2" --arg po "$3" --argjson tried "$tried" --argjson attempt "$fix_attempt" '
+    if jq -e '.[0].mergeable == false or .[0].mergeable_state == "dirty"' <<< "$input" >/dev/null; then
+        blocked=$(conflict_open_blocker "$1" "$3" "$head" <<< "$story") || return 1
+    fi
+    jq -r --arg bot "$1" --arg bk "$2" --argjson tried "$tried" --argjson attempt "$fix_attempt" \
+        --argjson blocked "$blocked" '
         .[0] as $pr | (.[1] // []) as $story | (.[2] // []) as $prc
         | (($pr.head.sha // "") | ascii_downcase) as $head
         | ($pr.number | tostring) as $n
-        | def unblocked_after($t):
-            any($story[]; (.user.login // "") == $po and .created_at > $t
-                and ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$"))));
-          def newest($list; $login; $marker):
+        | def newest($list; $login; $marker):
             [$list[] | select((.user.login // "") == $login
                               and ((.body // "") | ascii_downcase | contains($marker)))
              | .created_at] | max;
-          def stale_for_head:
-            (.user.login // "") == $bot
-            and ([(.body // "") | match("<!-- hpw:dispatcher [^>]*\\bhead=([0-9a-fA-F]+)"; "g")
-                  | .captures[0].string | ascii_downcase] as $heads
-                 | ($heads | length) > 0 and (any($heads[]; . == $head) | not));
-          def open_blocker:
-            any($story[];
-                ((.body // "") | test("(^|\n)## Blocked Declaration"))
-                and ((.user.login // "") == $bot or (.user.login // "") == $po
-                     or ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))
-                     or (.user.type // "") == "Bot")
-                and (stale_for_head | not)
-                and (unblocked_after(.created_at) | not));
           newest($prc; $bk; "<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=" + $head + " ") as $moves
         | ($moves != null and ($attempt.result != "holds" or $moves > $attempt.created_at)) as $fix_due
         | (any($prc[]; (.user.login // "") == $bot and ((.body // "") | ascii_downcase
@@ -104,7 +110,7 @@ conflict_round_rule() {
         | if $fix_due then "fix-round-due"
           elif ($pr.mergeable == false) or ($pr.mergeable_state == "dirty") then
               if $tried.result == "holds" then "tried"
-              elif open_blocker then "blocked"
+              elif $blocked then "blocked"
               else "owed" end
           elif $pr.mergeable == null then "unknown"
           elif $owned then "clean"

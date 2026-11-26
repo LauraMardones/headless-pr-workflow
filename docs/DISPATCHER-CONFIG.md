@@ -685,8 +685,10 @@ When the dispatcher merges one story, another dispatcher PR can start to conflic
 - the story is a review-loop story, whatever its board status;
 - its linked open, non-draft PR conflicts with main (`mergeable == false` or `mergeable_state == "dirty"`);
 - no fix round is due: no bookkeeping `move-in-implementation` marker for the current head without a fix-round attempt marker that holds for it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
-- the story has no open blocker: a `## Blocked Declaration` with no later standalone `/unblock` line from the PO. A dispatcher blocker whose hidden marker names an older PR head is not open;
+- the story has no open blocker: a `## Blocked Declaration` of any type with no later standalone `/unblock` line from the PO and, unless it is a decision blocker, no later trusted `Unblocked` comment. A dispatcher blocker whose hidden marker names an older PR head is not open;
 - no conflict-round attempt marker holds for the current head.
+
+Whether the story has an open blocker is decided by the one open-blocker rule (`hpw dispatcher session-blocker decide`, issue #649), which the resume pass's decision-blocker check (`latest_decision_blocker_json`), the board status, the in-flight plan, the facts and the post-`/implement` session check also call, each with its own types. When the rule cannot decide, the conflict rule gives no word, as below.
 
 Whether an attempt marker holds is decided by the one marker-holds rule (`hpw dispatcher marker decide`, issue #628): the newest marker by `created_at` holds unless a later standalone `/unblock` line from the PO follows it. When that decision cannot be made, the rule gives no word, and the poll and the resume pass treat the story as unreadable and start nothing.
 

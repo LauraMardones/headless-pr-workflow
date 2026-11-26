@@ -282,14 +282,24 @@ class _Facts:
         return self._blocker(comments, "decision")
 
     def dependency_blocker(self, comments: list[dict[str, Any]], refinement: dict[str, Any]) -> dict[str, Any]:
-        """Like ``decision_blocker``; a passing refine summary or a trusted ``Unblocked`` comment after it lifts it too (#529)."""
+        """Like ``decision_blocker``; a passing refine summary or a trusted ``Unblocked`` comment after it lifts it too (#529).
 
+        Whether it is open is decided by the one open-blocker rule, ``session_blocker.decide_open_blocker``
+        (issue #649), with the type ``dependency``; the newest declaration and the time it was lifted are
+        reported as before.
+        """
+
+        from .session_blocker import decide_open_blocker
+
+        summary_at = str(refinement.get("created_at") or "") if refinement.get("refine_check") == "pass" else ""
         found = self._unblocked_comment(comments, self._blocker(comments, "dependency"))
-        if found["state"] == "open" and refinement.get("refine_check") == "pass":
-            summary_at = str(refinement.get("created_at") or "")
-            if summary_at > str(found["created_at"] or ""):
-                found = {**found, "state": "unblocked", "unblocked_at": summary_at}
-        return found
+        if found["state"] == "open" and summary_at > str(found["created_at"] or ""):
+            found = {**found, "state": "unblocked", "unblocked_at": summary_at}
+        if found["state"] == "none":
+            return found
+        if decide_open_blocker(self, comments, types=("dependency",), refine_pass_at=summary_at) is not None:
+            return {**found, "state": "open", "unblocked_at": None}
+        return found if found["state"] == "unblocked" else {**found, "state": "unblocked"}
 
     def other_blocker(self, comments: list[dict[str, Any]]) -> dict[str, Any]:
         """An open ``Type: external``, ``resource`` or ``conflict`` declaration (#561), the rule of ``status.other_blocker_open``.
