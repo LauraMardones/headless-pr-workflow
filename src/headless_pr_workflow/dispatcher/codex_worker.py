@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
+from ..next_step import GITHUB_REPLY, render as render_next_step
 from ..review_policy import CODEX_BOT_LOGIN, CODEX_EXECUTOR_LABEL
 from .facts import closes_issue
 from .gateway import Gateway, GatewayError
@@ -496,12 +497,17 @@ def fix_round_for(gateway: Gateway, pr: int | None, head: str | None, config: Co
 def fix_round_blocker(issue: int, pr: int, head: str, maximum: int) -> str:
     """The ``Type: resource`` Blocked Declaration in the format of ``docs/PROJECT-STATUS.md``."""
 
+    next_step = render_next_step(
+        "/unblock", issue, GITHUB_REPLY,
+        "the worker may start the next fix round once CODEX_FIX_ROUND_MAX is raised, or the new head gets its /review "
+        "once the findings are fixed on the PR branch")  # fmt: skip
     return ("## Blocked Declaration\n"
             "Type: resource\n"
             "Declared by: codex-worker\n"
             f"Blocks: #{issue}\n"
-            f"Unblocked when: the findings on PR #{pr} are fixed by hand, or CODEX_FIX_ROUND_MAX is raised and the "
-            "PO posts /unblock\n"
+            f"Unblocked when: the findings on PR #{pr} are fixed on the PR branch, or CODEX_FIX_ROUND_MAX is raised, "
+            "and the PO posts /unblock\n"
+            f"{next_step}\n"
             "Owner: PO (@LauraMardones)\n"
             f"State of in-progress work: PR #{pr} has had {maximum} automatic fix rounds and the Claude review still "
             f"has blockers on head {head[:7]}; branch and commits intact; the item is not moved to Claude")  # fmt: skip

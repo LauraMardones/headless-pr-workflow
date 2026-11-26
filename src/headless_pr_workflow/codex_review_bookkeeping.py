@@ -31,6 +31,7 @@ from .github import (
 )
 from .github.pr_context import _gh_env
 from .github.review_threads import RESOLVE_THREAD_MUTATION, fetch_review_threads_for_context, summarize_review_threads
+from .next_step import GITHUB_REPLY, render as render_next_step
 from .review_policy import (
     CLAUDE_EXECUTOR_LABEL_PREFIX,
     CODEX_REVIEW_TRIGGER_PHRASE,
@@ -58,6 +59,7 @@ ACTED_ON_STATUSES = (STATUS_IN_REVIEW, STATUS_BLOCKED)
 ACTION_MOVE_IN_MERGE = "move-in-merge"
 ACTION_MOVE_IN_IMPLEMENTATION = "move-in-implementation"
 ACTION_REQUEST_REVIEW = "request-review"
+UNBLOCK_COMMAND = "/unblock"
 ACTION_BLOCKER_RESOURCE = "blocker-resource"
 ACTION_BLOCKER_EXTERNAL = "blocker-external"
 ACTION_NONE = "none"
@@ -714,6 +716,12 @@ def blocker_body(decision: Decision, story: StoryBoard) -> str:
     """A Blocked Declaration in the format of `docs/PROJECT-STATUS.md`, posted on the story."""
 
     blocker_type = "resource" if decision.action == ACTION_BLOCKER_RESOURCE else "external"
+    next_step = render_next_step(
+        UNBLOCK_COMMAND,
+        story.number,
+        GITHUB_REPLY,
+        "the job acts on the next Codex result for the story once the cause named under Unblocked when is gone",
+    )
     return (
         "## Blocked Declaration\n"
         f"Type: {blocker_type}\n"
@@ -723,7 +731,7 @@ def blocker_body(decision: Decision, story: StoryBoard) -> str:
         f"Owner: {BLOCKER_OWNER}\n"
         f"State of in-progress work: PR #{decision.pr} at head {decision.head_sha}; "
         f"the job acts on the next Codex result for the story. {decision.blocker_detail or decision.reason}\n"
-        "Resume instruction: n/a\n"
+        f"{next_step}\n"
         f"{decision.marker}\n"
     )
 
