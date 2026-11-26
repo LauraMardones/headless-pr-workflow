@@ -10,7 +10,12 @@ A declaration counts when its comment is trusted (``_Facts.trusted``), carries a
 is not an automation value, and nothing lifts it: a PO ``/unblock`` line or a
 trusted ``Unblocked`` comment after it. The newest such declaration is reported.
 
-Result words and exit codes: ``read`` (0; ``outcome`` is ``open_blocker`` or
+Issue #507: the rule also reports ``finding``: the newest trusted ``Command: implement`` Session Summary
+says ``Next: finding`` (a session that ended without a PR because its result is a finding) and no PO
+``/unblock`` line follows it. An open blocker wins over a finding. ``open_session_finding`` is that rule;
+``scripts/lib/in-flight.sh`` reaches it through ``plan_in_flight``.
+
+Result words and exit codes: ``read`` (0; ``outcome`` is ``open_blocker``, ``finding`` or
 ``none``), ``unreadable`` (3: the comments could not be read; the caller keeps
 its own blocker, so the rule fails closed).
 
@@ -47,6 +52,8 @@ _TYPE_LINE = re.compile(r"^[ \t]*Type:\s*([A-Za-z]+)\b", re.M)
 _DECLARED_BY = re.compile(r"^[ \t]*Declared by:[ \t]*(.+?)[ \t]*$", re.M)
 _UNBLOCKED_LINE = re.compile(r"^\s*Unblocked\b(?!\s+when\b)", re.M | re.I)
 _DECLARATION = re.compile(r"^## Blocked Declaration", re.M)
+_SUMMARY_COMMAND_IMPLEMENT = re.compile(r"^[ \t]*Command:[ \t]*implement[ \t]*$", re.M | re.I)
+_SUMMARY_NEXT = re.compile(r"^[ \t]*Next:[ \t]*([A-Za-z]+)[ \t]*$", re.M | re.I)
 _MARKER_HEAD = re.compile(r"<!-- hpw:dispatcher [^>]*\bhead=([0-9a-fA-F]+)")
 
 
@@ -69,6 +76,32 @@ def open_session_blocker(facts: _Facts, comments: list[dict[str, Any]]) -> dict[
     return decide_open_blocker(facts, named, exclude_declarers=AUTOMATION_DECLARERS)
 
 
+def open_session_finding(facts: _Facts, comments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The open finding as ``{url, created_at}``, or ``None`` (issue #507).
+
+    The newest trusted ``## Session Summary`` with ``Command: implement`` decides: ``Next: finding`` makes the
+    story's result a finding, any other ``Next:`` (a later session that opened a PR) supersedes it. A later
+    standalone PO ``/unblock`` line lifts it. Pure: no gateway, no model, no write.
+    """
+
+    newest: dict[str, Any] | None = None
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if not (facts.trusted(comment) and "## Session Summary" in body and _SUMMARY_COMMAND_IMPLEMENT.search(body)):
+            continue
+        if newest is None or str(comment.get("created_at") or "") >= str(newest.get("created_at") or ""):
+            newest = comment
+    if newest is None:
+        return None
+    next_match = _SUMMARY_NEXT.search(str(newest.get("body") or ""))
+    if not next_match or next_match.group(1).lower() != "finding":
+        return None
+    since = str(newest.get("created_at") or "")
+    if facts.po_login and _po_unblocked_after(comments, facts.po_login, since):
+        return None
+    return {"url": newest.get("html_url"), "created_at": since}
+
+
 def read_session_blocker(gateway: Gateway, story: int, *, env: Mapping[str, str] | None = None) -> Result:
     env = os.environ if env is None else env
     try:
@@ -76,10 +109,14 @@ def read_session_blocker(gateway: Gateway, story: int, *, env: Mapping[str, str]
     except GatewayError as exc:
         log(f"[SESSION-BLOCKER] unreadable: {exc}")
         return Result(OPERATION, "unreadable", error=str(exc), fields={"outcome": "none"}, block=BLOCK)
-    blocker = open_session_blocker(_Facts(gateway, env), list(comments))
-    if blocker is None:
-        return Result(OPERATION, "read", fields={"outcome": "none"}, block=BLOCK)
-    return Result(OPERATION, "read", fields={"outcome": "open_blocker", **blocker}, block=BLOCK)
+    facts = _Facts(gateway, env)
+    blocker = open_session_blocker(facts, list(comments))
+    if blocker is not None:
+        return Result(OPERATION, "read", fields={"outcome": "open_blocker", **blocker}, block=BLOCK)
+    finding = open_session_finding(facts, list(comments))
+    if finding is not None:
+        return Result(OPERATION, "read", fields={"outcome": "finding", **finding}, block=BLOCK)
+    return Result(OPERATION, "read", fields={"outcome": "none"}, block=BLOCK)
 
 
 def _declared_by_any(declared_by: str, declarers: Iterable[str]) -> bool:

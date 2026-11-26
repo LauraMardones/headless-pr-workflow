@@ -2844,6 +2844,14 @@ hand_off_to_codex_review_loop() {
             echo "[HANDOFF] #$ISSUE_NUMBER: /implement ended without a PR; open Blocked Declaration (Type: $(jq -r '.type' <<< "$session_blocker")) from $(jq -r '.declared_by' <<< "$session_blocker"): $(jq -r '.url' <<< "$session_blocker"); no dispatcher blocker"
             return 0
         fi
+        # Issue #507: a session whose result is a finding (a trusted Session
+        # Summary with `Next: finding`) opens no PR by design: no blocker, no
+        # po_blocker event, no failed run. The PO reads the finding and closes.
+        if [[ $session_blocker_rc -eq 0 ]] \
+                && [[ "$(jq -r '.outcome // empty' <<< "$session_blocker" 2>/dev/null)" == "finding" ]]; then
+            echo "[HANDOFF] #$ISSUE_NUMBER: /implement ended without a PR; finding recorded in $(jq -r '.url' <<< "$session_blocker"); no dispatcher blocker, ready to read and close"
+            return 0
+        fi
         echo "Error: No linked open PR found for #$ISSUE_NUMBER after /implement." >&2
         post_failed_session_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
         DISPATCH_HANDLED=true

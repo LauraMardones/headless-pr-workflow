@@ -146,6 +146,21 @@ def test_a_later_po_unblock_lifts_the_blocker():
     assert plan(row(7, story=[blocker, lifted]))["in_flight"] == []
 
 
+def finding_summary(next_: str = "finding", at: str = "2026-10-13T10:00:00Z") -> dict:
+    return comment(f"## Session Summary\nCommand: implement\nNext: {next_}", at=at, author_association="OWNER")
+
+
+def test_ac2_a_story_with_a_finding_and_no_pr_is_in_flight_until_the_po_unblocks():
+    assert plan(row(7, story=[finding_summary()]))["in_flight"] == [7]
+    lifted = comment("/unblock", login=PO, at="2026-10-13T11:00:00Z")
+    assert plan(row(7, story=[finding_summary(), lifted]))["in_flight"] == []
+
+
+def test_ac2_a_later_implement_summary_or_an_untrusted_one_does_not_hold_the_story():
+    assert plan(row(7, story=[finding_summary(), finding_summary("review", at="2026-10-13T12:00:00Z")]))["in_flight"] == []
+    assert plan(row(7, story=[comment("## Session Summary\nCommand: implement\nNext: finding", login="stranger")]))["in_flight"] == []
+
+
 def test_a_story_with_nothing_in_flight_is_in_no_list():
     """#475 AC 6: no linked PR and no dispatcher marker: no step and no scheduler list."""
     result = plan(row(8), row(9, story=[comment("a note")]))

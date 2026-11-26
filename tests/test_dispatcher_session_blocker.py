@@ -468,3 +468,77 @@ def test_646_invalid_inputs_exit_two(tmp_path, capsys, extra):
 def test_646_open_needs_a_repository(capsys):
     code, out = run(["session-blocker", "open", "--issue", str(STORY)], capsys)
     assert code == 2 and out["result"] == "invalid"
+
+
+# ── the finding outcome (issue #507) ─────────────────────────────────────────
+
+def summary(next_: str = "finding", at: str = "2026-11-09T06:00:00Z", login: str = "member", association: str = "MEMBER",
+            command: str = "implement") -> dict[str, Any]:
+    body = f"## Session Summary\nCommand: {command}\nIssue/PR: #{STORY}\nHead: abc\nChecks: pass\nBlockers: none\nNext: {next_}"
+    return {**reply(body, at, login, association), "html_url": "https://x/finding"}
+
+
+def test_ac3_a_trusted_finding_summary_is_reported_with_url_and_time():
+    out = read([summary()])
+    assert out["outcome"] == "finding" and out["url"] == "https://x/finding" and out["created_at"] == "2026-11-09T06:00:00Z"
+
+
+@pytest.mark.parametrize("next_", ["review", "implementation"])
+def test_ac3_other_next_actions_are_no_finding(next_):
+    assert read([summary(next_)])["outcome"] == "none"
+
+
+def test_ac3_a_review_summary_is_no_finding():
+    assert read([summary(command="review")])["outcome"] == "none"
+
+
+def test_ac3_an_untrusted_finding_is_ignored():
+    assert read([summary(login="stranger", association="NONE")])["outcome"] == "none"
+
+
+def test_ac3_a_po_unblock_after_the_finding_lifts_it():
+    assert read([summary(), reply("/unblock", "2026-11-09T07:00:00Z", login=PO, association="OWNER")])["outcome"] == "none"
+
+
+def test_ac3_a_po_unblock_before_the_finding_does_not_lift_it():
+    unblock = reply("/unblock", "2026-11-09T05:00:00Z", login=PO, association="OWNER")
+    assert read([unblock, summary()])["outcome"] == "finding"
+
+
+def test_ac3_a_later_implement_summary_supersedes_the_finding():
+    assert read([summary(), summary("review", at="2026-11-09T08:00:00Z")])["outcome"] == "none"
+
+
+def test_ac3_an_open_blocker_wins_over_a_finding():
+    out = read([summary(), blocked("dependency", at="2026-11-09T05:00:00Z")])
+    assert out["outcome"] == "open_blocker"
+
+
+@needs_tools
+def test_ac1_ac6_a_finding_without_a_pr_ends_cleanly(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "Ready to implement")
+    d.on_session("implement", f"""f="$MOCK_DIR/comments_{STORY}.json"; [[ -f "$f" ]] || echo '[]' > "$f"
+jq '. + [{{"user":{{"login":"hpw-bot"}},"author_association":"COLLABORATOR","html_url":"https://x/finding","body":"## Session Summary\\nCommand: implement\\nNext: finding\\n","created_at":"2026-10-13T11:00:00Z"}}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+""")
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert d.sessions == [f"implement {STORY}"]
+    assert d.posted(STORY) == [] and d.queued_events == []
+    assert f"[HANDOFF] #{STORY}: /implement ended without a PR; finding recorded in https://x/finding" in proc.stdout
+    assert "No linked open PR" not in proc.stderr + proc.stdout
+
+
+@needs_tools
+def test_ac4_a_lifted_finding_keeps_the_dispatchers_blocker(tmp_path):
+    d = Dispatcher(tmp_path)
+    d.add_story(STORY, "Ready to implement")
+    d.add_comment(STORY, "## Session Summary\nCommand: implement\nNext: finding\n")
+    d.add_comment(STORY, "/unblock", login=PO)
+
+    proc = d.run_issue(STORY)
+
+    assert proc.returncode != 0 and "Error: No linked open PR found" in proc.stderr + proc.stdout
+    assert len(po_events(d)) == 1

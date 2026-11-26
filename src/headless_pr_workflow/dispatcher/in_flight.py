@@ -29,6 +29,7 @@ from typing import Any, Mapping, Sequence, cast
 from .facts import _Facts, linked_pr
 from .gateway import Gateway
 from .marker import decide_holds, dispatcher_marker
+from .session_blocker import open_session_finding
 from .status import other_blocker_open
 from .write import Result, _author, _po_unblocked_after
 
@@ -174,6 +175,8 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
                 steps["finish"].append(_entry(row))
             elif story_comments is not None and other_blocker_open(trust, list(story_comments), po_unblock=True):
                 flight.add(number)  # an open non-decision blocker: never started again until /unblock
+            elif story_comments is not None and open_session_finding(trust, list(story_comments)) is not None:
+                flight.add(number)  # a finding with no PR (issue #507): never started again until /unblock
             continue
         draft = bool(pr.get("draft"))
         head = str(pr.get("head") or "")
