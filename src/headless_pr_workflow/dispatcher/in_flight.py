@@ -22,11 +22,13 @@ cannot be read or is not a list of rows).
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence, cast
 
 from .facts import _Facts, linked_pr
 from .gateway import Gateway
-from .marker import dispatcher_marker
+from .marker import decide_holds, dispatcher_marker
 from .status import other_blocker_open
 from .write import Result, _author, _po_unblocked_after
 
@@ -35,7 +37,10 @@ OPERATION = "plan"
 
 # The marker the codex-review-bookkeeping job writes when it records findings (review_policy.py).
 FINDINGS_MARKER = "<!-- hpw:codex-review-bookkeeping action=move-in-implementation head="
-STEPS = ("merge", "finish", "fix_round", "hand_off", "review")
+STEPS = ("merge", "finish", "fix_round", "hand_off", "review", "continue")
+DEFAULT_CONTINUE_AFTER_MINUTES = 60  # CONTINUE_DRAFT_AFTER_MINUTES default (issue #578)
+_DECLARED_BY_DISPATCHER = re.compile(r"^[ \t]*Declared by:[ \t]*dispatcher[ \t]*$", re.M | re.I)
+_TYPE_EXTERNAL = re.compile(r"^[ \t]*Type:\s*external\b", re.M | re.I)
 
 
 def hand_off_pending_prefix(pr: int) -> str:
@@ -73,6 +78,58 @@ def hand_off_pending(story_comments: list[dict[str, Any]], pr: int, dispatcher: 
     return not any(str(c.get("created_at") or "") > since and done in str(c.get("body") or "") for c in own)
 
 
+def continue_attempt_marker(pr: int, head: str) -> str:
+    """``continue_attempt_marker`` of ``scripts/dispatcher-invoke.sh``: one attempt per PR head (issue #578)."""
+
+    return dispatcher_marker(f"action=continue-attempt pr={pr} head={head}")
+
+
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def failed_session_unblocked(story_comments: list[dict[str, Any]], dispatcher: str, po: str) -> bool:
+    """The newest dispatcher ``Type: external`` declaration is lifted by a standalone PO ``/unblock`` posted after it."""
+
+    found = [c for c in story_comments if dispatcher and _author(c) == dispatcher
+             and "## Blocked Declaration" in str(c.get("body") or "")
+             and _TYPE_EXTERNAL.search(str(c.get("body") or ""))
+             and _DECLARED_BY_DISPATCHER.search(str(c.get("body") or ""))]  # fmt: skip
+    if not found:
+        return False
+    return _po_unblocked_after(story_comments, po, max(str(c.get("created_at") or "") for c in found))
+
+
+def continue_reason(row: Mapping[str, Any], *, dispatcher: str, po: str, trust: _Facts,
+                    after_minutes: int, now: datetime) -> str | None:
+    """``"failed"`` or ``"silent"`` when the draft PR of ``row`` is continued, else ``None`` (issue #578, E10).
+
+    Failed session: the newest dispatcher ``Type: external`` declaration is lifted by the PO's ``/unblock``.
+    Silent stop: the newest ``pytest`` check run on the head completed with success at least ``after_minutes``
+    ago (``green_completed_at``). Both need no other open blocker (decision or not) and no ``continue-attempt``
+    marker for this PR head that no later ``/unblock`` lifted.
+    """
+
+    pr, comments = row.get("pr") or {}, row.get("story_comments")
+    head = str(pr.get("head") or "")
+    if not dispatcher or comments is None or not head or pr.get("number") is None:
+        return None
+    comments = list(comments)
+    if trust.decision_blocker(comments)["state"] == "open" or other_blocker_open(trust, comments, po_unblock=True):
+        return None
+    if decide_holds(comments, dispatcher, continue_attempt_marker(int(pr["number"]), head), po_login=po)[0] == "holds":
+        return None
+    if failed_session_unblocked(comments, dispatcher, po):
+        return "failed"
+    green = _parse_time(row.get("green_completed_at"))
+    if green is not None and now - green >= timedelta(minutes=after_minutes):
+        return "silent"
+    return None
+
+
 def _entry(row: Mapping[str, Any]) -> dict[str, Any]:
     pr = row.get("pr") or {}
     return {"number": int(row["number"]), "title": str(row.get("title") or ""),
@@ -81,15 +138,25 @@ def _entry(row: Mapping[str, Any]) -> dict[str, Any]:
             "head": pr.get("head") or None}  # fmt: skip
 
 
-def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookkeeping: str, po: str) -> dict[str, Any]:
+def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookkeeping: str, po: str,
+                   continue_after_minutes: int = DEFAULT_CONTINUE_AFTER_MINUTES,
+                   now: datetime | None = None) -> dict[str, Any]:
     """The resume steps and the scheduler lists. Pure: the same rows give the same plan.
 
     A row: ``number``, ``title``, ``executors``, ``review_loop`` (one ``executor:`` label with a
     ``CODEX_REVIEW_LOOP_ROUTING`` row), ``pr`` (the linked open PR ``{"number", "draft", "head"}``, or
     ``None``), ``merged`` (no open linked PR, and a merged linked PR among the closed PRs read),
     ``gates_pass`` (the merge gates of the non-draft PR pass on its head, ignoring mergeability), and
-    ``story_comments`` / ``pr_comments`` (``None`` when not read). An empty login finds no marker of it.
+    ``story_comments`` / ``pr_comments`` (``None`` when not read), and ``green_completed_at`` (the
+    ``completed_at`` of the newest ``pytest`` check run on the PR head when it succeeded, else ``None``).
+    An empty login finds no marker of it.
+
+    A draft PR is in ``in_implementation`` only when a session is about to work on it: a fix round is due, or
+    the ``continue`` step lists it (issue #578). Every other draft PR is in ``in_flight``: no WIP place, no
+    file-overlap place, never started as new work.
     """
+
+    now = now or datetime.now(timezone.utc)
 
     trust = _Facts(cast(Gateway, None), {"DECISION_BLOCKER_PO_LOGIN": po})
     steps: dict[str, list[dict[str, Any]]] = {name: [] for name in STEPS}
@@ -107,9 +174,7 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
             continue
         draft = bool(pr.get("draft"))
         head = str(pr.get("head") or "")
-        if draft:
-            implementing.add(number)
-        elif row.get("gates_pass"):
+        if not draft and row.get("gates_pass"):
             # A ready PR that passes the current-head gates is in the merge step
             # even when an older fix or hand-off marker is still present.
             flight.add(number)
@@ -126,17 +191,26 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
                 flight.add(number)  # a ready PR: in flight, not counted for the WIP limit (AC 8)
                 continue
         if draft:
+            reason = continue_reason(row, dispatcher=dispatcher, po=po, trust=trust,
+                                     after_minutes=continue_after_minutes, now=now)
+            if reason:
+                steps["continue"].append({**_entry(row), "reason": reason, "minutes": continue_after_minutes})
+                implementing.add(number)
+            else:
+                flight.add(number)  # no session at work: no WIP place, never started as new work (issue #578)
             continue
         flight.add(number)
         steps["review"].append(_entry(row))
     return {**steps, "in_implementation": sorted(implementing), "in_flight": sorted(flight - implementing)}
 
 
-def plan(rows: Any, *, dispatcher: str, bookkeeping: str, po: str) -> Result:
+def plan(rows: Any, *, dispatcher: str, bookkeeping: str, po: str,
+         continue_after_minutes: int = DEFAULT_CONTINUE_AFTER_MINUTES, now: datetime | None = None) -> Result:
     if not isinstance(rows, list) or not all(isinstance(r, dict) and "number" in r for r in rows):
         return Result(OPERATION, "unreadable", error="input: not a list of rows with a number", block=BLOCK)
     try:
-        fields = plan_in_flight(rows, dispatcher=dispatcher, bookkeeping=bookkeeping, po=po)
+        fields = plan_in_flight(rows, dispatcher=dispatcher, bookkeeping=bookkeeping, po=po,
+                                continue_after_minutes=continue_after_minutes, now=now)
     except (TypeError, ValueError, KeyError) as exc:
         return Result(OPERATION, "unreadable", error=f"input: {exc}", block=BLOCK)
     return Result(OPERATION, "read", fields=fields, block=BLOCK)

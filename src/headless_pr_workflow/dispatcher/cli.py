@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -147,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     i_plan.add_argument("--input", required=True)
     i_plan.add_argument("--dispatcher", default="")
     i_plan.add_argument("--bookkeeping", default="")
+    i_plan.add_argument("--continue-after-minutes", type=int, default=60)
+    i_plan.add_argument("--now", default="")  # an ISO time, for tests; default: the clock
     i_plan.add_argument("--dry-run", action="store_true")  # accepted: the command never writes
     i_linked = in_flight_ops.add_parser("linked", add_help=False)
     i_linked.add_argument("--repo", required=True)
@@ -516,8 +519,15 @@ def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
         return _emit(Result(args.operation, "unreadable", error=f"read input file: {exc}", block="in-flight"))
     if args.operation == "linked":
         return _emit(linked_prs(rows))
+    now = None
+    if args.now:
+        try:
+            now = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+        except ValueError as exc:
+            return _emit(Result(args.operation, "unreadable", error=f"--now: {exc}", block="in-flight"))
     return _emit(plan_in_flight(rows, dispatcher=args.dispatcher.strip(), bookkeeping=args.bookkeeping.strip(),
-                                po=settings.po_login))  # fmt: skip
+                                po=settings.po_login, continue_after_minutes=args.continue_after_minutes,
+                                now=now))  # fmt: skip
 
 
 def _run_worker(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:

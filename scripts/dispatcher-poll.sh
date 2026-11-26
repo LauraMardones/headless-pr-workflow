@@ -190,6 +190,14 @@ inflight_get_page() {
         "$REST/$1"
 }
 
+# The check runs of a commit (issue #578: the silent stop of a draft PR reads its newest green `pytest` check).
+inflight_get_check_runs() {
+    curl -sf \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "$REST/repos/$REPO/commits/$1/check-runs?check_name=pytest&per_page=100"
+}
+
 # The token's own login: the dispatcher's account, and the bookkeeping job's
 # unless CODEX_BOOKKEEPING_LOGIN names it (as in dispatcher-invoke.sh).
 TOKEN_LOGIN=""
@@ -218,7 +226,7 @@ inflight_compute || { echo "Error: could not read the work in flight." >&2; exit
 # in_merge: the merge step and the finish step; in_implementation: the fix
 # rounds due and the pending hand-offs (a story the dispatcher resumes).
 IN_MERGE=$(jq -c '[(.merge + .finish)[] | {number, title}] | sort_by(.number)' <<< "$INFLIGHT_JSON")
-IN_IMPLEMENTATION=$(jq -c '[(.fix_round + .hand_off)[] | {number, title}] | sort_by(.number)' <<< "$INFLIGHT_JSON")
+IN_IMPLEMENTATION=$(jq -c '[(.fix_round + .hand_off + .continue)[] | {number, title}] | sort_by(.number)' <<< "$INFLIGHT_JSON")
 REVIEW_CANDIDATES=$(jq -c '.review' <<< "$INFLIGHT_JSON")
 
 # conflict_due lists the review-loop stories (one executor: label with a
