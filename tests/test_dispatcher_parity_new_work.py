@@ -641,7 +641,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "running-story-without-parent-epic": (overlap(("src/a.py",), ("src/a.py",), parent=None),
                                               but(OVERLAP, "overlap src/a.py", files_affected="no overlap")),
         "running-comments-unreadable": (overlap(("src/a.py",), ("src/a.py",), fail=(f"comments {RUNNING}",)),
-                                        same(OVERLAP, "overlap src/a.py")),
+                                        same(OVERLAP, "no overlap")),  # a fix round it cannot read is no work in implementation (#578)
         "open-issues-unreadable": (overlap(("src/a.py",), ("src/a.py",), fail=("issues",)), same(OVERLAP, "unreadable")),
     },
     "next_new_work_selection": {
