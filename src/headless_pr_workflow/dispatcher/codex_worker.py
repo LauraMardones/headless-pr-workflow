@@ -542,7 +542,7 @@ def work_in_flight(gateway: Gateway, facts: Mapping[str, Any], env: Mapping[str,
         except GatewayError as exc:
             log(f"[CODEX-WORKER] Warning: could not read the comments of #{number}; its blockers are not checked: {exc}")
             continue
-        if other_blocker_open(trust, comments, po_unblock=True):
+        if other_blocker_open(trust, comments):
             flight.append(number)
     return sorted(flight)
 

@@ -657,23 +657,35 @@ register_decision_blocker_event() {
 }
 
 # The story's latest decision blocker as one JSON object (the comment plus
-# `unblocked`: a standalone `/unblock` line by the PO follows it, the rule of
-# docs/PROJECT-STATUS.md → Decision blockers). Prints nothing when the
-# story has no decision blocker; returns 1 when the comments cannot be read.
+# `unblocked` and `unblocked_at`). Whether it is open is decided by the one
+# open-blocker rule, `hpw dispatcher session-blocker decide --type decision`
+# (session_blocker.py, issue #649): a standalone `/unblock` line by the PO
+# after it lifts it (docs/PROJECT-STATUS.md → Decision blockers). When the rule
+# finds an open one, that is the comment printed; otherwise the newest trusted
+# decision declaration is printed as unblocked, with the time of the PO's
+# latest `/unblock` line after it. Prints nothing when the story has no
+# decision blocker; returns 1 when the comments cannot be read or the rule
+# cannot decide.
 latest_decision_blocker_json() {
-    local issue_num="$1" comments
+    local issue_num="$1" comments open
     comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" | jq -s 'add // []') || return 1
-    jq -c --arg login "$DECISION_BLOCKER_PO_LOGIN" '
-        ([.[] | select((.body | (test("## Blocked Declaration") and test("Type: decision")))
-                            and ((.user.login // "") == $login
-                                 or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
-                                 or (.user.type // "") == "Bot"))] | last) as $b
+    open=$("$HPW_BIN" dispatcher session-blocker decide --type decision \
+        --po-login "$DECISION_BLOCKER_PO_LOGIN" <<< "$comments") || return 1
+    jq -c --arg login "$DECISION_BLOCKER_PO_LOGIN" --argjson open "$open" '
+        (if $open.outcome == "open" then
+            [.[] | select(.html_url == $open.url and .created_at == $open.created_at)] | last
+         else
+            [.[] | select((.body | (test("## Blocked Declaration") and test("Type: decision")))
+                          and ((.user.login // "") == $login
+                               or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
+                               or (.user.type // "") == "Bot"))] | last
+         end) as $b
         | if $b == null then empty else
             ([.[] | select((.user.login // "") == $login
                            and .created_at > $b.created_at
                            and ((.body // "") | split("\n") | any(test("^\\s*/unblock\\s*$"))))]
               | map(.created_at) | max) as $u
-            | $b + {unblocked: ($u != null), unblocked_at: ($u // "")}
+            | $b + {unblocked: ($open.outcome != "open"), unblocked_at: ($u // "")}
           end' <<< "$comments"
 }
 

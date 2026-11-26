@@ -24,7 +24,8 @@ from .admission import known_type
 from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC, _Facts, _labels, linked_pr, read_facts
 from .gateway import Gateway, GatewayError
 from .scheduler import _refine_gate
-from .write import Result, _po_unblocked_after, log
+from .session_blocker import decide_open_blocker
+from .write import Result, log
 
 BLOCK = "status"
 OPERATION = "read"
@@ -34,8 +35,6 @@ STATUSES = ("No spec", "In specification", "Refinement failed", "Not refined", "
 UNKNOWN = "unknown"
 
 _BLOCKED_TYPES = ("dependency", "external", "conflict", "resource")
-_TYPE_LINE = re.compile(r"^[ \t]*Type:\s*([A-Za-z]+)\b", re.M)
-_UNBLOCKED_LINE = re.compile(r"^\s*Unblocked\b(?!\s+when\b)", re.M | re.I)
 
 
 def _decided(status: str, fact: str) -> tuple[str, str]:
@@ -136,28 +135,14 @@ def _kind(issue: Mapping[str, Any]) -> str | None:
     return known_type(_labels(dict(issue)))
 
 
-def _resolves(body: str) -> bool:
-    """An ``Unblocked`` line in a comment that is not itself a declaration (its ``Unblocked when:`` field is no resolution)."""
+def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]]) -> bool:
+    """An open Blocked Declaration of type dependency, external, conflict or resource (see the command page).
 
-    return "## Blocked Declaration" not in body and _UNBLOCKED_LINE.search(body) is not None
+    A thin shim (issue #649): the one open-blocker rule, ``session_blocker.decide_open_blocker``, decides
+    with these four types; a later standalone PO ``/unblock`` line or trusted ``Unblocked`` comment lifts it.
+    """
 
-
-def other_blocker_open(facts: _Facts, comments: list[dict[str, Any]], *, po_unblock: bool = False) -> bool:
-    """An open Blocked Declaration of type dependency, external, conflict or resource (see the command page)."""
-
-    declared = ""
-    for comment in comments:
-        body = str(comment.get("body") or "")
-        match = _TYPE_LINE.search(body)
-        if (facts.trusted(comment) and "## Blocked Declaration" in body and match
-                and match.group(1).lower() in _BLOCKED_TYPES):
-            declared = max(declared, str(comment.get("created_at") or ""))
-    if not declared:
-        return False
-    return not ((po_unblock and _po_unblocked_after(comments, facts.po_login, declared)) or any(
-        facts.trusted(c) and str(c.get("created_at") or "") > declared and _resolves(str(c.get("body") or ""))
-        for c in comments
-    ))
+    return decide_open_blocker(facts, comments, types=_BLOCKED_TYPES) is not None
 
 
 def _epic_refined(entry: Mapping[str, Any]) -> bool:
@@ -242,7 +227,7 @@ def _read(gateway: Gateway, only_epic: int | None, env: Mapping[str, str]) -> Re
         except GatewayError as exc:
             return False, exc.step
         decision = helper.decision_blocker(comments) if decision is None else decision
-        return decision["state"] == "open" or other_blocker_open(helper, comments, po_unblock=True), None
+        return decision["state"] == "open" or other_blocker_open(helper, comments), None
 
     items: list[dict[str, Any]] = []
     for number, entry in epics.items():

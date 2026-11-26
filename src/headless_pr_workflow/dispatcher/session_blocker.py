@@ -14,9 +14,12 @@ Result words and exit codes: ``read`` (0; ``outcome`` is ``open_blocker`` or
 ``none``), ``unreadable`` (3: the comments could not be read; the caller keeps
 its own blocker, so the rule fails closed).
 
-``decide_open_blocker`` (issue #646) is the one rule "open blocker" that the
-copies listed under ``open_blocker`` in ``rules.py`` will call (#649 switches
-them). The declaration types, the declarers to leave out and the conflict
+``decide_open_blocker`` (issue #646) is the one rule "open blocker"; since
+#649 every caller reaches it: ``open_session_blocker`` here,
+``status.other_blocker_open``, ``facts._Facts.dependency_blocker``, and the
+shell through ``session-blocker decide`` (``conflict_round_rule`` in
+``scripts/lib/conflict-round.sh`` and ``latest_decision_blocker_json`` in
+``scripts/dispatcher-invoke.sh``). The declaration types, the declarers to leave out and the conflict
 round's head filter are caller inputs. ``hpw dispatcher session-blocker
 decide`` runs it over comments a caller already read (``--input``), ``open``
 over the story's comments read from GitHub. Both give ``read`` (0; ``outcome``
@@ -47,11 +50,6 @@ _DECLARATION = re.compile(r"^## Blocked Declaration", re.M)
 _MARKER_HEAD = re.compile(r"<!-- hpw:dispatcher [^>]*\bhead=([0-9a-fA-F]+)")
 
 
-def _automation(declared_by: str) -> bool:
-    name = declared_by.strip().lower()
-    return any(name == value or name.startswith(f"{value} ") for value in AUTOMATION_DECLARERS)
-
-
 def _lifts(body: str) -> bool:
     """A trusted ``Unblocked`` comment that is not itself a declaration (its ``Unblocked when:`` field is no resolution)."""
 
@@ -59,26 +57,16 @@ def _lifts(body: str) -> bool:
 
 
 def open_session_blocker(facts: _Facts, comments: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The newest open non-dispatcher Blocked Declaration as ``{type, declared_by, url, created_at}``, or ``None``."""
+    """The newest open non-dispatcher Blocked Declaration as ``{type, declared_by, url, created_at}``, or ``None``.
 
-    found: dict[str, Any] | None = None
-    for comment in comments:
-        body = str(comment.get("body") or "")
-        type_match, by_match = _TYPE_LINE.search(body), _DECLARED_BY.search(body)
-        if not (facts.trusted(comment) and "## Blocked Declaration" in body and type_match and by_match):
-            continue
-        kind, declared_by = type_match.group(1).lower(), by_match.group(1)
-        if kind not in BLOCKED_TYPES or _automation(declared_by):
-            continue
-        since = str(comment.get("created_at") or "")
-        if facts.po_login and _po_unblocked_after(comments, facts.po_login, since):
-            continue
-        if any(facts.trusted(c) and str(c.get("created_at") or "") > since and _lifts(str(c.get("body") or ""))
-               for c in comments):
-            continue
-        if found is None or since >= found["created_at"]:
-            found = {"type": kind, "declared_by": declared_by, "url": comment.get("html_url"), "created_at": since}
-    return found
+    A thin shim (issue #649): ``decide_open_blocker`` decides, with the automation declarers left out as this
+    caller's input (#556 → Decisions, case (7)). A declaration without a ``Declared by:`` line is no session
+    blocker: it names no declarer to leave out.
+    """
+
+    named = [c for c in comments if not (_DECLARATION.search(str(c.get("body") or ""))
+                                         and not _DECLARED_BY.search(str(c.get("body") or "")))]  # fmt: skip
+    return decide_open_blocker(facts, named, exclude_declarers=AUTOMATION_DECLARERS)
 
 
 def read_session_blocker(gateway: Gateway, story: int, *, env: Mapping[str, str] | None = None) -> Result:

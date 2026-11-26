@@ -235,18 +235,14 @@ RULES: tuple[Rule, ...] = (
           "poll invoke resume codex-worker",
           "test_dispatcher_in_flight.py test_dispatcher_status.py test_codex_reserve.py",
           "`waiting_codex_prs` finds Codex PRs by the branch prefix, not by the linked issue."),
-    _rule("open_blocker", "Whether a story has an open Blocked Declaration.", STATUS,
-          [(STATUS, "other_blocker_open"), (CONFLICT_ROUND_SH, "open_blocker"),
-           (SESSION_BLOCKER, "open_session_blocker"), (FACTS, "dependency_blocker"),
-           (INVOKE, "latest_decision_blocker_json")],
+    _rule("open_blocker", "Whether a story has an open Blocked Declaration.", SESSION_BLOCKER,
+          [(SESSION_BLOCKER, "decide_open_blocker")],
           "poll invoke resume codex-worker",
-          "test_dispatcher_session_blocker.py test_dispatcher_facts_block.py test_dispatcher_status.py "
-          "test_dispatcher_conflict_round.py test_dispatcher_in_flight.py",
-          "the jq `open_blocker` counts every type and is not lifted by a trusted Unblocked comment; "
-          "`other_blocker_open` counts four types, only the newest declaration, and is (a standalone PO `/unblock` lifts it when `po_unblock` is set, as both callers do); "
-          "`open_session_blocker` leaves out automation declarers."),
+          "test_dispatcher_session_blocker.py test_dispatcher_parity_in_flight.py test_dispatcher_rule_guard.py "
+          "test_dispatcher_facts_block.py test_dispatcher_status.py test_dispatcher_conflict_round.py "
+          "test_dispatcher_in_flight.py"),
     _rule("po_unblock", "Whether a standalone PO `/unblock` line after a time lifts a blocker or marker.", WRITE,
-          [(WRITE, "_po_unblocked_after"), (CONFLICT_ROUND_SH, "unblocked_after"), (FACTS, "_UNBLOCK_LINE"),
+          [(WRITE, "_po_unblocked_after"), (FACTS, "_UNBLOCK_LINE"),
            (POLL, "PO_LOGIN"), (INVOKE, "DECISION_BLOCKER_PO_LOGIN"),
            (NOTIFY_RETRY, "DECISION_BLOCKER_PO_LOGIN"), (BOOKKEEPING, "DECISION_BLOCKER_PO_LOGIN")],
           "poll invoke resume codex-worker",

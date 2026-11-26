@@ -392,7 +392,7 @@ CROSS = {
 def test_646_the_rule_decides_as_each_python_copy_with_that_copys_inputs(case):
     comments, facts = CROSS[case], _facts()
 
-    assert (rule(comments, types=FOUR) is not None) is other_blocker_open(facts, comments, po_unblock=True)
+    assert (rule(comments, types=FOUR) is not None) is other_blocker_open(facts, comments)
     assert (rule(comments, types=("dependency",)) is not None) is (facts.dependency_blocker(comments, {})["state"] == "open")
     assert rule(comments, exclude_declarers=AUTOMATION_DECLARERS) == open_session_blocker(facts, comments)
 

@@ -86,3 +86,23 @@ def test_628_a_second_marker_holds_copy_fails_the_guard(tmp_path: Path) -> None:
     write(tmp_path, "scripts/lib/conflict-round.sh", "jq 'def decide_holds($m): . ;'\n")
     problems = rule_guard.find_violations(tmp_path, [rule])
     assert problems == [f"marker_holds: new copy: scripts/lib/conflict-round.sh defines 'decide_holds' (owner {rule.owner})"]
+
+
+def test_649_open_blocker_has_one_implementation_and_an_empty_allowlist() -> None:
+    rule = next(r for r in RULES if r.name == "open_blocker")
+    assert rule.owner == "src/headless_pr_workflow/dispatcher/session_blocker.py" and rule.duplicates == ()
+    assert [impl.marker for impl in rule.implementations] == ["decide_open_blocker"]
+    conflict_round = (ROOT / "scripts" / "lib" / "conflict-round.sh").read_text(encoding="utf-8")
+    assert "def open_blocker" not in conflict_round and "dispatcher session-blocker decide" in conflict_round
+    invoke = (ROOT / "scripts" / "dispatcher-invoke.sh").read_text(encoding="utf-8")
+    assert '"$HPW_BIN" dispatcher session-blocker decide --type decision' in invoke
+    assert rule_guard.find_violations(ROOT, [rule]) == []
+
+
+def test_649_a_second_open_blocker_copy_fails_the_guard(tmp_path: Path) -> None:
+    rule = next(r for r in RULES if r.name == "open_blocker")
+    write(tmp_path, rule.owner, "def decide_open_blocker(facts, comments):\n    return None\n")
+    write(tmp_path, "src/headless_pr_workflow/dispatcher/status.py", "def decide_open_blocker(comments):\n    return None\n")
+    problems = rule_guard.find_violations(tmp_path, [rule])
+    assert problems == [f"open_blocker: new copy: src/headless_pr_workflow/dispatcher/status.py defines "
+                        f"'decide_open_blocker' (owner {rule.owner})"]
