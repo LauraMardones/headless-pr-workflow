@@ -12,6 +12,11 @@
 #   guard               DISPATCHER_ENABLED=true → output enabled=true, else enabled=false
 #   scope               the state-writer rule: EVENT_NAME=schedule, or REF is the
 #                       default branch (DEFAULT_BRANCH) → output state_writer=true
+#   debounce            board-status.yml: wait DEBOUNCE_SECONDS (default 20), then output
+#                       latest=false when a newer `Board status` run will write the board
+#                       (issues, issue_comment, workflow_run, or a pull_request_target /
+#                       pull_request_review run whose base is DEFAULT_BRANCH), else
+#                       latest=true; an unreadable answer is latest=true (issue #653)
 #   cache-date          TODAY=<UTC date> to $GITHUB_ENV (the restore key)
 #   cache-save-date     SAVE_DAY=<UTC date> to $GITHUB_ENV (the save key)
 #   git-auth            gh auth setup-git, so a session's plain git push authenticates
@@ -82,6 +87,45 @@ step_scope() {
     echo "state_writer=$writer" >> "$GITHUB_OUTPUT"
     if [[ "$writer" != "true" ]]; then
         echo "Non-default ref ${REF:-}: poll runs with --dry-run; dispatcher state is read-only" >&2
+    fi
+}
+
+# Issue #653: a burst of events starts one writing run, not one per event. The
+# run asks the Actions API (GITHUB_TOKEN, actions: read) whether a newer run
+# will write; only then is its writer job skipped. A newer run off the default
+# branch only reports (see step_scope), so it never stands in for a writer.
+# Any unreadable answer writes anyway: a wasted run costs less than a lost write.
+step_debounce() {
+    require_file_var GITHUB_OUTPUT
+    require_repo
+    [[ "${RUN_ID:-}" =~ ^[0-9]+$ ]] || die "RUN_ID is required (github.run_id)"
+    local wait="${DEBOUNCE_SECONDS:-20}" created runs newer
+    [[ "$wait" =~ ^[0-9]+$ ]] || die "DEBOUNCE_SECONDS must be a whole number"
+    sleep "$wait"
+    created=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '.created_at' 2>/dev/null) || created=""
+    if [[ -z "$created" || "$created" == "null" ]]; then
+        echo "debounce: own run time unreadable; this run writes" >&2
+        echo "latest=true" >> "$GITHUB_OUTPUT"
+        return 0
+    fi
+    runs=$(gh api "repos/${REPO}/actions/workflows/board-status.yml/runs?created=%3E%3D${created}&per_page=100" 2>/dev/null) || runs=""
+    newer=$(jq -r --argjson me "$RUN_ID" --arg base "${DEFAULT_BRANCH:-}" '
+        [.workflow_runs[]?
+         | select((.id | type) == "number" and .id > $me)
+         | select((.conclusion // "") | IN("cancelled", "failure", "timed_out") | not)
+         | select(
+             (.event | IN("issues", "issue_comment", "workflow_run"))
+             or ((.event | IN("pull_request_target", "pull_request_review")) and $base != ""
+                 and any(.pull_requests[]?; .base.ref == $base)))
+        ] | length' <<< "$runs" 2>/dev/null) || newer=""
+    if [[ ! "$newer" =~ ^[0-9]+$ ]]; then
+        echo "debounce: the runs list is unreadable; this run writes" >&2
+        echo "latest=true" >> "$GITHUB_OUTPUT"
+    elif [[ "$newer" -gt 0 ]]; then
+        echo "debounce: $newer newer writing run(s); this run's writer job is skipped" >&2
+        echo "latest=false" >> "$GITHUB_OUTPUT"
+    else
+        echo "latest=true" >> "$GITHUB_OUTPUT"
     fi
 }
 
@@ -189,10 +233,11 @@ step_usage_limit_notify() {
     bash "$SCRIPT_DIR/dispatcher-usage-limit.sh" mark-notified
 }
 
-[[ $# -eq 1 ]] || die "usage: $0 guard|scope|cache-date|cache-save-date|git-auth|poll|invoke|status-sync|trigger-check|retry|usage-limit-notify"
+[[ $# -eq 1 ]] || die "usage: $0 guard|scope|debounce|cache-date|cache-save-date|git-auth|poll|invoke|status-sync|trigger-check|retry|usage-limit-notify"
 case "$1" in
     guard)              step_guard ;;
     scope)              step_scope ;;
+    debounce)           step_debounce ;;
     cache-date)         step_cache_date ;;
     cache-save-date)    step_cache_save_date ;;
     git-auth)           step_git_auth ;;
