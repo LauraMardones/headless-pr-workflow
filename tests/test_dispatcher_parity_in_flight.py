@@ -594,10 +594,12 @@ DECIDE: dict[str, Callable[..., dict[str, str]]] = {
 # Every case whose copies decide differently, with its resolution class under the #525 divergence decision.
 DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("merge_gates_pass", "not-mergeable"): (
-        "PO decision", "inflight_gates_pass leaves mergeability to the merge step by design (in-flight.sh), "
-                       "GateResult needs mergeable=yes (MERGE-POLICY.md); whether the board shows such a PR In review "
-                       "while the resume pass routes it to the merge step needs a PO decision."),
-    ("merge_gates_pass", "mergeability-unknown"): ("PO decision", "As not-mergeable, for mergeable=unknown."),
+        "PO decision", "Resolved by #650 under the PO decision of 2026-11-16 on #556 (option A), case (3): the one rule "
+                       "(decide_merge_gates) returns the gates apart from mergeability and the mergeability; "
+                       "inflight_gates_pass takes merge_step, so the PR stays in the merge step for the conflict rule, "
+                       "and the board (merge_gates_pass) takes board_mergeable, Mergeable only with mergeable=yes, as "
+                       "the /merge gate (GateResult, MERGE-POLICY.md)."),
+    ("merge_gates_pass", "mergeability-unknown"): ("PO decision", "Resolved by #650 as not-mergeable, for mergeable=unknown."),
     ("in_flight_step", "draft-pr"): (
         "contract", "The board shows a draft linked PR as In implementation (derive_status); plan_in_flight and "
                     "work_in_flight give a draft PR with no session at work no WIP place (issue #578)."),
@@ -852,3 +854,137 @@ def test_649_the_resume_decision_blocker_shim_fails_closed_when_the_rule_cannot_
                       + f'DECISION_BLOCKER_PO_LOGIN="{PO}"\nlatest_decision_blocker_json {STORY}')  # fmt: skip
 
     assert (rc, out) == (1, "") and rc_read == 1
+
+
+# ── Entry equivalence: merge_gates_pass (issue #650) ─────────────────────────
+
+from headless_pr_workflow.dispatcher.gateway import decide_merge_gates, parse_gate_line  # noqa: E402
+
+GATE_CASES: dict[str, str | None] = {
+    "all-pass": gate_line(),
+    "not-mergeable": gate_line("no"),
+    "mergeability-unknown": gate_line("unknown"),
+    "conflicting": gate_line("fail(conflicting)"),
+    "unresolved-thread": gate_line(threads="unresolved(1)"),
+    "other-head": gate_line(head="bbbbbbb"),
+    "short-head": gate_line(head="aaaa"),
+    "policy-fail": gate_line().replace("policy=pass(required)", "policy=fail(missing)"),
+    "checks-pending": gate_line().replace("checks=pass", "checks=pending"),
+    "no-approval": gate_line().replace("approval=formal", "approval=none"),
+    "absent-ok-codex-review": gate_line().replace("checks=pass", "checks=absent-ok").replace("formal", "codex-review"),
+    "upper-case-head": gate_line(head="AAAAAAA"),
+    "gates-unreadable": None,
+}  # fmt: skip
+
+
+def _resume_merge_condition() -> str:
+    """The merge decision of ``resume_review_story`` (the resume pass after ``/review``), as it is written."""
+
+    match = re.search(r'^    if \[\[ -n "\$pr_head" \]\] && inflight_gates_pass [^\n]*\n.*?^    fi\n',
+                      _function("resume_review_story"), re.MULTILINE | re.DOTALL)  # fmt: skip
+    assert match, "resume_review_story no longer decides the merge with inflight_gates_pass"
+    return match.group(0)
+
+
+def _gate_facts(line: str | None) -> dict[str, Any]:
+    return facts(open_prs=[pr()], gates={PR: line} if line is not None else {}, fail=() if line is not None else ("gate",))
+
+
+def poll_merge_step(tmp: Path, f: dict[str, Any]) -> str:
+    """The poll (``inflight_compute``): ``merge`` when the story is in the merge step, ``review`` in the review step."""
+
+    plan = inflight(tmp, f)
+    assert plan is not None
+    steps = [step for step in ("merge", "review") if any(e["number"] == STORY for e in plan.get(step, []))]
+    assert len(steps) == 1, plan
+    return steps[0]
+
+
+def resume_merge_step(tmp: Path, f: dict[str, Any], hpw: str = "") -> str:
+    """The resume pass after ``/review`` (``resume_review_story``'s own condition): ``merge`` or ``review``."""
+
+    body = (f'{hpw}resume_in_merge_story() {{ echo merge; }}\n'
+            f'decide() {{\n    local pr_number={PR} pr_head={HEAD} issue_num={STORY} item_id=x\n'
+            f'{_resume_merge_condition()}    echo review\n}}\ndecide')  # fmt: skip
+    rc, out = bash(tmp, f, body)
+    assert rc == 0, out
+    return out
+
+
+@pytest.mark.parametrize("case", sorted(GATE_CASES))
+def test_650_poll_resume_and_board_follow_the_one_merge_gate_rule(case, tmp_path, monkeypatch):
+    """AC 2, AC 3: the same gate line through the poll, the resume pass and the board status.
+
+    The poll and the resume pass take the rule's ``merge_step`` (mergeability is left to the merge step, the
+    named cases ``not-mergeable`` and ``mergeability-unknown`` of divergence (3)); the board takes its
+    ``board_mergeable``. A change to either entry, or to the rule, makes one of the words differ.
+    """
+
+    line = GATE_CASES[case]
+    f = _gate_facts(line)
+    decision = decide_merge_gates(parse_gate_line(line or ""), HEAD)
+    expected = "merge" if decision["merge_step"] else "review"
+
+    poll, resume = poll_merge_step(tmp_path / "poll", f), resume_merge_step(tmp_path / "resume", f)
+
+    assert (poll, resume) == (expected, expected)
+    assert gateway_gates(f, PR, monkeypatch) is decision["board_mergeable"]
+
+
+@pytest.mark.parametrize("case", ["not-mergeable", "mergeability-unknown"])
+def test_650_a_pr_that_is_not_mergeable_stays_in_the_merge_step_but_is_not_mergeable_on_the_board(case, tmp_path,
+                                                                                                 monkeypatch):
+    """AC 3: divergence (3) of #556 → Decisions (2026-11-16), named by its case: the baseline of #571 holds."""
+
+    case_facts, baseline = CASES["merge_gates_pass"][case]
+    f = _gate_facts(case_facts["gates"][PR])  # the same gate line, with the story's open PR
+
+    assert poll_merge_step(tmp_path / "poll", f) == resume_merge_step(tmp_path / "resume", f) == "merge"
+    assert gateway_gates(f, PR, monkeypatch) is False
+    assert baseline["in-flight.sh:inflight_gates_pass"] == "pass" and baseline["gateway.py:merge_gates_pass"] == "fail"
+
+
+@pytest.mark.parametrize("rc", [2, 3])
+def test_650_a_gate_script_that_cannot_read_keeps_both_entries_out_of_the_merge_step(rc, tmp_path):
+    """AC 4: a gate script exiting above 1 is unreadable, even when it prints a passing gate line."""
+
+    f = _gate_facts(gate_line())
+    gate = tmp_path / "gate-fail.sh"
+    gate.write_text(f"#!/usr/bin/env bash\necho '{gate_line()}'\nexit {rc}\n", encoding="utf-8", newline="\n")
+    gate.chmod(0o755)
+    swap = f'MERGE_GATE_SCRIPT="{gate.as_posix()}"\n'
+
+    rc_poll, out = bash(tmp_path / "poll", f, swap + 'inflight_compute && printf "%s" "$INFLIGHT_JSON"')
+    plan = json.loads(out) if rc_poll == 0 else None
+
+    assert plan is not None and not any(e["number"] == STORY for e in plan["merge"])
+    assert resume_merge_step(tmp_path / "resume", f, swap) == "review"
+
+
+def test_650_a_failing_rule_call_keeps_both_entries_out_of_the_merge_step(tmp_path):
+    """AC 4: when ``merge-gates decide`` cannot run or be read, no entry acts on a guess: no merge step."""
+
+    f = _gate_facts(gate_line())
+    failing = tmp_path / "failing-hpw"
+    failing.write_text('#!/usr/bin/env bash\n[[ "$2" == merge-gates ]] && exit 3\nexec "$REAL_HPW" "$@"\n',
+                       encoding="utf-8", newline="\n")  # fmt: skip
+    failing.chmod(0o755)
+    swap = f'REAL_HPW="$HPW_BIN"; export REAL_HPW; HPW_BIN="{failing.as_posix()}"\n'
+
+    rc, out = bash(tmp_path / "poll", f, swap + 'inflight_compute && printf "%s" "$INFLIGHT_JSON"')
+    plan = json.loads(out) if rc == 0 else None
+
+    assert plan is not None and not any(e["number"] == STORY for e in plan["merge"])
+    assert any(e["number"] == STORY for e in plan["review"])
+    assert resume_merge_step(tmp_path / "resume", f, swap) == "review"
+
+
+def test_650_an_unreadable_gate_raises_on_the_board(monkeypatch):
+    """AC 4: the board status still reads unreadable gates as a ``GatewayError``, as before the switch."""
+
+    def evaluate(n: int, repo: str) -> Any:
+        raise ValueError("merge-gate-summary: unreadable")
+
+    monkeypatch.setattr(gateway_mod, "_merge_gate_module", lambda: SimpleNamespace(evaluate=evaluate))
+    with pytest.raises(GatewayError, match=f"evaluate merge gates of PR #{PR}: merge-gate-summary: unreadable"):
+        GhGateway(REPO).merge_gates_pass(PR, HEAD)
