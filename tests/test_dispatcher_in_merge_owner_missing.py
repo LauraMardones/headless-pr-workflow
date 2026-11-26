@@ -58,7 +58,8 @@ def test_ac1_ac2_a_head_without_a_merge_owner_gets_one_blocker_and_no_merge(d, e
     [blocker] = blockers(d)
     assert "Type: resource" in blocker
     assert f"the merge owner is missing for head {NEW_HEAD[:7]} on PR #{PR}" in blocker
-    assert "not pushed by a dispatcher session" in blocker
+    assert "not pushed by a dispatcher session" not in blocker
+    assert "the dispatcher cannot show that its own session pushed it" in blocker
     assert f"Unblocked when: the PO merges PR #{PR} by hand with /merge {PR} and then runs /cleanup {PR}" in blocker
     assert "docs/TAKEOVER-RULES.md → Merge Takeover" in blocker
     assert missing_marker(NEW_HEAD) in blocker
@@ -112,3 +113,79 @@ def test_ac3_a_conflicting_pr_gets_no_merge_owner_blocker(d):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert d.phases == []
     assert not any(missing_marker(NEW_HEAD) in b for b in d.posted(STORY))
+
+
+# ── issue #540: a failed merge-owner write names its cause and blocks with the true reason ──
+
+FAILING_HPW = """#!/usr/bin/env bash
+# hpw stand-in: every comment write on PR %(pr)d fails as %(mode)s; everything else is the real fake.
+if [[ "$1 $2 $3 $4" == "dispatcher write comment --number" && "$5" == "%(pr)d" ]]; then
+    %(fail)s
+fi
+exec "%(real)s" "$@"
+"""
+NO_JSON = "exit 7"
+JSON_NO_ERROR = """echo '{"ok": false, "block": "write", "operation": "comment", "result": "failed", "error": null}'; exit 1"""
+
+
+def failing_write_env(d, fail: str) -> dict[str, str]:
+    script = d.bin / "hpw-failing"
+    script.write_text(FAILING_HPW % {"pr": PR, "mode": "stubbed", "fail": fail, "real": (d.bin / "hpw").as_posix()},
+                      encoding="utf-8", newline="\n")
+    script.chmod(0o755)
+    return {"HPW_BIN": script.as_posix()}
+
+
+def session_pushes_new_head(d):
+    d.on_session("implement", f"""
+jq 'map(if .number == {PR} then .head.sha = "{NEW_HEAD}" | .mergeable = true | .mergeable_state = "clean" else . end)' \\
+    "$MOCK_DIR/pulls.json" > "$MOCK_DIR/p.tmp" && mv "$MOCK_DIR/p.tmp" "$MOCK_DIR/pulls.json"
+""")
+
+
+def failed_write_run(d, fail: str):
+    d.add_story(STORY, "In review", executor="claude-code-opus")
+    d.add_pr(PR, STORY, head=HEAD, **CONFLICTING)
+    session_pushes_new_head(d)
+    return d.resume(env=failing_write_env(d, fail))
+
+
+@pytest.mark.parametrize("fail, cause", [
+    (NO_JSON, "hpw exit code 7 and no output on stdout"),
+    (JSON_NO_ERROR, "hpw exit code 1, result failed with no error text"),
+    ("echo 'Traceback: boom'; exit 3", "hpw exit code 3 and no JSON result; last output line: Traceback: boom"),
+])
+def test_540_ac1_the_warning_names_the_exit_code_and_the_cause(d, fail, cause):
+    proc = failed_write_run(d, fail)
+
+    assert f"Warning: the comment on #{PR} was not written ({cause})." in proc.stderr
+    assert "was not written ()" not in proc.stderr
+
+
+def test_540_ac3_ac4_a_failed_owner_write_posts_one_blocker_with_the_true_reason(d):
+    proc = failed_write_run(d, NO_JSON)
+
+    assert "could not record merge ownership or its pending copy" in proc.stderr
+    [blocker] = blockers(d)
+    assert "Type: resource" in blocker
+    assert f"the merge-owner record could not be written for head {NEW_HEAD[:7]} on PR #{PR}" in blocker
+    assert "cause: hpw exit code 7 and no output on stdout" in blocker
+    assert "not pushed by a dispatcher session" not in blocker
+    assert "Next step:" in blocker
+    assert missing_marker(NEW_HEAD) in blocker
+    assert len(po_events(d)) == 1
+
+    proc = d.resume()  # a later run, the PR comments writable again: the head is blocked, nothing more is posted
+    assert len(blockers(d)) == 1 and len(po_events(d)) == 1
+    assert not any(p.startswith("merge") for p in d.phases)
+
+
+def test_540_ac5_no_blocker_text_says_the_head_was_not_pushed_by_a_dispatcher_session(d):
+    d.add_story(STORY, "Mergeable", executor="claude-code-sonnet")
+    d.add_pr(PR, STORY, head=NEW_HEAD, owned=False)
+
+    d.resume()
+
+    [blocker] = blockers(d)
+    assert "not pushed by a dispatcher session" not in blocker
+    assert "no dispatcher merge-owner record exists for this head" in blocker
