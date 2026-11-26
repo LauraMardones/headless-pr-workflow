@@ -34,7 +34,7 @@ import pytest
 
 from headless_pr_workflow.dispatcher.gateway import GatewayError
 from headless_pr_workflow.dispatcher.in_flight import plan_in_flight
-from headless_pr_workflow.dispatcher.marker import decide_holds, marker_holds
+from headless_pr_workflow.dispatcher.marker import decide_holds, marker_holds, merge_owner_evidence
 from headless_pr_workflow.dispatcher.session_blocker import read_session_blocker
 from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE, is_codex_review_request
 from tests.dispatcher_fakes import BASH, REPO_ROOT, needs_tools
@@ -146,7 +146,7 @@ INVOKE_FUNCTIONS = (
     "marker_list_json", "bookkeeping_fix_marker_init", "bookkeeping_login", "head_in_list", "fix_round_heads",
     "fix_round_due", "fix_round_attempt_marker", "fix_round_attempt_superseded", "hand_off_pending_marker",
     "hand_off_pending_prefix", "hand_off_done_marker", "complete_pending_hand_off", "merge_owner_marker",
-    "head_has_merge_owner_marker", "merge_attempt_marker", "pytest_green_on_head", "conflict_round_state",
+    "head_merge_owner_evidence", "merge_attempt_marker", "pytest_green_on_head", "conflict_round_state",
     "conflict_round_attempt_marker", "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after", "hand_off_to_codex_review_loop",
     "find_linked_pr_json", "pr_conflicts_with_main", "no_push_round_is_expected", "latest_decision_blocker_json",
 )  # fmt: skip
@@ -316,19 +316,27 @@ def hand_off_pending_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
 
 
 def merge_owner_evidence_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
-    """Whether the clean head has merge-owner evidence: ``owned``, ``not owned`` or ``unreadable``."""
+    """Whether the clean head has merge-owner evidence: ``owned``, ``not owned`` or ``unreadable``.
 
-    rc_merge, _ = bash(tmp / "merge", f, f'"$HPW_BIN" dispatcher marker holds --repo "$REPO" --number {PR} '
-                                         f'--marker "action=merge-owner pr={PR} head={HEAD} -->"')  # fmt: skip
-    rc_head, _ = bash(tmp / "head", f, f"head_has_merge_owner_marker {PR} {HEAD}")
+    Since #651 every entry calls the one rule, ``marker.decide_merge_owner``: the merge script and the
+    resume pass's merge step through ``hpw dispatcher marker merge-owner``, the poll and the resume pass's
+    conflict rule through ``hpw dispatcher marker merge-owner-decide``.
+    """
+
+    rc_merge, _ = bash(tmp / "merge", f, f'"$HPW_BIN" dispatcher marker merge-owner --repo "$REPO" --pr {PR} '
+                                         f'--head {HEAD} >/dev/null')  # fmt: skip
+    rc_head, _ = bash(tmp / "head", f, f"head_merge_owner_evidence {PR} {HEAD}")
+    by_rc = {0: "owned", 1: "not owned"}
+    python = merge_owner_evidence(FakeGateway(f), PR, HEAD, env=ENV).result
 
     def word(w: str) -> str:
         return {"clean": "owned", "ownerless": "not owned", "ownerless-reported": "not owned"}.get(w, w)
 
     return {
-        "dispatcher-merge.sh:holds_rc (marker.py:marker_holds)": {0: "owned", 1: "not owned"}.get(rc_merge, "unreadable"),
-        "conflict-round.sh:owned (resume)": word(resume_rule(tmp / "rule", f)),
-        "dispatcher-invoke.sh:head_has_merge_owner_marker": "owned" if rc_head == 0 else "not owned",
+        "marker.py:decide_merge_owner": {"holds": "owned", "absent": "not owned"}.get(python, "unreadable"),
+        "dispatcher-merge.sh:evidence_rc (marker merge-owner)": by_rc.get(rc_merge, "unreadable"),
+        "conflict-round.sh:conflict_merge_owner (resume)": word(resume_rule(tmp / "rule", f)),
+        "dispatcher-invoke.sh:head_merge_owner_evidence (resume, merge step)": by_rc.get(rc_head, "unreadable"),
         "dispatcher-poll.sh:OWNER_MISSING_DUE": word(poll_rule(tmp / "poll", f)),
     }  # fmt: skip
 
@@ -455,8 +463,10 @@ MAX = ("dispatcher-invoke.sh:CODEX_FIX_ROUND_MAX (resume_fix_round)", "in_flight
 REQUEST = ("review_policy.py:is_codex_review_request", "dispatcher-invoke.sh:review_request_after")
 HAND_OFF = ("in_flight.py:hand_off_pending (plan_in_flight)", "dispatcher-invoke.sh:complete_pending_hand_off",
             "dispatcher-invoke.sh:hand_off_pending_marker (resume_fix_round)")  # fmt: skip
-OWNERSHIP = ("dispatcher-merge.sh:holds_rc (marker.py:marker_holds)", "conflict-round.sh:owned (resume)",
-             "dispatcher-invoke.sh:head_has_merge_owner_marker", "dispatcher-poll.sh:OWNER_MISSING_DUE")  # fmt: skip
+OWNERSHIP = ("marker.py:decide_merge_owner", "dispatcher-merge.sh:evidence_rc (marker merge-owner)",
+             "conflict-round.sh:conflict_merge_owner (resume)",
+             "dispatcher-invoke.sh:head_merge_owner_evidence (resume, merge step)",
+             "dispatcher-poll.sh:OWNER_MISSING_DUE")  # fmt: skip
 ATTEMPT_COPIES = ("marker.py:marker_holds", "dispatcher-invoke.sh:merge_attempt_marker")
 HOLDS = ("marker.py:decide_holds", "dispatcher-poll.sh:conflict_round_rule (marker decide)",
          "dispatcher-invoke.sh:conflict_round_state (resume, marker decide)",
@@ -542,15 +552,14 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "marker-on-head": (facts(prc=[comment(BOT, OWNER, T0)]), same(OWNERSHIP, "owned")),
         "no-marker": (facts(), same(OWNERSHIP, "not owned")),
         "marker-by-another-account": (facts(prc=[comment(OTHER, OWNER, T0)]), same(OWNERSHIP, "not owned")),
-        "evidence-pending-copy": (facts(prc=[comment(BOT, OWNER_PENDING, T0)]),
-                                  {**same(OWNERSHIP, "not owned"), OWNERSHIP[1]: "owned", OWNERSHIP[3]: "owned"}),
-        "marker-then-po-unblock": (facts(prc=[comment(BOT, OWNER, T0), unblock(T1)]),
-                                   {**same(OWNERSHIP, "owned"), OWNERSHIP[0]: "not owned"}),
-        "pr-comments-unreadable": (facts(prc=[comment(BOT, OWNER, T0)], fail=("prc",)),
-                                   {**same(OWNERSHIP, "unreadable"), OWNERSHIP[2]: "owned"}),
+        "evidence-pending-copy": (facts(prc=[comment(BOT, OWNER_PENDING, T0)]), same(OWNERSHIP, "owned")),
+        "evidence-pending-copy-for-older-head": (facts(prc=[comment(BOT, OWNER_PENDING.replace(HEAD, OLD), T0)]),
+                                                 same(OWNERSHIP, "not owned")),
+        "marker-then-po-unblock": (facts(prc=[comment(BOT, OWNER, T0), unblock(T1)]), same(OWNERSHIP, "owned")),
+        "pr-comments-unreadable": (facts(prc=[comment(BOT, OWNER, T0)], fail=("prc",)), same(OWNERSHIP, "unreadable")),
         "mergeability-unknown": (facts(prc=[comment(BOT, OWNER, T0)], mergeable=None),
-                                 {**same(OWNERSHIP, "owned"), OWNERSHIP[1]: "unknown",
-                                  OWNERSHIP[3]: "skipped (mergeability unknown)"}),
+                                 {**same(OWNERSHIP, "owned"), OWNERSHIP[2]: "unknown",
+                                  OWNERSHIP[4]: "skipped (mergeability unknown)"}),
     },
     "attempt_once_per_head": {
         "no-attempt": (facts(), same(ATTEMPT_COPIES, "attempt")),
@@ -657,14 +666,6 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("hand_off_pending", "pending-for-older-head"): (
         "contract", "dispatcher-invoke.sh matches a pending hand-off by PR, not by head (issue #478); resume_fix_round "
                     "matches the full marker with the head: match by PR."),
-    ("merge_owner_evidence", "evidence-pending-copy"): (
-        "PO decision", "The conflict rule and the poll accept the evidence-pending copy (#348) as merge-owner evidence, "
-                       "the merge script and head_has_merge_owner_marker only the marker; no contract says which."),
-    ("merge_owner_evidence", "marker-then-po-unblock"): (
-        "PO decision", "dispatcher-merge.sh uses marker holds, so a later PO /unblock voids the ownership evidence; "
-                       "the other copies ignore /unblock. Needs a PO decision."),
-    ("merge_owner_evidence", "pr-comments-unreadable"): (
-        "read defect", "head_has_merge_owner_marker counts a failed read as owned; fail closed as the others do."),
     ("merge_owner_evidence", "mergeability-unknown"): (
         "contract", "The conflict rule decides nothing while mergeability is unknown (issue #449), and the poll skips "
                     "the PR; ownership itself is evidence on the head: the consolidated rule reads it apart from "
@@ -685,6 +686,16 @@ RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
     ("hand_off_pending", "newest-pending-listed-first"): (
         "contract", "Resolved by #628: as newest-attempt-listed-first; the marker_holds shim now takes the newest "
                     "pending marker by created_at, as hand_off_pending does."),
+    ("merge_owner_evidence", "evidence-pending-copy"): (
+        "PO decision", "Resolved by #651 under the PO decision of 2026-11-16 on #556 (option A), case (5): the "
+                       "evidence-pending copy (#348) is merge-owner evidence; marker.py decide_merge_owner is the one "
+                       "rule, and the merge script and the resume pass's merge step now accept it too."),
+    ("merge_owner_evidence", "marker-then-po-unblock"): (
+        "PO decision", "Resolved by #651 under the PO decision of 2026-11-16 on #556 (option A), case (6): a PO "
+                       "/unblock does not void merge-owner evidence; dispatcher-merge.sh no longer uses marker holds."),
+    ("merge_owner_evidence", "pr-comments-unreadable"): (
+        "read defect", "Resolved by #651: the resume pass's merge step no longer counts a failed read as owned; it "
+                       "runs no /merge this run, as the other entries fail closed."),
 }
 
 REQUIRED_KINDS = {

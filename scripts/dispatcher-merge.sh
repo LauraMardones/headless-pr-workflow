@@ -115,18 +115,19 @@ fi
 # which this script cannot supply, so it never merges on takeover.
 OWNER_ID="dispatcher"
 owner_args=(--session-id "$OWNER_ID")
-# Block 2 of ADR-014 (`hpw dispatcher marker holds`, issue #433) reads the
-# marker: exit 0 holds, 1 does not, 3 the account or the comments could not be
-# read (fail closed: no merge).
+# The one merge-owner-evidence rule (`hpw dispatcher marker merge-owner`,
+# issue #651) reads it: the marker for exactly this head or its evidence-pending
+# copy (issue #348), not voided by a later PO /unblock. Exit 0 holds, 1 does
+# not, 3 the account or the comments could not be read (fail closed: no merge).
 marker_note="; no dispatcher owner marker for head ${head_sha:0:7}"
-holds_rc=0
-holds_out=$("$HPW_BIN" dispatcher marker holds --repo "$REPO" --number "$PR" \
-    --marker "action=merge-owner pr=$PR head=$head_sha -->" 2>"$hpw_err") || holds_rc=$?
-case "$holds_rc" in
+evidence_rc=0
+evidence_out=$("$HPW_BIN" dispatcher marker merge-owner --repo "$REPO" --pr "$PR" \
+    --head "$head_sha" 2>"$hpw_err") || evidence_rc=$?
+case "$evidence_rc" in
     0) owner_args+=(--expected-owner "$OWNER_ID" --expected-owner-sha "$head_sha")
        marker_note="" ;;
     1) ;;
-    *) block "the dispatcher account or the PR comments could not be read, so merge ownership cannot be verified ($(jq -r '.error // "unreadable"' <<< "$holds_out" 2>/dev/null))." ;;
+    *) block "the dispatcher account or the PR comments could not be read, so merge ownership cannot be verified ($(jq -r '.error // "unreadable"' <<< "$evidence_out" 2>/dev/null))." ;;
 esac
 owner_out=$("$HPW_BIN" merge-owner "$PR" --repo "$REPO" "${owner_args[@]}" --json 2>"$hpw_err")
 owner_rc=$?

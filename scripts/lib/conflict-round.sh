@@ -19,10 +19,9 @@
 #                    marker supersedes it)
 #     unknown        GitHub has not computed mergeability yet (mergeable null)
 #     clean          not conflicting; the head has merge-owner evidence
-#     ownerless      not conflicting; the head has no merge-owner evidence
-#                    (the dispatcher's merge-owner marker or its
-#                    evidence-pending copy, issue #348), and the dispatcher
-#                    has not yet posted the missing-merge-owner blocker for it
+#     ownerless      not conflicting; the head has no merge-owner evidence,
+#                    and the dispatcher has not yet posted the
+#                    missing-merge-owner blocker for it
 #     ownerless-reported
 #                    as ownerless, but that blocker is already posted for the
 #                    head (it is posted once per head, even after /unblock)
@@ -51,6 +50,13 @@
 #   unless a later standalone PO /unblock line follows it. When that call
 #   fails, the rule prints no word and fails, which both callers read as
 #   unreadable.
+#   Merge-owner evidence is decided by the one merge-owner-evidence rule,
+#   `hpw dispatcher marker merge-owner-decide` (marker.py, issue #651), over
+#   the PR's conversation comments: the dispatcher's merge-owner marker for
+#   exactly the current head, or its evidence-pending copy (issue #348); a
+#   later PO /unblock does not void it. The rule is asked only for a PR that
+#   is not conflicting and whose mergeability is known; when the call fails,
+#   the rule prints no word and fails, as for the marker-holds call.
 
 # conflict_marker_decide <login> <po-login> <marker>
 #   Reads the story's comments on stdin and prints the `marker decide` JSON
@@ -76,8 +82,25 @@ conflict_open_blocker() {
         <<< "$out" 2>/dev/null
 }
 
+# conflict_merge_owner <dispatcher-login> <pr> <head>
+#   Reads the PR's conversation comments on stdin and prints true or false:
+#   whether the one merge-owner-evidence rule finds evidence for the head;
+#   fails on a read error. A PR with no head SHA has no evidence.
+conflict_merge_owner() {
+    local out rc
+    # Read the comments even when there is no head: an unread pipe would kill
+    # the writer with SIGPIPE, which `pipefail` in the callers reads as a failure.
+    [[ -n "$3" ]] || { cat >/dev/null; echo false; return 0; }
+    out=$("${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher marker merge-owner-decide \
+        --login "$1" --pr "$2" --head "$3")
+    rc=$?
+    [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
+    jq -r 'if .result == "holds" then true elif .result == "absent" then false else error("unreadable") end' \
+        <<< "$out" 2>/dev/null
+}
+
 conflict_round_rule() {
-    local input n head story tried fix_attempt blocked=false
+    local input n head story tried fix_attempt blocked=false owned=false
     input=$(jq -cs '.') || return 1
     if jq -e '(.[0].state // "open") != "open" or (.[0].draft // false)' <<< "$input" >/dev/null; then
         echo "not-open"
@@ -92,9 +115,11 @@ conflict_round_rule() {
         "<!-- hpw:dispatcher action=fix-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
     if jq -e '.[0].mergeable == false or .[0].mergeable_state == "dirty"' <<< "$input" >/dev/null; then
         blocked=$(conflict_open_blocker "$1" "$3" "$head" <<< "$story") || return 1
+    elif jq -e '.[0].mergeable != null' <<< "$input" >/dev/null; then
+        owned=$(jq -c '.[2] // []' <<< "$input" | conflict_merge_owner "$1" "$n" "$head") || return 1
     fi
     jq -r --arg bot "$1" --arg bk "$2" --argjson tried "$tried" --argjson attempt "$fix_attempt" \
-        --argjson blocked "$blocked" '
+        --argjson blocked "$blocked" --argjson owned "$owned" '
         .[0] as $pr | (.[1] // []) as $story | (.[2] // []) as $prc
         | (($pr.head.sha // "") | ascii_downcase) as $head
         | ($pr.number | tostring) as $n
@@ -104,9 +129,6 @@ conflict_round_rule() {
              | .created_at] | max;
           newest($prc; $bk; "<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=" + $head + " ") as $moves
         | ($moves != null and ($attempt.result != "holds" or $moves > $attempt.created_at)) as $fix_due
-        | (any($prc[]; (.user.login // "") == $bot and ((.body // "") | ascii_downcase
-              | contains("<!-- hpw:dispatcher action=merge-owner pr=" + $n + " head=" + $head + " -->")
-                or contains("<!-- hpw:dispatcher action=evidence-pending item=merge-owner head=" + $head + " ")))) as $owned
         | if $fix_due then "fix-round-due"
           elif ($pr.mergeable == false) or ($pr.mergeable_state == "dirty") then
               if $tried.result == "holds" then "tried"
