@@ -160,7 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     merge_gates = blocks.add_parser("merge-gates", add_help=False)
     merge_gates_ops = merge_gates.add_subparsers(dest="operation", parser_class=_Parser)
     mg_decide = merge_gates_ops.add_parser("decide", add_help=False)
-    mg_decide.add_argument("--input", default="-")  # scripts/merge-gate-summary's output; "-" reads stdin
+    # scripts/merge-gate-summary's stdout ("-" reads stdin); the caller counts a script exit above 1 as unreadable.
+    mg_decide.add_argument("--input", default="-")
     mg_read = merge_gates_ops.add_parser("read", add_help=False)
     mg_read.add_argument("--repo", required=True)
     mg_read.add_argument("--pr", type=_positive, required=True)

@@ -239,8 +239,8 @@ def _merge_gate_module() -> Any:
 
 # ── the one merge-gate rule (issue #629) ─────────────────────────────────────
 
-_GATE_LINE = re.compile(r"^Merge gate: policy=(?P<policy>[^,]*), checks=(?P<checks>[^,]*), approval=(?P<approval>[^,]*), "
-                        r"threads=(?P<threads>[^,]*), mergeable=(?P<mergeable>[^,]*), head=(?P<head>\S*)\s*$", re.M)
+_GATE_LINE = re.compile(r"Merge gate: policy=(?P<policy>[^,]*), checks=(?P<checks>[^,]*), approval=(?P<approval>[^,]*), "
+                        r"threads=(?P<threads>[^,]*), mergeable=(?P<mergeable>[^,]*), head=(?P<head>\S*)\s*")
 _GATE_POLICY = re.compile(r"pass\([A-Za-z_]+\)")
 _GATE_HEAD = re.compile(r"[0-9a-fA-F]{7}")
 GATE_CHECKS = ("pass", "absent-ok")
@@ -249,9 +249,13 @@ GATE_FIELDS = ("policy", "checks", "approval", "threads", "mergeable", "head")
 
 
 def parse_gate_line(text: str) -> dict[str, str] | None:
-    """The fields of the first ``Merge gate:`` line of scripts/merge-gate-summary's output, or ``None``."""
+    """The fields of the first ``Merge gate:`` line of scripts/merge-gate-summary's output, or ``None``.
 
-    match = _GATE_LINE.search(text or "")
+    Only the first such line counts, as in ``inflight_gates_pass``: a malformed one is ``None``, not a later line.
+    """
+
+    first = next((row for row in (text or "").splitlines() if row.startswith("Merge gate:")), None)
+    match = _GATE_LINE.fullmatch(first) if first is not None else None
     return match.groupdict() if match else None
 
 

@@ -138,6 +138,14 @@ def test_629_parse_takes_the_first_gate_line_of_the_script_output():
     assert parse_gate_line("merge-gate-summary: could not read the pull request") is None
     assert parse_gate_line("") is None
     assert parse_gate_line(line().replace("threads=none, ", "")) is None
+    assert parse_gate_line(f"Merge gate: broken\n{line()}\n") is None  # only the first gate line counts
+
+
+@pytest.mark.skipif(not HAVE_TOOLS, reason="needs bash and jq")
+def test_629_a_malformed_first_gate_line_is_unreadable_and_no_copy_passes(tmp_path):
+    output = f"Merge gate: broken\n{line()}"
+    assert decide_merge_gates(parse_gate_line(output), HEAD)["outcome"] == "unreadable"
+    assert not _gates_pass(tmp_path, output, 1)
 
 
 # ── the same decisions as the copies, apart from divergence (3) ─────────────────
