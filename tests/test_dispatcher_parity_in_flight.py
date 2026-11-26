@@ -372,12 +372,15 @@ def draft_ready_signal_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pyte
     """
 
     plan = story_category(inflight(tmp / "inflight", f))
+    draft_pr = bool(f["open"]) and bool(f["open"][-1].get("draft"))
     status = status_decision(f, monkeypatch)
     _, word = bash(tmp / "conflict", f, f'conflict_round_rule "{BOT}" "{BK}" "{PO}"',
                    stdin=json.dumps(f["open"][-1]) + "\n[]\n[]\n")  # fmt: skip
     queue = waiting_codex_prs(FakeGateway(f))  # type: ignore[arg-type]
     return {
-        "in_flight.py:plan_in_flight": {"implementing": "draft", "in flight": "ready"}.get(plan, plan),
+        # Issue #578: a draft PR with no session at work is in flight, so the draft signal reads the PR too.
+        "in_flight.py:plan_in_flight": "draft" if plan == "implementing" or (plan == "in flight" and draft_pr)
+                                       else {"in flight": "ready"}.get(plan, plan),
         "status.py:derive_status": "draft" if status == "In implementation" else "ready",
         "conflict-round.sh:not-open": "draft" if word == "not-open" else "ready",
         "codex_reserve.py:waiting_codex_prs": "ready" if queue else "draft",
@@ -530,11 +533,12 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
 STEP = "in_flight.py:plan_in_flight + in-flight.sh:inflight_compute", "codex_worker.py:work_in_flight", "status.py:derive_status"  # fmt: skip
 DEPENDENCY = [declaration("dependency", association="OWNER")]
 CASES["in_flight_step"] = {
-    "draft-pr": (facts(open_prs=[pr(draft=True)]), {**same(STEP, "implementing"), STEP[1]: "in flight"}),
+    # Issue #578: no session at work on a draft PR (no blocker, no green check, no fix round): in flight, no WIP place.
+    "draft-pr": (facts(open_prs=[pr(draft=True)]), {**same(STEP, "in flight"), STEP[2]: "implementing"}),
     "ready-gates-fail": (facts(open_prs=[pr()], gates={PR: gate_line(threads="1")}), same(STEP, "in flight")),
     "ready-gates-pass": (facts(open_prs=[pr()], gates={PR: gate_line()}), same(STEP, "in flight")),
     "draft-first-then-gated-pr": (facts(open_prs=[pr(draft=True), pr(901)], gates={901: gate_line()}),
-                                  {**same(STEP, "implementing"), STEP[1]: "in flight"}),
+                                  {**same(STEP, "in flight"), STEP[2]: "implementing"}),
     "dependency-blocker-no-pr": (facts(comments=DEPENDENCY), same(STEP, "in flight")),
     "no-pr-no-blocker": (facts(), same(STEP, "none")),
     "comments-unreadable": (facts(comments=DEPENDENCY, fail=("comments",)), {**same(STEP, "none"), STEP[2]: "unreadable"}),
@@ -593,11 +597,11 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
                        "while the resume pass routes it to the merge step needs a PO decision."),
     ("merge_gates_pass", "mergeability-unknown"): ("PO decision", "As not-mergeable, for mergeable=unknown."),
     ("in_flight_step", "draft-pr"): (
-        "contract", "PROJECT-STATUS.md counts a draft linked PR as In implementation for the WIP limit: "
-                    "work_in_flight follows plan_in_flight and reports a draft as in implementation."),
+        "contract", "The board shows a draft linked PR as In implementation (derive_status); plan_in_flight and "
+                    "work_in_flight give a draft PR with no session at work no WIP place (issue #578)."),
     ("in_flight_step", "draft-first-then-gated-pr"): (
-        "contract", "derive_status takes the first linked PR since #556 (PO decision (2)); work_in_flight differs "
-                    "only as in draft-pr: it does not separate drafts."),
+        "contract", "derive_status takes the first linked PR since #556 (PO decision (2)) and shows it In "
+                    "implementation, as in draft-pr; the plan and work_in_flight hold no WIP place for it."),
     ("in_flight_step", "comments-unreadable"): (
         "read defect", "inflight_compute and work_in_flight treat unreadable comments as no blocker and may start a "
                        "blocked story: follow the fail-closed read of derive_status (unreadable)."),

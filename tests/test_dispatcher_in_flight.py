@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 import pytest
 
 from headless_pr_workflow.dispatcher import cli
 from headless_pr_workflow.dispatcher.in_flight import (
+    continue_attempt_marker,
     hand_off_done_marker,
     hand_off_pending_prefix,
     plan_in_flight,
@@ -54,9 +56,10 @@ def test_each_step_comes_from_its_fact():
     result = plan(row(1, pr=91, gates=True), row(2, merged=True), row(3, pr=93, pr_comments=[FINDINGS]),
                   row(4, pr=90, story=[PENDING]), row(5, pr=95), row(6, pr=96, draft=True), row(7))
     assert steps(result) == {"merge": [1], "finish": [2], "fix_round": [3], "hand_off": [4], "review": [5]}
-    # A draft PR or a fix round due counts for the WIP limit; every other open linked PR is in flight (AC 8).
-    assert result["in_implementation"] == [3, 6]
-    assert result["in_flight"] == [1, 4, 5]
+    # A fix round due or a continued draft PR counts for the WIP limit; every other open linked PR, a draft
+    # PR with no session at work too, is in flight (AC 8, issue #578).
+    assert result["in_implementation"] == [3]
+    assert result["in_flight"] == [1, 4, 5, 6]
 
 
 @pytest.mark.parametrize("story,pr_comments", [
@@ -244,3 +247,96 @@ def test_markers_match_the_invoke_script():
     assert hand_off_pending_prefix(90) == "<!-- hpw:dispatcher action=hand-off-pending pr=90 "
     assert hand_off_done_marker(90) == "<!-- hpw:dispatcher action=hand-off-done pr=90 -->"
     assert 'BOOKKEEPING_FIX_MARKER="<!-- hpw:codex-review-bookkeeping action=move-in-implementation head="' in text
+
+
+# ── The continue step (issue #578, E10) ──────────────────────────────────────
+
+NOW = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
+EXTERNAL = comment("## Blocked Declaration\nType: external\nDeclared by: dispatcher\nBlocks: #3", at="2026-11-26T09:00:00Z",
+                   author_association="OWNER")
+UNBLOCK = comment("/unblock", login=PO, at="2026-11-26T10:00:00Z")
+
+
+def draft_row(number: int = 3, *, story: list | None = None, green: str | None = None, review_loop: bool = False) -> dict:
+    return {**row(number, pr=93, draft=True, review_loop=review_loop, story=story), "green_completed_at": green}
+
+
+def plan_at(*rows: dict, minutes: int = 60) -> dict:
+    return plan_in_flight(list(rows), dispatcher=BOT, bookkeeping=BK, po=PO, continue_after_minutes=minutes, now=NOW)
+
+
+def continued(result: dict) -> list[int]:
+    return [e["number"] for e in result["continue"]]
+
+
+def test_failed_session_after_unblock_is_continued():
+    result = plan_at(draft_row(story=[EXTERNAL, UNBLOCK]))
+    assert continued(result) == [3] and result["continue"][0]["reason"] == "failed"
+    assert result["continue"][0]["pr"] == 93 and result["continue"][0]["head"] == HEAD
+    assert result["in_implementation"] == [3] and result["in_flight"] == []
+
+
+@pytest.mark.parametrize("story", [
+    pytest.param([EXTERNAL], id="before-unblock"),
+    pytest.param([EXTERNAL, comment("/unblock", login="someone", at="2026-11-26T10:00:00Z")], id="other-login"),
+    pytest.param([EXTERNAL, comment("please /unblock this", login=PO, at="2026-11-26T10:00:00Z")], id="in-prose"),
+    pytest.param([EXTERNAL, UNBLOCK, comment("## Blocked Declaration\nType: external\nDeclared by: dispatcher",
+                                              at="2026-11-26T11:00:00Z", author_association="OWNER")], id="later-declaration"),
+    pytest.param([EXTERNAL, UNBLOCK, comment("## Blocked Declaration\nType: dependency\nDeclared by: dispatcher",
+                                              at="2026-11-26T11:00:00Z", author_association="OWNER")], id="later-dependency-declaration"),
+    pytest.param([EXTERNAL, UNBLOCK, comment("## Blocked Declaration\nType: decision\nDeclared by: x",
+                                              at="2026-11-26T11:00:00Z", author_association="OWNER")],
+                 id="open-decision-blocker"),
+    pytest.param([comment("## Blocked Declaration\nType: external\nDeclared by: codex-worker", login=PO,
+                          at="2026-11-26T09:00:00Z"), UNBLOCK], id="not-a-dispatcher-declaration"),
+])
+def test_failed_session_is_not_continued_without_its_facts(story):
+    result = plan_at(draft_row(story=story))
+    assert continued(result) == [] and result["in_implementation"] == [] and result["in_flight"] == [3]
+
+
+def test_silent_stop_is_continued_after_the_wait():
+    result = plan_at(draft_row(green="2026-11-26T10:59:00Z"))
+    assert continued(result) == [3] and result["continue"][0]["reason"] == "silent"
+    assert result["continue"][0]["minutes"] == 60 and result["in_implementation"] == [3]
+
+
+@pytest.mark.parametrize("kwargs", [
+    pytest.param({"green": None}, id="check-red-pending-or-absent"),
+    pytest.param({"green": "2026-11-26T11:30:00Z"}, id="younger-than-the-wait"),
+    pytest.param({"green": "2026-11-26T08:00:00Z", "story": [EXTERNAL]}, id="open-blocker"),
+])
+def test_silent_stop_is_not_continued_without_its_facts(kwargs):
+    result = plan_at(draft_row(**kwargs))
+    assert continued(result) == [] and result["in_implementation"] == [] and result["in_flight"] == [3]
+
+
+def test_a_non_draft_pr_is_never_continued():
+    result = plan_at({**row(3, pr=93, review_loop=False), "green_completed_at": "2026-11-26T08:00:00Z"})
+    assert continued(result) == []
+
+
+def test_the_wait_is_the_given_number_of_minutes():
+    assert continued(plan_at(draft_row(green="2026-11-26T11:40:00Z"), minutes=20)) == [3]
+    assert continued(plan_at(draft_row(green="2026-11-26T11:40:00Z"), minutes=21)) == []
+
+
+def test_one_attempt_per_head():
+    attempt = comment(continue_attempt_marker(93, HEAD), at="2026-11-26T11:00:00Z")
+    assert continued(plan_at(draft_row(story=[EXTERNAL, UNBLOCK.copy() | {"created_at": "2026-11-26T10:00:00Z"}, attempt]))) == []
+    # A new head is a new attempt; a later PO /unblock lifts the marker.
+    other = comment(continue_attempt_marker(93, "b" * 40), at="2026-11-26T11:00:00Z")
+    assert continued(plan_at(draft_row(story=[EXTERNAL, UNBLOCK, other]))) == [3]
+    later = comment("/unblock", login=PO, at="2026-11-26T11:30:00Z")
+    assert continued(plan_at(draft_row(story=[EXTERNAL, UNBLOCK, attempt, later]))) == [3]
+    assert continued(plan_at(draft_row(green="2026-11-26T08:00:00Z", story=[attempt]))) == []
+
+
+def test_a_fix_round_due_is_not_continued_and_stays_in_implementation():
+    result = plan_at({**draft_row(review_loop=True, story=[EXTERNAL, UNBLOCK]), "pr_comments": [FINDINGS]})
+    assert steps(result)["fix_round"] == [3] and continued(result) == [] and result["in_implementation"] == [3]
+
+
+def test_unread_comments_continue_nothing_and_hold_no_wip_place():
+    result = plan_at({**draft_row(green="2026-11-26T08:00:00Z"), "story_comments": None})
+    assert continued(result) == [] and result["in_implementation"] == [] and result["in_flight"] == [3]
