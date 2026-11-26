@@ -8,7 +8,8 @@ Usage: session-summary.sh --command <implement|review|merge|cleanup> \
   [--issue <N>] [--pr <N>] [--head <sha>] \
   --checks <text> --blockers <text> [--next <action>] \
   [--deviation <text>]...
-  --next for implement: review (default) or implementation
+  --next for implement: review (default), implementation or finding
+  (finding: no PR, the result is a finding; --head names the commit worked from)
 EOF
 }
 
@@ -80,7 +81,7 @@ done
 case "$command_value" in
     implement)
         default_next="review"
-        allowed_next="review implementation"
+        allowed_next="review implementation finding"
         ;;
     review)
         default_next="merge"

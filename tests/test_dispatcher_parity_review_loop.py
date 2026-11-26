@@ -413,14 +413,15 @@ def post_implement_outcome_decisions(f: dict[str, Any], tmp: Path) -> dict[str, 
             'post_failed_session_blocker() { post_mid_cycle_blocker "$@"; }\n'
             f'hand_off_to_codex_review_loop "{f["head_before"]}" "" 2>&1')
     rc, out = bash(tmp, f, "( " + body + " )")
-    shell = ("declaration kept" if "open Blocked Declaration" in out else "conflict blocker" if "BLOCKER conflict" in out
+    shell = ("declaration kept" if "open Blocked Declaration" in out else "finding" if "finding recorded in" in out else "conflict blocker" if "BLOCKER conflict" in out
              else "blocker" if "BLOCKER" in out else "waits for PO" if "waiting for the PO" in out
              else "hand-off" if "handed to the Codex review loop" in out else f"none ({rc})")
     decisions = {"dispatcher-invoke.sh:hand_off_to_codex_review_loop": shell}
     if f.get("no_pr") and "list" not in f["fail"]:
         result = read_session_blocker(FakeGateway(f), STORY, env=ENV)
         decisions["session_blocker.py:open_session_blocker"] = (
-            "declaration kept" if result.fields.get("outcome") == "open_blocker" else "blocker")  # unreadable: the caller keeps its own
+            "declaration kept" if result.fields.get("outcome") == "open_blocker"
+            else "finding" if result.fields.get("outcome") == "finding" else "blocker")  # unreadable: the caller keeps its own
     return decisions
 
 
@@ -471,6 +472,10 @@ SHELL_ONLY = ("dispatcher-invoke.sh:hand_off_to_codex_review_loop",)
 def declaration(by: str, kind: str = "dependency", at: str = T0, author: str = PO, association: str = "OWNER") -> dict[str, Any]:
     body = f"## Blocked Declaration\nType: {kind}\nDeclared by: {by}\nBlocks: #{STORY}\n"
     return comment(author, body, at, association=association)
+
+
+def finding(at: str) -> dict[str, Any]:
+    return comment(PO, f"## Session Summary\nCommand: implement\nIssue/PR: #{STORY}\nNext: finding", at, association="OWNER")
 
 
 def no_pr(**kw: Any) -> dict[str, Any]:
@@ -612,6 +617,10 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
                                      same(OUTCOME, "declaration kept")),
         "no-pr-session-declaration-then-po-unblock": (no_pr(story=[declaration("claude-code-session"), unblock(T1)]),
                                                       same(OUTCOME, "blocker")),
+        "no-pr-finding": (no_pr(story=[finding(T0)]), same(OUTCOME, "finding")),
+        "no-pr-finding-then-po-unblock": (no_pr(story=[finding(T0), unblock(T1)]), same(OUTCOME, "blocker")),
+        "no-pr-finding-and-session-declaration": (no_pr(story=[finding(T0), declaration("claude-code-session")]),
+                                                  same(OUTCOME, "declaration kept")),
         "no-pr-dispatcher-declaration": (no_pr(story=[declaration("dispatcher", "external")]), same(OUTCOME, "blocker")),
         "no-pr-story-comments-unreadable": (no_pr(story=[declaration("claude-code-session")], fail=("story",)),
                                             same(OUTCOME, "blocker")),
