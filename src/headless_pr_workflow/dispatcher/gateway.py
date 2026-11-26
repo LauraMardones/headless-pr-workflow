@@ -287,15 +287,22 @@ def decide_merge_gates(gate: Any, head: str) -> dict[str, Any]:
             "merge_step": passed, "board_mergeable": passed and values["mergeable"] == "yes"}  # fmt: skip
 
 
+def _evaluate_gate(repo: str, number: int) -> tuple[Any, str]:
+    """scripts/merge-gate-summary's ``GateResult`` for PR ``number``, or ``None`` and the masked reason it is unreadable."""
+
+    try:
+        return _merge_gate_module().evaluate(number, repo), ""
+    except Exception as exc:  # GHCommandError, ValueError, an unloadable script: all mean "not readable"
+        text = str(exc).strip()
+        return None, mask_tokens(text.splitlines()[-1][:300] if text else type(exc).__name__)
+
+
 def read_merge_gates(repo: str, number: int, head: str) -> tuple[dict[str, Any], str | None]:
     """``decide_merge_gates`` over the gates of PR ``number`` read now; the error is set when they are unreadable."""
 
-    try:
-        gate = _merge_gate_module().evaluate(number, repo)
-    except Exception as exc:  # GHCommandError, ValueError, an unloadable script: all mean "not readable"
-        text = str(exc).strip()
-        reason = text.splitlines()[-1][:300] if text else type(exc).__name__
-        return decide_merge_gates(None, head), mask_tokens(f"evaluate merge gates of PR #{number}: {reason}")
+    gate, reason = _evaluate_gate(repo, number)
+    if gate is None:
+        return decide_merge_gates(None, head), f"evaluate merge gates of PR #{number}: {reason}"
     return decide_merge_gates(gate, head), None
 
 
@@ -453,19 +460,16 @@ class GhGateway:
         return [item for item in self._pages(step, output) if "pull_request" not in item]
 
     def merge_gates_pass(self, number: int, head: str) -> bool:
-        """Whether every merge gate passes on PR ``number`` at ``head``, by the evaluation of scripts/merge-gate-summary.
+        """Whether the board shows PR ``number`` at ``head`` as Mergeable, by the one merge-gate rule (issue #650).
 
+        A thin shim over ``decide_merge_gates``: its ``board_mergeable`` (every gate passes, mergeability included).
         Raises ``GatewayError`` when the gates cannot be read. A result for another head than ``head`` is not a pass.
         """
 
-        step = f"evaluate merge gates of PR #{number}"
-        try:
-            result = _merge_gate_module().evaluate(number, self.repo)
-        except GatewayError:
-            raise
-        except Exception as exc:  # GHCommandError, ValueError, an unloadable script: all mean "not readable"
-            raise GatewayError(step, mask_tokens(str(exc).strip().splitlines()[-1][:300] if str(exc).strip() else type(exc).__name__)) from None
-        return bool(result.passed) and bool(head) and head.lower().startswith(result.head.lower())
+        gate, reason = _evaluate_gate(self.repo, number)
+        if gate is None:
+            raise GatewayError(f"evaluate merge gates of PR #{number}", reason)
+        return bool(decide_merge_gates(gate, head)["board_mergeable"])
 
     def board_item(self, issue: int) -> BoardItem:
         step = "read board"
