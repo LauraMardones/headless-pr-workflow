@@ -45,8 +45,7 @@ def po_context(d: Dispatcher) -> dict:
 
 
 def test_wip_limit_conflict_blocker_names_implement_and_registers_no_event(d):
-    d.add_story(501, "In implementation")
-    d.add_pr(901, 501, draft=True)
+    d.add_session_at_work(501, 901)
     board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"

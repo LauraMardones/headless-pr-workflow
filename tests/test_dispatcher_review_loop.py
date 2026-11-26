@@ -1035,9 +1035,10 @@ def test_ac14_poll_lists_in_merge_and_in_implementation(tmp_path):
         "scheduler_result": "implement",
         "resumable": True,
     }
-    # #475 AC 8: a draft PR or a fix round due counts for the WIP limit; the other open PRs are in flight.
+    # #475 AC 8, #578: a fix round due counts for the WIP limit; the other open PRs are in flight,
+    # a draft PR with no session at work too (story 7: no blocker lifted, no green check).
     assert (tmp_path / "scheduler.log").read_text().splitlines() == [
-        "dispatcher scheduler next --repo o/r --in-implementation 4,7 --in-flight 3,5 --dry-run"]
+        "dispatcher scheduler next --repo o/r --in-implementation 4 --in-flight 3,5,7 --dry-run"]
 
 
 @needs_tools
