@@ -29,8 +29,6 @@ STATUSES = {"converted", "pending"}
 # #608, #607, #612, #613, Feature #591) removes its kinds here and marks them
 # `converted` in the inventory.
 PENDING_KINDS = frozenset({
-    # Feature #590 (#613; #612 converted the refine kinds)
-    "implement-review-session-summary",
     # Feature #591
     "verify-closure-request",
     "slack-evidence-unwritable",

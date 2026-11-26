@@ -2,9 +2,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HPW_BIN="${HPW_BIN:-$SCRIPT_DIR/hpw}"
-
 usage() {
     cat <<'EOF'
 Usage: session-summary.sh --command <implement|review|merge|cleanup> \
@@ -125,6 +122,8 @@ if [[ -n "$next_step" ]]; then
     [[ "$next_step" != *$'\n'* ]] || fail "--next-step must be one line."
     [[ "$next_step" == "Next step: "* ]] || \
         fail "--next-step must start with 'Next step: ' (a lettered 'Next step <letter>:' line is not accepted)."
+    # Resolved here: a caller that pipes the script to `bash -s` has no BASH_SOURCE.
+    HPW_BIN="${HPW_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hpw}"
     if ! check_err=$("$HPW_BIN" next-step check --line "$next_step" 2>&1 >/dev/null); then
         fail "--next-step is rejected: ${check_err:-hpw next-step check failed}"
     fi
