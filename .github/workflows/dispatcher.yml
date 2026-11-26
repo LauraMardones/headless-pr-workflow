@@ -171,6 +171,7 @@ jobs:
         id: poll
         env:
           WIP_LIMIT_IMPLEMENTATION: ${{ vars.WIP_LIMIT_IMPLEMENTATION }}
+          CONTINUE_DRAFT_AFTER_MINUTES: ${{ vars.CONTINUE_DRAFT_AFTER_MINUTES }}
           READY_BUFFER_MIN: ${{ vars.READY_BUFFER_MIN }}
           READY_BUFFER_MAX: ${{ vars.READY_BUFFER_MAX }}
           STATE_WRITER: ${{ steps.scope.outputs.state_writer }}
@@ -227,6 +228,7 @@ jobs:
         id: invoke
         env:
           WIP_LIMIT_IMPLEMENTATION: ${{ vars.WIP_LIMIT_IMPLEMENTATION }}
+          CONTINUE_DRAFT_AFTER_MINUTES: ${{ vars.CONTINUE_DRAFT_AFTER_MINUTES }}
           READY_BUFFER_MIN: ${{ vars.READY_BUFFER_MIN }}
           READY_BUFFER_MAX: ${{ vars.READY_BUFFER_MAX }}
           USAGE_LIMIT_SESSIONS_PER_DAY: ${{ vars.USAGE_LIMIT_SESSIONS_PER_DAY }}

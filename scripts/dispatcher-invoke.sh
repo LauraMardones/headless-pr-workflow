@@ -345,6 +345,16 @@ CODEX_FIX_ROUND_MAX="${CODEX_FIX_ROUND_MAX:-3}"
     exit 1
 }
 
+# Minutes a draft PR with a green `pytest` check and no hand-off waits before the
+# dispatcher continues it (issue #578). Set from the repository variable of the same
+# name; an unset variable arrives as an empty string, which means the default.
+CONTINUE_DRAFT_AFTER_MINUTES="${CONTINUE_DRAFT_AFTER_MINUTES:-60}"
+[[ "$CONTINUE_DRAFT_AFTER_MINUTES" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Error: CONTINUE_DRAFT_AFTER_MINUTES must be a whole number of one or more; got '$CONTINUE_DRAFT_AFTER_MINUTES'." >&2
+    exit 1
+}
+export CONTINUE_DRAFT_AFTER_MINUTES
+
 # The hidden marker the codex-review-bookkeeping job puts on the review Session
 # Summary it posts after findings. Mirrors MARKER_PREFIX and
 # ACTION_MOVE_IN_IMPLEMENTATION in src/headless_pr_workflow/codex_review_bookkeeping.py
@@ -2259,6 +2269,11 @@ inflight_get_page() {
     gh api "$1"
 }
 
+# The check runs of a commit (issue #578): the silent stop of a draft PR reads its newest green `pytest` check.
+inflight_get_check_runs() {
+    gh api "repos/$REPO/commits/$1/check-runs?check_name=pytest&per_page=100"
+}
+
 # inflight_prepare — the accounts the markers are read under, as the poll reads
 # them. Without the dispatcher's account no fix round or pending hand-off is
 # found in this run (a warning says so); every story with a linked PR is still
@@ -2397,6 +2412,17 @@ record_merge_owner() {
     # sends its dispatcher_error) instead of advancing without ownership.
     echo "Error: could not record merge ownership or its pending copy on PR #$pr_number; stopping before the hand-off so the story does not advance without it." >&2
     return 1
+}
+
+# record_failed_session_owner <issue> <head-before> — issue #578 (E10, third case): a
+# dispatcher /implement session that exits non-zero may still have pushed a head. That head
+# is the dispatcher's own work, so it gets the merge-owner marker (or its evidence-pending
+# copy) after the failed-session blocker, and a continued session that pushes nothing still
+# reaches the merge. No new head: no marker. A write that fails never changes the failing
+# exit code of the run.
+record_failed_session_owner() {
+    record_merge_owner "$1" "${2:-}" || echo "Warning: the merge owner of the failed session's head on #$1 could not be recorded." >&2
+    return 0
 }
 
 # ensure_merge_owner <pr> <head> — before a merge: posts a pending owner marker
@@ -2632,6 +2658,10 @@ finish_story() {
 #
 # Argument: the PR head before the /implement session, or empty when the story
 # had no open PR then.
+
+continue_attempt_marker() {
+    dispatcher_marker "action=continue-attempt pr=$1 head=$2"
+}
 
 fix_round_attempt_marker() {
     dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
@@ -3135,6 +3165,7 @@ resume_fix_round() {
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
         post_failed_session_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
+        record_failed_session_owner "$issue_num" "$pr_head"
         DISPATCH_HANDLED=true
         exit 1
     fi
@@ -3143,6 +3174,77 @@ resume_fix_round() {
     notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
     record_merge_owner "$issue_num" "$pr_head" || exit 1
     hand_off_to_codex_review_loop "$pr_head" "$blocker_before"
+}
+
+# Continue step (issue #578, E10): a draft PR left by a failed /implement session (after the
+# PO's /unblock) or by a silent stop (a green pytest check older than CONTINUE_DRAFT_AFTER_MINUTES,
+# no hand-off) gets /implement again on its existing branch and PR. `hpw dispatcher in-flight plan`
+# decides which stories are listed; this step re-reads the PR, records one attempt marker per head
+# before the session, and ends a failed session as any failed /implement session ends.
+resume_continue_draft() {
+    local issue_num="$1" item_id="$2" entry reason minutes
+    local pr_json pr_number pr_draft pr_head attempt_marker blocker_before
+    load_story_context "$issue_num" "$item_id" || return 0
+    entry=$(jq -c --argjson n "$issue_num" '[.continue[]? | select(.number == $n)][0] // empty' <<< "$INFLIGHT_JSON")
+    reason=$(jq -r '.reason // empty' <<< "$entry")
+    minutes=$(jq -r '.minutes // empty' <<< "$entry")
+    if [[ "$STORY_EXECUTOR_LABEL_COUNT" -ne 1 || -z "${EXECUTOR_LABEL:-}" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: draft PR cannot be continued: the story has no single known executor label"
+        return 0
+    fi
+    pr_json=$(find_linked_pr_json "$issue_num")
+    pr_number=$(jq -r '.number // empty' <<< "$pr_json")
+    pr_draft=$(jq -r '.draft // false' <<< "$pr_json")
+    pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
+    [[ -n "$pr_number" && -n "$pr_head" && "$pr_draft" == "true" ]] || {
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: the linked PR is no longer an open draft; nothing to continue"
+        return 0; }
+
+    attempt_marker=$(continue_attempt_marker "$pr_number" "$pr_head")
+    if marker_holds "$issue_num" "$attempt_marker" 0; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: /implement was already continued on PR #$pr_number at head ${pr_head:0:7}; waiting for a new head or a PO /unblock line"
+        return 0
+    fi
+    resume_session_allowed "$issue_num" || return 0
+    # An executor with no provider row is never started here (executor:codex stays with its own worker).
+    if [[ -z "${EXECUTOR_PROVIDER[$EXECUTOR_LABEL]:-}" || -z "${EXECUTOR_MODEL[$EXECUTOR_LABEL]:-}" ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: draft PR cannot be continued: executor '$EXECUTOR_LABEL' has no provider entry"
+        return 0
+    fi
+    local why="failed session after /unblock"
+    [[ "$reason" == "silent" ]] && why="silent stop after ${minutes:-$CONTINUE_DRAFT_AFTER_MINUTES} minutes"
+    echo ""
+    echo "${LOG_PREFIX}[RESUME] #$issue_num: continue /implement on PR #$pr_number ($why)"
+    RESUME_SESSIONS=$(( RESUME_SESSIONS + 1 ))
+    LAST_ACTION="invoking /implement for #$issue_num (continue)"
+    # Like a fix round: unfinished work keeps its place, the allowance check must not reset it.
+    FIX_ROUND_SESSION=true
+    blocker_before=$(decision_blocker_created_at "$issue_num")
+    FIX_ROUND_START_HEAD="$pr_head"
+    FIX_ROUND_BLOCKER_BEFORE="$blocker_before"
+    local session_rc=0
+    invoke_executor_command "implement" "$issue_num" || session_rc=$?
+    [[ $session_rc -eq $CLAUDE_LIMIT_STOP_RC ]] && pause_at_usage_limit "implement" "$issue_num" "$issue_num"
+    if [[ $session_rc -ne 0 ]]; then
+        check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
+        post_failed_session_blocker "$issue_num" "$TARGET_TITLE" "implement" "$attempt_marker"
+        record_failed_session_owner "$issue_num" "$pr_head"
+        DISPATCH_HANDLED=true
+        exit 1
+    fi
+    FIX_ROUND_SESSION=false
+    echo "✓ /implement completed for #$issue_num (continue)"
+    # One attempt per head: the marker is written after a session that ran, never before the start, so a start
+    # refused by the usage limit or the allowance, or a pause at a provider limit, leaves the draft eligible.
+    # A session that ran and left the PR a draft is not continued again on this head.
+    if ! $DRY_RUN; then
+        post_comment "$issue_num" "$attempt_marker" 1 || echo "Warning: the continue attempt marker for PR #$pr_number could not be written." >&2
+    fi
+    notify_open_decision_blocker "$issue_num" "$TARGET_TITLE"
+    record_merge_owner "$issue_num" "$pr_head" || exit 1
+    if [[ -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]]; then
+        hand_off_to_codex_review_loop "$pr_head" "$blocker_before"
+    fi
 }
 
 # ─── Conflict round (issue #409, issue #449) ─────────────────────────────────
@@ -3371,6 +3473,8 @@ conflict_round_blocker() {
         "the PR branch is merged with main and the conflict resolved, or the PO posts /unblock" "" \
         "/implement" "$ISSUE_NUMBER" "Claude Code or Codex" \
         "the conflict with main on PR #$pr_number is resolved on the PR branch; the PO then replies /unblock on #$ISSUE_NUMBER and the dispatcher resumes the story"
+    # Issue #578: a head the failed session pushed is the dispatcher's own (5th argument: the head before).
+    [[ "${4:-}" == session-failed ]] && record_failed_session_owner "$ISSUE_NUMBER" "${5:-}"
     DISPATCH_HANDLED=true
     exit 1
 }
@@ -3398,7 +3502,7 @@ run_conflict_round() {
     RESUMED_ROUND="conflict round"
     RESUMED_ROUND_PLACE="\"$from_status\""
     blocker_before=$(decision_blocker_created_at "$issue_num")
-    local session_rc=0
+    local session_rc=0 round_start_head="$pr_head"
     invoke_executor_command "implement" "$issue_num" || session_rc=$?
     # A pause posts the standard record and ends the run; the next run decides
     # from the PR (issue #449).
@@ -3411,7 +3515,7 @@ run_conflict_round() {
     fi
     if [[ $session_rc -ne 0 ]]; then
         check_and_notify_decision_blocker "$issue_num" "$TARGET_TITLE"
-        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed" session-failed
+        conflict_round_blocker "$pr_number" "$pr_head" "the conflict round (/implement) failed" session-failed "$round_start_head"
     fi
     reset_conflict_round_session
     echo "✓ /implement completed for #$issue_num (conflict round)"
@@ -3595,6 +3699,13 @@ run_resume_pass() {
         drain_actionable_events
     done
 
+    list=$(jq -c '.continue' <<< "$plan")
+    count=$(jq 'length' <<< "$list")
+    for ((i=0; i < count; i++)); do
+        resume_row_story resume_continue_draft "$(jq -r ".[$i].number" <<< "$list")"
+        drain_actionable_events
+    done
+
     list=$(jq -c '.hand_off' <<< "$plan")
     count=$(jq 'length' <<< "$list")
     for ((i=0; i < count; i++)); do
@@ -3760,7 +3871,7 @@ LAST_ACTION="WIP limit check"
 # The pre-flight judges the target against the other stories (issue #496) and
 # leaves the target out. Issue #478: it reads the work in implementation from
 # pull request facts, read fresh now, as the scheduler's --in-implementation list
-# does (scripts/lib/in-flight.sh: a draft linked PR or a fix round due). It reads
+# does (scripts/lib/in-flight.sh: a fix round due or a draft PR in the continue step, issue #578). It reads
 # no board status: the board writer sets it only after this run, so a story
 # merged, finished or handed off earlier in the run would still count there.
 if ! inflight_prepare || ! inflight_compute; then
@@ -3793,7 +3904,7 @@ if [[ "$(jq -r '.result' <<< "$START_JSON")" == "wip-limit" ]]; then
     active_list=$(echo "$IN_IMPL_ITEMS" | jq -r '.[] | "  #\(.number) \(.title)"')
     echo "FAIL: WIP limit reached ($ACTIVE_WIP_COUNT >= $WIP_LIMIT)"
     echo "$active_list"
-    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a draft linked PR or a fix round due)"
+    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a fix round due or a draft PR a session is about to continue)"
     post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
 fi
 
@@ -3878,6 +3989,7 @@ invoke_executor_command "implement" "$ISSUE_NUMBER" || SESSION_RC=$?
 if [[ $SESSION_RC -ne 0 ]]; then
     check_and_notify_decision_blocker "$ISSUE_NUMBER" "$TARGET_TITLE"
     post_failed_session_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "implement"
+    record_failed_session_owner "$ISSUE_NUMBER" "$HEAD_BEFORE_IMPLEMENT"
     DISPATCH_HANDLED=true
     exit 1
 fi

@@ -19,6 +19,7 @@
 # failed read):
 #   inflight_get_all <path>   every page of a REST list ("repos/<r>/pulls?state=open"; the
 #                             reader adds per_page and page)
+#   inflight_get_check_runs <head>  the check-runs document of a commit (`{check_runs: [...]}`)
 #   inflight_get_page <path>  the first page only (the 100 most recently updated closed PRs)
 # Inputs:
 #   REPO, HPW_BIN, INFLIGHT_BOT (the dispatcher's login), INFLIGHT_BK (the
@@ -40,10 +41,15 @@
 #   hand_off     review-loop story, non-draft linked PR, hand-off-pending marker
 #                without hand-off-done
 #   review       any other story with a non-draft linked PR (not in the merge step)
-#   in_implementation  numbers for `scheduler next --in-implementation`: a draft
-#                linked PR, or a fix round due
+#   continue     story with a draft linked PR left by a failed session (the dispatcher's
+#                `Type: external` blocker lifted by the PO's /unblock) or a silent stop
+#                (green `pytest` check older than CONTINUE_DRAFT_AFTER_MINUTES), no open
+#                blocker, no continue-attempt marker for the head (issue #578); the entry
+#                also has `reason` (failed|silent) and `minutes`
+#   in_implementation  numbers for `scheduler next --in-implementation`: a `continue`
+#                entry or a fix round due (a draft PR with no session at work is in_flight)
 #   in_flight    numbers for `scheduler next --in-flight`: every other story
-#                with an open linked PR, and every one with an open
+#                with an open linked PR (a draft PR too), and every one with an open
 #                dependency, external, conflict or resource blocker that no
 #                later PO /unblock line resolves
 # Each step entry is {number, title, executors, pr, head} (pr and head are
@@ -85,10 +91,23 @@ inflight_gates_pass() {
     [[ "$head" == "$gate_head"* ]]
 }
 
+# inflight_green_completed_at <head> — prints the JSON string of `completed_at` of the newest
+# `pytest` check run on <head> when it completed with success (the choice of pytest_green_on_head:
+# newest by started_at), else `null`. 1 when the check runs cannot be read. Issue #578.
+inflight_green_completed_at() {
+    local runs
+    # A caller without the reader never continues a silent stop (the check is then unknown).
+    [[ -n "$1" ]] && declare -F inflight_get_check_runs >/dev/null || { echo null; return 0; }
+    runs=$(inflight_get_check_runs "$1") || return 1
+    jq -c '[.check_runs[]? | select(.name == "pytest")] | sort_by(.started_at // "") | last
+           | if . != null and .status == "completed" and .conclusion == "success" then (.completed_at // null) else null end' \
+        <<< "$runs"
+}
+
 inflight_compute() {
     local prs issues closed stories row n comments_count executors review_loop
     local pr_json pr_number pr_head pr_draft merged gates story_comments pr_comments
-    local tmp rows out links rc=0
+    local tmp rows out links rc=0 green_at
     INFLIGHT_JSON=""
     prs=$(inflight_get_all "repos/$REPO/pulls?state=open") || {
         echo "[IN-FLIGHT] unreadable: the open pull requests could not be read" >&2; return 1; }
@@ -124,7 +143,7 @@ inflight_compute() {
         pr_number=$(jq -r '.number // empty' <<< "$pr_json" 2>/dev/null || true)
         pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json" 2>/dev/null || true)
         pr_draft=$(jq -r '.draft // false' <<< "$pr_json" 2>/dev/null || echo false)
-        merged=false gates=false story_comments=null pr_comments=null
+        merged=false gates=false story_comments=null pr_comments=null green_at=null
 
         if [[ -z "$pr_number" ]]; then
             merged=$(jq -r --arg n "$n" '.merged[$n] != null' <<< "$links") || merged=false
@@ -142,6 +161,15 @@ inflight_compute() {
                     story_comments=null pr_comments=null
                 fi
             fi
+            if [[ "$pr_draft" == "true" && "$story_comments" == "null" && -n "$INFLIGHT_BOT" ]]; then
+                # Issue #578: a draft PR may be continued; the rule reads the story's blockers and markers.
+                story_comments=$(inflight_get_all "repos/$REPO/issues/$n/comments") || {
+                    echo "[IN-FLIGHT] Warning: could not read the comments of #$n; its draft PR #$pr_number is not continued in this run" >&2
+                    story_comments=null; }
+            fi
+            if [[ "$pr_draft" == "true" && "$story_comments" != "null" ]]; then
+                green_at=$(inflight_green_completed_at "$pr_head") || green_at=null
+            fi
             if [[ "$pr_draft" != "true" ]] && inflight_gates_pass "$pr_number" "$pr_head"; then
                 gates=true
             fi
@@ -149,22 +177,23 @@ inflight_compute() {
         # Comment lists go through stdin, not the argument list, so a long thread fits.
         printf '%s\n%s\n' "$story_comments" "$pr_comments" | jq -sc --argjson base "$row" \
             --argjson rl "$review_loop" --argjson merged "$merged" --argjson gates "$gates" \
-            --arg pr "$pr_number" --arg head "$pr_head" --argjson draft "${pr_draft:-false}" '
+            --arg pr "$pr_number" --arg head "$pr_head" --argjson draft "${pr_draft:-false}" --argjson green "$green_at" '
             {number: $base.number, title: $base.title, executors: $base.executors, review_loop: $rl,
              pr: (if $pr == "" then null else {number: ($pr | tonumber), draft: $draft, head: $head} end),
-             merged: $merged, gates_pass: $gates, story_comments: .[0], pr_comments: .[1]}' >> "$rows" \
+             merged: $merged, gates_pass: $gates, green_completed_at: $green, story_comments: .[0], pr_comments: .[1]}' >> "$rows" \
             || { echo "[IN-FLIGHT] unreadable: the facts of #$n could not be put together" >&2; rm -rf "$tmp"; return 1; }
     done <<< "$stories"
 
     jq -s '.' "$rows" > "$tmp/rows.json" || { rm -rf "$tmp"; return 1; }
     out=$(DECISION_BLOCKER_PO_LOGIN="$INFLIGHT_PO" "$HPW_BIN" dispatcher in-flight plan --repo "$REPO" \
-        --input "$tmp/rows.json" --dispatcher "$INFLIGHT_BOT" --bookkeeping "$INFLIGHT_BK") || rc=$?
+        --input "$tmp/rows.json" --dispatcher "$INFLIGHT_BOT" --bookkeeping "$INFLIGHT_BK" \
+        --continue-after-minutes "${CONTINUE_DRAFT_AFTER_MINUTES:-60}") || rc=$?
     rm -rf "$tmp"
     if [[ $rc -ne 0 ]] || ! jq -e '.result == "read"' <<< "$out" >/dev/null 2>&1; then
         echo "[IN-FLIGHT] unreadable: hpw dispatcher in-flight plan exited $rc ($(jq -r '.error // "no result"' <<< "$out" 2>/dev/null || echo "no result"))" >&2
         return 1
     fi
-    INFLIGHT_JSON=$(jq -c '{merge, finish, fix_round, hand_off, review, in_implementation, in_flight}' <<< "$out") || return 1
+    INFLIGHT_JSON=$(jq -c '{merge, finish, fix_round, hand_off, review, continue, in_implementation, in_flight}' <<< "$out") || return 1
 }
 
 # inflight_scheduler_lists — sets IN_IMPLEMENTATION_LIST and IN_FLIGHT_LIST (comma-separated

@@ -504,7 +504,7 @@ The pre-flight check is:
 1. Read the candidate story's `## Files affected` section.
 2. Scan open stories that show **In implementation** (an open draft linked PR).
 3. Read each active story's `## Files affected` section.
-4. Count active **In implementation** stories.
+4. Count active **In implementation** stories, except a draft PR with no session at work (parked behind an open blocker, inside the `CONTINUE_DRAFT_AFTER_MINUTES` wait, or with a `pytest` check that is not green): it shows **In implementation** on the board but holds no WIP place and no file-overlap place; the dispatcher continues it as described in `docs/DISPATCHER-CONFIG.md` → Continuing a draft PR.
 5. Compare file lists for overlap with the candidate story.
 
 The WIP limit is the repository variable `WIP_LIMIT_IMPLEMENTATION` (see [WIP and queue limits](DISPATCHER-CONFIG.md#wip-and-queue-limits)); the current value is **2 parallel stories**. The dispatcher and the flow review read the variable, so the number is not stated anywhere else as a source of truth. Parallel implementation is allowed only when both of these conditions are true:

@@ -181,6 +181,8 @@ Merge ownership belongs to the implementation session that last produced the app
 
 implementation session -> pushed head SHA -> separate review session -> approval -> same implementation session may merge after fresh refresh
 
+A head a dispatcher `/implement` session pushed before it failed is owned by the dispatcher: the failed session produced it, so the dispatcher records the merge-owner marker for that head at the failure (issue #578). A head pushed by a human or a manual session gets no marker.
+
 If that session is unavailable, a takeover session may become merge owner only after:
 
 - Fetching fresh GitHub PR context.

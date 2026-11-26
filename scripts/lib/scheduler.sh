@@ -12,7 +12,7 @@
 #
 # Both lists are comma-separated issue numbers ("" for none), found from pull
 # request facts by scripts/lib/in-flight.sh (issue #475): <in-implementation
-# list> is the stories with a draft linked PR or a fix round due (they count
+# list> is the stories with a fix round due or a draft PR a session is about to continue (they count
 # for the WIP limit and the file overlap), <in-flight list> every other story
 # with work in flight (never started, not counted). The scheduler's own `[SCHEDULER] ...`
 # lines (the action, idle, unreadable and every skipped entry, such as

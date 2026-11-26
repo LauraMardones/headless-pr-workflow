@@ -228,7 +228,7 @@ RULES: tuple[Rule, ...] = (
           "test_dispatcher_conflict_round.py test_merge_gate_summary.py",
           "only the conflict round checks `pytest` before a hand-off; `pytest_green_on_head` takes the newest "
           "run by `started_at`, the gate its required-checks evaluation."),
-    _rule("draft_ready_signal", "A draft PR means implementing; a ready PR means review, merge or the review queue.",
+    _rule("draft_ready_signal", "A draft PR means implementing; a ready PR means review, merge or the review queue. A draft PR is continued after a failed session or a silent stop and holds no WIP place while no session works on it (#578).",
           IN_FLIGHT,
           [(IN_FLIGHT, "plan_in_flight"), (STATUS, "derive_status"), (CONFLICT_ROUND_SH, "not-open"),
            (CODEX_RESERVE, "waiting_codex_prs")],

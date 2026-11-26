@@ -97,8 +97,7 @@ def d(tmp_path):
 def add_active_stories(d, count):
     """Stories with work in implementation: each has a draft linked PR, the fact the pre-flight counts (#478)."""
     for n in range(count):
-        d.add_story(600 + n, "In implementation", body="## Files affected\n- `other/file.txt`\n")
-        d.add_pr(960 + n, 600 + n, draft=True)
+        d.add_session_at_work(600 + n, 960 + n, body="## Files affected\n- `other/file.txt`\n")
     board = d._read("board.json")
     for item in board["items"]:
         item["updatedAt"] = "2999-01-01T00:00:00Z"

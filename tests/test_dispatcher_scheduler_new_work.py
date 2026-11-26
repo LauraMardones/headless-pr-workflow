@@ -56,9 +56,11 @@ def code_lines(path) -> list[str]:
 
 def test_ac1_a_scheduled_run_asks_the_scheduler_with_the_work_in_flight(d):
     # Issue #475 AC 8: the lists come from PR facts; the cards show other statuses.
-    d.add_story(10, "In review")
+    d.add_session_at_work(10, 910, status="In review")  # a draft PR with a session about to work on it
     fresh(d, 10)
-    d.add_pr(910, 10, draft=True)            # a draft PR: in implementation
+    d.add_story(13, "In implementation")     # a draft PR with no session at work: in flight, no WIP place (#578)
+    fresh(d, 13)
+    d.add_pr(913, 13, draft=True)
     d.add_story(11, "In implementation")
     fresh(d, 11)
     d.add_pr(911, 11)                         # a ready PR with its merge owner: in flight
@@ -70,7 +72,7 @@ def test_ac1_a_scheduled_run_asks_the_scheduler_with_the_work_in_flight(d):
     proc = scheduled(d)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation 10 --in-flight 11"]
+    assert d.scheduler_calls == ["dispatcher scheduler next --repo o/r --in-implementation 10 --in-flight 11,13"]
     assert d.sessions == []
 
 
@@ -451,8 +453,8 @@ def _target_in_implementation_on_first_read_only(d: Dispatcher, other_status: st
     """The 14:40 case: the run's first board read has the target "In implementation", the scheduler's read does not."""
     d.add_story(STORY, "In implementation", body=FILES)
     if other_status:
-        d.add_story(OTHER, other_status, body=other_body)
-        d.add_pr(PR + 50, OTHER, draft=True)  # the pre-flight counts a draft linked PR, not the card (#478)
+        # The pre-flight counts a draft linked PR with a session about to work on it, not the card (#478, #578).
+        d.add_session_at_work(OTHER, PR + 50, other_status, body=other_body)
         fresh(d, OTHER)
     fresh(d, STORY)
     d.add_pr(PR, STORY)

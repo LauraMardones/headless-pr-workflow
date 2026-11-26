@@ -265,7 +265,10 @@ case "$path" in
         case "$result" in
             absent)  echo '{"total_count": 0, "check_runs": []}' ;;
             pending) echo '{"total_count": 1, "check_runs": [{"name": "pytest", "status": "in_progress", "conclusion": null, "started_at": "2026-10-13T10:00:00Z"}]}' ;;
-            *)       echo "{\"total_count\": 1, \"check_runs\": [{\"name\": \"pytest\", \"status\": \"completed\", \"conclusion\": \"$result\", \"started_at\": \"2026-10-13T10:00:00Z\"}]}" ;;
+            *)       # completed_at only when the test set it (issue #578): without it a green check never starts a silent-stop continuation
+                     completed=null
+                     [[ -f "$MOCK_DIR/checks_completed_$sha" ]] && completed="\"$(cat "$MOCK_DIR/checks_completed_$sha")\""
+                     echo "{\"total_count\": 1, \"check_runs\": [{\"name\": \"pytest\", \"status\": \"completed\", \"conclusion\": \"$result\", \"started_at\": \"2026-10-13T10:00:00Z\", \"completed_at\": $completed}]}" ;;
         esac ;;
     repos/*/issues/*/comments)
         n="${path%/comments}"; n="${n##*/}"
@@ -464,6 +467,8 @@ if [[ -f "$MOCK_DIR/claude_sleep" ]]; then
     sleep "$(cat "$MOCK_DIR/claude_sleep")"
 fi
 if [[ -f "$MOCK_DIR/fail_$command" ]]; then
+    # A session that pushed before it failed (issue #578): the test's on_failed_session script runs first.
+    [[ -f "$MOCK_DIR/on_failed_$command.sh" ]] && bash "$MOCK_DIR/on_failed_$command.sh"
     echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
     echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"duration_ms":1000,"usage":{"input_tokens":1,"output_tokens":1}}'
     exit 1
@@ -662,6 +667,18 @@ class Dispatcher:
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 
+    def add_session_at_work(self, issue: int, pr: int, status: str = "In implementation", body: str = "") -> None:
+        """A story whose draft PR counts as work in implementation (issue #578).
+
+        A draft PR holds a WIP place only while a session is about to work on it. The PR here has a green
+        ``pytest`` check older than the wait, so the plan lists it under ``continue``; the story has no
+        ``executor:`` label, so the resume pass logs a skip and starts no session in the test.
+        """
+        self.add_story(issue, status, executor=None, body=body)
+        head = f"{pr:x}".rjust(40, "b")
+        self.add_pr(pr, issue, head=head, draft=True)
+        self.set_pytest(head, "success", completed_at="2026-10-13T10:30:00Z")
+
     def close_issue(self, number: int) -> None:
         """Close the issue, as GitHub does when its PR merges: the work in flight reads open issues only (#475)."""
         issue = self._read(f"issue_{number}.json")
@@ -693,6 +710,10 @@ class Dispatcher:
     def on_session(self, command: str, script: str) -> None:
         """Bash run by the fake executors when a ``command`` session starts (``$MOCK_DIR`` is set)."""
         (self.mock / f"on_{command}.sh").write_text(script, encoding="utf-8", newline="\n")
+
+    def on_failed_session(self, command: str, script: str) -> None:
+        """Bash run by the fake executors when a failing ``command`` session starts, before it exits non-zero."""
+        (self.mock / f"on_failed_{command}.sh").write_text(script, encoding="utf-8", newline="\n")
 
     def session_sets_status(self, command: str, number: int, status: str) -> None:
         self.on_session(command, f"""jq '. + {{"ITEM_{number}": "{status}"}}' "$MOCK_DIR/state.json" > "$MOCK_DIR/s.tmp" && mv "$MOCK_DIR/s.tmp" "$MOCK_DIR/state.json"\n""")
@@ -726,9 +747,13 @@ class Dispatcher:
         or ``conflicting`` (every gate but mergeability passes). The default follows the story's board status."""
         (self.mock / f"gate_{pr}").write_text(result, encoding="utf-8")
 
-    def set_pytest(self, head: str, result: str) -> None:
-        """The required pytest check of ``head``: success (the default), failure, pending or absent (#449)."""
+    def set_pytest(self, head: str, result: str, completed_at: str | None = None) -> None:
+        """The required pytest check of ``head``: success (the default), failure, pending or absent (#449).
+
+        ``completed_at`` is the check's completion time (issue #578); a check with none never starts a silent-stop continuation."""
         (self.mock / f"checks_{head}").write_text(result, encoding="utf-8")
+        if completed_at:
+            (self.mock / f"checks_completed_{head}").write_text(completed_at, encoding="utf-8")
 
     def fail_comment_writes(self, target: int, times: int) -> None:
         """The next ``times`` comment writes on issue or PR ``target`` fail (an HTTP 500)."""
