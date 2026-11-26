@@ -146,6 +146,11 @@ test_failures() {
     assert_failure "invalid command" --command deploy --issue 1 --head abc --checks pass --blockers none
     assert_failure "invalid next action" "${base[@]}" --next cleanup
     assert_failure "implement next merge not allowed" "${base[@]}" --next merge
+    assert_contains "implement next finding" "$("$SUMMARY_SCRIPT" "${base[@]}" --next finding)" "Next: finding"
+    for other in review merge cleanup; do
+        assert_failure "$other next finding not allowed" --command "$other" --issue 1 --pr 2 \
+            --head abc --checks pass --blockers none --next finding
+    done
     assert_failure "implement next blocked not allowed" "${base[@]}" --next blocked
     assert_failure "unknown flag" "${base[@]}" --unknown value
     assert_failure "missing flag value" "${base[@]}" --next
