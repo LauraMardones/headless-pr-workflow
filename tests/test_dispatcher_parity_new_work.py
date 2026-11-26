@@ -548,17 +548,21 @@ FIX_ROUND = {901: [comment(BK, findings())]}  # the bookkeeping job's findings o
 
 
 def running(wip: str = "1", **kw: Any) -> dict[str, Any]:
-    """The target story ready, #501 with a draft linked PR (in implementation from PR facts)."""
+    """The target story ready, #501 with a linked PR and a fix round due (in implementation from PR facts).
+
+    A draft PR with no session at work holds no WIP place (issue #578), so the running story's session is a
+    fix round on its current head."""
 
     kw.setdefault("board", {RUNNING: "In implementation", STORY: "Ready to implement"})
-    return world(TARGET, RUNNING_STORY, prs=kw.pop("prs", [pr(901, RUNNING)]), limits={"WIP_LIMIT_IMPLEMENTATION": wip}, **kw)
+    kw.setdefault("prc", FIX_ROUND)
+    return world(TARGET, RUNNING_STORY, prs=kw.pop("prs", [pr(901, RUNNING, draft=False)]), limits={"WIP_LIMIT_IMPLEMENTATION": wip}, **kw)
 
 
 def overlap(target_files: tuple[str, ...] | None, running_files: tuple[str, ...] | None, *, parent: int | None = EPIC,
             newline: str = "\n", fail: tuple[str, ...] = ()) -> dict[str, Any]:  # fmt: skip
     return world(story(STORY, "type:story", OPUS, files=target_files, newline=newline),
                  story(RUNNING, "type:story", OPUS, files=running_files, parent=parent),
-                 prs=[pr(901, RUNNING)], fail=fail)  # fmt: skip
+                 prs=[pr(901, RUNNING, draft=False)], prc=FIX_ROUND, fail=fail)  # fmt: skip
 
 
 def limits(**env: str) -> dict[str, Any]:
@@ -612,7 +616,7 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
                                              but(WIP, "start", scheduler_refine_due="no start")),
         "open-prs-unreadable": (running("1", fail=("open",)), same(WIP, "unreadable")),
         "running-story-unreadable": (running("2", fail=(f"issue {RUNNING}",)), but(WIP, "start", IN_IMPL_COUNT="unreadable")),
-        "more-than-100-open-prs": (running("1", prs=[*fillers(), pr(901, RUNNING)]), same(WIP, "no start")),
+        "more-than-100-open-prs": (running("1", prs=[*fillers(), pr(901, RUNNING, draft=False)]), same(WIP, "no start")),
     },
     "limits_valid": {
         "valid": (limits(**LIMITS), same(LIMIT, "2/2/4")),

@@ -126,7 +126,7 @@ Fixtures per rule: `wip_limit`, `limits_valid`, `file_overlap`, `next_new_work_s
 
 | Rule | Case | Failing input | Decisions | Class | Proposed resolution |
 |---|---|---|---|---|---|
-| `wip_limit` | `board-lags-pr-facts` | WIP limit 1, #501 has a draft PR, its card shows Ready to implement | `scheduler_refine_due`: start; the others: no start | contract | ADR-010 (the board never triggers work): the Codex refine source counts the stories in implementation from PR facts. |
+| `wip_limit` | `board-lags-pr-facts` | WIP limit 1, #501 has a PR with a fix round due, its card shows Ready to implement | `scheduler_refine_due`: start; the others: no start | contract | ADR-010 (the board never triggers work): the Codex refine source counts the stories in implementation from PR facts. |
 | `wip_limit` | `board-only-in-implementation` | WIP limit 1, #501's card shows In implementation, no PR | `scheduler_refine_due`: no start; the others: start | contract | As `board-lags-pr-facts`. |
 | `wip_limit` | `target-in-implementation` | WIP limit 1, the target itself has a draft PR | `IN_IMPL_COUNT` (Step 5): start; the others: no start | contract | A story with a draft PR in the continue step or a fix round due already holds its WIP place (`DISPATCHER-CONFIG.md`): the count leaves it out, as Step 5 does (#496); a draft PR with no session at work holds none (#578); not starting it again is the in-flight rule's decision. |
 | `wip_limit` | `fix-round-pr-comments-unreadable` | WIP limit 1, findings on #501's PR head, the PR comments cannot be read | PR-fact copies: start; `scheduler_refine_due` (card In implementation): no start | read defect | Fail closed: start nothing while the fix round count is unknown. |

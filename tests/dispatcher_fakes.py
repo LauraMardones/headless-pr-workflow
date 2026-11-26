@@ -667,6 +667,18 @@ class Dispatcher:
         if merged:  # a PR merged by an earlier run carries the dispatcher's confirmation
             self.add_comment(number, "Merge gate: pass head=fake\n\n## Session Summary\nCommand: merge")
 
+    def add_session_at_work(self, issue: int, pr: int, status: str = "In implementation", body: str = "") -> None:
+        """A story whose draft PR counts as work in implementation (issue #578).
+
+        A draft PR holds a WIP place only while a session is about to work on it. The PR here has a green
+        ``pytest`` check older than the wait, so the plan lists it under ``continue``; the story has no
+        ``executor:`` label, so the resume pass logs a skip and starts no session in the test.
+        """
+        self.add_story(issue, status, executor=None, body=body)
+        head = f"{pr:x}".rjust(40, "b")
+        self.add_pr(pr, issue, head=head, draft=True)
+        self.set_pytest(head, "success", completed_at="2026-10-13T10:30:00Z")
+
     def close_issue(self, number: int) -> None:
         """Close the issue, as GitHub does when its PR merges: the work in flight reads open issues only (#475)."""
         issue = self._read(f"issue_{number}.json")

@@ -158,9 +158,11 @@ def test_ac5_failures_before_the_unblock_do_not_count_toward_the_next_stop(d):
     d.add_comment(12, "/unblock", login=PO)
     d.fail("implement")
 
-    d.run_issue(13, env=env())  # one failure after the /unblock: 1 of 2
+    # The /unblock lifts story 12, so its draft PR is continued first (issue #578); that session fails: 1 of 2.
+    d.run_issue(13, env=env())
 
-    assert "implement 13" in d.sessions
+    assert d.sessions[-1] == "implement 12"
+    assert d.sessions.count("implement 12") == 2
     assert not any("action=failure-stop" in body for body in d.posted(13))
     assert len(stop_events(d)) == 1
 

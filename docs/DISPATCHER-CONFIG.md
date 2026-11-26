@@ -83,7 +83,7 @@ The PO sets every WIP and queue limit in repository variables (issue #358). No s
 
 | Variable | Valid values | Suggested value | Read by |
 |---|---|---|---|
-| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories with work in implementation (a draft linked PR or a fix round due) at the same time. | `2` | the [scheduler](#scheduler-new-work-from-github-facts), `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
+| `WIP_LIMIT_IMPLEMENTATION` | A whole number of one or more, in decimal digits only. The most stories with work in implementation (a fix round due or a draft PR a session is about to continue) at the same time. | `2` | the [scheduler](#scheduler-new-work-from-github-facts), `scripts/dispatcher-invoke.sh` (Step 5), `scripts/flow-review.sh` (violation, red and yellow status, `WIP count: N/<limit>`) |
 | `READY_BUFFER_MIN` | A whole number of zero or more. The fewest ready stories the scheduler keeps. | `3` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
 | `READY_BUFFER_MAX` | A whole number, `READY_BUFFER_MIN` or more. The most ready and waiting stories the scheduler keeps. | `5` | the shared check; the [scheduler](#scheduler-new-work-from-github-facts) uses it for the ready buffer |
 

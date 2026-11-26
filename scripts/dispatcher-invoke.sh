@@ -3855,7 +3855,7 @@ LAST_ACTION="WIP limit check"
 # The pre-flight judges the target against the other stories (issue #496) and
 # leaves the target out. Issue #478: it reads the work in implementation from
 # pull request facts, read fresh now, as the scheduler's --in-implementation list
-# does (scripts/lib/in-flight.sh: a draft linked PR or a fix round due). It reads
+# does (scripts/lib/in-flight.sh: a fix round due or a draft PR in the continue step, issue #578). It reads
 # no board status: the board writer sets it only after this run, so a story
 # merged, finished or handed off earlier in the run would still count there.
 if ! inflight_prepare || ! inflight_compute; then
@@ -3888,7 +3888,7 @@ if [[ "$(jq -r '.result' <<< "$START_JSON")" == "wip-limit" ]]; then
     active_list=$(echo "$IN_IMPL_ITEMS" | jq -r '.[] | "  #\(.number) \(.title)"')
     echo "FAIL: WIP limit reached ($ACTIVE_WIP_COUNT >= $WIP_LIMIT)"
     echo "$active_list"
-    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a draft linked PR or a fix round due)"
+    unblocked_when="Fewer than $WIP_LIMIT stories have work in implementation (a fix round due or a draft PR a session is about to continue)"
     post_conflict_blocker "$ISSUE_NUMBER" "$TARGET_TITLE" "$unblocked_when"
 fi
 

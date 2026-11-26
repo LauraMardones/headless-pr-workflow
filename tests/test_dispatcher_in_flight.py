@@ -215,8 +215,8 @@ def test_ac12_dispatcher_config_names_the_fact_behind_each_step():
                    "is not held back"):
         assert needle in facts, needle
     # The two scheduler lists.
-    for needle in ("`--in-implementation`: the stories with an open linked PR that is a draft, or whose current head has "
-                   "a fix round due", "`--in-flight`: every other open Story, Task or Bug with an open linked PR",
+    for needle in ("`--in-implementation`: the stories whose current head has a fix round due and the stories in the "
+                   "continue step", "Every other draft PR is in `--in-flight`", "`--in-flight`: every other open Story, Task or Bug with an open linked PR",
                    "does not count them for the WIP limit"):
         assert needle in facts, needle
     # No board status starts a step any more.
