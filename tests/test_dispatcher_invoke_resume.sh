@@ -113,6 +113,8 @@ gh() {
     return 1
 }
 HEADER
+    # latest_decision_blocker_json asks the one open-blocker rule (issue #649): the real hpw decides.
+    printf 'HPW_BIN=%q\n' "$SCRIPT_DIR/scripts/hpw"
     printf '%s\n%s\n' "$REAL_CONSTANT" "$REAL_FN"
     echo 'latest_decision_blocker_json 42 | jq -r ".unblocked | tostring"'
 } > "$RUNNER"

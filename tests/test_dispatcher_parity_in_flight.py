@@ -422,8 +422,8 @@ def open_blocker_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Mon
     _, rule = bash(tmp / "conflict", f, f'conflict_round_rule "{BOT}" "{BK}" "{PO}"',
                    stdin=f"{conflicting}\n{json.dumps(comments)}\n[]\n")  # fmt: skip
     return {
-        "status.py:other_blocker_open (in-flight plan)": word[other_blocker_open(trust, comments)],
-        "status.py:other_blocker_open (board status)": word[other_blocker_open(trust, comments)],
+        "status.py:other_blocker_open (in-flight plan)": word[other_blocker_open(trust, comments, po_unblock=True)],
+        "status.py:other_blocker_open (board status)": word[other_blocker_open(trust, comments, po_unblock=True)],
         "conflict-round.sh:open_blocker": {"blocked": "open", "owed": "not open"}.get(rule, rule),
         "session_blocker.py:open_session_blocker": word[open_session_blocker(trust, comments) is not None],
         "facts.py:dependency_blocker": word[trust.dependency_blocker(comments, {})["state"] == "open"],
