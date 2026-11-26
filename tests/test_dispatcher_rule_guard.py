@@ -106,3 +106,24 @@ def test_649_a_second_open_blocker_copy_fails_the_guard(tmp_path: Path) -> None:
     problems = rule_guard.find_violations(tmp_path, [rule])
     assert problems == [f"open_blocker: new copy: src/headless_pr_workflow/dispatcher/status.py defines "
                         f"'decide_open_blocker' (owner {rule.owner})"]
+
+
+def test_650_merge_gates_pass_has_one_implementation_and_an_empty_allowlist() -> None:
+    rule = next(r for r in RULES if r.name == "merge_gates_pass")
+    assert rule.owner == "src/headless_pr_workflow/dispatcher/gateway.py" and rule.duplicates == ()
+    assert [impl.marker for impl in rule.implementations] == ["decide_merge_gates"]
+    in_flight = (ROOT / "scripts" / "lib" / "in-flight.sh").read_text(encoding="utf-8")
+    assert "mergeable=[^,]+" not in in_flight and '"$HPW_BIN" dispatcher merge-gates decide' in in_flight
+    gateway = (ROOT / rule.owner).read_text(encoding="utf-8")
+    shim = gateway.split("class GhGateway", 1)[1].split("    def merge_gates_pass(self", 1)[1].split("\n    def ", 1)[0]
+    assert "decide_merge_gates(" in shim and "result.passed" not in shim
+    assert rule_guard.find_violations(ROOT, [rule]) == []
+
+
+def test_650_a_second_merge_gates_copy_fails_the_guard(tmp_path: Path) -> None:
+    rule = next(r for r in RULES if r.name == "merge_gates_pass")
+    write(tmp_path, rule.owner, "def decide_merge_gates(gate, head):\n    return {}\n")
+    write(tmp_path, "scripts/lib/in-flight.sh", "decide_merge_gates() {\n    return 0\n}\n")
+    problems = rule_guard.find_violations(tmp_path, [rule])
+    assert problems == [f"merge_gates_pass: new copy: scripts/lib/in-flight.sh defines 'decide_merge_gates' "
+                        f"(owner {rule.owner})"]

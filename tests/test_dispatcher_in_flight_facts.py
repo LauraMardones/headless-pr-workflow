@@ -14,6 +14,7 @@ import subprocess
 import pytest
 
 from tests.dispatcher_fakes import BASH, REPO_ROOT, Dispatcher, needs_tools
+from tests.hpw_dispatcher_route import fake_in_flight_route
 from tests.script_tools import windows_env
 
 pytestmark = needs_tools
@@ -154,8 +155,11 @@ def _gates_pass(tmp_path, line: str, rc: int) -> bool:
     script = tmp_path / "gate.sh"
     script.write_text(f"#!/usr/bin/env bash\necho '{line}'\nexit {rc}\n", encoding="utf-8", newline="\n")
     script.chmod(0o755)
+    hpw = tmp_path / "hpw"  # the real merge-gate rule (issue #650) behind the shim
+    hpw.write_text("#!/usr/bin/env bash\n" + fake_in_flight_route() + "exit 2\n", encoding="utf-8", newline="\n")
+    hpw.chmod(0o755)
     driver = (f'source "{IN_FLIGHT_LIB.as_posix()}"; REPO=o/r MERGE_GATE_SCRIPT="{script.as_posix()}" '
-              f'inflight_gates_pass 900 {HEAD}')
+              f'HPW_BIN="{hpw.as_posix()}" inflight_gates_pass 900 {HEAD}')
     return subprocess.run([BASH, "-c", driver], env=windows_env(), capture_output=True, timeout=60).returncode == 0
 
 

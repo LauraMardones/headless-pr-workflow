@@ -74,21 +74,20 @@ inflight_linked() {
     jq -ce 'select(.result == "read") | {linked, merged}' <<< "$out"
 }
 
-# inflight_gates_pass <pr> <head> — 0 when policy, checks, approval, threads and
-# head pass in the gate line of scripts/merge-gate-summary; mergeability is left
-# to the merge step itself. 1 for a failing gate, an unreadable one, or a line
-# for another head.
+# inflight_gates_pass <pr> <head> — 0 when the one merge-gate rule (`hpw dispatcher
+# merge-gates decide`, issue #650) puts the PR in the merge step: policy, checks,
+# approval, threads and head pass in the gate line of scripts/merge-gate-summary,
+# and mergeability is left to the merge step itself (divergence (3) of #556 →
+# Decisions). 1 for a failing gate, an unreadable one, a line for another head,
+# or a rule that cannot be run or read.
 inflight_gates_pass() {
-    local pr="$1" head="${2,,}" line rc=0 gate_head
+    local pr="$1" head="$2" out rc=0
     local script="${MERGE_GATE_SCRIPT:-}"
     [[ -n "$script" && -n "$head" ]] || return 1
-    line=$("$script" --pr "$pr" --repo "$REPO" 2>/dev/null) || rc=$?
+    out=$("$script" --pr "$pr" --repo "$REPO" 2>/dev/null) || rc=$?
     [[ $rc -le 1 ]] || return 1
-    line=$(grep -m1 '^Merge gate:' <<< "$line") || return 1
-    local re='policy=pass\([A-Za-z_]+\), checks=(pass|absent-ok), approval=(formal|codex-review|separate-session), threads=none, mergeable=[^,]+, head=([0-9a-fA-F]{7})$'
-    [[ "$line" =~ $re ]] || return 1
-    gate_head="${BASH_REMATCH[3],,}"
-    [[ "$head" == "$gate_head"* ]]
+    out=$(printf '%s\n' "$out" | "$HPW_BIN" dispatcher merge-gates decide --head "$head" --input - 2>/dev/null) || return 1
+    jq -e 'select(.result == "read") | .merge_step == true' <<< "$out" >/dev/null 2>&1
 }
 
 # inflight_green_completed_at <head> — prints the JSON string of `completed_at` of the newest

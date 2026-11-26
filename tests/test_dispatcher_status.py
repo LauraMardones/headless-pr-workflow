@@ -534,8 +534,11 @@ def test_command_invalid_arguments(capsys, gw):
 
 
 class _Gate:
+    """A ``GateResult``: every gate passes, or an unresolved thread fails it."""
+
     def __init__(self, passed, head):
-        self.passed, self.head = passed, head
+        self.policy, self.checks, self.approval, self.mergeable = "pass(required)", "pass", "formal", "yes"
+        self.threads, self.head = "none" if passed else "unresolved(1)", head
 
 
 def test_gh_gateway_merge_gates_use_the_script_evaluation(monkeypatch):

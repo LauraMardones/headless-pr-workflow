@@ -74,10 +74,12 @@ GATEMOCK
 chmod +x "$FAKE_BIN/gate"
 
 # The scheduler (issue #474) on HPW_BIN: idle, with no GitHub call; the
-# in-flight rule (issue #475) runs for real; no account is known.
+# in-flight rule (issue #475) and the merge-gate rule (issue #650) run for
+# real; no account is known.
 cat > "$FAKE_BIN/hpw" << HPWMOCK
 #!/usr/bin/env bash
-if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" || "\${1:-} \${2:-}" == "dispatcher admission" ]]; then
+if [[ "\${1:-} \${2:-}" == "dispatcher in-flight" || "\${1:-} \${2:-}" == "dispatcher admission"
+      || "\${1:-} \${2:-}" == "dispatcher merge-gates" ]]; then
     shift; PYTHONPATH="$REPO_ROOT/src" exec "$PYTHON" -m headless_pr_workflow.dispatcher "\$@"
 fi
 if [[ "\${1:-} \${2:-}" == "dispatcher scheduler" ]]; then

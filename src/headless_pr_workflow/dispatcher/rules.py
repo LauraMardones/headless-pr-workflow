@@ -89,13 +89,12 @@ RULES: tuple[Rule, ...] = (
           [(IN_FLIGHT, "plan_in_flight"), (IN_FLIGHT_SH, "inflight_compute"), (INVOKE, "find_merged_linked_pr")],
           "poll resume",
           "test_dispatcher_in_flight.py test_dispatcher_in_flight_facts.py test_dispatcher_cleanup_script.py"),
-    _rule("merge_gates_pass", "Whether the merge gates pass on the PR's current head.", MERGE_GATE,
-          [(MERGE_GATE, "GateResult"), (GATEWAY, "merge_gates_pass"), (IN_FLIGHT_SH, "inflight_gates_pass")],
+    _rule("merge_gates_pass", "Whether the merge gates pass on the PR's current head.", GATEWAY,
+          [(GATEWAY, "decide_merge_gates")],
           "poll resume",
+          "test_dispatcher_merge_gates.py test_dispatcher_parity_in_flight.py test_dispatcher_rule_guard.py "
           "test_dispatcher_in_flight_facts.py test_dispatcher_status.py test_merge_gate_summary.py "
-          "test_dispatcher_merge_script.py",
-          "`inflight_gates_pass` accepts any `mergeable=` value, `GateResult` needs `mergeable` yes: a "
-          "conflicting PR is in the in-flight merge step but shows In review on the board."),
+          "test_dispatcher_merge_script.py"),
     _rule("in_flight_step", "Which resume step a story is in, and the in-implementation and in-flight lists.",
           IN_FLIGHT,
           [(IN_FLIGHT, "plan_in_flight"), (IN_FLIGHT_SH, "inflight_compute"), (CODEX_WORKER, "work_in_flight"),
