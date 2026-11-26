@@ -127,6 +127,6 @@ One JSON line on stdout: `{"ok", "block": "status", "operation": "sync", "result
 | `2` | `invalid` | invalid arguments |
 | `3` | `unreadable` | the board, the issues, the facts or an Epic body could not be read; nothing was written |
 
-Stderr (the run log): one `[SYNC] #<n> <before> -> <after>: <fact>` line per correction (`(none)` for a card with no Status), one `[SYNC] progress #<epic>: <result>` line per Epic, one `[SYNC] skipped #<n>: <reason>` line per skipped item. A run is idempotent: right after a run, `--dry-run` lists no correction and no progress change.
+Stderr (the run log): one `[SYNC] #<n> <before> -> <after>: <fact>` line per correction (`(none)` for a card with no Status), one `[SYNC] progress #<epic>: <result>` line per Epic, one `[SYNC] skipped #<n>: <reason>` line per skipped item. When a read failed because the GitHub rate limit is used up, one `[RATE LIMIT] <step>: GitHub API rate limit used up; resets <UTC time | unknown>` line comes before `[SYNC] unreadable: ...`; the result (`unreadable`) and exit code (`3`) are unchanged (issue #660). A run is idempotent: right after a run, `--dry-run` lists no correction and no progress change.
 
 Environment: `GH_TOKEN` (through `gh`; `PROJECT_TOKEN`-class access to the board and issue bodies) and `DECISION_BLOCKER_PO_LOGIN`.

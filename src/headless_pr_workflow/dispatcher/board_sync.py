@@ -11,6 +11,8 @@ Result words and exit codes: ``synced`` (0: every difference written and verifie
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .facts import KNOWN_TYPES, STORY_TYPES, _FEATURE_GROUP, _PARENT_EPIC
@@ -111,8 +113,27 @@ def sync_board(gateway: Gateway, repo: str, *, epic: int | None = None, attempts
     try:
         return _sync(_ListedOnce(gateway), epic, attempts, dry_run, settings)
     except GatewayError as exc:
+        _log_rate_limit(gateway, exc)
         log(f"[SYNC] unreadable: {exc}")
         return _result("unreadable", [], [], [], dry_run, str(exc))
+
+
+def _log_rate_limit(gateway: Gateway, exc: GatewayError) -> None:
+    """One ``[RATE LIMIT]`` line when a read failed because the rate limit is used up (issue #660)."""
+
+    if "rate limit" not in str(exc).lower():
+        return
+    step = re.search(r"read (?:open|closed) issues|read open pull requests", str(exc))
+    reset = "unknown"
+    reader = getattr(gateway, "rate_limit_reset", None)
+    if callable(reader):
+        try:
+            epoch = reader()
+            if isinstance(epoch, int):
+                reset = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:  # the reset time is a courtesy: a failed read must not hide the rate limit
+            pass
+    log(f"[RATE LIMIT] {step.group(0) if step else exc.step}: GitHub API rate limit used up; resets {reset}")
 
 
 def _result(result: str, corrections: list, skipped: list, progress: list, dry_run: bool, error: str | None) -> Result:
