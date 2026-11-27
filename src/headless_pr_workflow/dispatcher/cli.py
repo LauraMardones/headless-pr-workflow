@@ -28,6 +28,7 @@ from .gateway import Gateway, GhGateway, decide_merge_gates, mask_tokens, parse_
 from .in_flight import fix_round as decide_fix_round_result
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
+from . import no_feature_note
 from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, decide_merge_owner_result, list_markers,
                      marker_holds, marker_text, merge_owner_evidence, whoami, write_marker)
 from .scheduler import InvalidLimits, load_limits, next_action
@@ -55,7 +56,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # The worker compares heads with GitHub's own: only a full SHA is accepted, and it is kept in lower case (#528).
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9_./-]+$")
-_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "merge-gates", "codex-worker", "catch-all", "admission", "failure-stop")
+_BLOCKS = ("write", "marker", "state", "facts", "scheduler", "status", "in-flight", "session-blocker", "merge-gates", "codex-worker", "catch-all", "admission", "failure-stop", "no-feature-note")
 
 
 class InvalidArguments(Exception):
@@ -307,6 +308,12 @@ def build_parser() -> argparse.ArgumentParser:
     catch_all = blocks.add_parser("catch-all", add_help=False)
     catch_all_ops = catch_all.add_subparsers(dest="operation", parser_class=_Parser)
     catch_all_ops.add_parser("numbers", add_help=False)
+    note = blocks.add_parser("no-feature-note", add_help=False)  # the no-feature note (#616)
+    note.set_defaults(operation="note")
+    note.add_argument("--repo", required=True)
+    note.add_argument("--scheduler-file", default="-")  # the scheduler's JSON; "-" is stdin
+    note.add_argument("--dry-run", action="store_true")
+    note.add_argument("--json", action="store_true")
     admission = blocks.add_parser("admission", add_help=False)
     admission_ops = admission.add_subparsers(dest="operation", parser_class=_Parser)
     admission_ops.add_parser("limits", add_help=False)
@@ -394,7 +401,8 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
             "| hpw dispatcher catch-all numbers "
             "| hpw dispatcher failure-stop check|record ... "
-            "| hpw dispatcher admission limits|type|executor|start ...")
+            "| hpw dispatcher admission limits|type|executor|start ... "
+            "| hpw dispatcher no-feature-note --repo <owner/repo> [--scheduler-file <file>|-] [--dry-run] [--json]")
     if args.block in ("catch-all", "admission"):
         return  # reads a constant: no repository
     if args.block == "session-blocker" and args.operation in ("decide", "open"):
@@ -606,6 +614,33 @@ def _run_marker(args: argparse.Namespace, gateway: Gateway, settings: Settings) 
                               attempts=args.attempts, dry_run=args.dry_run, settings=settings))  # fmt: skip
 
 
+def _run_no_feature_note(args: argparse.Namespace, gateway: Gateway, settings: Settings) -> int:
+    """Note the ``no-feature`` stories of the scheduler's output (#616); exit 0, 1 a write failed, 3 unreadable."""
+
+    try:
+        raw = sys.stdin.buffer.read() if args.scheduler_file == "-" else Path(args.scheduler_file).read_bytes()
+        decision = json.loads(raw.decode("utf-8"))
+        skipped = decision.get("skipped") if isinstance(decision, dict) else None
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        skipped, error = None, f"read scheduler output: {exc}"
+    else:
+        error = "the scheduler output has no skipped list"
+    if skipped is None:
+        print(mask_tokens(f"[NO-FEATURE NOTE] unreadable: {error}"), file=sys.stderr)
+        return EXIT_UNREADABLE
+    result = no_feature_note.run(gateway, skipped, dry_run=args.dry_run, settings=settings)
+    stories = result.fields["stories"]
+    if args.json:
+        for story in stories:
+            print(json.dumps({k: v for k, v in story.items() if k != "error"}))
+            if story.get("error"):
+                print(mask_tokens(f"[NO-FEATURE NOTE] #{story['issue']}: {story['result']}: {story['error']}"), file=sys.stderr)
+    else:
+        for line in no_feature_note.human_lines(stories):
+            print(mask_tokens(line))
+    return result.exit_code
+
+
 def _run_state(args: argparse.Namespace, gateway: Gateway) -> int:
     if args.operation == "read":
         return _emit(read_state(args.name, args.repo))
@@ -727,6 +762,8 @@ def _main(argv: list[str], *, gateway_factory: GatewayFactory | None = None, set
 
     if args.block == "marker":
         return _run_marker(args, gateway, settings)
+    if args.block == "no-feature-note":
+        return _run_no_feature_note(args, gateway, settings)
     if args.block == "state":
         return _run_state(args, gateway)
     if args.block == "facts":
