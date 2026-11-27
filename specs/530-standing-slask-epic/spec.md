@@ -17,10 +17,11 @@ In:
 - The allowed-maintenance list: which kinds of catch-all finding the Tech Lead may refine without the PO, and where the line goes.
 - The standing exception: the dispatcher's closure notifications and `/verify-closure` never act on this Epic or its catch-all Feature, read from the constants in `src/headless_pr_workflow/catch_all.py`. A second Feature under this Epic delivers it and closes as usual.
 - This Epic's priority (P1) and that it has no milestone.
-- The account of the automation (scope change, 2026-11-21): the dispatcher, board-status and the sessions the dispatcher starts run under their own GitHub App, not `PROJECT_TOKEN`, so they stop sharing its 5000 API calls per hour with the PO's sessions (issue #626).
+- The account of the automation (scope change, 2026-11-21, narrowed 2026-11-27): the dispatcher, board-status and the sessions the dispatcher starts run under their own GitHub App for everything except the Projects v2 board, so they spend fewer of the 5000 API calls per hour that `PROJECT_TOKEN` shares with the PO's sessions (issue #626). Every read and write of the board stays on `PROJECT_TOKEN`.
 
 Out:
 
+- The App reading or writing the Projects v2 board (scope change, 2026-11-27): the proof of 2026-11-26 and its re-run of 2026-11-27 show the App cannot see a user-owned board.
 - The 5-minute dispatcher schedule.
 - Reading less per run in the dispatcher and board-status: the Tech Lead does it in #626 without a spec.
 - The edits to `docs/DISPATCHER-CONFIG.md` and ADR-012 that follow from the account decision: a separate PR (see Dependencies).
@@ -39,10 +40,28 @@ This Epic never closes, so its criteria are standing outcomes. Each is verified 
   - **Verified by:** #504's closure evidence (its E2 proof): one allowed finding refined with no PO action, and one finding that is not allowed, such as a refactoring on its own, raised as a decision blocker.
 - **E3:** The PO never gets a closure request or a closure verification for this Epic or its catch-all Feature, even when the catch-all is empty.
   - **Verified by:** the second Feature's closure evidence: the catch-all Feature with every issue closed, no `feature_closure_confirmation` or `epic_closure_approval` notification for it or for this Epic, and `/verify-closure 530` refusing with a stated reason.
-- **E4:** No dispatcher or board-status run fails on the shared API rate limit over a week, because they run under their own GitHub App.
-  - **Verified by:** the closure evidence of the Feature that delivers the account: the runs of both workflows over seven days after the switch, with none failed on `could not read the work in flight` or `API rate limit exceeded`; a board-status run that wrote a card with the App's token; and a `scripts/merge-gate-summary` run under the App that reports its checks, not `required-unavailable`.
+- **E4:** Everything except the board runs under the App's token, and dispatcher and board-status runs fail less often on the shared API rate limit than before the switch.
+  - **Verified by:** the closure evidence of the Feature that delivers the account: the dispatcher and board-status runs over seven days after the switch, with the share failed on `could not read the work in flight` or `API rate limit exceeded` lower than the baseline of 11 failed runs in 40 (#626, 2026-11-21); a session the dispatcher started that pushed with the App's token; and a `scripts/merge-gate-summary` run under the App that reports its checks, not `required-unavailable`.
 
 ## Decisions
+
+### The board stays on `PROJECT_TOKEN`, the App takes the rest — 2026-11-27
+
+Scope change. Replaces the board part of "Own account for the automation: a GitHub App — 2026-11-21" (its board write, and its App permission "board (project) write"). The rest of that entry stands. That entry said that if the App cannot write the board, the PO decides again by a scope change. This is that decision.
+
+Evidence: the App token proof (#664, run 45903090636, 2026-11-26) printed `board-read: refused` and `board-write: refused` with `no Projects v2 board is visible on LauraMardones/headless-pr-workflow`, and `branch-protection: ok` and `review-requests: ok`. On 2026-11-27 the PO accepted the App's new Projects permission, confirmed the board is linked to the repository, and ran the proof again: the same result.
+
+**Chosen:**
+- Every read and write of the Projects v2 board runs with `PROJECT_TOKEN`: board-status, and the dispatcher's reads of the work in flight and its board writes.
+- Everything else runs under the App, as decided on 2026-11-21: the sessions the dispatcher starts (git pushes included), the merge gate's reads (branch protection, review requests) and the dispatcher's other GitHub calls.
+- The saving is smaller than the 2026-11-21 decision expected: the board reads still spend `PROJECT_TOKEN`'s calls. E4 is reworded to measure a lower failure share, not none.
+
+**Rejected:**
+- Fix the App's access and re-run the proof — done twice, same result.
+- Move the project to an organization — not chosen. It stays a possible later scope change.
+- A bot account with its own token — rejected on 2026-11-21, not reopened.
+- Keep E4 as "no failed run in a week" — it may not hold while the board reads share the limit with the PO's sessions.
+- Remove E4 — the account change would have no measure of use.
 
 ### Own account for the automation: a GitHub App — 2026-11-21
 
@@ -127,6 +146,9 @@ Scope change. Reconfirms and extends the PO's answer on #626 (option b, `/unbloc
 - `docs/MERGE-POLICY.md` and M9 — no conflict. The App's administration read keeps the merge gate whole; no gate is changed.
 - #626 (`## Decisions`, 2026-11-21) — consistent. It records option b and keeps #626 blocked until this spec merges. Reading less (its ideas 2 and 3) stays a Tech Lead task.
 - ADR-009 item 7 — no new consequence beyond the one already stated: #626 and any refined issue it affects are re-refined after this spec merges.
+- Scope change of 2026-11-27: `docs/DISPATCHER-CONFIG.md`, ADR-012, ADR-014 and `.github/workflows/dispatcher.yml`, `board-status.yml` — conflict with the 2026-11-21 plan that board-status moves to the App. Resolved: the board stays on `PROJECT_TOKEN`; the decision-document PR names `PROJECT_TOKEN` for the board and the App for the rest. No ADR is superseded by this spec PR.
+- #633 and its stories #664 and #665 (`Parent epic: #530`) — conflict. #665 ("The board writers run with the App's installation token") no longer matches the scope, and F3.2, F3.6 and F3.9 are narrowed. Resolved: the Tech Lead re-refines #633 and re-scopes or closes #665 after this spec merges (ADR-009 item 7).
+- ADR-011 item 1 — no conflict. This PR changes only the spec folder.
 - `docs/ROADMAP.md` milestones and `scripts/refine-check` — no conflict. `scripts/refine-check` does not check a milestone.
 
 ## Delegated to the Tech Lead
@@ -136,7 +158,7 @@ Scope change. Reconfirms and extends the PO's answer on #626 (option b, `/unbloc
 - The `prio:` and `executor:` labels of each catch-all issue; `prio:` orders only among catch-all issues.
 - How the dispatcher and `/verify-closure` read the constants, and the wording of the refusal.
 - Renaming the titles and bodies of #504 and #513 to #517, and the module name `catch_all.py` in #516 and #517 (decided above).
-- The account change: slicing it into a Feature (it closes, so E4 can be verified) and its stories, the App's exact permission names and how workflows get its token, the board-write proof, and re-refining #626.
+- The account change: slicing it into a Feature (it closes, so E4 can be verified) and its stories, the App's exact permission names (including whether its Projects permission stays), how a job holds both tokens (the App's for everything but the board, `PROJECT_TOKEN` for the board), re-scoping or closing #665, and re-refining #626 and #633.
 
 ## Dependencies
 
