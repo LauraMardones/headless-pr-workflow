@@ -16,6 +16,11 @@ findings marker on the bookkeeping job's account, ``/unblock`` on the PO's.
 issue #556) for the Bash callers: ``scripts/lib/in-flight.sh`` and the
 ``find_linked_pr_json`` / ``find_merged_linked_pr`` shims of the invoke script.
 
+``hpw dispatcher in-flight fix-round`` is the fix-round rule (``decide_fix_round``,
+issue #630): whether a fix round is due on the PR's current head, already
+attempted there, or the attempt superseded by later findings. No caller uses it
+yet (#652 switches them).
+
 Result words and exit codes: ``read`` (0), ``unreadable`` (3: the input file
 cannot be read or is not a list of rows).
 """
@@ -61,6 +66,97 @@ def findings_on_head(pr_comments: Sequence[Mapping[str, Any]], head: str, bookke
     return bool(head and bookkeeping) and any(
         _author(c) == bookkeeping and wanted in str(c.get("body") or "").lower() for c in pr_comments
     )
+
+
+def fix_round_attempt_text(pr: int, head: str) -> str:
+    """The fix-round attempt marker the invoke script posts for ``head`` on PR ``pr`` (issue #357)."""
+
+    return dispatcher_marker(f"action=fix-round-attempt pr={pr} head={head.strip().lower()}")
+
+
+def _newest_findings(pr_comments: Sequence[Mapping[str, Any]], head: str, bookkeeping: str) -> str | None:
+    """The ``created_at`` of the newest findings marker the bookkeeping job posted for ``head``, or ``None``."""
+
+    wanted = f"{FINDINGS_MARKER}{head} "
+    times = [str(c.get("created_at") or "") for c in pr_comments
+             if _author(c) == bookkeeping and wanted in str(c.get("body") or "").lower()]  # fmt: skip
+    return max(times) if times else None
+
+
+def decide_fix_round(story_comments: Sequence[Mapping[str, Any]], pr_comments: Sequence[Mapping[str, Any]], *,
+                     pr: int, head: str, dispatcher: str, bookkeeping: str, po: str) -> dict[str, Any]:
+    """The one fix-round rule (issue #630): due, attempted, superseded, for PR ``pr`` at ``head``.
+
+    ``due``: a comment of ``bookkeeping`` on the PR carries the findings marker for ``head``
+    (``findings_on_head``, ``fix_round_due``). ``attempt``: the ``decide_holds`` word of the
+    dispatcher's fix-round attempt marker for ``head`` on the story (a later PO ``/unblock``
+    lifts it). ``superseded``: the attempt holds and a findings marker for ``head`` is newer
+    (``fix_round_attempt_superseded``). ``attempted``: the attempt holds and is not superseded.
+    ``start``: due and not attempted, so a fix-round session starts (``resume_fix_round`` and
+    the ``fix-round-due`` word of ``conflict_round_rule``). Divergence 4 of #556: a tried round
+    stays ``due``, so ``plan_in_flight`` keeps its WIP place in ``fix_round``, and the conflict
+    rule reads ``start``. ``heads``: every head with findings, unique and sorted
+    (``fix_round_heads``). Matching ignores case.
+    """
+
+    head = head.strip().lower()
+    moves = _newest_findings(pr_comments, head, bookkeeping)
+    word, attempt = decide_holds(list(story_comments), dispatcher, fix_round_attempt_text(pr, head), po_login=po)
+    attempt_at = str((attempt or {}).get("created_at") or "")
+    superseded = word == "holds" and moves is not None and moves > attempt_at
+    attempted = word == "holds" and not superseded
+    heads = sorted({m.group(1).lower() for c in pr_comments if _author(c) == bookkeeping
+                    for m in re.finditer(re.escape(FINDINGS_MARKER) + r"([0-9a-fA-F]+) ", str(c.get("body") or ""),
+                                         re.I)})  # fmt: skip
+    return {"pr": pr, "head": head, "due": moves is not None, "attempt": word, "attempted": attempted,
+            "superseded": superseded, "start": moves is not None and not attempted, "heads": heads,
+            "findings_at": moves, "attempt_at": attempt_at or None}  # fmt: skip
+
+
+_FIX_ROUND_EMPTY = {"due": None, "attempt": None, "attempted": None, "superseded": None, "start": None,
+                    "heads": None, "findings_at": None, "attempt_at": None}  # fmt: skip
+
+
+def _comment_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(c, dict) for c in value)
+
+
+def fix_round(data: Any, *, dispatcher: str, bookkeeping: str, po: str) -> Result:
+    """``in-flight fix-round``: ``decide_fix_round`` over facts a caller already read.
+
+    Input: ``{"pr": <the PR as GitHub returns it, or {"number", "head"}>, "story_comments": [...],
+    "pr_comments": [...]}``. Result ``read`` (0) with the rule's fields. Fails closed with
+    ``unreadable`` (3) and no decision when the PR facts (number, head SHA), a comment list
+    (left out or ``null`` means not read) or a marker account (an empty dispatcher or bookkeeping
+    login) cannot be read: no fix round starts and no attempt is assumed absent.
+    """
+
+    operation = "fix-round"
+
+    def unreadable(error: str, pr: Any = None, head: Any = None) -> Result:
+        return Result(operation, "unreadable", error=error, block=BLOCK,
+                      fields={"pr": pr, "head": head, **_FIX_ROUND_EMPTY})  # fmt: skip
+
+    if not isinstance(data, dict):
+        return unreadable("input: not a JSON object")
+    pr = data.get("pr")
+    if not isinstance(pr, dict):
+        return unreadable("facts: the PR is not read")
+    raw_head = pr.get("head")
+    head = str((raw_head.get("sha") if isinstance(raw_head, dict) else raw_head) or "").strip().lower()
+    number = pr.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        return unreadable("facts: the PR number is not read", head=head or None)
+    if not re.fullmatch(r"[0-9a-f]{7,40}", head):
+        return unreadable("facts: the PR head SHA is not read", number)
+    for name in ("story_comments", "pr_comments"):
+        if not _comment_list(data.get(name)):
+            return unreadable(f"comments: {name} are not read", number, head)
+    if not dispatcher.strip() or not bookkeeping.strip():
+        return unreadable("markers: the dispatcher or bookkeeping account is not known", number, head)
+    fields = decide_fix_round(data["story_comments"], data["pr_comments"], pr=number, head=head,
+                              dispatcher=dispatcher.strip(), bookkeeping=bookkeeping.strip(), po=po.strip())  # fmt: skip
+    return Result(operation, "read", fields=fields, block=BLOCK)
 
 
 def hand_off_pending(story_comments: list[dict[str, Any]], pr: int, dispatcher: str, po: str) -> bool:
