@@ -366,8 +366,15 @@ def test_the_hook_runs_through_an_explicit_bash_command_as_the_docs_set_it_up():
     assert proc.returncode == 2 and proc.stdout == ""
     assert codex_worker.command_gate(command)("o/r", 1, "bogus") == (False, "eligibility-unreadable")
     docs = (REPO_ROOT / "docs" / "DISPATCHER-CONFIG.md").read_text(encoding="utf-8")
-    assert 'bash "C:/work/headless-pr-workflow/scripts/codex-eligibility.sh"' in docs
+    git_bash = '"C:/Program Files/Git/bin/bash.exe"'
+    assert f'CODEX_WORKER_ELIGIBILITY_COMMAND={git_bash} "C:/work/headless-pr-workflow/scripts/codex-eligibility.sh"' in docs
+    assert f"CODEX_ALLOWANCE_COMMAND={git_bash} " in docs
+    assert f"CLAUDE_ALLOWANCE_COMMAND={git_bash} " in docs
+    assert 'bash "C:/work' not in docs
     assert "bash <repo>/scripts/codex-eligibility.sh" in docs
+    assert "A bare `bash` is WSL's `bash.exe`" in docs
+    assert "`allowance-unreadable`" in docs and "exited 127" in docs
+    assert "`/c/Users/...` as `C:\\c\\Users\\...`" in docs and "`C:/Users/...`" in docs
 
 
 # ── the worker: the wait record carries the reason and the reset time; replays post it once ──
