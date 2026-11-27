@@ -1900,3 +1900,188 @@ def test_357_codex_review_that_leaves_the_story_in_review_runs_no_merge_and_unbl
     assert third.returncode == 0, third.stdout + third.stderr
     assert d.sessions == [f"review {PR}", f"review {PR}"]  # the same head is reviewed again
     assert d.phases == [f"merge {PR}", f"cleanup {STORY}"]
+
+
+# ─── The one Python fix-round rule (issue #630) ───────────────────────────────
+# `hpw dispatcher in-flight fix-round` decides due / attempted / superseded for a
+# PR head, next to the copies (findings_on_head, fix_round_due, fix_round_heads,
+# fix_round_attempt_superseded, conflict_round_rule). No caller uses it yet (#652).
+
+from headless_pr_workflow.dispatcher import cli as dispatcher_cli  # noqa: E402
+from headless_pr_workflow.dispatcher.in_flight import fix_round, plan_in_flight  # noqa: E402
+
+BK = "codex-bookkeeping[bot]"
+FIX_T_EARLY, FIX_T0, FIX_T1, FIX_T2 = ("2026-11-01T09:00:00Z", "2026-11-01T10:00:00Z", "2026-11-01T11:00:00Z",
+                                       "2026-11-01T12:00:00Z")  # fmt: skip
+OLD_HEAD = "c" * 40
+
+
+def fix_comment(login: str, body: str, at: str) -> dict:
+    return {"user": {"login": login}, "body": body, "created_at": at}
+
+
+def findings_at(at: str, head: str = HEAD, login: str = BK) -> dict:
+    return fix_comment(login, bookkeeping_marker("move-in-implementation", head), at)
+
+
+def attempt_at(at: str, head: str = HEAD, pr: int = PR, login: str = BOT) -> dict:
+    return fix_comment(login, f"Dispatcher: no push.\n\n<!-- hpw:dispatcher action=fix-round-attempt pr={pr} head={head} -->", at)
+
+
+def unblock_at(at: str) -> dict:
+    return fix_comment(PO, "/unblock", at)
+
+
+def decide(story=(), prc=(), head: str = HEAD, pr: int = PR, **kw) -> dict:
+    data = {"pr": {"number": pr, "head": {"sha": head}}, "story_comments": list(story), "pr_comments": list(prc)}
+    data.update(kw.pop("data", {}))
+    result = fix_round(data, dispatcher=kw.get("dispatcher", BOT), bookkeeping=kw.get("bookkeeping", BK), po=PO)
+    return result.to_dict() | {"exit": result.exit_code}
+
+
+def verdict(out: dict) -> tuple:
+    return out["due"], out["attempted"], out["superseded"], out["start"]
+
+
+FIX_ROUND_CASES = {
+    # fix_round_due (tests/test_dispatcher_parity_review_loop.py CASES)
+    "findings-on-head": ({"prc": [findings_at(FIX_T0)]}, (True, False, False, True)),
+    "findings-on-older-head": ({"prc": [findings_at(FIX_T0, OLD_HEAD)]}, (False, False, False, False)),
+    "findings-by-another-account": ({"prc": [findings_at(FIX_T0, login="someone")]}, (False, False, False, False)),
+    # Divergence (4) of #556, option A: a tried round stays due (its WIP place in fix_round), and
+    # the conflict rule reads start, which is false (conflict_round_rule: not fix-round-due).
+    "findings-then-attempt": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1)]},
+                              (True, True, False, False)),
+    # fix_round_attempt_once_per_head
+    "attempt-then-po-unblock": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1), unblock_at(FIX_T2)]},
+                                (True, False, False, True)),
+    "attempt-then-newer-findings": ({"prc": [findings_at(FIX_T2)], "story": [attempt_at(FIX_T1)]},
+                                    (True, False, True, True)),
+    "attempt-by-another-account": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1, login="someone")]},
+                                   (True, False, False, True)),
+    "newest-attempt-listed-first": (
+        {"prc": [findings_at(FIX_T_EARLY)], "story": [attempt_at(FIX_T2), unblock_at(FIX_T1), attempt_at(FIX_T0)]},
+        (True, True, False, False)),
+    "attempt-on-older-head": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1, OLD_HEAD)]},
+                              (True, False, False, True)),
+    "attempt-on-another-pr": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1, pr=PR + 1)]},
+                              (True, False, False, True)),
+    "attempt-without-findings": ({"story": [attempt_at(FIX_T1)]}, (False, True, False, False)),
+    "older-findings-do-not-supersede": ({"prc": [findings_at(FIX_T0)], "story": [attempt_at(FIX_T1)]},
+                                        (True, True, False, False)),
+    "findings-marker-upper-case": ({"prc": [fix_comment(BK, bookkeeping_marker("move-in-implementation", HEAD.upper()), FIX_T0)]},
+                                   (True, False, False, True)),
+    "findings-marker-quoted-by-another-account-after-attempt": (
+        {"prc": [findings_at(FIX_T0), findings_at(FIX_T2, login="someone")], "story": [attempt_at(FIX_T1)]},
+        (True, True, False, False)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FIX_ROUND_CASES))
+def test_630_fix_round_rule_decides_every_case_of_the_copies(case):
+    facts, expected = FIX_ROUND_CASES[case]
+    out = decide(**facts)
+    assert out["result"] == "read" and out["exit"] == 0 and out["ok"] is True
+    assert verdict(out) == expected, case
+
+
+def test_630_attempt_word_is_the_marker_holds_rule():
+    assert decide(prc=[findings_at(FIX_T0)])["attempt"] == "absent"
+    assert decide(prc=[findings_at(FIX_T0)], story=[attempt_at(FIX_T1)])["attempt"] == "holds"
+    assert decide(prc=[findings_at(FIX_T0)], story=[attempt_at(FIX_T1), unblock_at(FIX_T2)])["attempt"] == "unblocked"
+
+
+def test_630_heads_lists_every_head_with_findings_like_fix_round_heads():
+    prc = [findings_at(FIX_T0, OLD_HEAD), findings_at(FIX_T1, HEAD.upper()), findings_at(FIX_T2),
+           findings_at(FIX_T2, NEW_HEAD, login="someone")]  # fmt: skip
+    out = decide(prc=prc)
+    assert out["heads"] == sorted([HEAD, OLD_HEAD])
+    assert out["findings_at"] == FIX_T2
+
+
+def test_630_head_is_matched_whole_not_by_prefix():
+    out = decide(prc=[findings_at(FIX_T0, HEAD + "a")], head=HEAD)
+    assert verdict(out) == (False, False, False, False)
+
+
+def test_630_tried_round_keeps_its_wip_place_in_the_plan():
+    """Divergence (4): plan_in_flight lists a tried round in fix_round; the rule's due agrees."""
+
+    story, prc = [attempt_at(FIX_T1)], [findings_at(FIX_T0)]
+    row = {"number": STORY, "title": "t", "executors": ["claude-code-opus"], "review_loop": True,
+           "pr": {"number": PR, "draft": False, "head": HEAD}, "gates_pass": False,
+           "story_comments": story, "pr_comments": prc}  # fmt: skip
+    plan = plan_in_flight([row], dispatcher=BOT, bookkeeping=BK, po=PO)
+    assert [e["number"] for e in plan["fix_round"]] == [STORY] and plan["in_implementation"] == [STORY]
+    out = decide(story=story, prc=prc)
+    assert out["due"] is True and out["start"] is False
+
+
+@pytest.mark.parametrize("data, error", [
+    ({"pr": None}, "facts: the PR is not read"),
+    ({"pr": {"head": {"sha": HEAD}}}, "facts: the PR number is not read"),
+    ({"pr": {"number": PR, "head": {"sha": None}}}, "facts: the PR head SHA is not read"),
+    ({"pr": {"number": PR}}, "facts: the PR head SHA is not read"),
+    ({"pr": {"number": PR, "head": "not-a-sha"}}, "facts: the PR head SHA is not read"),
+    ({"story_comments": None}, "comments: story_comments are not read"),
+    ({"pr_comments": None}, "comments: pr_comments are not read"),
+    ({"pr_comments": {"body": "x"}}, "comments: pr_comments are not read"),
+    ({"story_comments": ["not a comment"]}, "comments: story_comments are not read"),
+])
+def test_630_read_failures_fail_closed(data, error):
+    """An unread PR fact or comment list gives no decision: no round starts, no attempt is assumed absent."""
+
+    out = decide(prc=[findings_at(FIX_T0)], data=data)
+    assert out["result"] == "unreadable" and out["exit"] == 3 and out["ok"] is False
+    assert out["error"] == error
+    assert verdict(out) == (None, None, None, None) and out["attempt"] is None
+
+
+@pytest.mark.parametrize("logins", [{"dispatcher": ""}, {"bookkeeping": " "}])
+def test_630_unknown_marker_account_fails_closed(logins):
+    out = decide(prc=[findings_at(FIX_T0)], story=[attempt_at(FIX_T1)], **logins)
+    assert out["result"] == "unreadable" and out["exit"] == 3
+    assert out["error"] == "markers: the dispatcher or bookkeeping account is not known"
+    assert out["start"] is None
+
+
+def test_630_input_that_is_not_an_object_fails_closed():
+    result = fix_round([], dispatcher=BOT, bookkeeping=BK, po=PO)
+    assert result.result == "unreadable" and result.exit_code == 3
+
+
+def test_630_row_shaped_pr_is_read():
+    out = decide(prc=[findings_at(FIX_T0)], data={"pr": {"number": PR, "head": HEAD}})
+    assert out["result"] == "read" and out["start"] is True
+
+
+def run_fix_round_cli(capsys, tmp_path, payload, *extra):
+    path = tmp_path / "facts.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    code = dispatcher_cli.main(["in-flight", "fix-round", "--input", str(path), "--dispatcher", BOT,
+                                "--bookkeeping", BK, "--po-login", PO, *extra])  # fmt: skip
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1, lines  # ADR-014: exactly one JSON line
+    return code, json.loads(lines[0])
+
+
+def test_630_cli_prints_one_json_line_and_needs_no_repository(capsys, tmp_path):
+    payload = {"pr": {"number": PR, "head": {"sha": HEAD}}, "story_comments": [attempt_at(FIX_T1)],
+               "pr_comments": [findings_at(FIX_T2)]}  # fmt: skip
+    code, out = run_fix_round_cli(capsys, tmp_path, payload)
+    assert code == 0
+    assert {k: out[k] for k in ("block", "operation", "result", "pr", "head")} == {
+        "block": "in-flight", "operation": "fix-round", "result": "read", "pr": PR, "head": HEAD}
+    assert verdict(out) == (True, False, True, True)
+
+
+def test_630_cli_unreadable_input_file_fails_closed(capsys, tmp_path):
+    code, out = run_fix_round_cli(capsys, tmp_path, "{not json")
+    assert code == 3 and out["result"] == "unreadable" and out["operation"] == "fix-round"
+
+
+def test_630_cli_po_login_lifts_the_attempt(capsys, tmp_path):
+    payload = {"pr": {"number": PR, "head": {"sha": HEAD}}, "story_comments": [attempt_at(FIX_T1), unblock_at(FIX_T2)],
+               "pr_comments": [findings_at(FIX_T0)]}  # fmt: skip
+    assert run_fix_round_cli(capsys, tmp_path, payload)[1]["start"] is True
+    assert run_fix_round_cli(capsys, tmp_path, payload, "--po-login", "someone-else")[1]["start"] is False

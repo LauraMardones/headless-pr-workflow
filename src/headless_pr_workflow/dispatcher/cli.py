@@ -25,6 +25,7 @@ from .failure_stop import InvalidRecord, validate_record
 from .failure_stop import check as failure_stop_check
 from .failure_stop import record as failure_stop_record
 from .gateway import Gateway, GhGateway, decide_merge_gates, mask_tokens, parse_gate_line, read_merge_gates
+from .in_flight import fix_round as decide_fix_round_result
 from .in_flight import linked as linked_prs
 from .in_flight import plan as plan_in_flight
 from .marker import (AUTHORS, DEFAULT_AUTHOR, InvalidMarker, decide_marker, decide_merge_owner_result, list_markers,
@@ -182,6 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
     i_linked = in_flight_ops.add_parser("linked", add_help=False)
     i_linked.add_argument("--repo", required=True)
     i_linked.add_argument("--input", required=True)  # {"issues", "open", "closed"}; "-" reads stdin
+    i_fix = in_flight_ops.add_parser("fix-round", add_help=False)  # the fix-round rule (#630)
+    i_fix.add_argument("--input", default="-")  # {"pr", "story_comments", "pr_comments"}; "-" reads stdin
+    i_fix.add_argument("--dispatcher", default="")
+    i_fix.add_argument("--bookkeeping", default="")
+    i_fix.add_argument("--po-login", default=None)
 
     status = blocks.add_parser("status", add_help=False)
     status_ops = status.add_subparsers(dest="operation", parser_class=_Parser)
@@ -382,7 +388,7 @@ def _validate(args: argparse.Namespace) -> None:
             "| hpw dispatcher facts read ... "
             "| hpw dispatcher scheduler next ... "
             "| hpw dispatcher status read|sync ... "
-            "| hpw dispatcher in-flight plan|linked ... "
+            "| hpw dispatcher in-flight plan|linked|fix-round ... "
             "| hpw dispatcher session-blocker read|decide|open ... "
             "| hpw dispatcher merge-gates decide|read ... "
             "| hpw dispatcher codex-worker claim|progress|finish|status ... "
@@ -410,6 +416,8 @@ def _validate(args: argparse.Namespace) -> None:
         if not args.marker.strip():
             raise InvalidArguments("--marker must not be empty")
         return  # decides over comments it is given: no repository
+    if args.block == "in-flight" and args.operation == "fix-round":
+        return  # decides over facts it is given: no repository
     if args.block == "marker" and args.operation in ("merge-owner", "merge-owner-decide"):
         if (args.head or args.operation == "merge-owner-decide") and not _SHA.match(args.head):
             raise InvalidArguments("--head must be a commit SHA")
@@ -630,6 +638,10 @@ def _run_in_flight(args: argparse.Namespace, settings: Settings) -> int:
         return _emit(Result(args.operation, "unreadable", error=f"read input file: {exc}", block="in-flight"))
     if args.operation == "linked":
         return _emit(linked_prs(rows))
+    if args.operation == "fix-round":
+        po_login = settings.po_login if args.po_login is None else args.po_login.strip()
+        return _emit(decide_fix_round_result(rows, dispatcher=args.dispatcher, bookkeeping=args.bookkeeping,
+                                             po=po_login))  # fmt: skip
     now = None
     if args.now:
         try:
@@ -700,6 +712,8 @@ def _main(argv: list[str], *, gateway_factory: GatewayFactory | None = None, set
         return _run_merge_owner_decide(args)
     if args.block == "session-blocker" and args.operation == "decide":
         return _run_open_blocker_decide(args, settings or Settings.from_env())
+    if args.block == "in-flight" and args.operation == "fix-round":
+        return _run_in_flight(args, settings or Settings.from_env())  # no gateway: no repository
     if args.block == "merge-gates":
         return _run_merge_gates(args)  # evaluates through scripts/merge-gate-summary, not the gateway
 
