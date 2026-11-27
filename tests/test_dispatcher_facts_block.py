@@ -28,6 +28,8 @@ from headless_pr_workflow.dispatcher.facts import (
 )
 from headless_pr_workflow.dispatcher.gateway import GatewayError, GhGateway
 
+from headless_pr_workflow.dispatcher.write import DEFAULT_PO_LOGIN  # noqa: E402
+
 PO = "LauraMardones"
 TOKEN = "ghp_secretTOKENvalue123"
 SPEC_PATH = "specs/10-epic/spec.md"
@@ -360,13 +362,29 @@ def test_unblock_must_be_a_line_by_the_po(gw, capsys, text, login):
     assert facts_of(out, 30)["decision_blocker"]["state"] == "open"
 
 
-def test_no_po_login_fails_closed(gw, capsys, monkeypatch):
-    monkeypatch.delenv("DECISION_BLOCKER_PO_LOGIN")
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_unset_or_blank_po_login_falls_back_to_the_default(gw, capsys, monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("DECISION_BLOCKER_PO_LOGIN")
+    else:
+        monkeypatch.setenv("DECISION_BLOCKER_PO_LOGIN", value)
     story(gw)
-    gw.comment(30, BLOCKER, login="x", assoc="OWNER")
-    gw.comment(30, "/unblock", login="x", assoc="OWNER")
-    _, out, _ = run(capsys, gw)
+    gw.comment(30, BLOCKER, login=DEFAULT_PO_LOGIN, assoc="OWNER")
+    gw.comment(30, "/unblock", login=DEFAULT_PO_LOGIN, assoc="OWNER")
+    _, out, err = run(capsys, gw)
+    assert facts_of(out, 30)["decision_blocker"]["state"] == "unblocked"
+    lines = [ln for ln in err.splitlines() if "DECISION_BLOCKER_PO_LOGIN" in ln]
+    assert len(lines) == 1 and "[FACTS]" in lines[0] and DEFAULT_PO_LOGIN in lines[0]
+
+
+def test_another_po_login_is_used_and_logs_nothing(gw, capsys, monkeypatch):
+    monkeypatch.setenv("DECISION_BLOCKER_PO_LOGIN", "someone-else")
+    story(gw)
+    gw.comment(30, BLOCKER, login="someone-else", assoc="OWNER")
+    gw.comment(30, "/unblock", login=DEFAULT_PO_LOGIN, assoc="OWNER")
+    _, out, err = run(capsys, gw)
     assert facts_of(out, 30)["decision_blocker"]["state"] == "open"
+    assert "DECISION_BLOCKER_PO_LOGIN" not in err
 
 
 # ── dependencies, ready (AC 5, 7) ─────────────────────────────────────────────

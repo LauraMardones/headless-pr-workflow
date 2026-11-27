@@ -244,8 +244,8 @@ RULES: tuple[Rule, ...] = (
           "poll invoke resume codex-worker",
           "test_dispatcher_po_login_env.py test_dispatcher_marker_block.py test_dispatcher_in_flight.py "
           "test_dispatcher_invoke_resume.sh",
-          "the PO login defaults differ: empty in `_Facts`, `DEFAULT_PO_LOGIN` in `write.py`, hard-coded in "
-          "the poll; the Codex worker runs without `DECISION_BLOCKER_PO_LOGIN` and counts no `/unblock`."),
+          "every entry point gets the configured or default PO login: `_Facts` falls back to `DEFAULT_PO_LOGIN` "
+          "in `write.py` and logs it; a drift test pins the shell and bookkeeping constants to it (#546)."),
     _rule("stale_spec_gate", "No session for a story whose spec record is stale.", SCHEDULER,
           [(SCHEDULER, "choose_next"), (INVOKE, "resume_session_allowed"), (INVOKE, "read_resume_facts")],
           "poll invoke resume",
