@@ -18,7 +18,7 @@ import re
 from typing import Any, Mapping
 
 from .gateway import Gateway, GatewayError
-from .write import Result, log
+from .write import DEFAULT_PO_LOGIN, Result, log
 
 BLOCK = "facts"
 OPERATION = "read"
@@ -175,7 +175,10 @@ class _Unreadable(Exception):
 class _Facts:
     def __init__(self, gateway: Gateway, env: Mapping[str, str]) -> None:
         self.gw = gateway
-        self.po_login = (env.get("DECISION_BLOCKER_PO_LOGIN") or "").strip()
+        configured = (env.get("DECISION_BLOCKER_PO_LOGIN") or "").strip()
+        if not configured:
+            log(f"[FACTS] DECISION_BLOCKER_PO_LOGIN is unset or blank; using the default PO login {DEFAULT_PO_LOGIN}")
+        self.po_login = configured or DEFAULT_PO_LOGIN
         self._specs: dict[int, dict[str, Any]] = {}
         self._spec_dirs: list[str] | None = None
         self._compare: dict[tuple[str, str], str | GatewayError] = {}

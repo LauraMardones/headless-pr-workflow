@@ -442,7 +442,7 @@ def po_unblock_decisions(f: dict[str, Any], tmp: Path, monkeypatch: pytest.Monke
     marker at ``T0`` is ``tried`` while the marker holds and ``owed`` once it is lifted. ``facts.py:_UNBLOCK_LINE``
     runs inside ``_Facts.decision_blocker``. With ``default_logins`` each copy uses its entry point's default PO
     login instead of an explicit one: the poll's ``PO_LOGIN``, the invoke script's ``DECISION_BLOCKER_PO_LOGIN``,
-    ``write.py``'s ``DEFAULT_PO_LOGIN``, and an empty environment for ``_Facts`` (the Codex worker's).
+    ``write.py``'s ``DEFAULT_PO_LOGIN``, and an empty environment for ``_Facts`` (the Codex worker's, which falls back to ``DEFAULT_PO_LOGIN``).
     """
 
     word = {True: "lifted", False: "not lifted"}
@@ -581,7 +581,7 @@ CASES["po_unblock"] = {
     "upper-case": (unblock_facts("/UNBLOCK"), same(UNBLOCK, "not lifted")),
     "by-a-member": (unblock_facts("/unblock", author=MEMBER, association="MEMBER"), same(UNBLOCK, "not lifted")),
     "before-the-declaration": (unblock_facts("/unblock", at=T_EARLY), same(UNBLOCK, "not lifted")),
-    "default-po-login": (unblock_facts("/unblock", author="LauraMardones"), {**same(UNBLOCK, "lifted"), UNBLOCK[2]: "not lifted"}),
+    "default-po-login": (unblock_facts("/unblock", author="LauraMardones"), same(UNBLOCK, "lifted")),
 }
 
 DECIDE: dict[str, Callable[..., dict[str, str]]] = {
@@ -626,9 +626,6 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
     ("open_blocker", "comments-unreadable"): (
         "read defect", "The one rule reads no comments: inflight_compute still treats unreadable comments as no blocker, "
                        "the in_flight_step comments-unreadable case of its own caller; the other callers fail closed."),
-    ("po_unblock", "default-po-login"): (
-        "contract", "PROJECT-STATUS.md lifts a blocker with the PO's /unblock line; the Codex worker's _Facts runs "
-                    "without DECISION_BLOCKER_PO_LOGIN and counts none: give every entry point the configured PO login."),
 }
 
 # Divergences of #571 that #556 resolved: the copies now agree, and the baseline above records the resolved
@@ -644,6 +641,9 @@ RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
     ("merged_pr_finish", "more-than-100-open-prs"): (
         "read defect", "find_linked_pr_json reads every page, so a story with an open PR past the first page is not "
                        "finished."),
+    ("po_unblock", "default-po-login"): (
+        "contract", "Resolved by #546: _Facts falls back to DEFAULT_PO_LOGIN and logs it, so every entry point gets the "
+                    "configured or default PO login."),
     ("open_blocker", "dependency-then-member-unblocked"): (
         "contract", "Resolved by #649: PROJECT-STATUS.md resolves a non-decision blocker with a trusted Unblocked "
                     "comment, and conflict_round_rule now asks the one rule, which applies it."),

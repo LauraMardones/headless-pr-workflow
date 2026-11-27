@@ -10,7 +10,7 @@ Python, same result as the command prints: `read_facts(gateway, repo, *, epic=No
 
 `--epic <n>` limits the output to that Epic and the issues whose `Parent epic:` is `#n`. `--dry-run` is accepted and changes nothing: the command has no write to skip.
 
-Environment: `GH_TOKEN` (through `gh`), `DECISION_BLOCKER_PO_LOGIN` (the PO's login; `/unblock` counts only from it). When it is empty, no `/unblock` counts and a decision blocker stays `open`.
+Environment: `GH_TOKEN` (through `gh`), `DECISION_BLOCKER_PO_LOGIN` (the PO's login; `/unblock` counts only from it). When it is unset or blank, the default PO login (`DEFAULT_PO_LOGIN` in `write.py`) is used and one `[FACTS]` line on stderr says so.
 
 ## Exit codes
 

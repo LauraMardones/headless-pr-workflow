@@ -1,9 +1,8 @@
 """The dispatcher workflow gives the facts readers the PO login (issue #546).
 
 `hpw dispatcher scheduler next` and `hpw dispatcher status sync` build their
-facts from `os.environ`, and `facts.py` has no default PO login. Without
-`DECISION_BLOCKER_PO_LOGIN` in the job environment, no PO `/unblock` counts and
-every decision blocker stays open. The workflow is read as text, the way
+facts from `os.environ`; `facts.py` falls back to `DEFAULT_PO_LOGIN`. The other
+readers' constants and the workflow envs are pinned to that default here. The workflow is read as text, the way
 tests/test_dispatcher_workflow_checkout.py does.
 """
 
@@ -12,6 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 from headless_pr_workflow.dispatcher.facts import _Facts
 from headless_pr_workflow.dispatcher.gateway import Gateway
@@ -63,7 +64,36 @@ def test_po_unblock_lifts_the_decision_blocker_with_the_workflow_env():
     assert blocker["unblocked_at"] == "2026-11-13T21:02:21Z"
 
 
-def test_without_the_po_login_the_unblock_does_not_count():
-    # The failure #546 reports: an empty environment leaves the blocker open.
+def test_without_the_po_login_the_default_counts():
     facts = _Facts(cast(Gateway, None), {})
-    assert facts.decision_blocker(comments())["state"] == "open"
+    assert facts.po_login == DEFAULT_PO_LOGIN
+    assert facts.decision_blocker(comments())["state"] == "unblocked"
+
+
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("scripts/dispatcher-poll.sh", r'^PO_LOGIN="([^"]*)"'),
+        ("scripts/dispatcher-invoke.sh", r'^DECISION_BLOCKER_PO_LOGIN="([^"]*)"'),
+        ("scripts/dispatcher-notify-retry.sh", r'^DECISION_BLOCKER_PO_LOGIN="\$\{DECISION_BLOCKER_PO_LOGIN:-([^}]*)\}"'),
+        ("src/headless_pr_workflow/codex_review_bookkeeping.py", r'^DECISION_BLOCKER_PO_LOGIN = "([^"]*)"'),
+    ],
+)
+def test_other_readers_hold_the_default_po_login(path, pattern):
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    found = re.findall(pattern, text, re.MULTILINE)
+    assert found == [DEFAULT_PO_LOGIN], (path, found)
+
+
+@pytest.mark.parametrize("name", ["dispatcher.yml", "board-status.yml"])
+def test_every_hpw_dispatcher_job_env_sets_the_default_po_login(name):
+    text = (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+    jobs = re.split(r"^  (?=[A-Za-z0-9_-]+:\n)", text.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+    checked = 0
+    for job in jobs:
+        if not re.search(r"hpw dispatcher|dispatcher-workflow-step\.sh status-sync|dispatcher-poll\.sh", job):
+            continue
+        checked += 1
+        values = re.findall(r"^      DECISION_BLOCKER_PO_LOGIN: (.+)$", job, re.MULTILINE)
+        assert values == [DEFAULT_PO_LOGIN], (name, job.splitlines()[0], values)
+    assert checked, name
