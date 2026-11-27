@@ -456,7 +456,7 @@ def test_646_read_open_blocker_uses_the_po_login_of_its_environment():
     comments = Comments([blocked(at=T0), po("/unblock")])
 
     assert read_open_blocker(comments, STORY, env={"DECISION_BLOCKER_PO_LOGIN": PO}).fields["outcome"] == "none"  # type: ignore[arg-type]
-    assert read_open_blocker(comments, STORY, env={}).fields["outcome"] == "open"  # type: ignore[arg-type]
+    assert read_open_blocker(comments, STORY, env={"DECISION_BLOCKER_PO_LOGIN": "someone-else"}).fields["outcome"] == "open"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("extra", [["--type", "blocked"], ["--bot", BOT], ["--head", HEAD], ["--any-type", "--type", "decision"]])
