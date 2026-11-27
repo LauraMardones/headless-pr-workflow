@@ -7,9 +7,11 @@ usage() {
 Usage: session-summary.sh --command <implement|review|merge|cleanup> \
   [--issue <N>] [--pr <N>] [--head <sha>] \
   --checks <text> --blockers <text> [--next <action>] \
-  [--deviation <text>]...
+  [--next-step <line>] [--deviation <text>]...
   --next for implement: review (default), implementation or finding
   (finding: no PR, the result is a finding; --head names the commit worked from)
+  --next-step (implement and review only): the PO's `Next step: ...` line made by
+  `hpw next-step render`; printed as its own line after Next:
 EOF
 }
 
@@ -35,6 +37,7 @@ head=""
 checks=""
 blockers=""
 next=""
+next_step=""
 deviations=()
 
 while [[ $# -gt 0 ]]; do
@@ -44,7 +47,7 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
-        --command|--issue|--pr|--head|--checks|--blockers|--next)
+        --command|--issue|--pr|--head|--checks|--blockers|--next|--next-step)
             require_value "$flag" "$#" "${2-}"
             [[ -z "${seen[$flag]:-}" ]] || fail "$flag may be supplied only once."
             seen[$flag]=1
@@ -56,6 +59,7 @@ while [[ $# -gt 0 ]]; do
                 --checks) checks="$2" ;;
                 --blockers) blockers="$2" ;;
                 --next) next="$2" ;;
+                --next-step) next_step="$2" ;;
             esac
             shift 2
             ;;
@@ -110,6 +114,21 @@ case " $allowed_next " in
     *) fail "--next '$next' is not valid for $command_value." ;;
 esac
 
+if [[ -n "$next_step" ]]; then
+    case "$command_value" in
+        implement|review) ;;
+        *) fail "--next-step is not valid for $command_value." ;;
+    esac
+    [[ "$next_step" != *$'\n'* ]] || fail "--next-step must be one line."
+    [[ "$next_step" == "Next step: "* ]] || \
+        fail "--next-step must start with 'Next step: ' (a lettered 'Next step <letter>:' line is not accepted)."
+    # Resolved here: a caller that pipes the script to `bash -s` has no BASH_SOURCE.
+    HPW_BIN="${HPW_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hpw}"
+    if ! check_err=$("$HPW_BIN" next-step check --line "$next_step" 2>&1 >/dev/null); then
+        fail "--next-step is rejected: ${check_err:-hpw next-step check failed}"
+    fi
+fi
+
 if [[ -n "$issue" && -n "$pr" ]]; then
     identifier="#${issue} / #${pr}"
 elif [[ -n "$issue" ]]; then
@@ -125,6 +144,7 @@ printf 'Issue/PR: %s\n' "$identifier"
 printf 'Checks: %s\n' "$checks"
 printf 'Blockers: %s\n' "$blockers"
 printf 'Next: %s\n' "$next"
+[[ -z "$next_step" ]] || printf '%s\n' "$next_step"
 
 if [[ ${#deviations[@]} -gt 0 ]]; then
     deviation_text="${deviations[0]}"

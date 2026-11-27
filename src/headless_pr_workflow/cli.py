@@ -29,7 +29,7 @@ from .github import (
 )
 from .merge_owner import summarize_merge_owner
 from .merge_pr import MERGE_METHODS, PostMergeVerification, run_github_merge, summarize_merge_pr
-from .next_step import NextStepError, build as build_next_step
+from .next_step import NextStepError, build as build_next_step, parse as parse_next_step
 from .post_merge_sync import fetch_post_merge_pr_state, fetch_pr_changed_paths, summarize_post_merge_sync
 from .pre_merge import summarize_pre_merge
 from .pr_takeover import summarize_pr_takeover
@@ -152,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--number", help="Issue or PR number the command names (render).")
             command_parser.add_argument("--where", help="`Claude Code`, `Codex`, `a reply on GitHub`, or `Claude Code or Codex` (render).")
             command_parser.add_argument("--then", help="What happens afterwards, one sentence (render).")
+            command_parser.add_argument("--line", help="A rendered `Next step:` line to read back into its parts (check).")
         if command.name == "review-rounds":
             command_parser.add_argument("--last", type=int, help="Report the N most recently merged PRs.")
             command_parser.add_argument("--prs", help="Comma-separated PR numbers or ranges such as 309-355.")
@@ -1474,10 +1475,13 @@ def _print_catch_all_issue(args: argparse.Namespace, parser: argparse.ArgumentPa
 
 
 def _print_next_step(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    if args.target != "render":
-        parser.error("next-step: the action must be `render`")
+    if args.target not in ("render", "check"):
+        parser.error("next-step: the action must be `render` or `check`")
     try:
-        step = build_next_step(args.step_command or "", args.number or "", args.where or "", args.then or "")
+        if args.target == "check":
+            step = parse_next_step(args.line or "")
+        else:
+            step = build_next_step(args.step_command or "", args.number or "", args.where or "", args.then or "")
     except NextStepError as exc:
         print(f"next-step: {exc}", file=sys.stderr)
         return 1

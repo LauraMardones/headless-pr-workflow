@@ -224,6 +224,34 @@ def test_cli_exits_2_on_a_usage_error(args: list[str]) -> None:
     assert exc.value.code == 2
 
 
+# --- hpw next-step check -------------------------------------------------------
+
+@pytest.mark.parametrize("where", ["Claude Code or Codex", "a reply on GitHub"])
+def test_check_accepts_a_rendered_line_of_both_shapes(where: str, capsys: pytest.CaptureFixture[str]) -> None:
+    line = render("/unblock" if where.startswith("a reply") else "/implement", 605, where, "the story starts")
+
+    assert hpw_main(["next-step", "check", "--line", line]) == 0
+    assert capsys.readouterr().out == line + "\n"
+    assert hpw_main(["next-step", "check", "--line", line, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["number"] == 605
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("Next step: run `/implement` in Codex; then it goes on.", "lacks a part"),
+        ("Next step: run `/implement 9`; then it goes on.", "lacks a part"),
+        ("Next step: run `/implement 9` in Codex.", "lacks a part"),
+        ("", "not a next step"),
+    ],
+)
+def test_check_rejects_a_line_with_a_missing_part(line: str, message: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert hpw_main(["next-step", "check", "--line", line]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("next-step: ") and message in captured.err
+
+
 _SHELL_CALLER = r"""
 set -u
 hpw="$REPO/scripts/hpw"
