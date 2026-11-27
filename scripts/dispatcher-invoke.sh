@@ -3126,7 +3126,7 @@ resume_in_merge_story() {
 # allowance check inside invoke_executor_command() still applies.
 resume_fix_round() {
     local issue_num="$1" item_id="$2"
-    local pr_json pr_number pr_draft pr_head round blocker_before fix_rc=0
+    local pr_json pr_number pr_draft pr_head round attempt_marker blocker_before fix_rc=0
     load_story_context "$issue_num" "$item_id" || return 0
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
 
@@ -3172,6 +3172,7 @@ resume_fix_round() {
     # lifts it) and no newer findings marker for the head supersedes it (issue
     # #357: after the post-waiver no-push round a new Blocker that Codex finds
     # on the unchanged head must start a round).
+    attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
     if [[ "$(jq -r '.attempted' <<< "$FIX_ROUND_JSON")" == "true" ]]; then
         # A round that ended without a push (issue #357) records its attempt
         # before the "In review" write; if that write failed, the pending

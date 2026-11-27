@@ -106,10 +106,18 @@ conflict_merge_owner() {
         <<< "$out" 2>/dev/null
 }
 
-# conflict_fix_round <dispatcher-login> <bookkeeping-login> <po-login>
-#   Reads the three JSON values of conflict_round_rule on stdin and prints the
-#   fields of the one fix-round rule as one JSON object; fails on a read error.
+# conflict_fix_round <dispatcher-login> <bookkeeping-login> <po-login> <head>
+#   Reads the three JSON values of conflict_round_rule (as one array) on stdin
+#   and prints the fields of the one fix-round rule as one JSON object; fails
+#   on a read error.
 conflict_fix_round() {
+    # A PR with no head SHA has no findings, so no fix round starts on it. Read
+    # the input anyway: an unread pipe would kill the writer with SIGPIPE.
+    if [[ -z "${4:-}" ]]; then
+        cat >/dev/null
+        echo '{"due": false, "attempted": false, "start": false}'
+        return 0
+    fi
     jq -c '{pr: .[0], story_comments: (.[1] // []), pr_comments: (.[2] // [])}' \
         | "${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher in-flight fix-round \
             --dispatcher "$1" --bookkeeping "$2" --po-login "$3"
@@ -127,7 +135,7 @@ conflict_round_rule() {
     story=$(jq -c '.[1] // []' <<< "$input") || return 1
     tried=$(conflict_marker_decide "$1" "$3" \
         "<!-- hpw:dispatcher action=conflict-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
-    fix_round=$(conflict_fix_round "$1" "$2" "$3" <<< "$input") || return 1
+    fix_round=$(conflict_fix_round "$1" "$2" "$3" "$head" <<< "$input") || return 1
     fix_due=$(jq -r '.start == true' <<< "$fix_round") || return 1
     if jq -e '.[0].mergeable == false or .[0].mergeable_state == "dirty"' <<< "$input" >/dev/null; then
         blocked=$(conflict_open_blocker "$1" "$3" "$head" <<< "$story") || return 1

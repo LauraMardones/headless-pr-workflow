@@ -281,12 +281,9 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
             steps["merge"].append(_entry(row))
             continue
         pr_comments = row.get("pr_comments")
-        if row.get("review_loop") and dispatcher and pr_comments is None:
-            # Whether a fix round is due cannot be read: skip the story this run, as
-            # conflict_round_state does, instead of routing it to review (issue #652).
-            flight.add(number)
-            continue
-        if row.get("review_loop") and dispatcher and story_comments is not None:
+        # Comments that cannot be read add no fix round: the review step then asks the conflict
+        # rule, which reads them again and skips the story this run when they stay unreadable.
+        if row.get("review_loop") and dispatcher and story_comments is not None and pr_comments is not None:
             if decide_fix_round(story_comments, pr_comments, pr=int(pr["number"]), head=head, dispatcher=dispatcher,
                                 bookkeeping=bookkeeping, po=po)["due"]:  # fmt: skip
                 steps["fix_round"].append(_entry(row))
