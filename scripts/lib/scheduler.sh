@@ -22,6 +22,7 @@
 #   SCHEDULER_RESULT  refine | implement | idle | unreadable
 #   SCHEDULER_ISSUE   the action's issue number, or "" for idle and unreadable
 #   SCHEDULER_ACTION  the action object as compact JSON, or "null"
+#   SCHEDULER_OUTPUT  the scheduler's whole JSON line (its `skipped` list too), or ""
 #
 # It always returns 0: an output it cannot read counts as unreadable (fail
 # closed), and the caller starts no new work for it.
@@ -34,6 +35,7 @@ scheduler_next() {
     local -a args=(dispatcher scheduler next --repo "$REPO" --in-implementation "$in_impl"
                    --in-flight "$in_flight" "$@")
     out=$("$HPW_BIN" "${args[@]}") || rc=$?
+    SCHEDULER_OUTPUT="$out"
     SCHEDULER_RESULT=$(jq -r 'if type == "object" then (.result // "") else "" end' <<< "$out" 2>/dev/null) \
         || SCHEDULER_RESULT=""
     SCHEDULER_ACTION=$(jq -c 'if type == "object" then (.action // null) else null end' <<< "$out" 2>/dev/null) \

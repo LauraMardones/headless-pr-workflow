@@ -320,6 +320,20 @@ scheduler_next "$IN_IMPLEMENTATION_LIST" "$IN_FLIGHT_LIST" \
     ${SCHEDULER_ARGS[@]+"${SCHEDULER_ARGS[@]}"}
 echo "[POLL] Scheduler result: $SCHEDULER_RESULT${SCHEDULER_ISSUE:+ #$SCHEDULER_ISSUE}" >&2
 
+# ─── The no-feature note (issue #616) ────────────────────────────────────────
+# A story the scheduler skips with no-feature gets one comment on the issue,
+# once per issue (the rule is `hpw dispatcher no-feature-note`). The poll runs
+# only behind the DISPATCHER_ENABLED guard of the workflow. The rule writes no
+# Slack event and starts no session; a failed read or write only logs here and
+# never changes the scheduler's choice: a later run tries again (exit 1 a write
+# failed, 3 the comments or the output could not be read).
+if [[ -n "${SCHEDULER_OUTPUT:-}" ]]; then
+    NO_FEATURE_NOTE_RC=0
+    "$HPW_BIN" dispatcher no-feature-note --repo "$REPO" --scheduler-file - \
+        ${SCHEDULER_ARGS[@]+"${SCHEDULER_ARGS[@]}"} <<< "$SCHEDULER_OUTPUT" >&2 || NO_FEATURE_NOTE_RC=$?
+    (( NO_FEATURE_NOTE_RC == 0 )) || echo "[POLL] The no-feature note exited $NO_FEATURE_NOTE_RC; a later run tries again" >&2
+fi
+
 # ─── Flow health notification (Red only) ─────────────────────────────────────
 
 # D7: flow-review.sh makes an independent board query; || true ensures a

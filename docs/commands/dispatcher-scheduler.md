@@ -82,7 +82,7 @@ A story starts only while the stories in `--in-implementation` are fewer than `W
 | `no-merged-spec: <facts reason>` | the Epic has no merged spec, so nothing under it is refined |
 | `epic-not-refined` | the issue's Epic record is not `current` |
 | `feature-not-refined #<n>` | the story's Feature is not refined, or is stale, or is not an open Feature |
-| `no-feature` | the story has no `Feature group:` |
+| `no-feature` | the story has no `Feature group:`; the poll also posts one note on the issue, once per issue, marker `action=no-feature-note` (see [DISPATCHER-CONFIG.md](../DISPATCHER-CONFIG.md#scheduler-new-work-from-github-facts)) |
 | `open-decision-blocker` | the issue waits for the PO's answer |
 | `last-refinement-failed` | the latest refinement after the newest spec commit and any `/unblock` did not pass |
 | `buffer-full` | the ready buffer does not allow story refinement or a Feature breakdown |
