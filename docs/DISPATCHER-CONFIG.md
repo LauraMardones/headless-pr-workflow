@@ -675,7 +675,9 @@ The dispatcher then runs `/implement` for the story, which continues on the exis
 
 Set it as a repository variable; `.github/workflows/dispatcher.yml` passes it to the invoke step. An unset or empty variable uses the default. Any other value stops the run with an error before any session starts.
 
-**One fix-round attempt per head.** A fix round that fails, or an `/implement` session that ends on the same PR head it started on while the findings for that head are still open, is not repeated on the same head, whatever status the session left the story in. The mid-cycle blocker for `/implement` records the head, and later runs log `[RESUME SKIP] #<n>: the fix round was already tried on PR #<pr> at head <sha>` until the PR has a new head or the PO posts a standalone `/unblock` line.
+**One fix-round attempt per head.** A fix round that fails, or an `/implement` session that ends on the same PR head it started on while the findings for that head are still open, is not repeated on the same head, whatever status the session left the story in. The mid-cycle blocker for `/implement` records the head, and later runs log `[RESUME SKIP] #<n>: the fix round was already tried on PR #<pr> at head <sha>` until the PR has a new head or the PO posts a standalone `/unblock` line. A findings marker for the same head that is newer than the attempt marker supersedes the attempt, so the round starts again (issue #357). A tried round still counts as due: it keeps its place within the WIP limit and stays in the fix-round step.
+
+**One rule (issue #652).** Whether a fix round is due, already attempted on the head, or the attempt superseded is decided by one rule, `hpw dispatcher in-flight fix-round` (`decide_fix_round` in `src/headless_pr_workflow/dispatcher/in_flight.py`). The poll and the resume pass both call it: the in-flight plan for the fix-round step, the resume pass's fix round and hand-off check, and the conflict rule. When the story's or the PR's comments cannot be read, no fix round starts and nothing is handed off: the resume pass logs `[RESUME SKIP] #<n>: could not read the fix-round facts on PR #<pr> at head <sha>; the next run decides again`, and the conflict rule reads the story as unreadable.
 
 ### Conflict round
 
@@ -685,7 +687,7 @@ When the dispatcher merges one story, another dispatcher PR can start to conflic
 
 - the story is a review-loop story, whatever its board status;
 - its linked open, non-draft PR conflicts with main (`mergeable == false` or `mergeable_state == "dirty"`);
-- no fix round is due: no bookkeeping `move-in-implementation` marker for the current head without a fix-round attempt marker that holds for it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
+- no fix round starts on the current head: the [one fix-round rule](#fix-round) finds no bookkeeping `move-in-implementation` marker for the current head, or a fix-round attempt marker holds for it and no newer findings marker supersedes it. A completed fix round on the head (its findings and its attempt marker) does not hide an owed round;
 - the story has no open blocker: a `## Blocked Declaration` of any type with no later standalone `/unblock` line from the PO and, unless it is a decision blocker, no later trusted `Unblocked` comment. A dispatcher blocker whose hidden marker names an older PR head is not open;
 - no conflict-round attempt marker holds for the current head.
 

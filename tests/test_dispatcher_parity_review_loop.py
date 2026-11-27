@@ -33,7 +33,7 @@ from typing import Any, Callable
 import pytest
 
 from headless_pr_workflow.dispatcher.gateway import GatewayError
-from headless_pr_workflow.dispatcher.in_flight import plan_in_flight
+from headless_pr_workflow.dispatcher.in_flight import fix_round, plan_in_flight
 from headless_pr_workflow.dispatcher.marker import decide_holds, marker_holds, merge_owner_evidence
 from headless_pr_workflow.dispatcher.session_blocker import read_session_blocker
 from headless_pr_workflow.review_policy import CODEX_REVIEW_TRIGGER_PHRASE, is_codex_review_request
@@ -143,8 +143,8 @@ esac
 
 INVOKE_FUNCTIONS = (
     "dispatcher_marker", "marker_block", "resolve_dispatcher_login", "marker_holds", "bot_comments_json",
-    "marker_list_json", "bookkeeping_fix_marker_init", "bookkeeping_login", "head_in_list", "fix_round_heads",
-    "fix_round_due", "fix_round_attempt_marker", "fix_round_attempt_superseded", "hand_off_pending_marker",
+    "marker_list_json", "bookkeeping_fix_marker_init", "bookkeeping_login", "fix_round_facts",
+    "fix_round_attempt_marker", "hand_off_pending_marker",
     "hand_off_pending_prefix", "hand_off_done_marker", "complete_pending_hand_off", "merge_owner_marker",
     "head_merge_owner_evidence", "merge_attempt_marker", "pytest_green_on_head", "conflict_round_state",
     "conflict_round_attempt_marker", "is_review_loop_story", "codex_review_trigger_phrase", "review_request_after", "hand_off_to_codex_review_loop",
@@ -252,26 +252,63 @@ def holds(f: dict[str, Any], number: int, text: str, cancel: str = "") -> str:
 # ── Rule decisions ───────────────────────────────────────────────────────────
 
 
-def fix_round_due_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
-    """Whether a fix round is due on the head: ``due``, ``not due`` or ``unreadable``."""
+def resume_fix_round_facts(tmp: Path, f: dict[str, Any]) -> dict[str, Any] | None:
+    """The resume pass's fix round and hand-off check: the ``fix_round_facts`` shim, or ``None`` (unreadable)."""
 
-    rc, _ = bash(tmp / "invoke", f, f"fix_round_due {PR} {HEAD}")
-    word = resume_rule(tmp / "rule", f)
+    rc, out = bash(tmp, f, f'fix_round_facts {STORY} {PR} {HEAD} && printf "%s" "$FIX_ROUND_JSON"')
+    return json.loads(out) if rc == 0 else None
+
+
+def conflict_rule_fix_round(tmp: Path, f: dict[str, Any]) -> dict[str, Any] | None:
+    """The fix-round fields ``conflict_round_rule`` reads (``conflict_fix_round``) from the poll's three values."""
+
+    if "pr" in f["fail"] or "story" in f["fail"] or "prc" in f["fail"]:
+        return None  # the poll and conflict_round_state read nothing more and decide nothing
+    rc, out = bash(tmp, f, 'jq -s . "$FACTS/pr.json" "$FACTS/story.json" "$FACTS/prc.json" '
+                           f'| conflict_fix_round "{BOT}" "{BK}" "{PO}" {HEAD}')  # fmt: skip
+    return json.loads(out) if rc == 0 else None
+
+
+def python_fix_round(f: dict[str, Any]) -> dict[str, Any] | None:
+    """``in_flight.decide_fix_round`` through ``hpw dispatcher in-flight fix-round``'s adapter, or ``None``."""
+
+    data = {"pr": f["pr"], "story_comments": None if "story" in f["fail"] else f["story"],
+            "pr_comments": None if "prc" in f["fail"] else f["prc"]}  # fmt: skip
+    result = fix_round(data, dispatcher=BOT, bookkeeping=BK, po=PO)
+    return result.fields if result.result == "read" else None
+
+
+def fix_round_due_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
+    """Whether a fix round is due on the head: ``due``, ``not due`` or ``unreadable``.
+
+    Since #652 every entry calls the one rule, ``in_flight.decide_fix_round``: the poll and the resume pass
+    through ``plan_in_flight`` (a row it does not put in ``fix_round`` goes to the review step, where the
+    conflict rule decides it), the resume pass's fix round and hand-off check through the ``fix_round_facts``
+    shim, and ``conflict_round_rule`` through ``conflict_fix_round``.
+    """
+
+    def word(fields: dict[str, Any] | None) -> str:
+        return "unreadable" if fields is None else ("due" if fields["due"] else "not due")
+
+    poll = "due" if step(f) == "fix_round" else ("unreadable" if poll_rule(tmp / "poll", f) == "unreadable"
+                                                 else "not due")  # fmt: skip
     return {
-        "in_flight.py:findings_on_head (plan_in_flight)": "due" if step(f) == "fix_round" else "not due",
-        "dispatcher-invoke.sh:fix_round_due": "due" if rc == 0 else "not due",
-        "conflict-round.sh:fix_due": "unreadable" if word == "unreadable" else ("due" if word == "fix-round-due" else "not due"),
+        "in_flight.py:decide_fix_round (plan_in_flight + review step, poll and resume)": poll,
+        "dispatcher-invoke.sh:fix_round_facts (resume_fix_round, hand-off check)": word(resume_fix_round_facts(tmp / "invoke", f)),
+        "conflict-round.sh:conflict_fix_round (conflict_round_rule)": word(conflict_rule_fix_round(tmp / "rule", f)),
     }  # fmt: skip
 
 
 def fix_round_attempt_once_per_head_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
     """With findings on the head: ``round`` (no attempt holds) or ``no round`` (tried, or the facts unreadable)."""
 
-    rc, _ = bash(tmp / "invoke", f, f'marker_holds {STORY} "$(fix_round_attempt_marker {PR} {HEAD})" 0 '
-                                    f"&& ! fix_round_attempt_superseded {STORY} {PR} {HEAD}")  # fmt: skip
+    def word(fields: dict[str, Any] | None) -> str:
+        return "round" if fields is not None and fields["start"] else "no round"
+
     return {
-        "dispatcher-invoke.sh:fix_round_attempt_marker + fix_round_attempt_superseded": "no round" if rc == 0 else "round",
-        "conflict-round.sh:conflict_round_rule": "round" if resume_rule(tmp / "rule", f) == "fix-round-due" else "no round",
+        "in_flight.py:decide_fix_round": word(python_fix_round(f)),
+        "dispatcher-invoke.sh:fix_round_facts (resume_fix_round)": word(resume_fix_round_facts(tmp / "invoke", f)),
+        "conflict-round.sh:conflict_round_rule (resume)": "round" if resume_rule(tmp / "rule", f) == "fix-round-due" else "no round",
     }  # fmt: skip
 
 
@@ -279,9 +316,8 @@ def fix_round_max_decisions(f: dict[str, Any], tmp: Path) -> dict[str, str]:
     """``fix round`` or ``blocked`` (above ``CODEX_FIX_ROUND_MAX``, the invoke default) for a head with findings."""
 
     maximum = int(re.search(r'^CODEX_FIX_ROUND_MAX="\$\{CODEX_FIX_ROUND_MAX:-(\d+)\}"$', INVOKE_TEXT, re.MULTILINE)[1])
-    rc, out = bash(tmp, f, f'heads=$(fix_round_heads {PR}); head_in_list {HEAD} "$heads" || exit 1\n'
-                           "wc -l <<< \"$heads\" | tr -d '[:space:]'")  # fmt: skip
-    invoke = "none" if rc else ("blocked" if int(out) > maximum else "fix round")
+    fields = resume_fix_round_facts(tmp, f)
+    invoke = "none" if not fields or not fields["due"] else ("blocked" if len(fields["heads"]) > maximum else "fix round")
     return {
         "dispatcher-invoke.sh:CODEX_FIX_ROUND_MAX (resume_fix_round)": invoke,
         "in_flight.py:plan_in_flight": "fix round" if step(f) == "fix_round" else "none",
@@ -457,8 +493,11 @@ def same(copies: tuple[str, ...] | list[str], decision: str) -> dict[str, str]:
 
 
 FOUND = [comment(BK, findings(), T_FIND)]
-DUE = ("in_flight.py:findings_on_head (plan_in_flight)", "dispatcher-invoke.sh:fix_round_due", "conflict-round.sh:fix_due")
-TRIED = ("dispatcher-invoke.sh:fix_round_attempt_marker + fix_round_attempt_superseded", "conflict-round.sh:conflict_round_rule")
+DUE = ("in_flight.py:decide_fix_round (plan_in_flight + review step, poll and resume)",
+       "dispatcher-invoke.sh:fix_round_facts (resume_fix_round, hand-off check)",
+       "conflict-round.sh:conflict_fix_round (conflict_round_rule)")
+TRIED = ("in_flight.py:decide_fix_round", "dispatcher-invoke.sh:fix_round_facts (resume_fix_round)",
+         "conflict-round.sh:conflict_round_rule (resume)")
 MAX = ("dispatcher-invoke.sh:CODEX_FIX_ROUND_MAX (resume_fix_round)", "in_flight.py:plan_in_flight")
 REQUEST = ("review_policy.py:is_codex_review_request", "dispatcher-invoke.sh:review_request_after")
 HAND_OFF = ("in_flight.py:hand_off_pending (plan_in_flight)", "dispatcher-invoke.sh:complete_pending_hand_off",
@@ -503,10 +542,11 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
         "findings-on-head": (facts(prc=FOUND), same(DUE, "due")),
         "findings-on-older-head": (facts(prc=[comment(BK, findings(OLD), T_FIND)]), same(DUE, "not due")),
         "findings-by-another-account": (facts(prc=[comment(OTHER, findings(), T_FIND)]), same(DUE, "not due")),
-        "findings-then-attempt": (facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T0)]),
-                                  {**same(DUE, "due"), "conflict-round.sh:fix_due": "not due"}),
-        "pr-comments-unreadable": (facts(prc=FOUND, fail=("prc",)),
-                                   {**same(DUE, "not due"), "conflict-round.sh:fix_due": "unreadable"}),
+        # Divergence (4) of #556, option A: a tried round stays due (its WIP place in fix_round), and the
+        # conflict rule reads start, which is false: fix_round_attempt_once_per_head "attempt" has no round.
+        "findings-then-attempt": (facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T0)]), same(DUE, "due")),
+        "pr-comments-unreadable": (facts(prc=FOUND, fail=("prc",)), same(DUE, "unreadable")),
+        "story-comments-unreadable": (facts(prc=FOUND, fail=("story",)), same(DUE, "unreadable")),
     },
     "fix_round_attempt_once_per_head": {
         "no-attempt": (facts(prc=FOUND), same(TRIED, "round")),
@@ -653,13 +693,6 @@ CASES: dict[str, dict[str, tuple[dict[str, Any], dict[str, str]]]] = {
 
 # Every case whose copies decide differently, with its resolution class under the #525 divergence decision.
 DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
-    ("fix_round_due", "findings-then-attempt"): (
-        "PO decision", "plan_in_flight keeps a tried round in fix_round (In implementation, counted for the WIP limit, "
-                       "the poll resumable); the conflict rule treats it as done. Whether a tried round holds a WIP "
-                       "place is not in a documented contract."),
-    ("fix_round_due", "pr-comments-unreadable"): (
-        "read defect", "plan_in_flight and fix_round_due read unreadable PR comments as no findings and route the "
-                       "story to review; follow conflict_round_state and skip the story this run."),
     ("fix_round_max", "fourth-round"): (
         "contract", "CODEX_FIX_ROUND_MAX stops the rounds with a resource blocker (dispatcher-invoke.sh header); "
                     "plan_in_flight still lists the story in fix_round: apply the maximum in the plan."),
@@ -680,6 +713,13 @@ DIVERGENCES: dict[tuple[str, str], tuple[str, str]] = {
 # Divergences that a consolidation story resolved: the copies now agree on the case, so it is no longer a
 # divergence. Each case names its #525 class and how it was resolved (issue #628, AC 3).
 RESOLVED: dict[tuple[str, str], tuple[str, str]] = {
+    ("fix_round_due", "findings-then-attempt"): (
+        "PO decision", "Resolved by #652 under the PO decision of 2026-11-16 on #556 (option A), case (4): a tried "
+                       "round keeps its WIP place in fix_round (due), and the conflict rule reads the same due/attempted "
+                       "outputs of in_flight.py decide_fix_round, the one rule every entry calls."),
+    ("fix_round_due", "pr-comments-unreadable"): (
+        "read defect", "Resolved by #652: every entry skips the story this run; the review step of plan_in_flight asks "
+                       "the conflict rule, which fails closed, and the resume pass's fix round reads it as unreadable."),
     ("fix_round_attempt_once_per_head", "newest-attempt-listed-first"): (
         "contract", "Resolved by #628: marker_holds (#262/#293) holds the newest own marker by created_at, not the "
                     "last in list order; marker.py decide_holds is the one rule, and conflict_round_rule calls it."),
@@ -778,3 +818,90 @@ def test_doc_links_each_rule_to_its_fixtures_and_lists_each_divergence():
         assert f"`{rule}`" in section, rule
     for (rule, case), (kind, _) in DIVERGENCES.items():
         assert re.search(rf"`{rule}`[^\n]*`{case}`[^\n]*{kind}", section), (rule, case)
+
+
+# ── Entry equivalence of the one fix-round rule (issue #652, AC 2) ────────────
+# The same facts go through the poll path and the resume path. Each path reads due, attempted and start
+# from the one rule: the poll through plan_in_flight (due) and the fields conflict_round_rule reads, the
+# resume pass through the fix_round_facts shim of resume_fix_round. A path changed to decide differently
+# (a copy of its own, another marker or another account) fails here.
+
+EQUIVALENCE: dict[str, tuple[dict[str, Any], tuple[bool, bool, bool]]] = {
+    "findings-on-head": (facts(prc=FOUND), (True, False, True)),
+    "no-findings": (facts(), (False, False, False)),
+    "findings-on-older-head": (facts(prc=[comment(BK, findings(OLD), T_FIND)]), (False, False, False)),
+    "findings-by-another-account": (facts(prc=[comment(OTHER, findings(), T_FIND)]), (False, False, False)),
+    # Divergence (4) of #556, option A (PO decision of 2026-11-16): due, attempted, no round.
+    "findings-then-attempt": (facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T0)]), (True, True, False)),
+    "attempt-then-po-unblock": (facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T0), unblock(T1)]), (True, False, True)),
+    "attempt-then-newer-findings": (facts(prc=[comment(BK, findings(), T1)], story=[comment(BOT, ATTEMPT, T0)]),
+                                    (True, False, True)),
+    "attempt-by-another-account": (facts(prc=FOUND, story=[comment(OTHER, ATTEMPT, T0)]), (True, False, True)),
+    "newest-attempt-listed-first": (
+        facts(prc=FOUND, story=[comment(BOT, ATTEMPT, T1), unblock(T0), comment(BOT, ATTEMPT, T_EARLY)]),
+        (True, True, False)),
+}  # fmt: skip
+
+
+def poll_path(f: dict[str, Any], tmp: Path) -> tuple[bool, bool, bool]:
+    fields = conflict_rule_fix_round(tmp, f)
+    assert fields is not None
+    return step(f) == "fix_round", fields["attempted"], fields["start"]
+
+
+def resume_path(f: dict[str, Any], tmp: Path) -> tuple[bool, bool, bool]:
+    fields = resume_fix_round_facts(tmp, f)
+    assert fields is not None
+    return fields["due"], fields["attempted"], fields["start"]
+
+
+@pytest.mark.parametrize("case", sorted(EQUIVALENCE))
+def test_652_poll_and_resume_decide_the_fix_round_alike(case, tmp_path):
+    f, expected = EQUIVALENCE[case]
+
+    poll, resume = poll_path(f, tmp_path / "poll"), resume_path(f, tmp_path / "resume")
+
+    assert poll == resume == expected, case
+    python = python_fix_round(f)
+    assert python is not None and (python["due"], python["attempted"], python["start"]) == expected
+    # The conflict rule's word follows start on both entries (poll and conflict_round_state).
+    word = resume_rule(tmp_path / "rule", f)
+    assert (word == "fix-round-due") == expected[2], (case, word)
+    rc, out = bash(tmp_path / "poll-rule", f, 'cat "$FACTS/pr.json" "$FACTS/story.json" "$FACTS/prc.json" '
+                                              f'| conflict_round_rule "{BOT}" "{BK}" "{PO}"')  # fmt: skip
+    assert rc == 0 and out == word
+
+
+@pytest.mark.parametrize("fail", ["story", "prc"])
+def test_652_unreadable_comments_start_no_round_on_either_entry(fail, tmp_path):
+    f = facts(prc=FOUND, fail=(fail,))
+
+    assert resume_fix_round_facts(tmp_path / "resume", f) is None
+    assert resume_rule(tmp_path / "rule", f) == "unreadable"
+    assert poll_rule(tmp_path / "poll", f) == "unreadable"  # the review step's conflict rule fails closed
+    assert step(f) == "review" and plan(f)["in_implementation"] == []
+
+
+def test_652_findings_then_attempt_keeps_the_wip_place():
+    """The PO decision of 2026-11-16 on #556, case (4): the tried round stays in fix_round."""
+
+    f, _ = EQUIVALENCE["findings-then-attempt"]
+    result = plan(f)
+    assert [e["number"] for e in result["fix_round"]] == [STORY] and result["in_implementation"] == [STORY]
+
+
+def test_652_each_entry_calls_the_one_rule():
+    conflict_round = (LIB / "conflict-round.sh").read_text(encoding="utf-8")
+    assert "dispatcher in-flight fix-round" in conflict_round
+    assert "move-in-implementation" not in conflict_round and "fix-round-attempt" not in conflict_round
+    shim = _function("fix_round_facts")
+    assert '"$HPW_BIN" dispatcher in-flight fix-round' in shim
+    for gone in ("fix_round_due", "fix_round_heads", "head_in_list", "fix_round_attempt_superseded"):
+        assert not re.search(rf"^{gone}\(\)", INVOKE_TEXT, re.MULTILINE), gone
+        assert not re.search(rf"\b{gone}\b", INVOKE_TEXT), gone
+    resume = re.search(r"^resume_fix_round\(\) \{\n.*?^\}\n", INVOKE_TEXT, re.MULTILINE | re.DOTALL).group(0)
+    hand_off = _function("hand_off_to_codex_review_loop")
+    assert "fix_round_facts " in resume and "fix_round_facts " in hand_off
+    in_flight = (REPO_ROOT / "src" / "headless_pr_workflow" / "dispatcher" / "in_flight.py").read_text(encoding="utf-8")
+    plan_source = in_flight.split("def plan_in_flight(", 1)[1].split("\ndef ", 1)[0]
+    assert "decide_fix_round(" in plan_source and "findings_on_head" not in in_flight

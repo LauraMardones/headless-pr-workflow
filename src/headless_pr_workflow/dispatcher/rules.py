@@ -158,19 +158,18 @@ RULES: tuple[Rule, ...] = (
           [(INVOKE, "AGENT_MAX_TURNS"), (INVOKE, "AGENT_MAX_WALLCLOCK_SECONDS")],
           "invoke resume",
           "test_dispatcher_claude_session.py test_dispatcher_usage_limit_pause.py"),
-    _rule("fix_round_due", "Whether the bookkeeping job's findings exist for the PR's current head.", IN_FLIGHT,
-          [(IN_FLIGHT, "findings_on_head"), (INVOKE, "fix_round_due"), (INVOKE, "fix_round_heads"),
-           (CONFLICT_ROUND_SH, "fix_due")],
+    _rule("fix_round_due", "Whether the bookkeeping job's findings exist for the PR's current head; a tried round "
+          "stays due and keeps its WIP place.", IN_FLIGHT,
+          [(IN_FLIGHT, "decide_fix_round")],
           "poll invoke resume",
-          "test_dispatcher_in_flight_facts.py test_dispatcher_review_loop.py test_dispatcher_conflict_round.py",
-          "`findings_on_head` and `fix_round_due` ignore the fix-round attempt marker, `conflict_round_rule` "
-          "needs no attempt held: a tried round stays in `fix_round`, counts for the WIP limit and keeps the "
-          "poll resumable."),
-    _rule("fix_round_attempt_once_per_head", "No second fix round on a head that was already tried.", INVOKE,
-          [(INVOKE, "fix_round_attempt_marker"), (INVOKE, "fix_round_attempt_superseded"),
-           (CONFLICT_ROUND_SH, "conflict_round_rule")],
-          "resume",
-          "test_dispatcher_review_loop.py test_dispatcher_conflict_round.py test_dispatcher_marker_block.py"),
+          "test_dispatcher_review_loop.py test_dispatcher_parity_review_loop.py test_dispatcher_rule_guard.py "
+          "test_dispatcher_in_flight_facts.py test_dispatcher_conflict_round.py"),
+    _rule("fix_round_attempt_once_per_head", "No second fix round on a head that was already tried, unless newer "
+          "findings supersede the attempt.", IN_FLIGHT,
+          [(IN_FLIGHT, "decide_fix_round")],
+          "poll resume",
+          "test_dispatcher_review_loop.py test_dispatcher_parity_review_loop.py test_dispatcher_rule_guard.py "
+          "test_dispatcher_conflict_round.py test_dispatcher_marker_block.py"),
     _rule("fix_round_max", "Stop after `CODEX_FIX_ROUND_MAX` fix rounds with a resource blocker.", INVOKE,
           [(INVOKE, "CODEX_FIX_ROUND_MAX")],
           "resume",

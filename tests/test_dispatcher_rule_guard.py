@@ -127,3 +127,26 @@ def test_650_a_second_merge_gates_copy_fails_the_guard(tmp_path: Path) -> None:
     problems = rule_guard.find_violations(tmp_path, [rule])
     assert problems == [f"merge_gates_pass: new copy: scripts/lib/in-flight.sh defines 'decide_merge_gates' "
                         f"(owner {rule.owner})"]
+
+
+def test_652_fix_round_rules_have_one_implementation_and_an_empty_allowlist() -> None:
+    for name in ("fix_round_due", "fix_round_attempt_once_per_head"):
+        rule = next(r for r in RULES if r.name == name)
+        assert rule.owner == "src/headless_pr_workflow/dispatcher/in_flight.py" and rule.duplicates == (), name
+        assert [impl.marker for impl in rule.implementations] == ["decide_fix_round"], name
+        assert rule_guard.find_violations(ROOT, [rule]) == [], name
+    conflict_round = (ROOT / "scripts" / "lib" / "conflict-round.sh").read_text(encoding="utf-8")
+    assert "dispatcher in-flight fix-round" in conflict_round and "$moves" not in conflict_round
+    invoke = (ROOT / "scripts" / "dispatcher-invoke.sh").read_text(encoding="utf-8")
+    assert '"$HPW_BIN" dispatcher in-flight fix-round' in invoke
+    for gone in ("fix_round_due() {", "fix_round_heads() {", "head_in_list() {", "fix_round_attempt_superseded() {"):
+        assert gone not in invoke, gone
+
+
+def test_652_a_second_fix_round_copy_fails_the_guard(tmp_path: Path) -> None:
+    rule = next(r for r in RULES if r.name == "fix_round_due")
+    write(tmp_path, rule.owner, "def decide_fix_round(story, prc):\n    return {}\n")
+    write(tmp_path, "scripts/dispatcher-invoke.sh", "decide_fix_round() {\n    return 0\n}\n")
+    problems = rule_guard.find_violations(tmp_path, [rule])
+    assert problems == [f"fix_round_due: new copy: scripts/dispatcher-invoke.sh defines 'decide_fix_round' "
+                        f"(owner {rule.owner})"]
