@@ -16,10 +16,11 @@ findings marker on the bookkeeping job's account, ``/unblock`` on the PO's.
 issue #556) for the Bash callers: ``scripts/lib/in-flight.sh`` and the
 ``find_linked_pr_json`` / ``find_merged_linked_pr`` shims of the invoke script.
 
-``hpw dispatcher in-flight fix-round`` is the fix-round rule (``decide_fix_round``,
+``hpw dispatcher in-flight fix-round`` is the one fix-round rule (``decide_fix_round``,
 issue #630): whether a fix round is due on the PR's current head, already
-attempted there, or the attempt superseded by later findings. No caller uses it
-yet (#652 switches them).
+attempted there, or the attempt superseded by later findings. ``plan_in_flight``
+calls it for ``fix_round``; the resume pass's fix round, its hand-off check and
+``conflict_round_rule`` (poll and resume) call the command (issue #652).
 
 Result words and exit codes: ``read`` (0), ``unreadable`` (3: the input file
 cannot be read or is not a list of rows).
@@ -59,15 +60,6 @@ def hand_off_done_marker(pr: int) -> str:
     return dispatcher_marker(f"action=hand-off-done pr={pr}")
 
 
-def findings_on_head(pr_comments: Sequence[Mapping[str, Any]], head: str, bookkeeping: str) -> bool:
-    """The bookkeeping job's findings marker names ``head`` (``fix_round_due`` of the invoke script)."""
-
-    wanted = f"{FINDINGS_MARKER}{head.lower()} "
-    return bool(head and bookkeeping) and any(
-        _author(c) == bookkeeping and wanted in str(c.get("body") or "").lower() for c in pr_comments
-    )
-
-
 def fix_round_attempt_text(pr: int, head: str) -> str:
     """The fix-round attempt marker the invoke script posts for ``head`` on PR ``pr`` (issue #357)."""
 
@@ -75,8 +67,12 @@ def fix_round_attempt_text(pr: int, head: str) -> str:
 
 
 def _newest_findings(pr_comments: Sequence[Mapping[str, Any]], head: str, bookkeeping: str) -> str | None:
-    """The ``created_at`` of the newest findings marker the bookkeeping job posted for ``head``, or ``None``."""
+    """The ``created_at`` of the newest findings marker the bookkeeping job posted for ``head``, or ``None``.
 
+    An empty head or bookkeeping login finds none."""
+
+    if not head or not bookkeeping:
+        return None
     wanted = f"{FINDINGS_MARKER}{head} "
     times = [str(c.get("created_at") or "") for c in pr_comments
              if _author(c) == bookkeeping and wanted in str(c.get("body") or "").lower()]  # fmt: skip
@@ -88,15 +84,17 @@ def decide_fix_round(story_comments: Sequence[Mapping[str, Any]], pr_comments: S
     """The one fix-round rule (issue #630): due, attempted, superseded, for PR ``pr`` at ``head``.
 
     ``due``: a comment of ``bookkeeping`` on the PR carries the findings marker for ``head``
-    (``findings_on_head``, ``fix_round_due``). ``attempt``: the ``decide_holds`` word of the
-    dispatcher's fix-round attempt marker for ``head`` on the story (a later PO ``/unblock``
-    lifts it). ``superseded``: the attempt holds and a findings marker for ``head`` is newer
-    (``fix_round_attempt_superseded``). ``attempted``: the attempt holds and is not superseded.
+    (``plan_in_flight`` and the hand-off check of the invoke script). ``attempt``: the
+    ``decide_holds`` word of the dispatcher's fix-round attempt marker for ``head`` on the story
+    (a later PO ``/unblock`` lifts it). ``superseded``: the attempt holds and a findings marker
+    for ``head`` is newer (issue #357). ``attempted``: the attempt holds and is not superseded.
     ``start``: due and not attempted, so a fix-round session starts (``resume_fix_round`` and
     the ``fix-round-due`` word of ``conflict_round_rule``). Divergence 4 of #556: a tried round
     stays ``due``, so ``plan_in_flight`` keeps its WIP place in ``fix_round``, and the conflict
-    rule reads ``start``. ``heads``: every head with findings, unique and sorted
-    (``fix_round_heads``). Matching ignores case.
+    rule reads ``start``. ``heads``: every head with findings, unique and sorted (the round
+    count of ``resume_fix_round``). Matching ignores case. The callers since #652: the poll and
+    the resume pass through ``plan_in_flight`` and ``conflict_round_rule``, the resume pass's fix
+    round and the hand-off check through ``hpw dispatcher in-flight fix-round``.
     """
 
     head = head.strip().lower()
@@ -283,8 +281,11 @@ def plan_in_flight(rows: Sequence[Mapping[str, Any]], *, dispatcher: str, bookke
             steps["merge"].append(_entry(row))
             continue
         pr_comments = row.get("pr_comments")
+        # Comments that cannot be read add no fix round: the review step then asks the conflict
+        # rule, which reads them again and skips the story this run when they stay unreadable.
         if row.get("review_loop") and dispatcher and story_comments is not None and pr_comments is not None:
-            if findings_on_head(pr_comments, head, bookkeeping):
+            if decide_fix_round(story_comments, pr_comments, pr=int(pr["number"]), head=head, dispatcher=dispatcher,
+                                bookkeeping=bookkeeping, po=po)["due"]:  # fmt: skip
                 steps["fix_round"].append(_entry(row))
                 implementing.add(number)
                 continue

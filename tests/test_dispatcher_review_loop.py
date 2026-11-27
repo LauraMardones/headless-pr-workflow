@@ -1904,8 +1904,8 @@ def test_357_codex_review_that_leaves_the_story_in_review_runs_no_merge_and_unbl
 
 # ─── The one Python fix-round rule (issue #630) ───────────────────────────────
 # `hpw dispatcher in-flight fix-round` decides due / attempted / superseded for a
-# PR head, next to the copies (findings_on_head, fix_round_due, fix_round_heads,
-# fix_round_attempt_superseded, conflict_round_rule). No caller uses it yet (#652).
+# PR head. Since #652 it is the only copy: the poll and the resume pass call it
+# (tests/test_dispatcher_parity_review_loop.py records the entry equivalence).
 
 from headless_pr_workflow.dispatcher import cli as dispatcher_cli  # noqa: E402
 from headless_pr_workflow.dispatcher.in_flight import fix_round, plan_in_flight  # noqa: E402
