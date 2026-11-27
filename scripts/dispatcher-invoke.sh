@@ -1989,13 +1989,10 @@ find_merged_linked_pr() {
 }
 
 # ─── Utility: fix-round facts from the bookkeeping job's marker (#293) ───────
-# fix_round_heads prints, one per line, the PR heads for which the
-# codex-review-bookkeeping job recorded findings on PR <pr>: comments by the
-# job's account that carry its hidden marker with action=move-in-implementation.
-# The dispatcher reads only this marker; it never parses Codex comments or
-# reviews (the recognizer lives in review_policy.py). A marker in a comment by
-# any other account is ignored. An unresolved account or a failed read prints
-# nothing, so no fix round starts.
+# The codex-review-bookkeeping job records findings on a PR head with its hidden
+# marker (action=move-in-implementation). The dispatcher reads only this marker;
+# it never parses Codex comments or reviews (the recognizer lives in
+# review_policy.py). A marker in a comment by any other account is ignored.
 
 bookkeeping_login() {
     if [[ -z "$CODEX_BOOKKEEPING_LOGIN" ]]; then
@@ -2007,24 +2004,33 @@ bookkeeping_login() {
     echo "$CODEX_BOOKKEEPING_LOGIN"
 }
 
-fix_round_heads() {
-    local pr_number="$1" login own
-    login=$(bookkeeping_login)
-    [[ -n "$login" ]] || return 0
-    own=$(marker_list_json "$pr_number" "$BOOKKEEPING_FIX_MARKER" bookkeeping) || return 0
-    jq -r --arg marker "$BOOKKEEPING_FIX_MARKER" '
-        [ .[] | (.body // "") | split($marker)[1:][]
-          | capture("^(?<head>[0-9a-fA-F]+)[ ]").head | ascii_downcase
-        ] | unique | .[]' <<< "$own" 2>/dev/null || true
-}
+# fix_round_facts <issue> <pr> <head> — the one fix-round rule, `hpw dispatcher
+# in-flight fix-round` (in_flight.py decide_fix_round, issue #652), for PR <pr>
+# at <head>. Sets FIX_ROUND_JSON to its fields: `due` (the bookkeeping job's
+# findings marker names the head), `attempted` (the dispatcher's fix-round
+# attempt marker for the head holds and no newer findings marker supersedes
+# it), `start` (due and not attempted) and `heads` (every head with findings).
+# 0 when read; 3 when a login, the story's or the PR's comments cannot be read,
+# and FIX_ROUND_JSON is empty (fail closed: the caller decides nothing).
+FIX_ROUND_JSON=""
 
-# head_in_list <head> <newline-separated heads> — 0 when <head> is one of them.
-head_in_list() {
-    local head="${1,,}" line
-    while IFS= read -r line; do
-        [[ -n "$line" && "$line" == "$head" ]] && return 0
-    done <<< "$2"
-    return 1
+fix_round_facts() {
+    local issue_num="$1" pr_number="$2" head="$3" login story_comments pr_comments out
+    FIX_ROUND_JSON=""
+    resolve_dispatcher_login || return 3
+    login=$(bookkeeping_login)
+    [[ -n "$login" ]] || return 3
+    story_comments=$(gh api --paginate "repos/$REPO/issues/$issue_num/comments?per_page=100" 2>/dev/null \
+        | jq -s 'add // []') || return 3
+    pr_comments=$(gh api --paginate "repos/$REPO/issues/$pr_number/comments?per_page=100" 2>/dev/null \
+        | jq -s 'add // []') || return 3
+    # Comment lists go through stdin, not the argument list, so a long thread fits.
+    out=$(printf '%s\n%s\n' "$story_comments" "$pr_comments" \
+        | jq -sc --argjson pr "$pr_number" --arg head "$head" \
+            '{pr: {number: $pr, head: $head}, story_comments: .[0], pr_comments: .[1]}' \
+        | "$HPW_BIN" dispatcher in-flight fix-round --dispatcher "$DISPATCHER_LOGIN" --bookkeeping "$login" \
+            2>/dev/null) || return 3
+    FIX_ROUND_JSON="$out"
 }
 
 # ─── Utility: paginated project board fetch (D1 fix) ──────────────────────────
@@ -2701,27 +2707,6 @@ fix_round_attempt_marker() {
     dispatcher_marker "action=fix-round-attempt pr=$1 head=$2"
 }
 
-# A fix-round attempt marker is superseded by a later findings result on the
-# same head (issue #357): after the post-waiver no-push round the marker stays
-# newer than the PO's /unblock, and a new Blocker that Codex then finds on the
-# unchanged head must start a round. fix_round_attempt_superseded <issue> <pr>
-# <head> returns 0 when the bookkeeping job posted its move-in-implementation
-# marker for <head> on the PR after the story's latest attempt marker for it.
-fix_round_attempt_superseded() {
-    local issue_num="$1" pr_number="$2" head="$3" login attempt_at moves_at own
-    login=$(bookkeeping_login)
-    [[ -n "$login" ]] || return 1
-    # Only the dispatcher's own marker counts (Block 2): anyone can copy the
-    # visible marker into a later comment.
-    own=$(marker_list_json "$issue_num" "$(fix_round_attempt_marker "$pr_number" "$head")") || return 1
-    attempt_at=$(jq -r '[.[].created_at] | max // empty' <<< "$own") || return 1
-    [[ -n "$attempt_at" ]] || return 1
-    own=$(marker_list_json "$pr_number" "$BOOKKEEPING_FIX_MARKER" bookkeeping) || return 1
-    moves_at=$(jq -r --arg marker "$BOOKKEEPING_FIX_MARKER${head,,} " '
-        [.[] | select((.body // "") | ascii_downcase | contains($marker)) | .created_at] | max // empty' <<< "$own") || return 1
-    [[ -n "$moves_at" && "$moves_at" > "$attempt_at" ]]
-}
-
 # A pending hand-off is matched by PR, not by head. Since issue #478 no new
 # pending marker is posted (no status write can fail); one left by an earlier
 # run is cancelled by the "done" marker the resume pass posts, so it is
@@ -2738,14 +2723,6 @@ hand_off_pending_prefix() {
 
 hand_off_done_marker() {
     dispatcher_marker "action=hand-off-done pr=$1"
-}
-
-fix_round_due() {
-    local pr_number="$1" head_sha="$2"
-    local heads
-    [[ -n "$head_sha" ]] || return 1
-    heads=$(fix_round_heads "$pr_number")
-    head_in_list "$head_sha" "$heads"
 }
 
 # complete_pending_hand_off <issue> <item-id> <pr> <draft> — posts the "done"
@@ -2907,8 +2884,12 @@ hand_off_to_codex_review_loop() {
         exit 1
     fi
 
+    # Findings already recorded on the new head (the one fix-round rule, issue
+    # #652); facts that cannot be read count as no findings, as before.
     local due=false
-    fix_round_due "$pr_number" "$pr_head" && due=true
+    if [[ -n "$pr_head" ]] && fix_round_facts "$ISSUE_NUMBER" "$pr_number" "$pr_head"; then
+        due=$(jq -r '.due == true' <<< "$FIX_ROUND_JSON")
+    fi
 
     # A session that pushed nothing would otherwise be handed off, and the
     # bookkeeping job would act on the same head and start the same round again.
@@ -3145,7 +3126,7 @@ resume_in_merge_story() {
 # allowance check inside invoke_executor_command() still applies.
 resume_fix_round() {
     local issue_num="$1" item_id="$2"
-    local pr_json pr_number pr_draft pr_head heads round attempt_marker blocker_before
+    local pr_json pr_number pr_draft pr_head round blocker_before fix_rc=0
     load_story_context "$issue_num" "$item_id" || return 0
     [[ "$STORY_EXECUTOR_LABEL_COUNT" -eq 1 && -n "${CODEX_REVIEW_LOOP_ROUTING[$EXECUTOR_LABEL]:-}" ]] || return 0
 
@@ -3155,8 +3136,14 @@ resume_fix_round() {
     pr_head=$(jq -r '.head.sha // empty' <<< "$pr_json")
     [[ -n "$pr_number" && -n "$pr_head" ]] || return 0
 
-    heads=$(fix_round_heads "$pr_number")
-    if ! head_in_list "$pr_head" "$heads"; then
+    # The one fix-round rule (issue #652). Facts that cannot be read decide
+    # nothing this run: no fix round, no hand-off, no conflict round.
+    fix_round_facts "$issue_num" "$pr_number" "$pr_head" || fix_rc=$?
+    if [[ $fix_rc -ne 0 ]]; then
+        echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: could not read the fix-round facts on PR #$pr_number at head ${pr_head:0:7}; the next run decides again"
+        return 0
+    fi
+    if [[ "$(jq -r '.due' <<< "$FIX_ROUND_JSON")" != "true" ]]; then
         # No fix round is due. If an earlier hand-off could not write
         # "In review", finish it now; otherwise the bookkeeping job would
         # never act on Codex's answer.
@@ -3169,7 +3156,7 @@ resume_fix_round() {
     fi
 
     # One marker per head: the count is the number of this round.
-    round=$(wc -l <<< "$heads" | tr -d '[:space:]')
+    round=$(jq -r '.heads | length' <<< "$FIX_ROUND_JSON")
     if [[ "$round" -gt "$CODEX_FIX_ROUND_MAX" ]]; then
         echo "${LOG_PREFIX}[RESUME SKIP] #$issue_num: fix round $round on PR #$pr_number is above the maximum of $CODEX_FIX_ROUND_MAX; no session started"
         post_blocker_once "$issue_num" "$TARGET_TITLE" "resource" \
@@ -3181,9 +3168,11 @@ resume_fix_round() {
         return 0
     fi
 
-    attempt_marker=$(fix_round_attempt_marker "$pr_number" "$pr_head")
-    if marker_holds "$issue_num" "$attempt_marker" 0 \
-            && ! fix_round_attempt_superseded "$issue_num" "$pr_number" "$pr_head"; then
+    # Attempted: the attempt marker for this head holds (a later PO /unblock
+    # lifts it) and no newer findings marker for the head supersedes it (issue
+    # #357: after the post-waiver no-push round a new Blocker that Codex finds
+    # on the unchanged head must start a round).
+    if [[ "$(jq -r '.attempted' <<< "$FIX_ROUND_JSON")" == "true" ]]; then
         # A round that ended without a push (issue #357) records its attempt
         # before the "In review" write; if that write failed, the pending
         # hand-off for this head is finished here, without a new /implement,

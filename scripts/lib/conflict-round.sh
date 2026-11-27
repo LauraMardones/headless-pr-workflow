@@ -13,10 +13,8 @@
 #   authors) and the PR's conversation comments (one array, all authors).
 #   Prints one word:
 #     not-open       the PR is closed or a draft
-#     fix-round-due  the bookkeeping job's move-in-implementation marker names
-#                    the current head and no fix-round attempt marker holds for
-#                    it (no marker, a later PO /unblock, or a later findings
-#                    marker supersedes it)
+#     fix-round-due  a fix round starts on the current head: the `start`
+#                    output of the one fix-round rule (below)
 #     unknown        GitHub has not computed mergeability yet (mergeable null)
 #     clean          not conflicting; the head has merge-owner evidence
 #     ownerless      not conflicting; the head has no merge-owner evidence,
@@ -44,12 +42,21 @@
 #   marker-holds call.
 #   Markers count only on comments of the dispatcher's own account; the
 #   findings marker only on comments of the bookkeeping job's account.
-#   Whether a story marker holds (the conflict-round and fix-round attempt
-#   markers) is decided by the one marker-holds rule, `hpw dispatcher marker
-#   decide` (marker.py, issue #628): the newest marker by created_at holds
-#   unless a later standalone PO /unblock line follows it. When that call
-#   fails, the rule prints no word and fails, which both callers read as
-#   unreadable.
+#   Whether the conflict-round attempt marker holds is decided by the one
+#   marker-holds rule, `hpw dispatcher marker decide` (marker.py, issue #628):
+#   the newest marker by created_at holds unless a later standalone PO
+#   /unblock line follows it. When that call fails, the rule prints no word
+#   and fails, which both callers read as unreadable.
+#   Whether a fix round is due, attempted or superseded is decided by the one
+#   fix-round rule, `hpw dispatcher in-flight fix-round` (in_flight.py
+#   decide_fix_round, issue #652), the rule the resume pass's fix round calls
+#   too: `due` when the bookkeeping job's findings marker names the current
+#   head, `attempted` when the dispatcher's fix-round attempt marker for it
+#   holds and no newer findings marker supersedes it. This rule reads `start`
+#   (due and not attempted): a tried round keeps its WIP place in `fix_round`,
+#   but the PR's conflict and merge-owner state is still decided here (the PO
+#   decision of 2026-11-16 on #556, case (4)). When that call fails, the rule
+#   prints no word and fails, as for the marker-holds call.
 #   Merge-owner evidence is decided by the one merge-owner-evidence rule,
 #   `hpw dispatcher marker merge-owner-decide` (marker.py, issue #651), over
 #   the PR's conversation comments: the dispatcher's merge-owner marker for
@@ -99,8 +106,17 @@ conflict_merge_owner() {
         <<< "$out" 2>/dev/null
 }
 
+# conflict_fix_round <dispatcher-login> <bookkeeping-login> <po-login>
+#   Reads the three JSON values of conflict_round_rule on stdin and prints the
+#   fields of the one fix-round rule as one JSON object; fails on a read error.
+conflict_fix_round() {
+    jq -c '{pr: .[0], story_comments: (.[1] // []), pr_comments: (.[2] // [])}' \
+        | "${HPW_BIN:-$(dirname "${BASH_SOURCE[0]}")/../hpw}" dispatcher in-flight fix-round \
+            --dispatcher "$1" --bookkeeping "$2" --po-login "$3"
+}
+
 conflict_round_rule() {
-    local input n head story tried fix_attempt blocked=false owned=false
+    local input n head story tried fix_round fix_due blocked=false owned=false
     input=$(jq -cs '.') || return 1
     if jq -e '(.[0].state // "open") != "open" or (.[0].draft // false)' <<< "$input" >/dev/null; then
         echo "not-open"
@@ -111,25 +127,23 @@ conflict_round_rule() {
     story=$(jq -c '.[1] // []' <<< "$input") || return 1
     tried=$(conflict_marker_decide "$1" "$3" \
         "<!-- hpw:dispatcher action=conflict-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
-    fix_attempt=$(conflict_marker_decide "$1" "$3" \
-        "<!-- hpw:dispatcher action=fix-round-attempt pr=$n head=$head -->" <<< "$story") || return 1
+    fix_round=$(conflict_fix_round "$1" "$2" "$3" <<< "$input") || return 1
+    fix_due=$(jq -r '.start == true' <<< "$fix_round") || return 1
     if jq -e '.[0].mergeable == false or .[0].mergeable_state == "dirty"' <<< "$input" >/dev/null; then
         blocked=$(conflict_open_blocker "$1" "$3" "$head" <<< "$story") || return 1
     elif jq -e '.[0].mergeable != null' <<< "$input" >/dev/null; then
         owned=$(jq -c '.[2] // []' <<< "$input" | conflict_merge_owner "$1" "$n" "$head") || return 1
     fi
-    jq -r --arg bot "$1" --arg bk "$2" --argjson tried "$tried" --argjson attempt "$fix_attempt" \
+    jq -r --arg bot "$1" --argjson tried "$tried" --argjson fix_due "$fix_due" \
         --argjson blocked "$blocked" --argjson owned "$owned" '
-        .[0] as $pr | (.[1] // []) as $story | (.[2] // []) as $prc
+        .[0] as $pr | (.[1] // []) as $story
         | (($pr.head.sha // "") | ascii_downcase) as $head
         | ($pr.number | tostring) as $n
         | def newest($list; $login; $marker):
             [$list[] | select((.user.login // "") == $login
                               and ((.body // "") | ascii_downcase | contains($marker)))
              | .created_at] | max;
-          newest($prc; $bk; "<!-- hpw:codex-review-bookkeeping action=move-in-implementation head=" + $head + " ") as $moves
-        | ($moves != null and ($attempt.result != "holds" or $moves > $attempt.created_at)) as $fix_due
-        | if $fix_due then "fix-round-due"
+          if $fix_due then "fix-round-due"
           elif ($pr.mergeable == false) or ($pr.mergeable_state == "dirty") then
               if $tried.result == "holds" then "tried"
               elif $blocked then "blocked"
